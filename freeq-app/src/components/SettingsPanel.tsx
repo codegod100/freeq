@@ -177,10 +177,10 @@ function Toggle({ label, checked, onChange }: { label: string; checked: boolean;
       <span className="text-fg-muted">{label}</span>
       <button
         onClick={() => onChange(!checked)}
-        className={`w-9 h-5 rounded-full relative transition-colors ${checked ? 'bg-accent' : 'bg-surface'}`}
+        className={`w-11 h-6 rounded-full relative shrink-0 transition-colors ${checked ? 'bg-accent' : 'bg-surface'}`}
       >
-        <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-          checked ? 'translate-x-4' : 'translate-x-0.5'
+        <span className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-[left] ${
+          checked ? 'left-6' : 'left-1'
         }`} />
       </button>
     </div>
