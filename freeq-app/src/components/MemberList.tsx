@@ -80,6 +80,20 @@ export function MemberList() {
   );
 }
 
+/** Determine online/away status by checking shared channel member lists (not the DM member map) */
+function usePresence(nick: string): { online: boolean; away: string | null } {
+  const channels = useStore((s) => s.channels);
+  const nickLower = nick.toLowerCase();
+  for (const [name, ch] of channels) {
+    if (!name.startsWith('#')) continue; // skip DM buffers
+    const member = ch.members.get(nickLower);
+    if (member) {
+      return { online: true, away: member.away ?? null };
+    }
+  }
+  return { online: false, away: null };
+}
+
 /** Rich profile panel shown in the right sidebar for DMs */
 function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: Map<string, any>; isEncrypted?: boolean } }) {
   const whoisCache = useStore((s) => s.whoisCache);
@@ -88,7 +102,7 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
   const did = partnerMember?.did || whois?.did;
   const [profile, setProfile] = useState<ATProfile | null>(null);
   const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
-  const isAway = partnerMember?.away != null;
+  const presence = usePresence(nick);
 
   useEffect(() => {
     sendWhois(nick);
@@ -140,9 +154,14 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
             </div>
           )}
           {/* Online/away indicator */}
-          <span className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-[3px] border-bg-secondary ${
-            isAway ? 'bg-warning' : 'bg-success'
-          }`} />
+          {presence.online && (
+            <span className={`absolute bottom-0 right-0 w-4 h-4 rounded-full border-[3px] border-bg-secondary ${
+              presence.away ? 'bg-warning' : 'bg-success'
+            }`} />
+          )}
+          {!presence.online && (
+            <span className="absolute bottom-0 right-0 w-4 h-4 rounded-full border-[3px] border-bg-secondary bg-fg-dim/30" />
+          )}
         </div>
       </div>
 
@@ -171,10 +190,14 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
 
         {/* Status */}
         <div className="text-xs text-fg-dim mt-1">
-          {isAway ? (
-            <span className="text-warning">Away{partnerMember?.away ? `: ${partnerMember.away}` : ''}</span>
+          {presence.online ? (
+            presence.away ? (
+              <span className="text-warning">Away{presence.away !== '' ? `: ${presence.away}` : ''}</span>
+            ) : (
+              <span className="text-success">Online</span>
+            )
           ) : (
-            <span className="text-success">Online</span>
+            <span className="text-fg-dim">Offline</span>
           )}
         </div>
 

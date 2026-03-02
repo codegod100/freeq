@@ -853,9 +853,10 @@ async function handleLine(rawLine: string) {
       const failNick = msg.params[1];
       // Show in the DM buffer if it exists, otherwise server buffer
       if (failNick && store.channels.has(failNick.toLowerCase())) {
-        store.addSystemMessage(failNick, `${failNick} is not online — message not delivered`);
+        store.addSystemMessage(failNick, `${failNick} is not online — message was not delivered`);
+      } else {
+        store.addSystemMessage('server', `No such nick: ${failNick}`);
       }
-      store.addSystemMessage('server', `No such nick: ${failNick}`);
       break;
     }
     case '404': { // ERR_CANNOTSENDTOCHAN
