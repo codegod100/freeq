@@ -35,3 +35,4 @@ freeq-ios/Generated/
 freeq-ios/freeq.xcodeproj/
 .DS_Store
 .env
+.env.secrets
