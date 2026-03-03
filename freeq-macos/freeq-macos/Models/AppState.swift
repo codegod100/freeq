@@ -410,20 +410,36 @@ class AppState {
     // MARK: - WHOIS for DID discovery
 
     private var whoisedNicks: Set<String> = []
+    private var whoisQueue: [String] = []
+    private var whoisTimerActive = false
 
-    /// Send WHOIS for members we haven't checked yet (to discover DIDs).
+    /// Queue WHOIS for members we haven't checked yet (to discover DIDs).
     func whoisMembers(_ nicks: [String]) {
-        // Rate-limit: stagger WHOIS requests
-        var delay: Double = 0.5
         for nick in nicks {
             let lower = nick.lowercased()
             guard !whoisedNicks.contains(lower), lower != self.nick.lowercased() else { continue }
             whoisedNicks.insert(lower)
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.sendWhois(nick)
-            }
-            delay += 0.3  // 300ms between WHOIS requests
-            if delay > 15 { break }  // Cap at ~50 members
+            whoisQueue.append(nick)
+        }
+        startWhoisDrain()
+    }
+
+    /// Drain the WHOIS queue one at a time, 2 seconds apart.
+    private func startWhoisDrain() {
+        guard !whoisTimerActive, !whoisQueue.isEmpty else { return }
+        whoisTimerActive = true
+        drainNextWhois()
+    }
+
+    private func drainNextWhois() {
+        guard !whoisQueue.isEmpty else {
+            whoisTimerActive = false
+            return
+        }
+        let nick = whoisQueue.removeFirst()
+        sendWhois(nick)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            self?.drainNextWhois()
         }
     }
 
