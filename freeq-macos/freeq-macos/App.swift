@@ -8,44 +8,48 @@ struct FreeqApp: App {
         WindowGroup {
             MainView()
                 .environment(appState)
-                .frame(minWidth: 800, minHeight: 500)
+                .frame(minWidth: 700, minHeight: 400)
                 .onAppear {
-                    appState.reconnectIfSaved()
+                    // Auto-reconnect if we have a saved session
+                    if appState.hasSavedSession && appState.connectionState == .disconnected {
+                        appState.reconnectIfSaved()
+                    }
                 }
         }
-        .windowStyle(.titleBar)
-        .defaultSize(width: 1100, height: 700)
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("New DM…") {
-                    // TODO: new DM sheet
+            CommandGroup(after: .sidebar) {
+                Button("Toggle Detail Panel") {
+                    appState.showDetailPanel.toggle()
                 }
-                .keyboardShortcut("n")
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+            }
 
+            CommandGroup(replacing: .newItem) {
                 Button("Join Channel…") {
                     appState.showJoinSheet = true
                 }
-                .keyboardShortcut("j")
-            }
-
-            CommandGroup(after: .sidebar) {
-                Button("Quick Switcher") {
-                    appState.showQuickSwitcher = true
-                }
-                .keyboardShortcut("k")
-
-                Button("Toggle Members") {
-                    appState.showDetailPanel.toggle()
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .keyboardShortcut("j", modifiers: .command)
 
                 Divider()
 
-                ForEach(0..<9, id: \.self) { i in
-                    Button("Switch to Channel \(i + 1)") {
-                        appState.switchToChannelByIndex(i)
+                // Quick channel switching ⌘1–9
+                ForEach(1...9, id: \.self) { i in
+                    Button("Switch to Buffer \(i)") {
+                        appState.switchToChannelByIndex(i - 1)
                     }
-                    .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")))
+                    .keyboardShortcut(KeyEquivalent(Character("\(i)")), modifiers: .command)
+                }
+            }
+
+            CommandGroup(replacing: .help) {
+                Button("freeq Help") {
+                    if let ch = appState.activeChannelState {
+                        ch.appendIfNew(ChatMessage(
+                            id: UUID().uuidString, from: "system",
+                            text: "Type /help for a list of commands",
+                            isAction: false, timestamp: Date(), replyTo: nil
+                        ))
+                    }
                 }
             }
         }

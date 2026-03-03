@@ -69,4 +69,20 @@ class ChannelState: Identifiable {
             messages[idx].text = ""
         }
     }
+
+    func applyReaction(msgId: String, emoji: String, from: String) {
+        if let idx = findMessage(byId: msgId) {
+            var reactions = messages[idx].reactions
+            var nicks = reactions[emoji] ?? Set()
+            if nicks.contains(from) {
+                nicks.remove(from)
+                if nicks.isEmpty { reactions.removeValue(forKey: emoji) }
+                else { reactions[emoji] = nicks }
+            } else {
+                nicks.insert(from)
+                reactions[emoji] = nicks
+            }
+            messages[idx].reactions = reactions
+        }
+    }
 }

@@ -13,8 +13,14 @@ struct MessageListView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(messages) { msg in
                         if !msg.isDeleted {
-                            MessageRow(message: msg)
-                                .id(msg.id)
+                            if msg.from.isEmpty {
+                                // System message (join/part/quit/kick)
+                                SystemMessageRow(message: msg)
+                                    .id(msg.id)
+                            } else {
+                                MessageRow(message: msg)
+                                    .id(msg.id)
+                            }
                         }
                     }
                 }
@@ -37,6 +43,38 @@ struct MessageListView: View {
     }
 }
 
+// MARK: - System Messages (join/part/quit/kick)
+
+struct SystemMessageRow: View {
+    let message: ChatMessage
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemIcon)
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            Text(message.text)
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+            Text(formatTime(message.timestamp))
+                .font(.caption2)
+                .foregroundStyle(.quaternary)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 2)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var systemIcon: String {
+        if message.text.contains("joined") { return "arrow.right.circle" }
+        if message.text.contains("left") || message.text.contains("quit") { return "arrow.left.circle" }
+        if message.text.contains("kicked") { return "xmark.circle" }
+        return "info.circle"
+    }
+}
+
+// MARK: - Message Row
+
 struct MessageRow: View {
     @Environment(AppState.self) private var appState
     let message: ChatMessage
@@ -45,14 +83,17 @@ struct MessageRow: View {
         message.from.lowercased() == appState.nick.lowercased()
     }
 
+    private var isSystem: Bool {
+        message.from == "server" || message.from == "system"
+    }
+
     private var showHeader: Bool {
-        // Show header if this is the first message or sender changed
         guard let ch = appState.activeChannelState,
               let idx = ch.messages.firstIndex(where: { $0.id == message.id }),
               idx > 0 else { return true }
         let prev = ch.messages[idx - 1]
+        if prev.from.isEmpty { return true }  // After system message
         if prev.from != message.from { return true }
-        // Also show if > 5 min gap
         return message.timestamp.timeIntervalSince(prev.timestamp) > 300
     }
 
@@ -62,7 +103,7 @@ struct MessageRow: View {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(message.from)
                         .font(.system(.body, weight: .semibold))
-                        .foregroundStyle(Theme.nickColor(for: message.from))
+                        .foregroundStyle(isSystem ? .secondary : Theme.nickColor(for: message.from))
 
                     Text(formatTime(message.timestamp))
                         .font(.caption)
@@ -77,55 +118,115 @@ struct MessageRow: View {
                 .padding(.top, 6)
             }
 
+            // Reply indicator
+            if let replyTo = message.replyTo {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .font(.caption2)
+                    Text("replying to \(replyTo)")
+                        .font(.caption2)
+                }
+                .foregroundStyle(.secondary)
+                .padding(.leading, 2)
+            }
+
             // Message text
             if message.isAction {
                 Text("• \(message.from) \(message.text)")
                     .italic()
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
+            } else if isSystem {
+                Text(message.text)
+                    .font(.system(.body, design: .monospaced).weight(.light))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             } else {
                 Text(parseMessageText(message.text))
                     .textSelection(.enabled)
+            }
+
+            // Reactions
+            if !message.reactions.isEmpty {
+                FlowLayout(spacing: 4) {
+                    ForEach(Array(message.reactions.keys.sorted()), id: \.self) { emoji in
+                        if let nicks = message.reactions[emoji] {
+                            ReactionBadge(
+                                emoji: emoji,
+                                count: nicks.count,
+                                isSelfReacted: nicks.contains(appState.nick),
+                                action: {
+                                    if let target = appState.activeChannel {
+                                        appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
+                                    }
+                                }
+                            )
+                        }
+                    }
+                }
+                .padding(.top, 4)
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
-        .contextMenu {
-            messageContextMenu
-        }
+        .contextMenu { messageContextMenu }
     }
 
     @ViewBuilder
     private var messageContextMenu: some View {
-        Button("Copy") {
+        // React
+        if !isSystem {
+            Menu("React") {
+                ForEach(["👍", "❤️", "😂", "🎉", "👀", "🔥"], id: \.self) { emoji in
+                    Button(emoji) {
+                        if let target = appState.activeChannel {
+                            appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reply
+        if !isSystem {
+            Button("Reply") {
+                appState.replyingToMessage = message
+            }
+        }
+
+        Button("Copy Text") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(message.text, forType: .string)
         }
 
-        if isSelf, let msgId = Optional(message.id) {
-            Divider()
-            Button("Edit") {
-                // TODO: set editing state
-            }
-            Button("Delete", role: .destructive) {
-                appState.sendRaw("@+draft/delete=\(msgId) TAGMSG \(appState.activeChannel ?? "")")
+        if let msgId = Optional(message.id) {
+            Button("Copy Message ID") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(msgId, forType: .string)
             }
         }
 
-        if !isSelf {
-            Button("Reply") {
-                // TODO: set reply state
+        if isSelf {
+            Divider()
+            Button("Edit") {
+                appState.editingMessageId = message.id
+                appState.editingText = message.text
+            }
+            Button("Delete", role: .destructive) {
+                if let target = appState.activeChannel {
+                    appState.deleteMessage(target: target, msgId: message.id)
+                }
             }
         }
     }
 
-    /// Parse message text into AttributedString with basic formatting.
+    /// Parse message text into AttributedString with formatting.
     private func parseMessageText(_ text: String) -> AttributedString {
         var result = AttributedString(text)
 
-        // Make URLs clickable
+        // URLs
         let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         if let matches = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
             for match in matches.reversed() {
@@ -142,7 +243,7 @@ struct MessageRow: View {
             attributed[range].inlinePresentationIntent = .stronglyEmphasized
         }
 
-        // Italic: *text* or _text_
+        // Italic: *text*
         result = applyFormatting(result, pattern: "(?<![*])\\*([^*]+?)\\*(?![*])", text: text) { attributed, range in
             attributed[range].inlinePresentationIntent = .emphasized
         }
@@ -172,15 +273,94 @@ struct MessageRow: View {
         }
         return result
     }
+}
 
-    private func formatTime(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        let calendar = Calendar.current
-        if calendar.isDateInToday(date) {
-            formatter.dateFormat = "HH:mm"
-        } else {
-            formatter.dateFormat = "MMM d, HH:mm"
+// MARK: - Reaction Badge
+
+struct ReactionBadge: View {
+    let emoji: String
+    let count: Int
+    let isSelfReacted: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Text(emoji)
+                    .font(.caption)
+                if count > 1 {
+                    Text("\(count)")
+                        .font(.caption2.weight(.medium))
+                        .foregroundColor(isSelfReacted ? .accentColor : .secondary)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(isSelfReacted ? Color.accentColor.opacity(0.15) : Color(nsColor: .quaternaryLabelColor))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(isSelfReacted ? Color.accentColor.opacity(0.3) : .clear, lineWidth: 1)
+            )
         }
-        return formatter.string(from: date)
+        .buttonStyle(.plain)
     }
+}
+
+// MARK: - Flow Layout for reactions
+
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 4
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth && x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        return CGSize(width: maxWidth, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX
+        var y = bounds.minY
+        var rowHeight: CGFloat = 0
+
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > bounds.maxX && x > bounds.minX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), proposal: .unspecified)
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+    }
+}
+
+// MARK: - Time formatting (shared)
+
+func formatTime(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) {
+        formatter.dateFormat = "HH:mm"
+    } else {
+        formatter.dateFormat = "MMM d, HH:mm"
+    }
+    return formatter.string(from: date)
 }

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UserNotifications
 
 /// Connection transport type.
 enum TransportType: Equatable {
@@ -25,7 +26,8 @@ class AppState {
     var nick: String = ""
     var serverAddress: String = "irc.freeq.at:6697"
     var authenticatedDID: String?
-    var irohEndpointId: String?  // Server's iroh endpoint ID
+    var irohEndpointId: String?
+    var reconnectAttempts: Int = 0
 
     // MARK: - Channels & DMs
     var channels: [ChannelState] = []
@@ -38,13 +40,18 @@ class AppState {
     // MARK: - P2P
     var p2pEndpointId: String?
     var p2pConnectedPeers: Set<String> = []
-    var p2pDMActive: Set<String> = []  // nicks with active P2P connections
+    var p2pDMActive: Set<String> = []
 
     // MARK: - UI State
     var showDetailPanel: Bool = true
     var showQuickSwitcher: Bool = false
     var showJoinSheet: Bool = false
     var errorMessage: String?
+
+    // MARK: - Compose state (editing/replying)
+    var editingMessageId: String?
+    var editingText: String?
+    var replyingToMessage: ChatMessage?
 
     // MARK: - Auth
     var authBrokerBase: String = "https://auth.freeq.at"
@@ -60,6 +67,9 @@ class AppState {
 
     // MARK: - Names accumulator (353 lines come in multiple events)
     var pendingNames: [String: [MemberInfo]] = [:]
+
+    // MARK: - Typing debounce
+    private var lastTypingSent: [String: Date] = [:]
 
     // MARK: - Private
     private var client: FreeqClient?
@@ -83,10 +93,15 @@ class AppState {
 
     var isP2pActive: Bool { p2pEndpointId != nil }
 
+    var hasSavedSession: Bool {
+        brokerToken != nil && !nick.isEmpty
+    }
+
     // MARK: - Init
 
     init() {
         loadSavedState()
+        requestNotificationPermission()
     }
 
     private func loadSavedState() {
@@ -96,11 +111,15 @@ class AppState {
         if let saved = UserDefaults.standard.string(forKey: "freeq.server") {
             serverAddress = saved
         }
-        if let saved = UserDefaults.standard.stringArray(forKey: "freeq.channels") {
+        if let saved = UserDefaults.standard.stringArray(forKey: "freeq.channels"), !saved.isEmpty {
             autoJoinChannels = saved
         }
         brokerToken = KeychainHelper.load(key: "brokerToken")
         authenticatedDID = KeychainHelper.load(key: "did")
+    }
+
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
     }
 
     // MARK: - Connection
@@ -140,10 +159,20 @@ class AppState {
         shutdownP2p()
     }
 
+    func logout() {
+        disconnect()
+        brokerToken = nil
+        authenticatedDID = nil
+        pendingWebToken = nil
+        KeychainHelper.delete(key: "brokerToken")
+        KeychainHelper.delete(key: "did")
+        channels.removeAll()
+        dmBuffers.removeAll()
+        activeChannel = nil
+    }
+
     func reconnectIfSaved() {
-        guard connectionState == .disconnected,
-              !nick.isEmpty,
-              brokerToken != nil else { return }
+        guard connectionState == .disconnected, hasSavedSession else { return }
 
         Task {
             do {
@@ -158,7 +187,7 @@ class AppState {
                     self.connect(nick: session.nick)
                 }
             } catch {
-                // Silent retry later
+                // Silent — will retry on next attempt
             }
         }
     }
@@ -170,8 +199,6 @@ class AppState {
         if !target.hasPrefix("#"),
            let peerEndpoint = p2pEndpointForNick(target) {
             try? p2p?.sendMessage(peerId: peerEndpoint, text: text)
-
-            // Echo locally
             let msg = ChatMessage(
                 id: UUID().uuidString,
                 from: nick,
@@ -192,9 +219,34 @@ class AppState {
         }
     }
 
+    func sendAction(to target: String, text: String) {
+        sendRaw("PRIVMSG \(target) :\u{01}ACTION \(text)\u{01}")
+    }
+
+    func editMessage(target: String, msgId: String, newText: String) {
+        sendRaw("@+draft/edit=\(msgId) PRIVMSG \(target) :\(newText)")
+    }
+
+    func deleteMessage(target: String, msgId: String) {
+        sendRaw("@+draft/delete=\(msgId) TAGMSG \(target)")
+    }
+
+    func sendReaction(target: String, msgId: String, emoji: String) {
+        sendRaw("@+react=\(emoji);+reply=\(msgId) TAGMSG \(target)")
+    }
+
+    func sendTyping(target: String) {
+        let now = Date()
+        let key = target.lowercased()
+        if let last = lastTypingSent[key], now.timeIntervalSince(last) < 3 { return }
+        lastTypingSent[key] = now
+        sendRaw("@+typing=active TAGMSG \(target)")
+    }
+
     func joinChannel(_ channel: String) {
+        let ch = channel.hasPrefix("#") ? channel : "#\(channel)"
         do {
-            try client?.join(channel: channel)
+            try client?.join(channel: ch)
         } catch {
             errorMessage = "Join failed: \(error.localizedDescription)"
         }
@@ -203,8 +255,10 @@ class AppState {
     func partChannel(_ channel: String) {
         do {
             try client?.part(channel: channel)
-            channels.removeAll { $0.name == channel }
-            if activeChannel == channel {
+            channels.removeAll { $0.name.lowercased() == channel.lowercased() }
+            autoJoinChannels.removeAll { $0.lowercased() == channel.lowercased() }
+            UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
+            if activeChannel?.lowercased() == channel.lowercased() {
                 activeChannel = channels.first?.name
             }
         } catch {
@@ -214,6 +268,43 @@ class AppState {
 
     func sendRaw(_ line: String) {
         try? client?.sendRaw(line: line)
+    }
+
+    func requestHistory(channel: String, before: Date? = nil) {
+        if let before {
+            let iso = ISO8601DateFormatter().string(from: before)
+            sendRaw("CHATHISTORY BEFORE \(channel) timestamp=\(iso) 50")
+        } else {
+            sendRaw("CHATHISTORY LATEST \(channel) * 50")
+        }
+    }
+
+    func setAway(_ reason: String?) {
+        if let reason {
+            sendRaw("AWAY :\(reason)")
+        } else {
+            sendRaw("AWAY")
+        }
+    }
+
+    func kickUser(_ channel: String, _ nick: String, reason: String? = nil) {
+        if let reason {
+            sendRaw("KICK \(channel) \(nick) :\(reason)")
+        } else {
+            sendRaw("KICK \(channel) \(nick)")
+        }
+    }
+
+    func setMode(_ channel: String, _ mode: String, _ nick: String) {
+        sendRaw("MODE \(channel) \(mode) \(nick)")
+    }
+
+    func inviteUser(_ channel: String, _ nick: String) {
+        sendRaw("INVITE \(nick) \(channel)")
+    }
+
+    func sendWhois(_ nick: String) {
+        sendRaw("WHOIS \(nick)")
     }
 
     // MARK: - P2P (iroh)
@@ -226,7 +317,7 @@ class AppState {
             self.p2p = p2p
             self.p2pEndpointId = try p2p.endpointId()
         } catch {
-            errorMessage = "P2P start failed: \(error.localizedDescription)"
+            // P2P is optional — don't show error
         }
     }
 
@@ -246,11 +337,8 @@ class AppState {
         }
     }
 
-    /// Resolve a nick to a P2P endpoint ID (from WHOIS metadata or cache).
     private func p2pEndpointForNick(_ nick: String) -> String? {
-        // TODO: maintain a nick -> iroh endpoint ID mapping
-        // populated from WHOIS, CTCP, or user metadata
-        nil
+        nil // TODO: maintain nick -> iroh endpoint ID mapping
     }
 
     // MARK: - Channel helpers
@@ -292,7 +380,6 @@ class AppState {
         mentionCounts[channel.lowercased()] = 0
     }
 
-    /// Check if a nick is online by scanning shared channel member lists.
     func isNickOnline(_ nick: String) -> Bool {
         let lower = nick.lowercased()
         return channels.contains { ch in
@@ -309,11 +396,28 @@ class AppState {
         }
         return nil
     }
+
+    /// Get the last message from self in the active channel (for edit-last).
+    func lastOwnMessage(in target: String) -> ChatMessage? {
+        let ch = channels.first { $0.name.lowercased() == target.lowercased() }
+            ?? dmBuffers.first { $0.name.lowercased() == target.lowercased() }
+        return ch?.messages.last { $0.from.lowercased() == nick.lowercased() && !$0.isDeleted }
+    }
+
+    // MARK: - Notifications
+
+    func sendNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
 }
 
 // MARK: - IRC Event Handler
 
-/// Bridges FreeqEvent callbacks to AppState on MainActor.
 class AppEventHandler: EventHandler {
     private weak var appState: AppState?
 
@@ -337,13 +441,16 @@ extension AppState {
 
         case .registered(let registeredNick):
             connectionState = .registered
+            reconnectAttempts = 0
             nick = registeredNick
             // Auto-join channels
             for ch in autoJoinChannels {
                 joinChannel(ch)
             }
             // Request DM targets
-            sendRaw("CHATHISTORY TARGETS * * 50")
+            if authenticatedDID != nil {
+                sendRaw("CHATHISTORY TARGETS * * 50")
+            }
             // Start P2P subsystem
             startP2p()
 
@@ -357,39 +464,86 @@ extension AppState {
         case .joined(let channel, let joinNick):
             if joinNick.lowercased() == nick.lowercased() {
                 let ch = getOrCreateChannel(channel)
-                ch.members.removeAll()  // Clear stale members before NAMES
+                ch.members.removeAll()
                 pendingNames[channel.lowercased()] = []
                 if activeChannel == nil || activeChannel == "server" {
                     activeChannel = ch.name
+                }
+                // Save to auto-join
+                if !autoJoinChannels.contains(where: { $0.lowercased() == channel.lowercased() }) {
+                    autoJoinChannels.append(channel)
+                    UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
                 }
             } else {
                 if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
                     if !ch.members.contains(where: { $0.nick.lowercased() == joinNick.lowercased() }) {
                         ch.members.append(MemberInfo(nick: joinNick, isOp: false, isHalfop: false, isVoiced: false, awayMsg: nil, did: nil))
                     }
+                    // System message
+                    ch.appendIfNew(ChatMessage(
+                        id: UUID().uuidString, from: "",
+                        text: "\(joinNick) joined",
+                        isAction: false, timestamp: Date(), replyTo: nil
+                    ))
                 }
             }
 
         case .parted(let channel, let partNick):
             if partNick.lowercased() == nick.lowercased() {
                 channels.removeAll { $0.name.lowercased() == channel.lowercased() }
+                autoJoinChannels.removeAll { $0.lowercased() == channel.lowercased() }
+                UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
+                if activeChannel?.lowercased() == channel.lowercased() {
+                    activeChannel = channels.first?.name
+                }
             } else {
                 if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
                     ch.members.removeAll { $0.nick.lowercased() == partNick.lowercased() }
+                    ch.appendIfNew(ChatMessage(
+                        id: UUID().uuidString, from: "",
+                        text: "\(partNick) left",
+                        isAction: false, timestamp: Date(), replyTo: nil
+                    ))
                 }
             }
 
         case .message(let msg):
-            let isAction = msg.isAction
+            let isSelf = msg.fromNick.lowercased() == nick.lowercased()
             let message = ChatMessage(
                 id: msg.msgid ?? UUID().uuidString,
                 from: msg.fromNick,
                 text: msg.text,
-                isAction: isAction,
+                isAction: msg.isAction,
                 timestamp: Date(timeIntervalSince1970: Double(msg.timestampMs) / 1000.0),
                 replyTo: msg.replyTo,
                 isEdited: msg.editOf != nil
             )
+
+            // Handle edits
+            if let editOf = msg.editOf {
+                if let batchId = msg.batchId, var batch = batches[batchId] {
+                    if let idx = batch.messages.firstIndex(where: { $0.id == editOf }) {
+                        batch.messages[idx].text = msg.text
+                        batch.messages[idx].isEdited = true
+                        if let newId = msg.msgid { batch.messages[idx].id = newId }
+                    } else {
+                        batch.messages.append(message)
+                    }
+                    batches[batchId] = batch
+                    return
+                }
+
+                let target = msg.target
+                if target.hasPrefix("#") {
+                    let ch = getOrCreateChannel(target)
+                    ch.applyEdit(originalId: editOf, newId: msg.msgid, newText: msg.text)
+                } else {
+                    let bufName = isSelf ? target : msg.fromNick
+                    let dm = getOrCreateDM(bufName)
+                    dm.applyEdit(originalId: editOf, newId: msg.msgid, newText: msg.text)
+                }
+                return
+            }
 
             // Handle batch (CHATHISTORY)
             if let batchId = msg.batchId, var batch = batches[batchId] {
@@ -398,61 +552,68 @@ extension AppState {
                 return
             }
 
-            // Handle edit
-            if let editOf = msg.replacesMsgid ?? msg.editOf {
-                let target = msg.target
-                let ch = target.hasPrefix("#")
-                    ? channels.first { $0.name.lowercased() == target.lowercased() }
-                    : dmBuffers.first { $0.name.lowercased() == target.lowercased() }
-                ch?.applyEdit(originalId: editOf, newId: msg.msgid, newText: msg.text)
-                return
-            }
-
             // Route to channel or DM
             let target = msg.target
             if target.hasPrefix("#") {
                 let ch = getOrCreateChannel(target)
                 ch.appendIfNew(message)
+                ch.typingUsers.removeValue(forKey: msg.fromNick)
                 incrementUnread(target)
+
+                // Mention notification
+                if !isSelf && msg.text.localizedCaseInsensitiveContains(nick) {
+                    mentionCounts[target.lowercased(), default: 0] += 1
+                    sendNotification(title: "\(msg.fromNick) in \(target)", body: msg.text)
+                }
             } else {
-                // DM — use sender's nick as buffer name (unless it's from us)
-                let bufName = msg.fromNick.lowercased() == nick.lowercased() ? target : msg.fromNick
+                let bufName = isSelf ? target : msg.fromNick
                 let dm = getOrCreateDM(bufName)
                 dm.appendIfNew(message)
                 incrementUnread(bufName)
+
+                // DM notification
+                if !isSelf {
+                    sendNotification(title: msg.fromNick, body: msg.text)
+                }
             }
 
         case .tagMsg(let tagMsg):
-            // Handle typing, reactions, deletes via tag messages
-            for tag in tagMsg.tags {
-                if tag.key == "+draft/typing" {
-                    let target = tagMsg.target
-                    if let ch = channels.first(where: { $0.name.lowercased() == target.lowercased() }) {
-                        ch.typingUsers[tagMsg.from] = Date()
-                    }
-                } else if tag.key == "+draft/react" {
-                    // TODO: apply reaction
-                } else if tag.key == "+draft/delete" {
-                    let msgId = tag.value
-                    for ch in allBuffers {
-                        ch.applyDelete(msgId: msgId)
+            let tags = Dictionary(uniqueKeysWithValues: tagMsg.tags.map { ($0.key, $0.value) })
+            let target = tagMsg.target
+            let from = tagMsg.from
+
+            // Typing indicators
+            if let typing = tags["+typing"] {
+                if from.lowercased() != nick.lowercased() {
+                    let bufferName = target.hasPrefix("#") ? target : from
+                    let ch = bufferName.hasPrefix("#") ? getOrCreateChannel(bufferName) : getOrCreateDM(bufferName)
+                    if typing == "active" {
+                        ch.typingUsers[from] = Date()
+                    } else if typing == "done" {
+                        ch.typingUsers.removeValue(forKey: from)
                     }
                 }
             }
 
+            // Message deletion
+            if let deleteId = tags["+draft/delete"] {
+                let bufferName = target.hasPrefix("#") ? target : from
+                let ch = bufferName.hasPrefix("#") ? getOrCreateChannel(bufferName) : getOrCreateDM(bufferName)
+                ch.applyDelete(msgId: deleteId)
+            }
+
+            // Reactions
+            if let emoji = tags["+react"], let replyId = tags["+reply"] {
+                let bufferName = target.hasPrefix("#") ? target : from
+                let ch = bufferName.hasPrefix("#") ? getOrCreateChannel(bufferName) : getOrCreateDM(bufferName)
+                ch.applyReaction(msgId: replyId, emoji: emoji, from: from)
+            }
+
         case .names(let channel, let memberList):
-            // 353 lines come in multiple events — accumulate until NamesEnd (366)
             let key = channel.lowercased()
             var existing = pendingNames[key] ?? []
             existing.append(contentsOf: memberList.map { m in
-                MemberInfo(
-                    nick: m.nick,
-                    isOp: m.isOp,
-                    isHalfop: m.isHalfop,
-                    isVoiced: m.isVoiced,
-                    awayMsg: m.awayMsg,
-                    did: nil
-                )
+                MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: nil)
             })
             pendingNames[key] = existing
 
@@ -460,23 +621,49 @@ extension AppState {
             if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
                 ch.topic = topic.text
                 ch.topicSetBy = topic.setBy
+                ch.lastActivity = Date()
             }
 
-        case .modeChanged(_, _, _, _):
-            break // TODO
+        case .modeChanged(let channel, let mode, let arg, _):
+            guard let targetNick = arg else { break }
+            if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }),
+               let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == targetNick.lowercased() }) {
+                let m = ch.members[idx]
+                switch mode {
+                case "+o": ch.members[idx] = MemberInfo(nick: m.nick, isOp: true, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: m.did)
+                case "-o": ch.members[idx] = MemberInfo(nick: m.nick, isOp: false, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: m.did)
+                case "+h": ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: true, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: m.did)
+                case "-h": ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: false, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: m.did)
+                case "+v": ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: true, awayMsg: m.awayMsg, did: m.did)
+                case "-v": ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: false, awayMsg: m.awayMsg, did: m.did)
+                default: break
+                }
+            }
 
-        case .kicked(let channel, let kickedNick, _, _):
+        case .kicked(let channel, let kickedNick, let by, let reason):
             if kickedNick.lowercased() == nick.lowercased() {
                 channels.removeAll { $0.name.lowercased() == channel.lowercased() }
+                autoJoinChannels.removeAll { $0.lowercased() == channel.lowercased() }
+                UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
+                if activeChannel?.lowercased() == channel.lowercased() {
+                    activeChannel = channels.first?.name
+                }
+                errorMessage = "Kicked from \(channel) by \(by): \(reason)"
             } else {
                 if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
                     ch.members.removeAll { $0.nick.lowercased() == kickedNick.lowercased() }
+                    ch.appendIfNew(ChatMessage(
+                        id: UUID().uuidString, from: "",
+                        text: "\(kickedNick) was kicked by \(by)\(reason.isEmpty ? "" : " (\(reason))")",
+                        isAction: false, timestamp: Date(), replyTo: nil
+                    ))
                 }
             }
 
         case .nickChanged(let oldNick, let newNick):
             if oldNick.lowercased() == nick.lowercased() {
                 nick = newNick
+                UserDefaults.standard.set(newNick, forKey: "freeq.nick")
             }
             for ch in allBuffers {
                 if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == oldNick.lowercased() }) {
@@ -493,9 +680,17 @@ extension AppState {
                 }
             }
 
-        case .userQuit(let quitNick, _):
+        case .userQuit(let quitNick, let reason):
             for ch in channels {
-                ch.members.removeAll { $0.nick.lowercased() == quitNick.lowercased() }
+                if ch.members.contains(where: { $0.nick.lowercased() == quitNick.lowercased() }) {
+                    ch.members.removeAll { $0.nick.lowercased() == quitNick.lowercased() }
+                    ch.typingUsers.removeValue(forKey: quitNick)
+                    ch.appendIfNew(ChatMessage(
+                        id: UUID().uuidString, from: "",
+                        text: "\(quitNick) quit\(reason.isEmpty ? "" : " (\(reason))")",
+                        isAction: false, timestamp: Date(), replyTo: nil
+                    ))
+                }
             }
 
         case .batchStart(let id, _, let target):
@@ -521,12 +716,11 @@ extension AppState {
                    let ch = channels.first(where: { $0.name.lowercased() == key }) {
                     ch.members = members
                 }
-                // Request chat history
-                sendRaw("CHATHISTORY LATEST \(channel) * 50")
-                break
+                requestHistory(channel: channel)
+                return
             }
-            if text.isEmpty { break }
-            // Show in active channel or as system
+            if text.isEmpty { return }
+            // Show as system in active channel
             if let ch = activeChannelState {
                 ch.appendIfNew(ChatMessage(
                     id: UUID().uuidString,
@@ -540,10 +734,12 @@ extension AppState {
 
         case .disconnected(let reason):
             connectionState = .disconnected
-            if !reason.contains("intentional") {
-                // Auto-reconnect after delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
-                    self?.reconnectIfSaved()
+            if !reason.contains("intentional") && hasSavedSession {
+                reconnectAttempts += 1
+                let delay = min(Double(1 << min(reconnectAttempts, 5)), 30.0)
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, self.connectionState == .disconnected, self.hasSavedSession else { return }
+                    self.reconnectIfSaved()
                 }
             }
         }

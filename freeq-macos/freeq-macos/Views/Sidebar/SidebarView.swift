@@ -50,6 +50,13 @@ struct SidebarView: View {
         .onChange(of: appState.activeChannel) { _, newValue in
             if let ch = newValue {
                 appState.clearUnread(ch)
+                // Request DM history if no messages loaded yet
+                if !ch.hasPrefix("#") {
+                    if let dm = appState.dmBuffers.first(where: { $0.name.lowercased() == ch.lowercased() }),
+                       dm.messages.isEmpty {
+                        appState.requestHistory(channel: ch)
+                    }
+                }
             }
         }
     }
@@ -62,14 +69,27 @@ struct SidebarView: View {
                 Circle()
                     .fill(.green)
                     .frame(width: 8, height: 8)
-                Text(appState.nick)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(appState.nick)
+                        .font(.caption.weight(.medium))
+                        .lineLimit(1)
+                    Text(did.prefix(24) + "…")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            } else if appState.connectionState == .registered {
+                Circle()
+                    .fill(.yellow)
+                    .frame(width: 8, height: 8)
+                Text("\(appState.nick) (guest)")
                     .font(.caption)
-                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
             } else {
                 Circle()
                     .fill(.gray)
                     .frame(width: 8, height: 8)
-                Text(appState.nick.isEmpty ? "Not connected" : "\(appState.nick) (guest)")
+                Text("Not connected")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -83,13 +103,40 @@ struct SidebarView: View {
                     .help("iroh P2P: \(appState.p2pConnectedPeers.count) peers")
             }
 
+            // Join channel
             Button {
                 appState.showJoinSheet = true
             } label: {
                 Image(systemName: "plus.bubble")
             }
             .buttonStyle(.plain)
-            .help("Join Channel")
+            .help("Join Channel (⌘J)")
+
+            // User menu
+            Menu {
+                if appState.authenticatedDID != nil {
+                    Button("Set Away…") {
+                        appState.setAway("AFK")
+                    }
+                    Button("Remove Away") {
+                        appState.setAway(nil)
+                    }
+                    Divider()
+                }
+                Button("Disconnect") {
+                    appState.disconnect()
+                }
+                if appState.authenticatedDID != nil {
+                    Button("Logout", role: .destructive) {
+                        appState.logout()
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .buttonStyle(.plain)
+            .menuStyle(.borderlessButton)
+            .frame(width: 20)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -105,24 +152,38 @@ struct ChannelRow: View {
         appState.unreadCounts[channel.name.lowercased()] ?? 0
     }
 
+    private var mentions: Int {
+        appState.mentionCounts[channel.name.lowercased()] ?? 0
+    }
+
     var body: some View {
         Label {
             HStack {
                 Text(channel.name.replacingOccurrences(of: "#", with: ""))
                     .lineLimit(1)
+                    .fontWeight(unread > 0 ? .semibold : .regular)
                 Spacer()
-                if unread > 0 {
-                    Text("\(unread)")
+                if mentions > 0 {
+                    Text("\(mentions)")
                         .font(.caption2.weight(.bold))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(.red))
+                } else if unread > 0 {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 8, height: 8)
                 }
             }
         } icon: {
             Image(systemName: "number")
                 .foregroundStyle(.secondary)
+        }
+        .contextMenu {
+            Button("Leave Channel") {
+                appState.partChannel(channel.name)
+            }
         }
     }
 }
@@ -144,8 +205,8 @@ struct DMRow: View {
             HStack {
                 Text(dm.name)
                     .lineLimit(1)
+                    .fontWeight(unread > 0 ? .semibold : .regular)
 
-                // P2P indicator
                 if appState.p2pDMActive.contains(dm.name.lowercased()) {
                     Image(systemName: "point.3.connected.trianglepath.dotted")
                         .font(.caption2)
@@ -167,6 +228,14 @@ struct DMRow: View {
             Circle()
                 .fill(isOnline ? .green : Color.secondary.opacity(0.3))
                 .frame(width: 10, height: 10)
+        }
+        .contextMenu {
+            Button("Close DM") {
+                appState.dmBuffers.removeAll { $0.name.lowercased() == dm.name.lowercased() }
+                if appState.activeChannel?.lowercased() == dm.name.lowercased() {
+                    appState.activeChannel = appState.channels.first?.name
+                }
+            }
         }
     }
 }

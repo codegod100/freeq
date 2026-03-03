@@ -8,6 +8,8 @@ struct MainView: View {
         Group {
             if appState.connectionState == .disconnected && appState.brokerToken == nil {
                 ConnectView()
+            } else if appState.connectionState == .connecting {
+                connectingView
             } else {
                 NavigationSplitView {
                     SidebarView()
@@ -22,14 +24,7 @@ struct MainView: View {
                             }
                         }
                     } else {
-                        VStack(spacing: 12) {
-                            Image(systemName: "bubble.left.and.bubble.right")
-                                .font(.system(size: 48))
-                                .foregroundStyle(.tertiary)
-                            Text("Select a channel to start chatting")
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        emptyState
                     }
                 }
                 .toolbar {
@@ -45,6 +40,47 @@ struct MainView: View {
         )) {
             JoinChannelSheet()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .cancelEdit)) { _ in
+            appState.editingMessageId = nil
+            appState.editingText = nil
+            appState.replyingToMessage = nil
+        }
+        .alert("Error", isPresented: Binding(
+            get: { appState.errorMessage != nil },
+            set: { if !$0 { appState.errorMessage = nil } }
+        )) {
+            Button("OK") { appState.errorMessage = nil }
+        } message: {
+            Text(appState.errorMessage ?? "")
+        }
+    }
+
+    private var connectingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .scaleEffect(1.5)
+            Text("Connecting to \(appState.serverAddress)…")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "bubble.left.and.bubble.right")
+                .font(.system(size: 48))
+                .foregroundStyle(.tertiary)
+            Text("Select a channel to start chatting")
+                .foregroundStyle(.secondary)
+
+            if appState.channels.isEmpty {
+                Button("Join #freeq") {
+                    appState.joinChannel("#freeq")
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     @ViewBuilder
