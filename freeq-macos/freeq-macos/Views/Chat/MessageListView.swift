@@ -118,6 +118,7 @@ struct MessageRow: View {
     @Environment(AppState.self) private var appState
     @AppStorage("freeq.compactMode") private var compactMode = false
     let message: ChatMessage
+    @State private var isHovered = false
 
     private var isSelf: Bool {
         message.from.lowercased() == appState.nick.lowercased()
@@ -314,8 +315,16 @@ struct MessageRow: View {
         .background(
             appState.scrollToMessageId == message.id
                 ? Color.accentColor.opacity(0.1)
-                : Color.clear
+                : isHovered ? Color(nsColor: .textBackgroundColor).opacity(0.5) : Color.clear
         )
+        .onHover { isHovered = $0 }
+        .overlay(alignment: .topTrailing) {
+            if isHovered && !isSystem {
+                HoverActionBar(message: message)
+                    .padding(.trailing, 8)
+                    .offset(y: -12)
+            }
+        }
         .contextMenu { messageContextMenu }
     }
 
@@ -443,6 +452,77 @@ struct MessageRow: View {
             apply(&result, attrRange)
         }
         return result
+    }
+}
+
+// MARK: - Hover Action Bar (Slack/Discord style)
+
+struct HoverActionBar: View {
+    @Environment(AppState.self) private var appState
+    let message: ChatMessage
+    @State private var showEmojiPicker = false
+
+    private let quickEmoji = ["👍", "❤️", "😂", "🎉", "👀", "🔥"]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(quickEmoji, id: \.self) { emoji in
+                Button {
+                    if let target = appState.activeChannel {
+                        appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
+                    }
+                } label: {
+                    Text(emoji)
+                        .font(.system(size: 14))
+                        .frame(width: 28, height: 26)
+                }
+                .buttonStyle(.plain)
+                .help("React with \(emoji)")
+            }
+
+            Divider().frame(height: 16)
+
+            // Reply
+            Button {
+                appState.replyingToMessage = message
+            } label: {
+                Image(systemName: "arrowshape.turn.up.left")
+                    .font(.system(size: 11))
+                    .frame(width: 28, height: 26)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Reply")
+
+            // Thread
+            Button {
+                appState.threadRootMessage = message
+            } label: {
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 11))
+                    .frame(width: 28, height: 26)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Open Thread")
+
+            // More emoji (opens system picker)
+            Button {
+                NSApp.orderFrontCharacterPalette(nil)
+            } label: {
+                Image(systemName: "face.smiling")
+                    .font(.system(size: 11))
+                    .frame(width: 28, height: 26)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("More emoji…")
+        }
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
+        .background(.regularMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
     }
 }
 

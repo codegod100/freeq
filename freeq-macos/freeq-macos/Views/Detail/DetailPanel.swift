@@ -52,6 +52,16 @@ struct MemberListView: View {
 
             Divider()
 
+            // Total member count header
+            HStack {
+                Text("\(channel.members.count) Members")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if !ops.isEmpty {
@@ -60,12 +70,11 @@ struct MemberListView: View {
                     if !voiced.isEmpty {
                         memberSection("Voiced — \(voiced.count)", members: voiced)
                     }
-                    memberSection(
-                        "\(ops.isEmpty && voiced.isEmpty ? "Online" : "Members") — \(regular.count)",
-                        members: regular
-                    )
+                    if !regular.isEmpty {
+                        memberSection("Online — \(regular.count)", members: regular)
+                    }
                 }
-                .padding(.vertical, 8)
+                .padding(.vertical, 4)
             }
         }
     }
