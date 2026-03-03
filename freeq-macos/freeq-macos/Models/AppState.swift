@@ -68,6 +68,9 @@ class AppState {
     // MARK: - Names accumulator (353 lines come in multiple events)
     var pendingNames: [String: [MemberInfo]] = [:]
 
+    // MARK: - Profile cache
+    var profileCache = ProfileCache.shared
+
     // MARK: - Typing debounce
     private var lastTypingSent: [String: Date] = [:]
 
@@ -404,6 +407,26 @@ class AppState {
         return ch?.messages.last { $0.from.lowercased() == nick.lowercased() && !$0.isDeleted }
     }
 
+    // MARK: - WHOIS for DID discovery
+
+    private var whoisedNicks: Set<String> = []
+
+    /// Send WHOIS for members we haven't checked yet (to discover DIDs).
+    func whoisMembers(_ nicks: [String]) {
+        // Rate-limit: stagger WHOIS requests
+        var delay: Double = 0.5
+        for nick in nicks {
+            let lower = nick.lowercased()
+            guard !whoisedNicks.contains(lower), lower != self.nick.lowercased() else { continue }
+            whoisedNicks.insert(lower)
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.sendWhois(nick)
+            }
+            delay += 0.3  // 300ms between WHOIS requests
+            if delay > 15 { break }  // Cap at ~50 members
+        }
+    }
+
     // MARK: - Notifications
 
     func sendNotification(title: String, body: String) {
@@ -665,6 +688,7 @@ extension AppState {
                 nick = newNick
                 UserDefaults.standard.set(newNick, forKey: "freeq.nick")
             }
+            profileCache.renameUser(from: oldNick, to: newNick)
             for ch in allBuffers {
                 if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == oldNick.lowercased() }) {
                     let old = ch.members[idx]
@@ -707,20 +731,49 @@ extension AppState {
         case .chatHistoryTarget(let targetNick, _):
             let _ = getOrCreateDM(targetNick)
 
+        case .whoisReply(let whoisNick, let info):
+            // Parse WHOIS for DID: "nick is authenticated as did:plc:xxx"
+            // Or "nick is logged in as did:plc:xxx"
+            if info.contains("authenticated as ") || info.contains("logged in as ") {
+                let parts = info.split(separator: " ")
+                if let did = parts.last, did.hasPrefix("did:") {
+                    let didStr = String(did)
+                    profileCache.setDid(didStr, for: whoisNick)
+                    // Update member DID in all channels
+                    for ch in channels {
+                        if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == whoisNick.lowercased() }) {
+                            let m = ch.members[idx]
+                            if m.did == nil {
+                                ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: didStr)
+                            }
+                        }
+                    }
+                }
+            }
+            // Show WHOIS in active channel
+            if let ch = activeChannelState {
+                ch.appendIfNew(ChatMessage(
+                    id: UUID().uuidString, from: "server", text: info,
+                    isAction: false, timestamp: Date(), replyTo: nil
+                ))
+            }
+
         case .notice(let text):
             // NamesEnd signal — flush pending members and request history
             if text.hasPrefix("__NAMES_END__") {
                 let channel = String(text.dropFirst("__NAMES_END__".count))
                 let key = channel.lowercased()
-                if let members = pendingNames.removeValue(forKey: key),
-                   let ch = channels.first(where: { $0.name.lowercased() == key }) {
+                // Ensure channel exists before flushing
+                let ch = getOrCreateChannel(channel)
+                if let members = pendingNames.removeValue(forKey: key) {
                     ch.members = members
+                    // WHOIS each member to discover DIDs (background, rate-limited)
+                    whoisMembers(members.map(\.nick))
                 }
                 requestHistory(channel: channel)
                 return
             }
             if text.isEmpty { return }
-            // Show as system in active channel
             if let ch = activeChannelState {
                 ch.appendIfNew(ChatMessage(
                     id: UUID().uuidString,

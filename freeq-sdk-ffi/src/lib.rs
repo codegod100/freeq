@@ -121,6 +121,10 @@ pub enum FreeqEvent {
         nick: String,
         timestamp: Option<String>,
     },
+    WhoisReply {
+        nick: String,
+        info: String,
+    },
     Notice {
         text: String,
     },
@@ -506,6 +510,10 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
         },
         Event::Invited { channel, by } => FreeqEvent::Notice {
             text: format!("{by} invited you to {channel}"),
+        },
+        Event::WhoisReply { nick, info } => FreeqEvent::WhoisReply {
+            nick: nick.clone(),
+            info: info.clone(),
         },
         _ => FreeqEvent::Notice {
             text: String::new(),

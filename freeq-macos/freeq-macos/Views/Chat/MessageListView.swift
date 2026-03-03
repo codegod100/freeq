@@ -72,22 +72,25 @@ struct MessageListView: View {
 
 struct SystemMessageRow: View {
     let message: ChatMessage
+    @AppStorage("freeq.showJoinPart") private var showJoinPart = true
 
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: systemIcon)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-            Text(message.text)
-                .font(.caption)
-                .foregroundStyle(.tertiary)
-            Text(formatTime(message.timestamp))
-                .font(.caption2)
-                .foregroundStyle(.quaternary)
+        if showJoinPart {
+            HStack(spacing: 4) {
+                Image(systemName: systemIcon)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(message.text)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                Text(formatTime(message.timestamp))
+                    .font(.caption2)
+                    .foregroundStyle(.quaternary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 2)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 2)
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var systemIcon: String {
@@ -122,22 +125,54 @@ struct MessageRow: View {
         return message.timestamp.timeIntervalSince(prev.timestamp) > 300
     }
 
+    private var profile: ProfileCache.Profile? {
+        ProfileCache.shared.profile(for: message.from)
+    }
+
+    private var hasDid: Bool {
+        ProfileCache.shared.did(for: message.from) != nil
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if showHeader {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(message.from)
-                        .font(.system(.body, weight: .semibold))
-                        .foregroundStyle(isSystem ? .secondary : Theme.nickColor(for: message.from))
+                HStack(alignment: .top, spacing: 8) {
+                    if !isSystem {
+                        AvatarView(nick: message.from, size: 24)
+                            .padding(.top, 2)
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        HStack(alignment: .firstTextBaseline, spacing: 4) {
+                            // Display name or nick
+                            if let displayName = profile?.displayName, !displayName.isEmpty {
+                                Text(displayName)
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundStyle(Theme.nickColor(for: message.from))
+                                Text(message.from)
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            } else {
+                                Text(message.from)
+                                    .font(.system(.body, weight: .semibold))
+                                    .foregroundStyle(isSystem ? .secondary : Theme.nickColor(for: message.from))
+                            }
 
-                    Text(formatTime(message.timestamp))
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
+                            if hasDid {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.caption2)
+                                    .foregroundStyle(.blue)
+                            }
 
-                    if message.isEdited {
-                        Text("(edited)")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
+                            Text(formatTime(message.timestamp))
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+
+                            if message.isEdited {
+                                Text("(edited)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
                     }
                 }
                 .padding(.top, 6)
@@ -169,6 +204,11 @@ struct MessageRow: View {
             } else {
                 Text(parseMessageText(message.text))
                     .textSelection(.enabled)
+            }
+
+            // Link previews
+            if !isSystem, let url = extractURL(from: message.text) {
+                LinkPreviewView(url: url)
             }
 
             // Reactions
@@ -375,6 +415,17 @@ struct FlowLayout: Layout {
             rowHeight = max(rowHeight, size.height)
         }
     }
+}
+
+// MARK: - URL extraction
+
+private func extractURL(from text: String) -> String? {
+    let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    if let match = detector?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+       let range = Range(match.range, in: text) {
+        return String(text[range])
+    }
+    return nil
 }
 
 // MARK: - Time formatting (shared)

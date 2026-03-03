@@ -156,24 +156,36 @@ struct ChannelRow: View {
         appState.mentionCounts[channel.name.lowercased()] ?? 0
     }
 
+    private var lastMessage: ChatMessage? {
+        channel.messages.last(where: { !$0.from.isEmpty && !$0.isDeleted })
+    }
+
     var body: some View {
         Label {
-            HStack {
-                Text(channel.name.replacingOccurrences(of: "#", with: ""))
-                    .lineLimit(1)
-                    .fontWeight(unread > 0 ? .semibold : .regular)
-                Spacer()
-                if mentions > 0 {
-                    Text("\(mentions)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(.red))
-                } else if unread > 0 {
-                    Circle()
-                        .fill(Color.accentColor)
-                        .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(channel.name.replacingOccurrences(of: "#", with: ""))
+                        .lineLimit(1)
+                        .fontWeight(unread > 0 ? .semibold : .regular)
+                    Spacer()
+                    if mentions > 0 {
+                        Text("\(mentions)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(.red))
+                    } else if unread > 0 {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 8, height: 8)
+                    }
+                }
+                if let last = lastMessage {
+                    Text("\(last.from): \(last.text)")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
         } icon: {
@@ -200,34 +212,53 @@ struct DMRow: View {
         appState.unreadCounts[dm.name.lowercased()] ?? 0
     }
 
+    private var profile: ProfileCache.Profile? {
+        ProfileCache.shared.profile(for: dm.name)
+    }
+
+    private var lastMessage: ChatMessage? {
+        dm.messages.last(where: { !$0.isDeleted })
+    }
+
     var body: some View {
         Label {
-            HStack {
-                Text(dm.name)
-                    .lineLimit(1)
-                    .fontWeight(unread > 0 ? .semibold : .regular)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text(profile?.displayName ?? dm.name)
+                        .lineLimit(1)
+                        .fontWeight(unread > 0 ? .semibold : .regular)
 
-                if appState.p2pDMActive.contains(dm.name.lowercased()) {
-                    Image(systemName: "point.3.connected.trianglepath.dotted")
-                        .font(.caption2)
-                        .foregroundStyle(.green)
-                        .help("Direct P2P connection via iroh")
+                    if appState.p2pDMActive.contains(dm.name.lowercased()) {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .font(.caption2)
+                            .foregroundStyle(.green)
+                    }
+
+                    Spacer()
+                    if unread > 0 {
+                        Text("\(unread)")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(.red))
+                    }
                 }
-
-                Spacer()
-                if unread > 0 {
-                    Text("\(unread)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(.red))
+                if let last = lastMessage {
+                    Text(last.text)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
                 }
             }
         } icon: {
-            Circle()
-                .fill(isOnline ? .green : Color.secondary.opacity(0.3))
-                .frame(width: 10, height: 10)
+            AvatarView(nick: dm.name, size: 22)
+                .overlay(alignment: .bottomTrailing) {
+                    Circle()
+                        .fill(isOnline ? .green : Color.secondary.opacity(0.3))
+                        .frame(width: 7, height: 7)
+                        .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 1))
+                }
         }
         .contextMenu {
             Button("Close DM") {
