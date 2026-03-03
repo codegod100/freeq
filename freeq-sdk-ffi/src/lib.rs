@@ -435,10 +435,10 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
                 members,
             }
         }
-        Event::NamesEnd { .. } => {
-            // NamesEnd is informational; map to empty notice for FFI consumers
+        Event::NamesEnd { channel } => {
+            // Signal end of NAMES list — client should flush pending members + request history
             FreeqEvent::Notice {
-                text: String::new(),
+                text: format!("__NAMES_END__{}", channel),
             }
         }
         Event::ModeChanged {

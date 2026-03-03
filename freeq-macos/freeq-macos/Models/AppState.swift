@@ -58,6 +58,9 @@ class AppState {
     }
     var batches: [String: BatchBuffer] = [:]
 
+    // MARK: - Names accumulator (353 lines come in multiple events)
+    var pendingNames: [String: [MemberInfo]] = [:]
+
     // MARK: - Private
     private var client: FreeqClient?
     private var p2p: FreeqP2p?
@@ -354,7 +357,9 @@ extension AppState {
         case .joined(let channel, let joinNick):
             if joinNick.lowercased() == nick.lowercased() {
                 let ch = getOrCreateChannel(channel)
-                if activeChannel == nil {
+                ch.members.removeAll()  // Clear stale members before NAMES
+                pendingNames[channel.lowercased()] = []
+                if activeChannel == nil || activeChannel == "server" {
                     activeChannel = ch.name
                 }
             } else {
@@ -436,18 +441,20 @@ extension AppState {
             }
 
         case .names(let channel, let memberList):
-            if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
-                ch.members = memberList.map { m in
-                    MemberInfo(
-                        nick: m.nick,
-                        isOp: m.isOp,
-                        isHalfop: m.isHalfop,
-                        isVoiced: m.isVoiced,
-                        awayMsg: m.awayMsg,
-                        did: nil
-                    )
-                }
-            }
+            // 353 lines come in multiple events — accumulate until NamesEnd (366)
+            let key = channel.lowercased()
+            var existing = pendingNames[key] ?? []
+            existing.append(contentsOf: memberList.map { m in
+                MemberInfo(
+                    nick: m.nick,
+                    isOp: m.isOp,
+                    isHalfop: m.isHalfop,
+                    isVoiced: m.isVoiced,
+                    awayMsg: m.awayMsg,
+                    did: nil
+                )
+            })
+            pendingNames[key] = existing
 
         case .topicChanged(let channel, let topic):
             if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
@@ -506,6 +513,19 @@ extension AppState {
             let _ = getOrCreateDM(targetNick)
 
         case .notice(let text):
+            // NamesEnd signal — flush pending members and request history
+            if text.hasPrefix("__NAMES_END__") {
+                let channel = String(text.dropFirst("__NAMES_END__".count))
+                let key = channel.lowercased()
+                if let members = pendingNames.removeValue(forKey: key),
+                   let ch = channels.first(where: { $0.name.lowercased() == key }) {
+                    ch.members = members
+                }
+                // Request chat history
+                sendRaw("CHATHISTORY LATEST \(channel) * 50")
+                break
+            }
+            if text.isEmpty { break }
             // Show in active channel or as system
             if let ch = activeChannelState {
                 ch.appendIfNew(ChatMessage(
