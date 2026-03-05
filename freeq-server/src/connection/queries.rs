@@ -206,6 +206,16 @@ pub(super) fn handle_whois(
         send(state, session_id, format!("{client_line}\r\n"));
     }
 
+    // 301 RPL_AWAY — show away message if target is away
+    if let Some(away_msg) = state.session_away.lock().get(&target_session) {
+        let away = Message::from_server(
+            server_name,
+            irc::RPL_AWAY,
+            vec![my_nick, target_nick, away_msg],
+        );
+        send(state, session_id, format!("{away}\r\n"));
+    }
+
     // 318 RPL_ENDOFWHOIS
     let end = Message::from_server(
         server_name,

@@ -373,7 +373,9 @@ export function inviteUser(channel: string, userNick: string) {
   raw(`INVITE ${userNick} ${channel}`);
 }
 
+let pendingAwayReason: string | null = null;
 export function setAway(reason?: string) {
+  pendingAwayReason = reason || null;
   raw(reason ? `AWAY :${reason}` : 'AWAY');
 }
 
@@ -855,6 +857,23 @@ async function handleLine(rawLine: string) {
     case 'AWAY': {
       const reason = msg.params[0];
       store.setUserAway(from, reason || null);
+      break;
+    }
+
+    // ── RPL_NOWAWAY (306) / RPL_UNAWAY (305) — self away status ──
+    case '306': {
+      // "You have been marked as being away"
+      const reason = pendingAwayReason || 'away';
+      pendingAwayReason = null;
+      store.setUserAway(nick, reason);
+      store.addSystemMessage('server', `You are now away: ${reason}`);
+      break;
+    }
+    case '305': {
+      // "You are no longer marked as being away"
+      pendingAwayReason = null;
+      store.setUserAway(nick, null);
+      store.addSystemMessage('server', 'You are no longer away');
       break;
     }
 
