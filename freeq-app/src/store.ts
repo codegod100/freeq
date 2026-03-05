@@ -375,9 +375,12 @@ export const useStore = create<Store>((set, get) => ({
   // Members
   clearMembers: (channel) => set((s) => {
     const key = channel.toLowerCase();
-    const ch = s.channels.get(key);
-    if (ch) ch.members = new Map();
-    return {};
+    const channels = new Map(s.channels);
+    const ch = channels.get(key);
+    if (ch) {
+      channels.set(key, { ...ch, members: new Map() });
+    }
+    return { channels };
   }),
   addMember: (channel, member) => set((s) => {
     const channels = new Map(s.channels);
