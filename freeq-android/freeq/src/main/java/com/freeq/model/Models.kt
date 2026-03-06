@@ -287,7 +287,6 @@ class AppState(application: Application) : AndroidViewModel(application) {
     }
 
     fun reconnectSavedSession() {
-
         if (!hasSavedSession || connectionState.value != ConnectionState.Disconnected) return
         if (pendingWebToken != null) { connect(nick.value); return }
 
@@ -298,14 +297,12 @@ class AppState(application: Application) : AndroidViewModel(application) {
         scope.launch {
             try {
                 val session = withContext(Dispatchers.IO) { fetchBrokerSession(token) }
-
                 brokerRetryCount = 0
                 pendingWebToken = session.token
                 authenticatedDID.value = session.did
                 securePrefs.edit().putString("did", session.did).apply()
                 connect(session.nick)
             } catch (e: Exception) {
-
                 brokerRetryCount++
                 if (brokerRetryCount <= 4) {
                     val delayMs = 3000L * (1L shl (brokerRetryCount - 1)) // 3, 6, 12, 24s
@@ -485,6 +482,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
     }
 
     fun getOrCreateDM(nick: String): ChannelState {
+        if (nick.isEmpty()) return ChannelState("")
         dmBuffers.firstOrNull { it.name.equals(nick, ignoreCase = true) }?.let { return it }
         val dm = ChannelState(nick)
         dmBuffers.add(dm)
@@ -590,7 +588,15 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 }
                 state.connectionState.value = ConnectionState.Registered
                 state.nick.value = event.nick
-                state.autoJoinChannels.toList().forEach { state.joinChannel(it) }
+                // Server auto-joins saved channels for DID users.
+                // Only send JOIN for channels not already in our store to avoid
+                // duplicate CHATHISTORY requests.
+                state.autoJoinChannels.toList().forEach { ch ->
+                    val name = if (ch.startsWith("#")) ch else "#$ch"
+                    if (state.channels.none { it.name.equals(name, ignoreCase = true) }) {
+                        state.joinChannel(ch)
+                    }
+                }
                 // Fetch DM conversation list if authenticated
                 if (state.authenticatedDID.value != null) {
                     state.sendRaw("CHATHISTORY TARGETS * * 50")
@@ -798,6 +804,8 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                     }
                 } else if (text.startsWith("MOTD:") && state.collectingMotd) {
                     state.motdLines.add(text.removePrefix("MOTD:"))
+                } else if (text.startsWith("__")) {
+                    // Internal SDK signal — ignore
                 } else if (!state.collectingMotd && text.isNotBlank()) {
                     // Server error or notice — show to user
                     state.errorMessage.value = text
@@ -885,6 +893,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
             is FreeqEvent.BatchEnd -> {
                 val batch = state.batches.remove(event.id) ?: return
+                if (batch.target.isEmpty()) return
                 val sorted = batch.messages.sortedBy { it.timestamp }
                 val ch = if (batch.target.startsWith("#"))
                     state.getOrCreateChannel(batch.target)
@@ -896,6 +905,10 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
             is FreeqEvent.ChatHistoryTarget -> {
                 // Create DM buffer for each conversation partner
                 state.getOrCreateDM(event.nick)
+            }
+
+            is FreeqEvent.WhoisReply -> {
+                // No-op for now
             }
         }
     }
