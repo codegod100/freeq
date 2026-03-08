@@ -149,9 +149,13 @@ class AppState(application: Application) : AndroidViewModel(application) {
     var authBrokerBase: String = "https://irc.freeq.at/auth/broker"
     private var brokerRetryCount = 0
     internal var intentionalDisconnect = false
+    var loggedOut = mutableStateOf(false)
+    private var cachedWebToken: String? = null
+    private var cachedWebTokenExpiry: Long = 0L  // epoch millis
 
     val hasSavedSession: Boolean
-        get() = brokerToken != null && nick.value.isNotEmpty()
+        get() = nick.value.isNotEmpty() && (brokerToken != null
+                || (cachedWebToken != null && System.currentTimeMillis() < cachedWebTokenExpiry))
     val lastReadMessageIds = mutableStateMapOf<String, String>()
     val lastReadTimestamps = mutableStateMapOf<String, Long>()
     var isDarkTheme = mutableStateOf(true)
@@ -205,6 +209,15 @@ class AppState(application: Application) : AndroidViewModel(application) {
         // Load secrets from encrypted storage
         brokerToken = securePrefs.getString("brokerToken", null)
         authenticatedDID.value = securePrefs.getString("did", null)
+        // Restore cached web token if still valid (25 min TTL, server expires at 30 min)
+        val savedExpiry = prefs.getLong("webTokenExpiry", 0L)
+        if (savedExpiry > System.currentTimeMillis()) {
+            cachedWebToken = securePrefs.getString("webToken", null)
+            cachedWebTokenExpiry = savedExpiry
+        } else {
+            securePrefs.edit().remove("webToken").apply()
+            prefs.edit().remove("webTokenExpiry").apply()
+        }
 
         // Restore persisted state
         nick.value = prefs.getString("nick", "") ?: ""
@@ -242,6 +255,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
 
     fun connect(nickName: String) {
         intentionalDisconnect = false
+        loggedOut.value = false
         nick.value = nickName
         connectionState.value = ConnectionState.Connecting
         errorMessage.value = null
@@ -277,12 +291,23 @@ class AppState(application: Application) : AndroidViewModel(application) {
         authenticatedDID.value = null
     }
 
+    fun cacheWebToken(token: String) {
+        cachedWebToken = token
+        cachedWebTokenExpiry = System.currentTimeMillis() + 25 * 60 * 1000L
+        securePrefs.edit().putString("webToken", token).apply()
+        prefs.edit().putLong("webTokenExpiry", cachedWebTokenExpiry).apply()
+    }
+
     fun logout() {
         intentionalDisconnect = true
+        loggedOut.value = true
+        errorMessage.value = null
         brokerToken = null
         pendingWebToken = null
-        securePrefs.edit().remove("brokerToken").remove("did").apply()
-        prefs.edit().remove("nick").apply()
+        cachedWebToken = null
+        cachedWebTokenExpiry = 0L
+        securePrefs.edit().remove("brokerToken").remove("did").remove("webToken").apply()
+        prefs.edit().remove("nick").remove("webTokenExpiry").apply()
         nick.value = ""
         disconnect()
     }
@@ -291,7 +316,19 @@ class AppState(application: Application) : AndroidViewModel(application) {
         if (!hasSavedSession || connectionState.value != ConnectionState.Disconnected) return
         if (pendingWebToken != null) { connect(nick.value); return }
 
-        val token = brokerToken ?: return
+        // Reuse cached web token if still within TTL (avoids broker round-trip)
+        val cached = cachedWebToken
+        if (cached != null && System.currentTimeMillis() < cachedWebTokenExpiry) {
+            pendingWebToken = cached
+            connect(nick.value)
+            return
+        }
+
+        val token = brokerToken ?: run {
+            // No broker token and cached web token expired — must sign in again
+            connectionState.value = ConnectionState.Disconnected
+            return
+        }
 
         connectionState.value = ConnectionState.Connecting
 
@@ -300,6 +337,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
                 val session = withContext(Dispatchers.IO) { fetchBrokerSession(token) }
                 brokerRetryCount = 0
                 pendingWebToken = session.token
+                cacheWebToken(session.token)
                 authenticatedDID.value = session.did
                 securePrefs.edit().putString("did", session.did).apply()
                 connect(session.nick)
@@ -322,8 +360,8 @@ class AppState(application: Application) : AndroidViewModel(application) {
     private data class BrokerSessionResponse(val token: String, val nick: String, val did: String)
 
     private fun fetchBrokerSession(brokerToken: String): BrokerSessionResponse {
-        // Retry once on 502 (DPoP nonce rotation)
-        for (attempt in 0..1) {
+        // Retry up to 3 times with backoff — DPoP nonce rotation causes the first call to fail
+        for (attempt in 0..2) {
             val url = java.net.URL("$authBrokerBase/session")
             val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
                 requestMethod = "POST"
@@ -336,9 +374,18 @@ class AppState(application: Application) : AndroidViewModel(application) {
                 out.write("""{"broker_token":"$brokerToken"}""".toByteArray())
             }
             val status = conn.responseCode
-            if (status == 502 && attempt == 0) {
-                Thread.sleep(300)
+            if (status == 502 && attempt < 2) {
+                Thread.sleep(if (attempt == 0) 500 else 1000)
                 continue
+            }
+            // 401 = broker token genuinely invalid — clear it
+            if (status == 401) {
+                this.brokerToken = null
+                cachedWebToken = null
+                cachedWebTokenExpiry = 0L
+                securePrefs.edit().remove("brokerToken").remove("webToken").apply()
+                prefs.edit().remove("webTokenExpiry").apply()
+                throw Exception("Session expired — please sign in again")
             }
             if (status != 200) {
                 throw Exception("Broker returned $status")
@@ -818,7 +865,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
             is FreeqEvent.Disconnected -> {
                 state.connectionState.value = ConnectionState.Disconnected
-                if (event.reason.isNotEmpty()) {
+                if (event.reason.isNotEmpty() && !state.intentionalDisconnect) {
                     state.errorMessage.value = "Disconnected: ${event.reason}"
                 }
                 // Auto-reconnect: prefer broker session restore, fall back to plain reconnect
