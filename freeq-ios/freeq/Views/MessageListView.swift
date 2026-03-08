@@ -320,6 +320,21 @@ struct MessageListView: View {
         }) {
             Label("Copy Text", systemImage: "doc.on.doc")
         }
+
+        Button(action: {
+            appState.sendRaw("PIN \(channel.name) \(msg.id)")
+            ToastManager.shared.show("Pinned!", icon: "pin.fill")
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }) {
+            Label("Pin Message", systemImage: "pin")
+        }
+
+        Button(action: {
+            UIPasteboard.general.string = msg.id
+            ToastManager.shared.show("Message ID copied", icon: "number")
+        }) {
+            Label("Copy Message ID", systemImage: "number")
+        }
     }
 
     // MARK: - Typing Indicator
@@ -735,6 +750,11 @@ struct MessageListView: View {
         // Match AT Protocol CDN image URLs (cdn.bsky.app/img/...)
         let cdnPattern = #"https?://cdn\.bsky\.app/img/[^\s<]+"#
         if let range = text.range(of: cdnPattern, options: .regularExpression) {
+            return URL(string: String(text[range]))
+        }
+        // Match blob proxy URLs with image mime hint
+        let blobPattern = #"https?://\S+/api/v1/blob\?\S*mime=image%2F\S*"#
+        if let range = text.range(of: blobPattern, options: .regularExpression) {
             return URL(string: String(text[range]))
         }
         return nil

@@ -48,6 +48,17 @@ struct ChatsTab: View {
                             }
                             .swipeActions(edge: .leading) {
                                 Button {
+                                    appState.toggleMute(conv.name)
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                } label: {
+                                    Label(
+                                        appState.isMuted(conv.name) ? "Unmute" : "Mute",
+                                        systemImage: appState.isMuted(conv.name) ? "bell.fill" : "bell.slash.fill"
+                                    )
+                                }
+                                .tint(Theme.warning)
+
+                                Button {
                                     appState.markRead(conv.name)
                                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 } label: {
@@ -211,6 +222,12 @@ struct ChatRow: View {
                         .font(.system(size: 16, weight: unreadCount > 0 ? .bold : .regular))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(1)
+
+                    if appState.isMuted(conversation.name) {
+                        Image(systemName: "bell.slash.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(Theme.textMuted)
+                    }
 
                     // Member count for channels
                     if isChannel && conversation.members.count > 0 {

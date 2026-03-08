@@ -144,7 +144,14 @@ class AppState: ObservableObject {
     @Published var authenticatedDID: String? = nil
     @Published var dmBuffers: [ChannelState] = []
     @Published var autoJoinChannels: [String] = ["#general"]
-    @Published var unreadCounts: [String: Int] = [:]
+    @Published var unreadCounts: [String: Int] = [:] {
+        didSet { UserDefaults.standard.set(unreadCounts, forKey: "freeq.unreadCounts") }
+    }
+
+    /// Muted channels — no notifications, no badge increment
+    @Published var mutedChannels: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(mutedChannels), forKey: "freeq.mutedChannels") }
+    }
 
     /// MOTD lines collected from server
     @Published var motdLines: [String] = []
@@ -214,6 +221,12 @@ class AppState: ObservableObject {
         }
         if let savedReadPositions = UserDefaults.standard.dictionary(forKey: "freeq.readPositions") as? [String: String] {
             lastReadMessageIds = savedReadPositions
+        }
+        if let savedUnreads = UserDefaults.standard.dictionary(forKey: "freeq.unreadCounts") as? [String: Int] {
+            unreadCounts = savedUnreads
+        }
+        if let savedMuted = UserDefaults.standard.stringArray(forKey: "freeq.mutedChannels") {
+            mutedChannels = Set(savedMuted)
         }
         // Migrate secrets from UserDefaults to Keychain (one-time)
         KeychainHelper.migrateFromUserDefaults(userDefaultsKey: "freeq.did", keychainKey: "did")
@@ -501,8 +514,20 @@ class AppState: ObservableObject {
     }
 
     func updateBadgeCount() {
-        let total = unreadCounts.values.reduce(0, +)
+        let total = unreadCounts.filter { !mutedChannels.contains($0.key) }.values.reduce(0, +)
         UNUserNotificationCenter.current().setBadgeCount(total)
+    }
+
+    func toggleMute(_ channel: String) {
+        if mutedChannels.contains(channel) {
+            mutedChannels.remove(channel)
+        } else {
+            mutedChannels.insert(channel)
+        }
+    }
+
+    func isMuted(_ channel: String) -> Bool {
+        mutedChannels.contains(channel)
     }
 
     func toggleTheme() {
@@ -531,10 +556,10 @@ class AppState: ObservableObject {
     }
 
     func incrementUnread(_ channel: String) {
-        if activeChannel != channel {
-            unreadCounts[channel, default: 0] += 1
-            updateBadgeCount()
-        }
+        guard activeChannel != channel else { return }
+        guard !mutedChannels.contains(channel) else { return }
+        unreadCounts[channel, default: 0] += 1
+        updateBadgeCount()
     }
 
     func getOrCreateChannel(_ name: String) -> ChannelState {
@@ -780,10 +805,10 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 state.incrementUnread(target)
                 ch.typingUsers.removeValue(forKey: from)
 
-                // Notify on mention
-                if !isSelf && ircMsg.text.lowercased().contains(state.nick.lowercased()) {
+                // Notify on mention (skip if muted)
+                if !isSelf && ircMsg.text.lowercased().contains(state.nick.lowercased()) && !state.isMuted(target) {
                     NotificationManager.shared.sendMessageNotification(
-                        from: from, text: ircMsg.text, channel: target
+                        from: from, text: ircMsg.text, channel: target, isMention: true
                     )
                     // Haptic when mentioned in active app
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
