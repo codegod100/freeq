@@ -387,6 +387,10 @@ export function joinChannel(channel: string) {
 
 export function partChannel(channel: string) {
   raw(`PART ${channel}`);
+  // Optimistic removal — don't wait for server confirmation
+  useStore.getState().removeChannel(channel);
+  joinedChannels.delete(channel.toLowerCase());
+  saveJoinedChannels();
 }
 
 export function setTopic(channel: string, topic: string) {
