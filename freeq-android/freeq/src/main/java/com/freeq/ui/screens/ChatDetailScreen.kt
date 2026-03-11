@@ -32,10 +32,9 @@ fun ChatDetailScreen(
     onBack: () -> Unit,
     onNavigateToChat: ((String) -> Unit)? = null
 ) {
-    val channelState = remember(channelName) {
-        appState.channels.firstOrNull { it.name.equals(channelName, ignoreCase = true) }
-            ?: appState.dmBuffers.firstOrNull { it.name.equals(channelName, ignoreCase = true) }
-    }
+    // Don't cache channelState - it changes on reconnect when channels are recreated
+    val channelState = appState.channels.firstOrNull { it.name.equals(channelName, ignoreCase = true) }
+        ?: appState.dmBuffers.firstOrNull { it.name.equals(channelName, ignoreCase = true) }
 
     var showMembers by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }

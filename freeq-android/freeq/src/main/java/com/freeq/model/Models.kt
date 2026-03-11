@@ -282,9 +282,11 @@ class AppState(application: Application) : AndroidViewModel(application) {
     fun disconnect() {
         intentionalDisconnect = true
         client?.disconnect()
+        client = null  // Clear reference so reconnect creates fresh client
         connectionState.value = ConnectionState.Disconnected
         channels.clear()
         dmBuffers.clear()
+        batches.clear()
         activeChannel.value = null
         replyingTo.value = null
         editingMessage.value = null
@@ -457,6 +459,9 @@ class AppState(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendRaw(line: String) {
+        if (client == null) {
+            return
+        }
         try {
             client?.sendRaw(line)
         } catch (_: Exception) {}
@@ -637,14 +642,9 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 }
                 state.connectionState.value = ConnectionState.Registered
                 state.nick.value = event.nick
-                // Server auto-joins saved channels for DID users.
-                // Only send JOIN for channels not already in our store to avoid
-                // duplicate CHATHISTORY requests.
-                state.autoJoinChannels.toList().forEach { ch ->
-                    val name = if (ch.startsWith("#")) ch else "#$ch"
-                    if (state.channels.none { it.name.equals(name, ignoreCase = true) }) {
-                        state.joinChannel(ch)
-                    }
+                // Auto-join saved channels (matches iOS behavior exactly)
+                for (channel in state.autoJoinChannels.toList()) {
+                    state.joinChannel(channel)
                 }
                 // Fetch DM conversation list if authenticated
                 if (state.authenticatedDID.value != null) {
@@ -671,7 +671,10 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                         state.autoJoinChannels.add(event.channel)
                         state.persistChannels()
                     }
-                    state.requestHistory(event.channel)
+                    // Only request history if channel has no messages yet (avoid duplicate requests)
+                    if (ch.messages.isEmpty()) {
+                        state.requestHistory(event.channel)
+                    }
                 }
                 ch.appendIfNew(ChatMessage(
                     id = UUID.randomUUID().toString(),
