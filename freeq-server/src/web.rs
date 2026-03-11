@@ -703,12 +703,19 @@ async fn api_channel_pins(
             let pins: Vec<serde_json::Value> = ch
                 .pins
                 .iter()
-                .map(|p| {
-                    serde_json::json!({
+                .filter_map(|p| {
+                    // Look up current message content from history
+                    let msg = ch.history.iter().find(|m| m.msgid.as_deref() == Some(&p.msgid))?;
+                    Some(serde_json::json!({
                         "msgid": p.msgid,
+                        "from": msg.from,
+                        "text": msg.text,
+                        "timestamp": chrono::DateTime::from_timestamp(msg.timestamp as i64, 0)
+                            .map(|dt| dt.to_rfc3339())
+                            .unwrap_or_default(),
                         "pinned_by": p.pinned_by,
                         "pinned_at": p.pinned_at,
-                    })
+                    }))
                 })
                 .collect();
             Ok(Json(
