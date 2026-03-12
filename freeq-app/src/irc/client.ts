@@ -797,10 +797,15 @@ async function handleLine(rawLine: string) {
     // ── TAGMSG ──
     case 'TAGMSG': {
       const target = msg.params[0];
+      // For DMs, buffer = the other person's nick (not our own)
+      const isChannel = target.startsWith('#') || target.startsWith('&');
+      const isSelf = from.toLowerCase() === nick.toLowerCase();
+      const bufName = isChannel ? target : (isSelf ? target : from);
+
       // Handle deletes
       const deleteOf = msg.tags['+draft/delete'];
       if (deleteOf) {
-        store.deleteMessage(target, deleteOf);
+        store.deleteMessage(bufName, deleteOf);
         break;
       }
       // Handle reactions — +reply tag references the target message
@@ -808,15 +813,15 @@ async function handleLine(rawLine: string) {
       if (reaction) {
         const reactTarget = msg.tags['+reply'];
         if (reactTarget) {
-          store.addReaction(target, reactTarget, reaction, from);
+          store.addReaction(bufName, reactTarget, reaction, from);
         } else {
           // No +reply — reaction to the channel generally.
           // Attach to the most recent non-system message.
-          const ch = store.channels.get(target.toLowerCase());
+          const ch = store.channels.get(bufName.toLowerCase());
           if (ch) {
             const lastMsg = [...ch.messages].reverse().find((m) => !m.isSystem && !m.deleted);
             if (lastMsg) {
-              store.addReaction(target, lastMsg.id, reaction, from);
+              store.addReaction(bufName, lastMsg.id, reaction, from);
             }
           }
         }
@@ -824,7 +829,7 @@ async function handleLine(rawLine: string) {
       // Handle typing
       const typing = msg.tags['+typing'];
       if (typing) {
-        store.setTyping(target, from, typing === 'active');
+        store.setTyping(bufName, from, typing === 'active');
       }
       break;
     }
