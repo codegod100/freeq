@@ -8,6 +8,7 @@ members = [
     "freeq-bots",
     "freeq-auth-broker",
     "freeq-windows-core",
+    "freeq-bot-id",
 ]
 exclude = [
     "freeq-app/src-tauri",

@@ -193,6 +193,25 @@ pub(super) fn handle_whois(
         send(state, session_id, format!("{iroh_notice}\r\n"));
     }
 
+    // Show actor class if not human (673 = custom RPL_ACTORCLASS)
+    {
+        let actor_class = state
+            .session_actor_class
+            .lock()
+            .get(&target_session)
+            .copied();
+        if let Some(class) = actor_class {
+            if class != crate::connection::ActorClass::Human {
+                let class_line = Message::from_server(
+                    server_name,
+                    "673",
+                    vec![my_nick, target_nick, &format!("actor_class={class}")],
+                );
+                send(state, session_id, format!("{class_line}\r\n"));
+            }
+        }
+    }
+
     // Show linked identities (e.g., GitHub)
     if let Some(ref did) = did {
         let identities = state.linked_identities.lock();

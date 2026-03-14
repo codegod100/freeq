@@ -50,6 +50,43 @@ use registration::try_complete_registration;
 // Re-export items used by other modules in the crate
 
 /// State of a single client connection.
+/// Actor class — distinguishes humans from agents in the protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorClass {
+    Human,
+    Agent,
+    ExternalAgent,
+}
+
+impl Default for ActorClass {
+    fn default() -> Self {
+        ActorClass::Human
+    }
+}
+
+impl std::fmt::Display for ActorClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActorClass::Human => write!(f, "human"),
+            ActorClass::Agent => write!(f, "agent"),
+            ActorClass::ExternalAgent => write!(f, "external_agent"),
+        }
+    }
+}
+
+impl std::str::FromStr for ActorClass {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "human" => Ok(ActorClass::Human),
+            "agent" => Ok(ActorClass::Agent),
+            "external_agent" => Ok(ActorClass::ExternalAgent),
+            _ => Err(format!("Unknown actor class: {s}")),
+        }
+    }
+}
+
 pub struct Connection {
     pub id: String,
     pub nick: Option<String>,
@@ -57,6 +94,8 @@ pub struct Connection {
     pub realname: Option<String>,
     pub authenticated_did: Option<String>,
     pub registered: bool,
+    /// Actor class: human (default), agent, or external_agent.
+    pub(crate) actor_class: ActorClass,
 
     /// Iroh endpoint ID of the remote peer (if connected via iroh).
     /// This is a cryptographic public key, giving us verified identity.
@@ -98,6 +137,7 @@ impl Connection {
             realname: None,
             authenticated_did: None,
             registered: false,
+            actor_class: ActorClass::Human,
             iroh_endpoint_id: None,
             cap_negotiating: false,
             cap_sasl_requested: false,
@@ -1188,6 +1228,87 @@ where
                     tracing::warn!(nick = %nick, session = %session_id, "OPER failed: bad password");
                 }
             }
+            // AGENT command — register as an agent or manage agent state.
+            // Usage: AGENT REGISTER :class=agent
+            "AGENT" => {
+                if !conn.registered {
+                    continue;
+                }
+                let nick = conn.nick_or_star().to_string();
+                if msg.params.is_empty() {
+                    let reply = Message::from_server(
+                        &server_name,
+                        irc::ERR_NEEDMOREPARAMS,
+                        vec![&nick, "AGENT", "Not enough parameters"],
+                    );
+                    send(&state, &session_id, format!("{reply}\r\n"));
+                    continue;
+                }
+                let subcmd = msg.params[0].to_uppercase();
+                match subcmd.as_str() {
+                    "REGISTER" => {
+                        // Parse class from trailing param: "class=agent"
+                        let class_str = msg.params.get(1)
+                            .and_then(|p| p.strip_prefix("class="))
+                            .unwrap_or("agent");
+                        match class_str.parse::<ActorClass>() {
+                            Ok(class) => {
+                                conn.actor_class = class;
+                                // Store in shared state for WHOIS / member list lookups
+                                state.session_actor_class.lock().insert(
+                                    session_id.clone(),
+                                    class,
+                                );
+                                let reply = Message::from_server(
+                                    &server_name,
+                                    "NOTICE",
+                                    vec![&nick, &format!("Agent registered as {class}")],
+                                );
+                                send(&state, &session_id, format!("{reply}\r\n"));
+                                tracing::info!(nick = %nick, session = %session_id, actor_class = %class, "AGENT REGISTER");
+
+                                // Broadcast actor class to shared channels if they support the cap
+                                if conn.cap_message_tags {
+                                    let hostmask = conn.hostmask();
+                                    let channels = state.channels.lock();
+                                    let conns = state.connections.lock();
+                                    for (ch_name, ch) in channels.iter() {
+                                        if ch.members.contains(&session_id) {
+                                            let msg_line = format!(
+                                                "@+freeq.at/actor-class={class} :{hostmask} NOTICE {ch_name} :registered as {class}\r\n"
+                                            );
+                                            for member_sid in &ch.members {
+                                                if member_sid != &session_id {
+                                                    if let Some(tx) = conns.get(member_sid) {
+                                                        let _ = tx.try_send(msg_line.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                let reply = Message::from_server(
+                                    &server_name,
+                                    "NOTICE",
+                                    vec![&nick, &format!("Invalid actor class: {e}")],
+                                );
+                                send(&state, &session_id, format!("{reply}\r\n"));
+                            }
+                        }
+                    }
+                    _ => {
+                        let reply = Message::from_server(
+                            &server_name,
+                            "NOTICE",
+                            vec![&nick, &format!("Unknown AGENT subcommand: {subcmd}. Use: AGENT REGISTER")],
+                        );
+                        send(&state, &session_id, format!("{reply}\r\n"));
+                    }
+                }
+            }
+
             // Phase 4: Revoke a peer's S2S access (oper-only).
             // Usage: REVOKEPEER <endpoint_id>
             "REVOKEPEER" => {
@@ -1506,6 +1627,7 @@ fn cleanup_session_state(state: &Arc<SharedState>, session_id: &str) {
     state.cap_extended_join.lock().remove(session_id);
     state.cap_away_notify.lock().remove(session_id);
     state.server_opers.lock().remove(session_id);
+    state.session_actor_class.lock().remove(session_id);
 }
 
 /// Remove a session from all channels. Retains channels that still have content.

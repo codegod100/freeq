@@ -425,6 +425,8 @@ pub struct SharedState {
     pub cap_away_notify: Mutex<HashSet<String>>,
     /// Sessions that have OPER (server operator) status.
     pub server_opers: Mutex<HashSet<String>>,
+    /// Actor class per session (default: Human, omitted from map).
+    pub session_actor_class: Mutex<HashMap<String, crate::connection::ActorClass>>,
     /// Pending OAuth sessions: state → OAuthPending.
     pub oauth_pending: Mutex<HashMap<String, OAuthPending>>,
     /// Completed OAuth sessions: state → OAuthResult.
@@ -874,6 +876,7 @@ impl Server {
             cap_extended_join: Mutex::new(HashSet::new()),
             cap_away_notify: Mutex::new(HashSet::new()),
             server_opers: Mutex::new(HashSet::new()),
+            session_actor_class: Mutex::new(HashMap::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),

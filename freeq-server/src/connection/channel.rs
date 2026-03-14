@@ -3,8 +3,8 @@
 
 use super::Connection;
 use super::helpers::{
-    broadcast_to_channel, make_extended_join, make_standard_join, s2s_broadcast,
-    s2s_broadcast_mode, s2s_next_event_id,
+    broadcast_to_channel, make_extended_join, make_extended_join_with_class, make_standard_join,
+    s2s_broadcast, s2s_broadcast_mode, s2s_next_event_id,
 };
 use crate::irc::{self, Message};
 use crate::server::SharedState;
@@ -298,6 +298,13 @@ pub(super) fn handle_join(
     let std_join = make_standard_join(&hostmask, channel);
     let realname = conn.realname.as_deref().unwrap_or(nick);
     let ext_join = make_extended_join(&hostmask, channel, did, realname);
+    let ext_join_class = make_extended_join_with_class(
+        &hostmask,
+        channel,
+        did,
+        realname,
+        conn.actor_class,
+    );
 
     let members: Vec<String> = state
         .channels
@@ -307,11 +314,17 @@ pub(super) fn handle_join(
         .unwrap_or_default();
 
     let ext_set = state.cap_extended_join.lock();
+    let tag_set = state.cap_message_tags.lock();
     let conns = state.connections.lock();
     for member_session in &members {
         if let Some(tx) = conns.get(member_session) {
             if ext_set.contains(member_session) {
-                let _ = tx.try_send(ext_join.clone());
+                // Clients with message-tags get the actor class tag
+                if tag_set.contains(member_session) {
+                    let _ = tx.try_send(ext_join_class.clone());
+                } else {
+                    let _ = tx.try_send(ext_join.clone());
+                }
             } else {
                 let _ = tx.try_send(std_join.clone());
             }

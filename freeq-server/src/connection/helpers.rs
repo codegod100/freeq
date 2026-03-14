@@ -229,6 +229,22 @@ pub(crate) fn make_extended_join(
     format!(":{hostmask} JOIN {channel} {account} :{realname}\r\n")
 }
 
+/// Build an extended JOIN line with actor class tag (for agent-aware clients).
+pub(crate) fn make_extended_join_with_class(
+    hostmask: &str,
+    channel: &str,
+    did: Option<&str>,
+    realname: &str,
+    actor_class: super::ActorClass,
+) -> String {
+    let account = did.unwrap_or("*");
+    if actor_class != super::ActorClass::Human {
+        format!("@+freeq.at/actor-class={actor_class} :{hostmask} JOIN {channel} {account} :{realname}\r\n")
+    } else {
+        format!(":{hostmask} JOIN {channel} {account} :{realname}\r\n")
+    }
+}
+
 /// Build a standard JOIN line.
 pub(crate) fn make_standard_join(hostmask: &str, channel: &str) -> String {
     format!(":{hostmask} JOIN {channel}\r\n")

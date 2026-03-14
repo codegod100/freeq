@@ -512,4 +512,66 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("did not verify"));
     }
+
+    #[tokio::test]
+    async fn verify_did_key_ed25519() {
+        use freeq_sdk::crypto::PrivateKey;
+        use freeq_sdk::did::DidResolver;
+        use std::collections::HashMap;
+
+        let private_key = PrivateKey::generate_ed25519();
+        let multibase = private_key.public_key_multibase();
+        let did = format!("did:key:{multibase}");
+
+        // did:key resolves from the DID itself — no pre-loaded docs needed
+        let resolver = DidResolver::static_map(HashMap::new());
+
+        let store = ChallengeStore::new(60);
+        let _encoded = store.create("test-did-key");
+        let (challenge, challenge_bytes) = store.take("test-did-key").unwrap();
+
+        let signature = private_key.sign_base64url(&challenge_bytes);
+        let response = ChallengeResponse {
+            did: did.clone(),
+            signature,
+            method: None,
+            pds_url: None,
+            dpop_proof: None,
+        };
+
+        let result = verify_response(&challenge, &challenge_bytes, &response, &resolver).await;
+        assert!(result.is_ok(), "did:key auth failed: {:?}", result.err());
+        assert_eq!(result.unwrap(), did);
+    }
+
+    #[tokio::test]
+    async fn verify_did_key_wrong_key_fails() {
+        use freeq_sdk::crypto::PrivateKey;
+        use freeq_sdk::did::DidResolver;
+        use std::collections::HashMap;
+
+        let real_key = PrivateKey::generate_ed25519();
+        let imposter_key = PrivateKey::generate_ed25519();
+        let did = format!("did:key:{}", real_key.public_key_multibase());
+
+        let resolver = DidResolver::static_map(HashMap::new());
+
+        let store = ChallengeStore::new(60);
+        let _encoded = store.create("test-imposter");
+        let (challenge, challenge_bytes) = store.take("test-imposter").unwrap();
+
+        // Sign with the wrong key
+        let signature = imposter_key.sign_base64url(&challenge_bytes);
+        let response = ChallengeResponse {
+            did,
+            signature,
+            method: None,
+            pds_url: None,
+            dpop_proof: None,
+        };
+
+        let result = verify_response(&challenge, &challenge_bytes, &response, &resolver).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("did not verify"));
+    }
 }

@@ -169,6 +169,8 @@ impl HttpResolver {
             self.resolve_plc(did).await
         } else if did.starts_with("did:web:") {
             self.resolve_web(did).await
+        } else if did.starts_with("did:key:") {
+            resolve_did_key(did)
         } else {
             bail!("Unsupported DID method: {did}");
         }
@@ -285,11 +287,44 @@ pub struct StaticResolver {
 
 impl StaticResolver {
     fn resolve(&self, did: &str) -> Result<DidDocument> {
+        // did:key can always be resolved from the DID itself
+        if did.starts_with("did:key:") {
+            return resolve_did_key(did);
+        }
         self.documents
             .get(did)
             .cloned()
             .context(format!("DID not found in static resolver: {did}"))
     }
+}
+
+/// Resolve a did:key by extracting the public key from the DID string itself.
+///
+/// did:key encodes the public key directly: `did:key:<multibase-public-key>`
+/// No network fetch needed — the DID *is* the key.
+pub fn resolve_did_key(did: &str) -> Result<DidDocument> {
+    let multibase = did
+        .strip_prefix("did:key:")
+        .context("Invalid did:key format")?;
+
+    // Verify the key is parseable
+    crate::crypto::PublicKey::from_multibase(multibase)
+        .context("Invalid public key in did:key")?;
+
+    let key_id = format!("{did}#{multibase}");
+    Ok(DidDocument {
+        id: did.to_string(),
+        also_known_as: vec![],
+        verification_method: vec![VerificationMethod {
+            id: key_id.clone(),
+            method_type: "Multikey".to_string(),
+            controller: did.to_string(),
+            public_key_multibase: Some(multibase.to_string()),
+        }],
+        authentication: vec![StringOrMap::Reference(key_id.clone())],
+        assertion_method: vec![StringOrMap::Reference(key_id)],
+        service: vec![],
+    })
 }
 
 /// Helper to create a minimal DID document for testing.
@@ -370,6 +405,75 @@ mod tests {
         let resolved = static_resolver.resolve(did).unwrap();
         assert_eq!(resolved.id, did);
         assert_eq!(resolved.authentication_keys().len(), 1);
+    }
+
+    #[test]
+    fn resolve_did_key_ed25519() {
+        let key = PrivateKey::generate_ed25519();
+        let multibase = key.public_key_multibase();
+        let did = format!("did:key:{multibase}");
+        let doc = resolve_did_key(&did).unwrap();
+        assert_eq!(doc.id, did);
+        let auth_keys = doc.authentication_keys();
+        assert_eq!(auth_keys.len(), 1);
+        assert_eq!(auth_keys[0].1.key_type(), "ed25519");
+
+        // Verify the extracted key can verify signatures from the original key
+        let message = b"hello did:key";
+        let sig = key.sign(message);
+        auth_keys[0].1.verify(message, &sig).unwrap();
+    }
+
+    #[test]
+    fn resolve_did_key_secp256k1() {
+        let key = PrivateKey::generate_secp256k1();
+        let multibase = key.public_key_multibase();
+        let did = format!("did:key:{multibase}");
+        let doc = resolve_did_key(&did).unwrap();
+        assert_eq!(doc.id, did);
+        let auth_keys = doc.authentication_keys();
+        assert_eq!(auth_keys.len(), 1);
+        assert_eq!(auth_keys[0].1.key_type(), "secp256k1");
+    }
+
+    #[test]
+    fn resolve_did_key_invalid() {
+        assert!(resolve_did_key("did:key:zINVALID").is_err());
+        assert!(resolve_did_key("did:key:").is_err());
+        assert!(resolve_did_key("did:plc:abc").is_err());
+    }
+
+    #[test]
+    fn static_resolver_handles_did_key() {
+        let resolver = StaticResolver {
+            documents: HashMap::new(),
+        };
+        let key = PrivateKey::generate_ed25519();
+        let did = format!("did:key:{}", key.public_key_multibase());
+        let doc = resolver.resolve(&did).unwrap();
+        assert_eq!(doc.id, did);
+    }
+
+    #[tokio::test]
+    async fn sasl_roundtrip_with_did_key() {
+        // Full SASL challenge-response flow using did:key
+        let key = PrivateKey::generate_ed25519();
+        let multibase = key.public_key_multibase();
+        let did = format!("did:key:{multibase}");
+
+        // did:key resolves without network, so use the main resolver
+        let resolver = DidResolver::static_map(HashMap::new()); // empty — did:key doesn't need it
+
+        let doc = resolver.resolve(&did).await.unwrap();
+        assert_eq!(doc.id, did);
+
+        let auth_keys = doc.authentication_keys();
+        assert_eq!(auth_keys.len(), 1);
+
+        // Simulate SASL: sign a challenge, verify it
+        let challenge = b"session-id:nonce:timestamp";
+        let sig = key.sign(challenge);
+        auth_keys[0].1.verify(challenge, &sig).unwrap();
     }
 
     #[test]

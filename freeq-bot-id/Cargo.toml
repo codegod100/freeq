@@ -1,0 +1,26 @@
+[package]
+name = "freeq-bot-id"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Generate and manage bot identities for freeq"
+
+[[bin]]
+name = "freeq-bot-id"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = "3"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand.workspace = true
+bs58 = "0.5"
+base64.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+freeq-sdk = { path = "../freeq-sdk" }
