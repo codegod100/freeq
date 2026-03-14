@@ -331,6 +331,7 @@ pub(super) fn handle_join(
         }
     }
     drop(conns);
+    drop(tag_set);
     drop(ext_set);
 
     // Broadcast JOIN to S2S peers
