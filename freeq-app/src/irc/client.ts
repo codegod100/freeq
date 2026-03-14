@@ -627,7 +627,7 @@ async function handleLine(rawLine: string) {
         fetchPins(channel);
       }
       const joinDid = account && account !== '*' ? account : undefined;
-      const actorClass = msg.tags?.['freeq.at/actor-class'] as Member['actorClass'] | undefined;
+      const actorClass = (msg.tags?.['freeq.at/actor-class'] || msg.tags?.['+freeq.at/actor-class']) as Member['actorClass'] | undefined;
       store.addMember(channel, {
         nick: from,
         did: joinDid,
@@ -794,6 +794,11 @@ async function handleLine(rawLine: string) {
       const target = msg.params[0];
       const text = msg.params[1] || '';
       const buf = target === '*' || target === nick ? 'server' : target;
+      // Update actor class from agent registration broadcast
+      const noticeActorClass = (msg.tags?.['freeq.at/actor-class'] || msg.tags?.['+freeq.at/actor-class']) as Member['actorClass'] | undefined;
+      if (noticeActorClass && from && (target.startsWith('#') || target.startsWith('&'))) {
+        store.addMember(target, { nick: from, actorClass: noticeActorClass });
+      }
       store.addSystemMessage(buf, `[${from || 'server'}] ${text}`);
       break;
     }
@@ -877,7 +882,8 @@ async function handleLine(rawLine: string) {
       if (ch) {
         const toWhois: string[] = [];
         for (const m of ch.members.values()) {
-          if (!m.did && m.nick.toLowerCase() !== nick.toLowerCase()) {
+          const ml = m.nick.toLowerCase();
+          if (ml !== nick.toLowerCase() && !backgroundWhois.has(ml)) {
             toWhois.push(m.nick);
           }
         }
@@ -1046,6 +1052,24 @@ async function handleLine(rawLine: string) {
       }
       if (did) {
         prefetchProfiles([did]);
+      }
+      break;
+    }
+    case '673': { // RPL_ACTORCLASS — actor_class=agent
+      const whoisNick = msg.params[1] || '';
+      const classStr = msg.params[2] || '';
+      const match = classStr.match(/actor_class=(\w+)/);
+      if (match && whoisNick) {
+        const actorClass = match[1] as Member['actorClass'];
+        // Update member in all channels this nick is in
+        for (const [, ch] of store.channels) {
+          if (ch.members.has(whoisNick.toLowerCase())) {
+            store.addMember(ch.name, { nick: whoisNick, actorClass });
+          }
+        }
+      }
+      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
+        store.addSystemMessage('server', `  Actor class: ${classStr}`);
       }
       break;
     }
