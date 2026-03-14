@@ -182,8 +182,8 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
           <div className="text-sm text-fg-muted">{nick}</div>
         )}
 
-        {/* AT Handle — linked to Bluesky */}
-        {handle && (
+        {/* AT Handle — linked to Bluesky (not for did:key users) */}
+        {handle && !did?.startsWith('did:key:') && (
           <a
             href={`https://bsky.app/profile/${handle}`}
             target="_blank"
@@ -301,7 +301,7 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
         )}
 
         {/* Actions */}
-        {handle && (
+        {handle && !did?.startsWith('did:key:') && (
           <div className="mt-4">
             <a
               href={`https://bsky.app/profile/${handle}`}

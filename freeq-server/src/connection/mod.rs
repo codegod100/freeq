@@ -2195,7 +2195,14 @@ where
                         sids
                     };
                     let conns = state.connections.lock();
-                    let line = format!(":{hostmask} AWAY :{away_json}\r\n");
+                    // For active/online/idle: send AWAY with no parameter (= back from away)
+                    // For other states: send AWAY with the JSON payload
+                    let is_clear = ps == PresenceState::Online || ps == PresenceState::Active || ps == PresenceState::Idle;
+                    let line = if is_clear {
+                        format!(":{hostmask} AWAY\r\n")
+                    } else {
+                        format!(":{hostmask} AWAY :{away_json}\r\n")
+                    };
                     for sid in &targets {
                         if let Some(tx) = conns.get(sid) {
                             let _ = tx.try_send(line.clone());
