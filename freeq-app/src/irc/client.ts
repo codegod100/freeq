@@ -685,7 +685,8 @@ async function handleLine(rawLine: string) {
       // Handle edits
       const editOf = msg.tags['+draft/edit'];
       if (editOf) {
-        store.editMessage(bufName, editOf, text, msg.tags['msgid']);
+        const isStreaming = msg.tags['+freeq.at/streaming'] === '1';
+        store.editMessage(bufName, editOf, text, msg.tags['msgid'], isStreaming);
         break;
       }
 
@@ -746,6 +747,7 @@ async function handleLine(rawLine: string) {
         isSelf: isSelf,
         replyTo: msg.tags['+reply'],
         encrypted: isEncryptedMsg,
+        isStreaming: msg.tags['+freeq.at/streaming'] === '1',
       };
 
       // Ensure DM buffer exists
