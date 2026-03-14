@@ -28,6 +28,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use base64::Engine;
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -297,6 +298,62 @@ impl ClientHandle {
     /// Set the channel topic.
     pub async fn topic(&self, channel: &str, topic: &str) -> Result<()> {
         self.raw(&format!("TOPIC {channel} :{topic}")).await
+    }
+
+    // ── Agent-native methods ─────────────────────────────────────────
+
+    /// Register this connection as an agent (or external_agent).
+    pub async fn register_agent(&self, class: &str) -> Result<()> {
+        self.raw(&format!("AGENT REGISTER :class={class}")).await
+    }
+
+    /// Submit a provenance declaration (JSON value, will be base64url-encoded).
+    pub async fn submit_provenance(&self, provenance: &serde_json::Value) -> Result<()> {
+        let json = serde_json::to_vec(provenance)?;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
+        self.raw(&format!("PROVENANCE :{encoded}")).await
+    }
+
+    /// Update structured agent presence.
+    pub async fn set_presence(
+        &self,
+        state: &str,
+        status: Option<&str>,
+        task: Option<&str>,
+    ) -> Result<()> {
+        let mut parts = vec![format!("state={state}")];
+        if let Some(s) = status {
+            parts.push(format!("status={s}"));
+        }
+        if let Some(t) = task {
+            parts.push(format!("task={t}"));
+        }
+        self.raw(&format!("PRESENCE :{}", parts.join(";"))).await
+    }
+
+    /// Send a heartbeat with the given state and TTL (seconds).
+    pub async fn send_heartbeat(&self, state: &str, ttl: u64) -> Result<()> {
+        self.raw(&format!("HEARTBEAT :state={state};ttl={ttl}"))
+            .await
+    }
+
+    /// Start automatic heartbeat in a background task.
+    /// Returns a handle that stops the heartbeat when dropped.
+    pub fn start_heartbeat(
+        &self,
+        interval: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let handle = self.clone();
+        let ttl = interval.as_secs() * 2;
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                if handle.send_heartbeat("active", ttl).await.is_err() {
+                    break; // Connection closed
+                }
+            }
+        })
     }
 }
 

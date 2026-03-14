@@ -31,6 +31,7 @@ export interface Member {
   isVoiced: boolean;
   away?: string | null;
   typing?: boolean;
+  actorClass?: 'human' | 'agent' | 'external_agent';
 }
 
 export interface PinnedMessage {

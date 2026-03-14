@@ -193,6 +193,7 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/api/v1/signing-key", get(api_signing_key))
         .route("/api/v1/signing-keys/{did}", get(api_did_signing_key))
         .route("/api/v1/verify/{msgid}", get(api_verify_message))
+        .route("/api/v1/actors/{did}", get(api_actor_identity))
         .route("/auth/mobile", get(auth_mobile_redirect))
         .route("/join/{channel}", get(channel_invite_page))
         .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)) // 12MB
@@ -420,6 +421,104 @@ async fn api_did_signing_key(
 
 /// Verify a message's cryptographic signature by msgid.
 /// Returns the message, signature, verification result, and the math to prove it.
+/// GET /api/v1/actors/{did} — identity card for any actor (human or agent).
+async fn api_actor_identity(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Path(did): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    // URL-decode the DID (colons may be encoded)
+    let did = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did)).to_string();
+
+    // Find session(s) for this DID
+    let sessions: Vec<String> = state
+        .session_dids
+        .lock()
+        .iter()
+        .filter(|(_, d)| d.as_str() == did)
+        .map(|(sid, _)| sid.clone())
+        .collect();
+
+    let online = !sessions.is_empty();
+
+    // Actor class (from first active session, or default to human)
+    let actor_class = sessions
+        .iter()
+        .find_map(|sid| state.session_actor_class.lock().get(sid).copied())
+        .unwrap_or(crate::connection::ActorClass::Human);
+
+    // Nick
+    let nick = {
+        let nts = state.nick_to_session.lock();
+        sessions
+            .iter()
+            .find_map(|sid| nts.get_nick(sid).map(|n| n.to_string()))
+    };
+
+    // Handle
+    let handle = sessions
+        .iter()
+        .find_map(|sid| state.session_handles.lock().get(sid).cloned());
+
+    // Channels
+    let channels: Vec<String> = {
+        let chs = state.channels.lock();
+        chs.iter()
+            .filter(|(_, ch)| sessions.iter().any(|sid| ch.members.contains(sid)))
+            .map(|(name, _)| name.clone())
+            .collect()
+    };
+
+    // Provenance
+    let provenance = state.provenance_declarations.lock().get(&did).cloned();
+
+    // Presence (from first session with presence)
+    let presence = sessions
+        .iter()
+        .find_map(|sid| state.agent_presence.lock().get(sid).cloned());
+
+    // Heartbeat
+    let heartbeat = sessions.iter().find_map(|sid| {
+        state.agent_heartbeats.lock().get(sid).map(|(last, ttl)| {
+            let now = chrono::Utc::now().timestamp();
+            let elapsed = now - last;
+            serde_json::json!({
+                "last_seen": last,
+                "ttl_seconds": ttl,
+                "healthy": elapsed <= (*ttl as i64),
+                "elapsed_seconds": elapsed,
+            })
+        })
+    });
+
+    let mut result = serde_json::json!({
+        "did": did,
+        "actor_class": actor_class.to_string(),
+        "online": online,
+    });
+    let obj = result.as_object_mut().unwrap();
+
+    if let Some(nick) = nick {
+        obj.insert("nick".into(), serde_json::json!(nick));
+    }
+    if let Some(handle) = handle {
+        obj.insert("handle".into(), serde_json::json!(handle));
+    }
+    if !channels.is_empty() {
+        obj.insert("channels".into(), serde_json::json!(channels));
+    }
+    if let Some(prov) = provenance {
+        obj.insert("provenance".into(), prov);
+    }
+    if let Some(pres) = presence {
+        obj.insert("presence".into(), serde_json::to_value(&pres).unwrap_or_default());
+    }
+    if let Some(hb) = heartbeat {
+        obj.insert("heartbeat".into(), hb);
+    }
+
+    Ok(Json(result))
+}
+
 async fn api_verify_message(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(msgid): axum::extract::Path<String>,

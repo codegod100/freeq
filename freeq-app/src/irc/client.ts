@@ -7,7 +7,7 @@
 
 import { parse, prefixNick, format, type IRCMessage } from './parser';
 import { Transport, type TransportState } from './transport';
-import { useStore, type Message } from '../store';
+import { useStore, type Message, type Member } from '../store';
 import { notify } from '../lib/notifications';
 import { prefetchProfiles } from '../lib/profiles';
 import * as e2ee from '../lib/e2ee';
@@ -624,12 +624,14 @@ async function handleLine(rawLine: string) {
         fetchPins(channel);
       }
       const joinDid = account && account !== '*' ? account : undefined;
+      const actorClass = msg.tags?.['freeq.at/actor-class'] as Member['actorClass'] | undefined;
       store.addMember(channel, {
         nick: from,
         did: joinDid,
         isOp: false,
         isHalfop: false,
         isVoiced: false,
+        actorClass,
       });
       if (joinDid) prefetchProfiles([joinDid]);
       store.addSystemMessage(channel, `${from} joined`);

@@ -33,6 +33,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
+use base64::Engine;
 use crate::irc::{self, Message};
 use crate::server::SharedState;
 
@@ -72,6 +73,54 @@ impl std::fmt::Display for ActorClass {
             ActorClass::Agent => write!(f, "agent"),
             ActorClass::ExternalAgent => write!(f, "external_agent"),
         }
+    }
+}
+
+/// Structured agent presence state.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentPresence {
+    pub state: PresenceState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Operational state for agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PresenceState {
+    Online,
+    Idle,
+    Active,
+    Executing,
+    WaitingForInput,
+    BlockedOnPermission,
+    BlockedOnBudget,
+    Degraded,
+    Paused,
+    Sandboxed,
+    RateLimited,
+    Revoked,
+    Offline,
+}
+
+impl std::fmt::Display for PresenceState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| format!("{self:?}"));
+        write!(f, "{s}")
+    }
+}
+
+impl std::str::FromStr for PresenceState {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_json::from_value(serde_json::Value::String(s.to_string()))
+            .map_err(|_| format!("Unknown presence state: {s}"))
     }
 }
 
@@ -1309,6 +1358,165 @@ where
                 }
             }
 
+            // PROVENANCE command — submit a provenance declaration for this agent.
+            // Usage: PROVENANCE :<base64url-encoded JSON>
+            "PROVENANCE" => {
+                if !conn.registered { continue; }
+                let nick = conn.nick_or_star().to_string();
+                if msg.params.is_empty() {
+                    let reply = Message::from_server(
+                        &server_name, irc::ERR_NEEDMOREPARAMS,
+                        vec![&nick, "PROVENANCE", "Not enough parameters"],
+                    );
+                    send(&state, &session_id, format!("{reply}\r\n"));
+                    continue;
+                }
+                let encoded = &msg.params[0];
+                // Try base64url decode, or accept raw JSON
+                let json_result = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(encoded)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                    .or_else(|| serde_json::from_str::<serde_json::Value>(encoded).ok());
+
+                match json_result {
+                    Some(provenance) => {
+                        if let Some(ref did) = conn.authenticated_did {
+                            state.provenance_declarations.lock().insert(did.clone(), provenance);
+                            let reply = Message::from_server(
+                                &server_name, "NOTICE",
+                                vec![&nick, "Provenance declaration stored"],
+                            );
+                            send(&state, &session_id, format!("{reply}\r\n"));
+                            tracing::info!(nick = %nick, did = %did, "Provenance declaration stored");
+                        } else {
+                            let reply = Message::from_server(
+                                &server_name, "NOTICE",
+                                vec![&nick, "Must be authenticated to submit provenance"],
+                            );
+                            send(&state, &session_id, format!("{reply}\r\n"));
+                        }
+                    }
+                    None => {
+                        let reply = Message::from_server(
+                            &server_name, "NOTICE",
+                            vec![&nick, "Invalid provenance format (expected base64url-encoded JSON or raw JSON)"],
+                        );
+                        send(&state, &session_id, format!("{reply}\r\n"));
+                    }
+                }
+            }
+
+            // PRESENCE command — update structured agent presence.
+            // Usage: PRESENCE :state=executing;status=building project;task=01JQXYZ
+            "PRESENCE" => {
+                if !conn.registered { continue; }
+                let nick = conn.nick_or_star().to_string();
+                if msg.params.is_empty() {
+                    let reply = Message::from_server(
+                        &server_name, irc::ERR_NEEDMOREPARAMS,
+                        vec![&nick, "PRESENCE", "Not enough parameters"],
+                    );
+                    send(&state, &session_id, format!("{reply}\r\n"));
+                    continue;
+                }
+                // Parse key=value pairs separated by semicolons
+                let raw = &msg.params[0];
+                let mut presence_state: Option<PresenceState> = None;
+                let mut status_text: Option<String> = None;
+                let mut task_ref: Option<String> = None;
+
+                for part in raw.split(';') {
+                    if let Some((k, v)) = part.split_once('=') {
+                        match k.trim() {
+                            "state" => presence_state = v.trim().parse().ok(),
+                            "status" => status_text = Some(v.trim().to_string()),
+                            "task" => task_ref = Some(v.trim().to_string()),
+                            _ => {}
+                        }
+                    }
+                }
+
+                let ps = presence_state.unwrap_or(PresenceState::Online);
+                let presence = AgentPresence {
+                    state: ps,
+                    status: status_text.clone(),
+                    task: task_ref,
+                    updated_at: chrono::Utc::now().timestamp(),
+                };
+
+                state.agent_presence.lock().insert(session_id.clone(), presence.clone());
+
+                // Broadcast via AWAY mechanism for backwards compat
+                let away_json = serde_json::to_string(&presence).unwrap_or_default();
+                let hostmask = conn.hostmask();
+
+                // Set/clear AWAY state
+                if ps == PresenceState::Online || ps == PresenceState::Active || ps == PresenceState::Idle {
+                    state.session_away.lock().remove(&session_id);
+                } else {
+                    let away_text = status_text.as_deref().unwrap_or(&ps.to_string()).to_string();
+                    state.session_away.lock().insert(session_id.clone(), away_text);
+                }
+
+                // Broadcast to away-notify subscribers in shared channels
+                {
+                    let channels = state.channels.lock();
+                    let away_caps = state.cap_away_notify.lock();
+                    let conns = state.connections.lock();
+                    for ch in channels.values() {
+                        if ch.members.contains(&session_id) {
+                            for member_sid in &ch.members {
+                                if member_sid != &session_id && away_caps.contains(member_sid) {
+                                    if let Some(tx) = conns.get(member_sid) {
+                                        let line = format!(":{hostmask} AWAY :{away_json}\r\n");
+                                        let _ = tx.try_send(line);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let reply = Message::from_server(
+                    &server_name, "NOTICE",
+                    vec![&nick, &format!("Presence updated: {ps}")],
+                );
+                send(&state, &session_id, format!("{reply}\r\n"));
+                tracing::debug!(nick = %nick, state = %ps, "PRESENCE updated");
+            }
+
+            // HEARTBEAT command — agent liveness signal.
+            // Usage: HEARTBEAT :state=active;ttl=60
+            "HEARTBEAT" => {
+                if !conn.registered { continue; }
+                let raw = msg.params.first().map(|s| s.as_str()).unwrap_or("");
+                let mut hb_state = PresenceState::Active;
+                let mut ttl: u64 = 60;
+
+                for part in raw.split(';') {
+                    if let Some((k, v)) = part.split_once('=') {
+                        match k.trim() {
+                            "state" => { if let Ok(s) = v.trim().parse() { hb_state = s; } }
+                            "ttl" => { if let Ok(t) = v.trim().parse() { ttl = t; } }
+                            _ => {}
+                        }
+                    }
+                }
+
+                let now = chrono::Utc::now().timestamp();
+                state.agent_heartbeats.lock().insert(session_id.clone(), (now, ttl));
+
+                // Update presence from heartbeat
+                let presence = AgentPresence {
+                    state: hb_state,
+                    status: None,
+                    task: None,
+                    updated_at: now,
+                };
+                state.agent_presence.lock().insert(session_id.clone(), presence);
+            }
+
             // Phase 4: Revoke a peer's S2S access (oper-only).
             // Usage: REVOKEPEER <endpoint_id>
             "REVOKEPEER" => {
@@ -1628,6 +1836,8 @@ fn cleanup_session_state(state: &Arc<SharedState>, session_id: &str) {
     state.cap_away_notify.lock().remove(session_id);
     state.server_opers.lock().remove(session_id);
     state.session_actor_class.lock().remove(session_id);
+    state.agent_presence.lock().remove(session_id);
+    state.agent_heartbeats.lock().remove(session_id);
 }
 
 /// Remove a session from all channels. Retains channels that still have content.

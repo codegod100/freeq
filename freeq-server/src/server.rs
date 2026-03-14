@@ -427,6 +427,12 @@ pub struct SharedState {
     pub server_opers: Mutex<HashSet<String>>,
     /// Actor class per session (default: Human, omitted from map).
     pub session_actor_class: Mutex<HashMap<String, crate::connection::ActorClass>>,
+    /// Provenance declarations: DID → provenance JSON.
+    pub provenance_declarations: Mutex<HashMap<String, serde_json::Value>>,
+    /// Agent presence state: session_id → AgentPresence.
+    pub agent_presence: Mutex<HashMap<String, crate::connection::AgentPresence>>,
+    /// Agent heartbeat tracking: session_id → (last_heartbeat_unix, ttl_seconds).
+    pub agent_heartbeats: Mutex<HashMap<String, (i64, u64)>>,
     /// Pending OAuth sessions: state → OAuthPending.
     pub oauth_pending: Mutex<HashMap<String, OAuthPending>>,
     /// Completed OAuth sessions: state → OAuthResult.
@@ -877,6 +883,9 @@ impl Server {
             cap_away_notify: Mutex::new(HashSet::new()),
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
+            provenance_declarations: Mutex::new(HashMap::new()),
+            agent_presence: Mutex::new(HashMap::new()),
+            agent_heartbeats: Mutex::new(HashMap::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),
@@ -1150,6 +1159,62 @@ impl Server {
                             Ok(0) => {}
                             Ok(n) => tracing::info!("Invalidated {n} expired policy attestations"),
                             Err(e) => tracing::warn!("Policy revalidation error: {e}"),
+                        }
+                    }
+                }
+            });
+        }
+
+        // Heartbeat expiry: check agent liveness every 15 seconds.
+        // Agents that miss their TTL transition to degraded, then offline, then disconnect.
+        {
+            let hb_state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                interval.tick().await; // skip first tick
+                loop {
+                    interval.tick().await;
+                    let now = chrono::Utc::now().timestamp();
+                    let heartbeats: Vec<(String, i64, u64)> = hb_state
+                        .agent_heartbeats
+                        .lock()
+                        .iter()
+                        .map(|(sid, (last, ttl))| (sid.clone(), *last, *ttl))
+                        .collect();
+
+                    for (session_id, last_hb, ttl) in heartbeats {
+                        let elapsed = (now - last_hb) as u64;
+                        if elapsed > ttl * 5 {
+                            // Force disconnect
+                            tracing::warn!(session = %session_id, elapsed, ttl, "Heartbeat timeout — disconnecting agent");
+                            hb_state.agent_heartbeats.lock().remove(&session_id);
+                            hb_state.agent_presence.lock().remove(&session_id);
+                            // Send ERROR to the connection
+                            if let Some(tx) = hb_state.connections.lock().get(&session_id) {
+                                let _ = tx.try_send("ERROR :Heartbeat timeout\r\n".to_string());
+                            }
+                        } else if elapsed > ttl * 2 {
+                            // Transition to offline
+                            let mut presences = hb_state.agent_presence.lock();
+                            if let Some(p) = presences.get_mut(&session_id) {
+                                if p.state != crate::connection::PresenceState::Offline {
+                                    tracing::debug!(session = %session_id, "Heartbeat missed 2x TTL — offline");
+                                    p.state = crate::connection::PresenceState::Offline;
+                                    p.updated_at = now;
+                                }
+                            }
+                        } else if elapsed > ttl {
+                            // Transition to degraded
+                            let mut presences = hb_state.agent_presence.lock();
+                            if let Some(p) = presences.get_mut(&session_id) {
+                                if p.state != crate::connection::PresenceState::Degraded
+                                    && p.state != crate::connection::PresenceState::Offline
+                                {
+                                    tracing::debug!(session = %session_id, "Heartbeat missed TTL — degraded");
+                                    p.state = crate::connection::PresenceState::Degraded;
+                                    p.updated_at = now;
+                                }
+                            }
                         }
                     }
                 }
