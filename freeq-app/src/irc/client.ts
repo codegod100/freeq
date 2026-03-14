@@ -631,9 +631,8 @@ async function handleLine(rawLine: string) {
       store.addMember(channel, {
         nick: from,
         did: joinDid,
-        isOp: false,
-        isHalfop: false,
-        isVoiced: false,
+        // Don't override op/voice status — JOIN doesn't carry prefix info.
+        // NAMES (353) or MODE will set these correctly.
         actorClass,
       });
       if (joinDid) prefetchProfiles([joinDid]);
