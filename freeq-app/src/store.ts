@@ -401,6 +401,7 @@ export const useStore = create<Store>((set, get) => ({
       isHalfop: member.isHalfop ?? existing?.isHalfop ?? false,
       isVoiced: member.isVoiced ?? existing?.isVoiced ?? false,
       away: existing?.away,
+      actorClass: member.actorClass ?? existing?.actorClass,
     });
     channels.set(channel.toLowerCase(), ch);
     return { channels };
