@@ -524,6 +524,12 @@ export const useStore = create<Store>((set, get) => ({
     const channels = new Map(s.channels);
     const ch = getOrCreateChannel(channels, channel);
 
+    // Auto-join DM buffers so they appear in the sidebar
+    const isDMBuf = !channel.startsWith('#') && !channel.startsWith('&') && channel !== 'server';
+    if (isDMBuf && !ch.isJoined) {
+      ch.isJoined = true;
+    }
+
     // Dedup by msgid — CHATHISTORY can return messages already shown live
     if (msg.id && !msg.isSystem && ch.messages.some((m) => m.id === msg.id)) {
       return {};
