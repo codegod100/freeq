@@ -29,6 +29,13 @@ import { MotdBanner } from './components/MotdBanner';
 export default function App() {
   const registered = useStore((s) => s.registered);
   const theme = useStore((s) => s.theme);
+  // Once we've been registered in this session, don't flash back to ConnectScreen
+  // on brief state transitions (e.g. reconnect). The ReconnectBanner handles that.
+  const [wasRegistered, setWasRegistered] = useState(false);
+  useEffect(() => {
+    if (registered) setWasRegistered(true);
+  }, [registered]);
+  const showApp = registered || wasRegistered;
   const [quickSwitcher, setQuickSwitcher] = useState(false);
   const [settings, setSettings] = useState(false);
   const [shortcuts, setShortcuts] = useState(false);
@@ -179,7 +186,7 @@ export default function App() {
     },
   } : {}, [channels, switchToNth, registered]);
 
-  if (!registered) {
+  if (!showApp) {
     return (
       <div className="h-dvh flex flex-col bg-bg">
         <ConnectScreen />

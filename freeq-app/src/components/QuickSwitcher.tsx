@@ -63,6 +63,8 @@ export function QuickSwitcher({ open, onClose }: QuickSwitcherProps) {
     if (!item) return;
     if (item.type === 'action') {
       joinChannel(item.name);
+      // Switch to the newly joined channel
+      setActive(item.name);
     } else {
       setActive(item.name);
     }

@@ -43,9 +43,11 @@ function friendlyError(error: string): string {
   return error;
 }
 
-// Module-level counter survives ConnectScreen remounts
+// Module-level flags survive ConnectScreen remounts
 let brokerAutoAttempts = 0;
 const MAX_BROKER_AUTO_ATTEMPTS = 3;
+// Synchronous guard: prevents broker effect from racing with OAuth result effect
+let oauthConnectInProgress = false;
 
 type OAuthResultData = {
   did?: string;
@@ -193,6 +195,9 @@ export function ConnectScreen() {
           localStorage.setItem(LS_BROKER_TOKEN, result.broker_token);
           localStorage.setItem(LS_BROKER_BASE, brokerOrigin);
         }
+        // Set synchronous flag BEFORE async state update — prevents broker
+        // effect from also calling connect() in the same render cycle.
+        oauthConnectInProgress = true;
         setAutoConnecting(true);
         const h = localStorage.getItem(LS_HANDLE) || result.handle || '';
         const ch = (localStorage.getItem(LS_CHANNELS) || '#freeq').split(',').map(s => s.trim()).filter(Boolean);
@@ -210,6 +215,8 @@ export function ConnectScreen() {
   // Attempt broker session refresh on load (persistent login)
   useEffect(() => {
     if (registered || oauthPending || autoConnecting) return;
+    // Synchronous check: if OAuth result effect already called connect(), skip
+    if (oauthConnectInProgress) return;
     if (brokerAutoAttempts >= MAX_BROKER_AUTO_ATTEMPTS) return;
     const brokerToken = localStorage.getItem(LS_BROKER_TOKEN);
     if (!brokerToken) return;
@@ -268,8 +275,8 @@ export function ConnectScreen() {
   // Clear autoConnecting on auth failure or disconnect
   useEffect(() => {
     if (!autoConnecting) return;
-    if (registered) { setAutoConnecting(false); brokerAutoAttempts = 0; return; }
-    if (authError) { setAutoConnecting(false); return; }
+    if (registered) { setAutoConnecting(false); brokerAutoAttempts = 0; oauthConnectInProgress = false; return; }
+    if (authError) { setAutoConnecting(false); oauthConnectInProgress = false; return; }
     // If we were connecting but dropped back to disconnected, give a brief grace period
     // then show the form. This prevents a permanent spinner if SASL fails.
     if (connectionState === 'disconnected') {
