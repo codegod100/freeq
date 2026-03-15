@@ -1166,9 +1166,22 @@ fn handle_edit(
         .filter(|(k, _)| *k != "msgid")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // For DMs, store under the canonical dm_key (not the nick) so
+    // edits appear in CHATHISTORY alongside the original message.
+    let store_channel = if is_channel {
+        target.to_string()
+    } else if let Some(sender_did) = conn.authenticated_did.as_deref() {
+        if let Some(recipient_did) = state.nick_owners.lock().get(&target.to_lowercase()).cloned() {
+            crate::db::canonical_dm_key(sender_did, &recipient_did)
+        } else {
+            target.to_string()
+        }
+    } else {
+        target.to_string()
+    };
     state.with_db(|db| {
         db.insert_edit(
-            target,
+            &store_channel,
             &hostmask,
             new_text,
             timestamp,

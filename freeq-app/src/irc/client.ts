@@ -689,6 +689,10 @@ async function handleLine(rawLine: string) {
       const editOf = msg.tags['+draft/edit'];
       if (editOf) {
         const isStreaming = msg.tags['+freeq.at/streaming'] === '1';
+        // Ensure DM buffer exists before editing (streaming edits can race with initial message)
+        if (!isChannel && !useStore.getState().channels.has(bufName.toLowerCase())) {
+          useStore.getState().addChannel(bufName);
+        }
         store.editMessage(bufName, editOf, text, msg.tags['msgid'], isStreaming);
         break;
       }
@@ -754,8 +758,8 @@ async function handleLine(rawLine: string) {
       };
 
       // Ensure DM buffer exists
-      if (!isChannel && !store.channels.has(bufName.toLowerCase())) {
-        store.addChannel(bufName);
+      if (!isChannel && !useStore.getState().channels.has(bufName.toLowerCase())) {
+        useStore.getState().addChannel(bufName);
       }
 
       // Background WHOIS for DM partners to learn their DID (enables E2EE)
