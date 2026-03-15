@@ -1524,3 +1524,286 @@ async fn budget_requires_op() {
     pleb.quit(None).await.unwrap();
     server_handle.abort();
 }
+
+// ── Helper: reconnect with the same DID+signer ────────────────────────────
+
+/// Connect with a pre-existing signer (allows reconnecting with the same DID).
+async fn connect_did_key_with_signer(
+    addr: std::net::SocketAddr,
+    nick: &str,
+    signer: Arc<dyn ChallengeSigner>,
+) -> (client::ClientHandle, mpsc::Receiver<Event>) {
+    let config = ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: nick.to_string(),
+        user: nick.to_string(),
+        realname: format!("{nick} bot"),
+        ..Default::default()
+    };
+    let (handle, mut events) = client::connect(config, Some(signer));
+
+    expect_event(&mut events, 2000, |e| matches!(e, Event::Connected), "Connected").await;
+    expect_event(&mut events, 2000, |e| matches!(e, Event::Authenticated { .. }), "Authenticated").await;
+    expect_event(&mut events, 2000, |e| matches!(e, Event::Registered { .. }), "Registered").await;
+
+    (handle, events)
+}
+
+// ── Tests: PART clears auto-rejoin ────────────────────────────────────────
+//
+// Regression: an agent that PARTs channels and then disconnects should NOT be
+// auto-rejoined to those channels on the next connect.  The ghost-session path
+// must not restore PARTed channels, and user_channels DB must be cleared by PART.
+
+#[tokio::test]
+async fn part_clears_auto_rejoin() {
+    start_deadlock_detector();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+
+    let (_did, signer) = make_did_key_signer();
+
+    // ── First connection ─────────────────────────────────────────────────
+    let (agent, mut agent_ev) = connect_did_key_with_signer(addr, "yokota", signer.clone()).await;
+    agent.register_agent("agent").await.unwrap();
+    expect_raw_line(&mut agent_ev, 2000, "registered as agent", "AGENT REGISTER #1").await;
+
+    // Join two channels
+    agent.join("#chad-dev").await.unwrap();
+    expect_event(
+        &mut agent_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#chad-dev"),
+        "Joined #chad-dev",
+    ).await;
+    agent.join("#chad-mess").await.unwrap();
+    expect_event(
+        &mut agent_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#chad-mess"),
+        "Joined #chad-mess",
+    ).await;
+
+    // Explicitly PART both channels (no `part()` on ClientHandle — use raw IRC)
+    agent.raw("PART #chad-dev :leaving").await.unwrap();
+    expect_event(
+        &mut agent_ev, 2000,
+        |e| matches!(e, Event::Parted { channel, .. } if channel == "#chad-dev"),
+        "Parted #chad-dev",
+    ).await;
+    agent.raw("PART #chad-mess :leaving").await.unwrap();
+    expect_event(
+        &mut agent_ev, 2000,
+        |e| matches!(e, Event::Parted { channel, .. } if channel == "#chad-mess"),
+        "Parted #chad-mess",
+    ).await;
+
+    // Disconnect — server enters ghost mode for this DID
+    agent.quit(None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // ── Second connection: same DID + same nick ──────────────────────────
+    let (agent2, mut agent2_ev) = connect_did_key_with_signer(addr, "yokota", signer.clone()).await;
+    agent2.register_agent("agent").await.unwrap();
+    expect_raw_line(&mut agent2_ev, 2000, "registered as agent", "AGENT REGISTER #2").await;
+
+    // Let the event loop drain any pending server messages
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The agent must NOT have been auto-joined into the PARTed channels
+    expect_no_event(&mut agent2_ev, 500, |e| {
+        matches!(e, Event::Joined { channel, .. }
+            if channel == "#chad-dev" || channel == "#chad-mess")
+    }).await;
+
+    // Cross-check with an observer: yokota should not appear in #chad-dev NAMES
+    let (_obs_did, obs_signer) = make_did_key_signer();
+    let (obs, mut obs_ev) = connect_did_key_with_signer(addr, "observer", obs_signer).await;
+    obs.join("#chad-dev").await.unwrap();
+    // Collect the NAMES reply that arrives automatically on JOIN
+    expect_event(&mut obs_ev, 2000, |e| matches!(e, Event::Joined { .. }), "Observer joined").await;
+    let names_line = expect_raw_line(&mut obs_ev, 2000, "353", "NAMES reply for #chad-dev").await;
+    assert!(
+        !names_line.contains("yokota"),
+        "yokota must not appear in #chad-dev NAMES after PART, got: {names_line}",
+    );
+
+    agent2.quit(None).await.unwrap();
+    obs.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+/// Simpler variant: verifies only the DB-based auto-rejoin path.
+/// After PART + disconnect + reconnect the server must not auto-join.
+#[tokio::test]
+async fn part_removes_from_user_channels_db() {
+    start_deadlock_detector();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+
+    let (_did, signer) = make_did_key_signer();
+
+    // ── First connection ─────────────────────────────────────────────────
+    let (agent, mut agent_ev) = connect_did_key_with_signer(addr, "yokota2", signer.clone()).await;
+    agent.register_agent("agent").await.unwrap();
+    expect_raw_line(&mut agent_ev, 2000, "registered as agent", "AGENT REGISTER").await;
+
+    agent.join("#testchan").await.unwrap();
+    expect_event(&mut agent_ev, 2000, |e| matches!(e, Event::Joined { .. }), "Joined").await;
+
+    agent.raw("PART #testchan").await.unwrap();
+    expect_event(&mut agent_ev, 2000, |e| matches!(e, Event::Parted { .. }), "Parted").await;
+
+    agent.quit(None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // ── Reconnect: should NOT be auto-joined to #testchan ────────────────
+    let (agent2, mut agent2_ev) = connect_did_key_with_signer(addr, "yokota2", signer).await;
+    agent2.register_agent("agent").await.unwrap();
+    expect_raw_line(&mut agent2_ev, 2000, "registered as agent", "AGENT REGISTER #2").await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    expect_no_event(&mut agent2_ev, 500, |e| {
+        matches!(e, Event::Joined { channel, .. } if channel == "#testchan")
+    }).await;
+
+    // Manual join should still work (the channel is not blocked, just not auto-joined)
+    agent2.join("#testchan").await.unwrap();
+    expect_event(
+        &mut agent2_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#testchan"),
+        "Manual join after PART+reconnect succeeds",
+    ).await;
+
+    agent2.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+// ── Tests: Agent JOIN visible to other clients ────────────────────────────
+//
+// Regression for: "Agent JOIN events not reflected in member list"
+// When an agent joins a channel, other connected clients must see the JOIN
+// broadcast and the agent must appear in NAMES.
+
+#[tokio::test]
+async fn agent_join_visible_to_observer() {
+    start_deadlock_detector();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+
+    // Observer: a DID-authenticated user already in #testchan
+    let (_obs_did, obs_signer) = make_did_key_signer();
+    let (obs, mut obs_ev) = connect_did_key_with_signer(addr, "observer", obs_signer).await;
+    obs.join("#testchan").await.unwrap();
+    expect_event(
+        &mut obs_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#testchan"),
+        "Observer joined #testchan",
+    ).await;
+
+    // Agent: connects, registers, and joins #testchan
+    let (_agent_did, agent_signer) = make_did_key_signer();
+    let (agent, mut agent_ev) = connect_did_key_with_signer(addr, "yokota", agent_signer).await;
+    agent.register_agent("agent").await.unwrap();
+    expect_raw_line(&mut agent_ev, 2000, "registered as agent", "AGENT REGISTER").await;
+    agent.join("#testchan").await.unwrap();
+    expect_event(
+        &mut agent_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#testchan"),
+        "Agent joined #testchan",
+    ).await;
+
+    // Observer must see the agent's JOIN (as a RawLine containing "yokota" and "JOIN")
+    let join_line = expect_raw_line(
+        &mut obs_ev, 2000,
+        "JOIN",
+        "Observer sees agent JOIN broadcast",
+    ).await;
+    assert!(
+        join_line.contains("yokota"),
+        "JOIN broadcast must contain agent nick 'yokota', got: {join_line}",
+    );
+
+    // Verify NAMES includes the agent
+    obs.raw("NAMES #testchan").await.unwrap();
+    let names_line = expect_raw_line(&mut obs_ev, 2000, "353", "NAMES reply").await;
+    assert!(
+        names_line.contains("yokota"),
+        "NAMES must include agent 'yokota', got: {names_line}",
+    );
+
+    agent.quit(None).await.unwrap();
+    obs.quit(None).await.unwrap();
+    server_handle.abort();
+    eprintln!("  ✓ Agent JOIN visible to observer");
+}
+
+/// Ghost reclaim must clean up stale session_ids so that subsequent JOINs
+/// by other users are properly broadcast to the reconnected client.
+#[tokio::test]
+async fn ghost_reclaim_cleans_stale_sessions() {
+    start_deadlock_detector();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+
+    let (_user_did, user_signer) = make_did_key_signer();
+
+    // ── First connection: user joins #testchan ──
+    let (user1, mut user1_ev) = connect_did_key_with_signer(addr, "webuser", user_signer.clone()).await;
+    user1.join("#testchan").await.unwrap();
+    expect_event(
+        &mut user1_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#testchan"),
+        "User joined #testchan",
+    ).await;
+
+    // Disconnect (triggers ghost mode)
+    user1.quit(None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // ── Second connection: same DID reconnects (ghost reclaim) ──
+    let (user2, mut user2_ev) = connect_did_key_with_signer(addr, "webuser", user_signer.clone()).await;
+    // Ghost reclaim should restore channel membership — look for synthetic NAMES
+    expect_raw_line(&mut user2_ev, 2000, "353", "Ghost reclaim NAMES for #testchan").await;
+
+    // Now an agent joins #testchan — the reconnected user must see it
+    let (_agent_did, agent_signer) = make_did_key_signer();
+    let (agent, mut agent_ev) = connect_did_key_with_signer(addr, "agentbot", agent_signer).await;
+    agent.register_agent("agent").await.unwrap();
+    expect_raw_line(&mut agent_ev, 2000, "registered as agent", "AGENT REGISTER").await;
+    agent.join("#testchan").await.unwrap();
+    expect_event(
+        &mut agent_ev, 2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#testchan"),
+        "Agent joined #testchan",
+    ).await;
+
+    // Reconnected user must see the agent's JOIN broadcast
+    let join_line = expect_raw_line(
+        &mut user2_ev, 2000,
+        "JOIN",
+        "Reconnected user sees agent JOIN after ghost reclaim",
+    ).await;
+    assert!(
+        join_line.contains("agentbot"),
+        "JOIN broadcast must contain agent nick 'agentbot', got: {join_line}",
+    );
+
+    // NAMES must include the agent and NOT have duplicate entries for webuser
+    agent.raw("NAMES #testchan").await.unwrap();
+    let names_line = expect_raw_line(&mut agent_ev, 2000, "353", "NAMES reply from agent").await;
+    assert!(
+        names_line.contains("agentbot"),
+        "NAMES must include 'agentbot', got: {names_line}",
+    );
+    assert!(
+        names_line.contains("webuser"),
+        "NAMES must include 'webuser', got: {names_line}",
+    );
+    // Check no duplicate webuser entries (would indicate ghost leak)
+    let webuser_count = names_line.matches("webuser").count();
+    assert_eq!(
+        webuser_count, 1,
+        "webuser must appear exactly once in NAMES (no ghost dupes), got {webuser_count} in: {names_line}",
+    );
+
+    agent.quit(None).await.unwrap();
+    user2.quit(None).await.unwrap();
+    server_handle.abort();
+    eprintln!("  ✓ Ghost reclaim cleans stale sessions — no duplicate members");
+}

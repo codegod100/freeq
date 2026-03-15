@@ -2348,12 +2348,28 @@ where
                 // DID user — enter ghost mode instead of immediate QUIT
                 let hostmask = conn.hostmask();
 
-                // Collect channel membership to preserve
+                // Collect channel membership to preserve.
+                //
+                // Cross-reference with user_channels DB: PART removes from user_channels,
+                // so only channels still in user_channels are candidates for ghost restore.
+                // This prevents ghost sessions from silently re-joining channels the user
+                // explicitly PARTed before disconnecting — PART is authoritative.
+                //
+                // When there is no DB, fall back to in-memory membership (old behaviour).
+                let subscribed: std::collections::HashSet<String> = state
+                    .with_db(|db| db.get_user_channels(did))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
                 let ghost_channels: Vec<(String, bool, bool, bool)> = {
                     let channels = state.channels.lock();
                     channels
                         .iter()
-                        .filter(|(_, ch)| ch.members.contains(&session_id))
+                        .filter(|(name, ch)| {
+                            ch.members.contains(&session_id)
+                                && (state.db.is_none()
+                                    || subscribed.contains(name.as_str()))
+                        })
                         .map(|(name, ch)| {
                             (
                                 name.clone(),
@@ -2376,6 +2392,7 @@ where
                 let ghost = crate::server::GhostSession {
                     nick: nick.clone(),
                     hostmask: hostmask.clone(),
+                    session_id: session_id.clone(),
                     channels: ghost_channels,
                     disconnect_time: std::time::Instant::now(),
                     cancel: cancel_tx,
@@ -2397,7 +2414,7 @@ where
                         _ = tokio::time::sleep(std::time::Duration::from_secs(QUIT_GRACE_SECS)) => {
                             // Grace period expired — broadcast QUIT now
                             let ghost = state_clone.ghost_sessions.lock().remove(&did_clone);
-                            if ghost.is_some() {
+                            if let Some(ghost) = ghost {
                                 let quit_msg = format!(":{hostmask_clone} QUIT :Connection closed\r\n");
                                 let channels = state_clone.channels.lock();
                                 let conns = state_clone.connections.lock();
@@ -2411,6 +2428,12 @@ where
                                 drop(conns);
                                 drop(channels);
                                 state_clone.nick_to_session.lock().remove_by_nick(&nick_clone);
+                                // Evict the ghost's stale session_id from ch.members.
+                                // cleanup_session_state (called at disconnect) intentionally
+                                // skips cleanup_channel_membership to preserve ghost membership
+                                // during the grace window. Now that grace has expired, clean up
+                                // to prevent the old session_id from being a ghost member forever.
+                                cleanup_channel_membership(&state_clone, &ghost.session_id);
                                 tracing::info!(
                                     nick = %nick_clone, did = %did_clone,
                                     "Ghost grace expired — broadcasting QUIT"
@@ -2426,7 +2449,9 @@ where
                             }
                         }
                         _ = cancel_rx => {
-                            // Reconnected — ghost was reclaimed, no QUIT needed
+                            // Reconnected — ghost was reclaimed by attach_same_did.
+                            // Stale session_id was already cleaned up from ch.members
+                            // and nick_to_session during reclaim. No QUIT needed.
                         }
                     }
                 });

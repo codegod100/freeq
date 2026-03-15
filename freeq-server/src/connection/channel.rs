@@ -318,16 +318,32 @@ pub(super) fn handle_join(
     let conns = state.connections.lock();
     for member_session in &members {
         if let Some(tx) = conns.get(member_session) {
-            if ext_set.contains(member_session) {
+            let result = if ext_set.contains(member_session) {
                 // Clients with message-tags get the actor class tag
                 if tag_set.contains(member_session) {
-                    let _ = tx.try_send(ext_join_class.clone());
+                    tx.try_send(ext_join_class.clone())
                 } else {
-                    let _ = tx.try_send(ext_join.clone());
+                    tx.try_send(ext_join.clone())
                 }
             } else {
-                let _ = tx.try_send(std_join.clone());
+                tx.try_send(std_join.clone())
+            };
+            if let Err(e) = result {
+                tracing::warn!(
+                    channel = %channel,
+                    session = %member_session,
+                    nick = %nick,
+                    error = %e,
+                    "JOIN broadcast failed — client may have stale member list"
+                );
             }
+        } else {
+            tracing::debug!(
+                channel = %channel,
+                session = %member_session,
+                nick = %nick,
+                "JOIN broadcast: session in ch.members but not in connections (ghost?)"
+            );
         }
     }
     drop(conns);

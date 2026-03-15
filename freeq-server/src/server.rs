@@ -546,6 +546,9 @@ pub struct SpawnedAgent {
 pub struct GhostSession {
     pub nick: String,
     pub hostmask: String,
+    /// The session ID of the disconnected session. Used to evict the stale
+    /// session from ch.members when the grace period expires without reconnect.
+    pub session_id: String,
     /// Channels they were in, with (is_op, is_voiced, is_halfop).
     pub channels: Vec<(String, bool, bool, bool)>,
     pub disconnect_time: std::time::Instant,

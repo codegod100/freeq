@@ -56,10 +56,18 @@ pub(super) fn attach_same_did(
         // Point the nick at the new session
         state.nick_to_session.lock().insert(&ghost.nick, session_id);
 
-        // Re-join all channels the ghost was in (silently — no broadcast)
+        // Re-join all channels the ghost was in (silently — no broadcast).
+        // Remove the stale ghost session_id and replace with the new one.
         let mut channels = state.channels.lock();
         for (ch_name, was_op, was_voiced, was_halfop) in &ghost.channels {
             if let Some(ch) = channels.get_mut(&ch_name.to_lowercase()) {
+                // Remove the ghost's stale session_id from all membership sets
+                ch.members.remove(&ghost.session_id);
+                ch.ops.remove(&ghost.session_id);
+                ch.voiced.remove(&ghost.session_id);
+                ch.halfops.remove(&ghost.session_id);
+
+                // Insert the new session_id
                 ch.members.insert(session_id.to_string());
                 // Restore ops from ghost state, OR grant via DID authority
                 let should_op = *was_op
@@ -77,6 +85,12 @@ pub(super) fn attach_same_did(
             }
         }
         drop(channels);
+
+        // Also clean up the ghost's stale sid_to_nick entry
+        state
+            .nick_to_session
+            .lock()
+            .remove_by_session(&ghost.session_id);
 
         // Store reclaimed channel names so try_complete_registration can send
         // synthetic state AFTER the client is fully registered (needed for CHATHISTORY).
