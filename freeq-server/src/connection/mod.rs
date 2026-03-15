@@ -2198,12 +2198,16 @@ where
                     };
                     let conns = state.connections.lock();
                     // For active/online/idle: send AWAY with no parameter (= back from away)
-                    // For other states: send AWAY with the JSON payload
+                    // For other states: send human-readable AWAY text
                     let is_clear = ps == PresenceState::Online || ps == PresenceState::Active || ps == PresenceState::Idle;
+                    let away_text = match (&status_text, ps) {
+                        (Some(status), _) => format!("{ps}: {status}"),
+                        (None, _) => ps.to_string(),
+                    };
                     let line = if is_clear {
                         format!(":{hostmask} AWAY\r\n")
                     } else {
-                        format!(":{hostmask} AWAY :{away_json}\r\n")
+                        format!(":{hostmask} AWAY :{away_text}\r\n")
                     };
                     for sid in &targets {
                         if let Some(tx) = conns.get(sid) {

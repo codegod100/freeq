@@ -6,6 +6,7 @@
 //! - Spec-to-Prototype: idea → deployed app in minutes
 
 pub mod auditor;
+pub mod context;
 pub mod factory;
 pub mod llm;
 pub mod memory;

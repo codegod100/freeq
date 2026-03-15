@@ -10,6 +10,10 @@ name = "freeq-bots"
 path = "src/main.rs"
 
 [[bin]]
+name = "context-bot"
+path = "src/bin/context_bot.rs"
+
+[[bin]]
 name = "chatroom"
 path = "src/bin/chatroom.rs"
 

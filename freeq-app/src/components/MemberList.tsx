@@ -202,7 +202,12 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
         <div className="text-xs text-fg-dim mt-1">
           {presence.online ? (
             presence.away ? (
-              <span className="text-warning">Away{presence.away !== '' ? `: ${presence.away}` : ''}</span>
+              <span className="text-warning">Away{presence.away !== '' ? `: ${(() => {
+                try {
+                  const j = JSON.parse(presence.away!);
+                  return j.status || j.state || presence.away;
+                } catch { return presence.away; }
+              })()}` : ''}</span>
             ) : (
               <span className="text-success">Online</span>
             )

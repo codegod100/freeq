@@ -101,6 +101,16 @@ impl Memory {
         Ok(entries)
     }
 
+    /// Delete a specific entry.
+    pub fn delete(&self, project: &str, kind: &str, key: &str) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        db.execute(
+            "DELETE FROM memory WHERE project = ?1 AND kind = ?2 AND key = ?3",
+            rusqlite::params![project, kind, key],
+        )?;
+        Ok(())
+    }
+
     /// Append to a log (doesn't overwrite — adds new entry).
     pub fn log(&self, project: &str, kind: &str, value: &str) -> Result<()> {
         let db = self.db.lock().unwrap();
