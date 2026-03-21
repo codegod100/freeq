@@ -131,7 +131,7 @@ enum class ConnectionState {
 class AppState(application: Application) : AndroidViewModel(application) {
     var connectionState = mutableStateOf(ConnectionState.Disconnected)
     var nick = mutableStateOf("")
-    var serverAddress = mutableStateOf("irc.freeq.at:6667")
+    var serverAddress = mutableStateOf(ServerConfig.ircServer)
     val channels = mutableStateListOf<ChannelState>()
     var activeChannel = mutableStateOf<String?>(null)
     var errorMessage = mutableStateOf<String?>(null)
@@ -148,7 +148,8 @@ class AppState(application: Application) : AndroidViewModel(application) {
     var pendingNavigation = mutableStateOf<String?>(null)
     var pendingJoinChannel: String? = null  // Track user-initiated joins for navigation
     var brokerToken: String? = null
-    var authBrokerBase: String = "https://irc.freeq.at/auth/broker"
+    val authBrokerBase: String
+        get() = "${ServerConfig.apiBaseUrl}/auth/broker"
     private var brokerRetryCount = 0
     private var consecutive401Count = 0  // Require 3 consecutive 401s before nuking token
     internal var intentionalDisconnect = false
@@ -224,7 +225,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
 
         // Restore persisted state
         nick.value = prefs.getString("nick", "") ?: ""
-        serverAddress.value = prefs.getString("server", "irc.freeq.at:6667") ?: "irc.freeq.at:6667"
+        serverAddress.value = prefs.getString("server", ServerConfig.ircServer) ?: ServerConfig.ircServer
         prefs.getStringSet("channels", setOf("#general"))?.forEach { ch ->
             if (ch !in autoJoinChannels) autoJoinChannels.add(ch)
         }
@@ -767,17 +768,13 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 val isSelf = ircMsg.fromNick.equals(state.nick.value, ignoreCase = true)
 
                 // Handle pin/unpin sync broadcasts (don't show as chat message)
-                ircMsg.pinMsgid?.let { msgId ->
-                    if (ircMsg.target.startsWith("#")) {
-                        PinCache.addPin(ircMsg.target, msgId)
-                        return@launch // Don't display sync message in chat
-                    }
+                if (ircMsg.pinMsgid != null && ircMsg.target.startsWith("#")) {
+                    PinCache.addPin(ircMsg.target, ircMsg.pinMsgid!!)
+                    return
                 }
-                ircMsg.unpinMsgid?.let { msgId ->
-                    if (ircMsg.target.startsWith("#")) {
-                        PinCache.removePin(ircMsg.target, msgId)
-                        return@launch // Don't display sync message in chat
-                    }
+                if (ircMsg.unpinMsgid != null && ircMsg.target.startsWith("#")) {
+                    PinCache.removePin(ircMsg.target, ircMsg.unpinMsgid!!)
+                    return
                 }
 
                 val msg = ChatMessage(

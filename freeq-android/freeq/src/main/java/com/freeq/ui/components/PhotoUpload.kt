@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.freeq.model.AppState
+import com.freeq.model.ServerConfig
 import com.freeq.ui.theme.FreeqColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -268,7 +269,7 @@ private fun uploadPhoto(
 
         // Build multipart request
         val boundary = UUID.randomUUID().toString()
-        val url = URL("https://irc.freeq.at/api/v1/upload")
+        val url = URL("${ServerConfig.apiBaseUrl}/api/v1/upload")
         val conn = (url.openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             doOutput = true

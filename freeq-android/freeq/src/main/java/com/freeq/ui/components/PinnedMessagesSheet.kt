@@ -15,6 +15,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.freeq.model.PinCache
+import com.freeq.model.ServerConfig
 import com.freeq.ui.theme.FreeqColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -232,7 +233,7 @@ private fun PinnedMessageRow(pin: PinnedMessage, onClick: () -> Unit) {
 
 private fun fetchPins(channelName: String): List<PinnedMessage> {
     val encoded = java.net.URLEncoder.encode(channelName, "UTF-8")
-    val url = URL("https://irc.freeq.at/api/v1/channels/$encoded/pins")
+    val url = URL("${ServerConfig.apiBaseUrl}/api/v1/channels/$encoded/pins")
     val conn = url.openConnection() as java.net.HttpURLConnection
     conn.connectTimeout = 10_000
     conn.readTimeout = 10_000

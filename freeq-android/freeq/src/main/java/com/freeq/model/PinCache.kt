@@ -40,7 +40,7 @@ object PinCache {
     private suspend fun fetchPins(channel: String, key: String) {
         try {
             val encoded = URLEncoder.encode(channel, "UTF-8")
-            val url = URL("https://irc.freeq.at/api/v1/channels/$encoded/pins")
+            val url = URL("${ServerConfig.apiBaseUrl}/api/v1/channels/$encoded/pins")
             val conn = url.openConnection().apply {
                 connectTimeout = 5000
                 readTimeout = 5000

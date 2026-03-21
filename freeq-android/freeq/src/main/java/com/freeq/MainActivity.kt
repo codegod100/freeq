@@ -13,6 +13,7 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.freeq.model.AppState
+import com.freeq.model.ServerConfig
 import com.freeq.ui.FreeqApp
 
 class MainActivity : ComponentActivity() {
@@ -80,7 +81,7 @@ class MainActivity : ComponentActivity() {
                 }
                 // Cache the web token for fast reconnect (25 min TTL, server expires at 30 min)
                 state.cacheWebToken(token)
-                state.serverAddress.value = "irc.freeq.at:6667"
+                state.serverAddress.value = ServerConfig.ircServer
                 state.connect(nick)
             }
         }

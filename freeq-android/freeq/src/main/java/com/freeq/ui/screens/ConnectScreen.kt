@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.sp
 import androidx.browser.customtabs.CustomTabsIntent
 import com.freeq.model.AppState
 import com.freeq.model.ConnectionState
+import com.freeq.model.ServerConfig
 import com.freeq.ui.theme.FreeqColors
 import com.freeq.ui.theme.Theme
 import java.net.URLEncoder
@@ -49,7 +50,7 @@ fun ConnectScreen(appState: AppState) {
     var handle by remember { mutableStateOf("") }
     var showGuestLogin by remember { mutableStateOf(false) }
     var guestNick by remember { mutableStateOf("") }
-    var guestServer by remember { mutableStateOf("irc.freeq.at:6667") }
+    var guestServer by remember { mutableStateOf(ServerConfig.ircServer) }
     var localError by remember { mutableStateOf<String?>(null) }
 
     val connectionState by appState.connectionState
@@ -396,7 +397,7 @@ private fun ErrorBanner(text: String) {
 private fun startBlueskyLogin(context: android.content.Context, handle: String) {
     if (handle.isEmpty()) return
     val encoded = URLEncoder.encode(handle, "UTF-8")
-    val url = "https://irc.freeq.at/auth/login?handle=$encoded&mobile=1"
+    val url = "${ServerConfig.apiBaseUrl}/auth/login?handle=$encoded&mobile=1"
     val customTabsIntent = CustomTabsIntent.Builder()
         .setShowTitle(true)
         .build()
