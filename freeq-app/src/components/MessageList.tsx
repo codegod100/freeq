@@ -620,6 +620,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
   const color = msg.isSelf ? '#b18cff' : nickColor(msg.from);
   const currentNick = getNick();
   const isMention = !msg.isSelf && msg.text.toLowerCase().includes(currentNick.toLowerCase());
+  const isPinned = useStore((s) => s.channels.get(channel.toLowerCase())?.pins?.some(p => p.msgid === msg.id) ?? false);
 
   // Find DID for this user — check channel members reactively, fall back to authDid for self
   const member = useStore((s) => s.channels.get(channel.toLowerCase())?.members.get(msg.from.toLowerCase()));
@@ -634,6 +635,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
   return (
     <div
       className={`msg-full group px-4 pt-3 pb-1 hover:bg-white/[0.02] flex gap-3 relative ${
+        isPinned ? 'bg-orange-500/[0.04] border-l-2 border-orange-500' :
         isMention ? 'bg-accent/[0.04] border-l-2 border-accent' : ''
       }`}
       onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY }); }}
@@ -718,6 +720,7 @@ function GroupedMessage({ msg, channel }: MessageProps) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const currentNick = getNick();
   const isMention = !msg.isSelf && msg.text.toLowerCase().includes(currentNick.toLowerCase());
+  const isPinned = useStore((s) => s.channels.get(channel.toLowerCase())?.pins?.some(p => p.msgid === msg.id) ?? false);
 
   const openEmojiPicker = (e: React.MouseEvent) => {
     setPickerPos({ x: e.clientX, y: e.clientY });
@@ -727,6 +730,7 @@ function GroupedMessage({ msg, channel }: MessageProps) {
   return (
     <div
       className={`group px-4 py-0.5 hover:bg-white/[0.02] flex gap-3 relative ${
+        isPinned ? 'bg-orange-500/[0.04] border-l-2 border-orange-500' :
         isMention ? 'bg-accent/[0.04] border-l-2 border-accent' : ''
       }`}
       onContextMenu={(e) => { e.preventDefault(); setCtxMenu({ x: e.clientX, y: e.clientY }); }}

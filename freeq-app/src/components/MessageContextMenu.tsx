@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { useStore, type Message } from '../store';
-import { sendDelete, pinMessage, unpinMessage } from '../irc/client';
+import { sendDelete, pinMessage, unpinMessage, getNick } from '../irc/client';
 import { showToast } from './Toast';
 
 interface Props {
@@ -75,6 +75,10 @@ export function MessageContextMenu({ msg, channel, position, onClose, onReply, o
       }} />
       {channel.startsWith('#') && (() => {
         const ch = useStore.getState().channels.get(channel.toLowerCase());
+        const myNick = getNick();
+        const myMember = ch?.members.get(myNick.toLowerCase());
+        const isOp = myMember?.isOp ?? false;
+        if (!isOp) return null; // Only ops can pin/unpin
         const isPinned = ch?.pins.some(p => p.msgid === msg.id);
         return (
           <MenuItem icon="📌" label={isPinned ? "Unpin Message" : "Pin Message"} onClick={() => {
