@@ -406,7 +406,7 @@ struct ComposeView: View {
             body.append(data)
             body.append("\r\n--\(boundary)--\r\n".data(using: .utf8)!)
 
-            var request = URLRequest(url: URL(string: "https://irc.freeq.at/api/v1/upload")!)
+            var request = URLRequest(url: URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/upload")!)
             request.httpMethod = "POST"
             request.timeoutInterval = 30
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")

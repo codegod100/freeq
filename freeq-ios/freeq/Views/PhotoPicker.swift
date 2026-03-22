@@ -188,7 +188,7 @@ struct ImagePreviewSheet: View {
 
         Task {
             let did = appState.authenticatedDID ?? ""
-            let serverBase = "https://irc.freeq.at"
+            let serverBase = ServerConfig.apiBaseUrl
 
             // Ensure server has a fresh web session for this DID by calling broker
             if let brokerToken = appState.brokerToken {

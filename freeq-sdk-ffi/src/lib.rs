@@ -309,6 +309,7 @@ impl FreeqClient {
     }
 
     pub fn send_raw(&self, line: String) -> Result<(), FreeqError> {
+        tracing::debug!("[FFI] send_raw called: {}", &line);
         let handle = self
             .handle
             .lock()
@@ -316,11 +317,25 @@ impl FreeqClient {
             .clone()
             .ok_or(FreeqError::NotConnected)?;
         let (tx, rx) = std::sync::mpsc::channel();
+        let line_clone = line.clone();
         RUNTIME.spawn(async move {
-            let result = handle.raw(&line).await.map_err(|_| FreeqError::SendFailed);
+            let result = handle.raw(&line_clone).await.map_err(|_| FreeqError::SendFailed);
             let _ = tx.send(result);
         });
-        rx.recv().map_err(|_| FreeqError::SendFailed)?
+        match rx.recv() {
+            Ok(Ok(())) => {
+                tracing::debug!("[FFI] send_raw OK: {}", &line);
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                tracing::error!("[FFI] send_raw failed: {:?}", e);
+                Err(e)
+            }
+            Err(_) => {
+                tracing::error!("[FFI] send_raw channel error");
+                Err(FreeqError::SendFailed)
+            }
+        }
     }
 
     pub fn set_topic(&self, channel: String, topic: String) -> Result<(), FreeqError> {
@@ -523,6 +538,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
             nick: nick.clone(),
             info: info.clone(),
         },
+        Event::RawLine(_) => FreeqEvent::Notice { text: String::new() }
         _ => FreeqEvent::Notice {
             text: String::new(),
         },

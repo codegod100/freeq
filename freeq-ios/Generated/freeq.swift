@@ -1303,13 +1303,15 @@ public struct IrcMessage {
     public var replacesMsgid: String?
     public var editOf: String?
     public var batchId: String?
+    public var pinMsgid: String?
+    public var unpinMsgid: String?
     public var isAction: Bool
     public var isSigned: Bool
     public var timestampMs: Int64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(fromNick: String, target: String, text: String, msgid: String?, replyTo: String?, replacesMsgid: String?, editOf: String?, batchId: String?, isAction: Bool, isSigned: Bool, timestampMs: Int64) {
+    public init(fromNick: String, target: String, text: String, msgid: String?, replyTo: String?, replacesMsgid: String?, editOf: String?, batchId: String?, pinMsgid: String?, unpinMsgid: String?, isAction: Bool, isSigned: Bool, timestampMs: Int64) {
         self.fromNick = fromNick
         self.target = target
         self.text = text
@@ -1318,6 +1320,8 @@ public struct IrcMessage {
         self.replacesMsgid = replacesMsgid
         self.editOf = editOf
         self.batchId = batchId
+        self.pinMsgid = pinMsgid
+        self.unpinMsgid = unpinMsgid
         self.isAction = isAction
         self.isSigned = isSigned
         self.timestampMs = timestampMs
@@ -1355,6 +1359,12 @@ extension IrcMessage: Equatable, Hashable {
         if lhs.batchId != rhs.batchId {
             return false
         }
+        if lhs.pinMsgid != rhs.pinMsgid {
+            return false
+        }
+        if lhs.unpinMsgid != rhs.unpinMsgid {
+            return false
+        }
         if lhs.isAction != rhs.isAction {
             return false
         }
@@ -1376,6 +1386,8 @@ extension IrcMessage: Equatable, Hashable {
         hasher.combine(replacesMsgid)
         hasher.combine(editOf)
         hasher.combine(batchId)
+        hasher.combine(pinMsgid)
+        hasher.combine(unpinMsgid)
         hasher.combine(isAction)
         hasher.combine(isSigned)
         hasher.combine(timestampMs)
@@ -1399,6 +1411,8 @@ public struct FfiConverterTypeIrcMessage: FfiConverterRustBuffer {
                 replacesMsgid: FfiConverterOptionString.read(from: &buf), 
                 editOf: FfiConverterOptionString.read(from: &buf), 
                 batchId: FfiConverterOptionString.read(from: &buf), 
+                pinMsgid: FfiConverterOptionString.read(from: &buf), 
+                unpinMsgid: FfiConverterOptionString.read(from: &buf), 
                 isAction: FfiConverterBool.read(from: &buf), 
                 isSigned: FfiConverterBool.read(from: &buf), 
                 timestampMs: FfiConverterInt64.read(from: &buf)
@@ -1414,6 +1428,8 @@ public struct FfiConverterTypeIrcMessage: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.replacesMsgid, into: &buf)
         FfiConverterOptionString.write(value.editOf, into: &buf)
         FfiConverterOptionString.write(value.batchId, into: &buf)
+        FfiConverterOptionString.write(value.pinMsgid, into: &buf)
+        FfiConverterOptionString.write(value.unpinMsgid, into: &buf)
         FfiConverterBool.write(value.isAction, into: &buf)
         FfiConverterBool.write(value.isSigned, into: &buf)
         FfiConverterInt64.write(value.timestampMs, into: &buf)

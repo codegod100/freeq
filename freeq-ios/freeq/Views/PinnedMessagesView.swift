@@ -103,7 +103,7 @@ struct PinnedMessagesView: View {
         defer { loading = false }
 
         let encoded = channelName.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? channelName
-        guard let url = URL(string: "https://irc.freeq.at/api/v1/channels/\(encoded)/pins") else {
+        guard let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/channels/\(encoded)/pins") else {
             error = "Invalid channel name"
             return
         }

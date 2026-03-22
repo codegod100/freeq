@@ -233,7 +233,7 @@ struct DiscoverTab: View {
         loading = true
         defer { loading = false }
 
-        guard let url = URL(string: "https://irc.freeq.at/api/v1/channels") else { return }
+        guard let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/channels") else { return }
         do {
             var request = URLRequest(url: url)
             request.timeoutInterval = 8

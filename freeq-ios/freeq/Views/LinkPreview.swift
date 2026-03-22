@@ -130,7 +130,7 @@ struct LinkPreviewCard: View {
 
         // Fetch from server proxy
         let encoded = url.absoluteString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        guard let apiURL = URL(string: "https://irc.freeq.at/api/v1/og?url=\(encoded)") else {
+        guard let apiURL = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/og?url=\(encoded)") else {
             loaded = true
             return
         }

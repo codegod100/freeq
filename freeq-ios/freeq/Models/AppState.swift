@@ -25,6 +25,7 @@ class ChannelState: ObservableObject, Identifiable {
     @Published var members: [MemberInfo] = []
     @Published var topic: String = ""
     @Published var typingUsers: [String: Date] = [:]  // nick -> last typing time
+    @Published var pins: Set<String> = []  // pinned message IDs
     /// Tracks the most recent activity (message, join, topic change, etc.)
     var lastActivity: Date = Date()
 
@@ -136,7 +137,7 @@ class AppState: ObservableObject {
 
     @Published var connectionState: ConnectionState = .disconnected
     @Published var nick: String = ""
-    @Published var serverAddress: String = "irc.freeq.at:6667"
+    @Published var serverAddress: String = ServerConfig.ircServer
     @Published var authBrokerBase: String = "https://auth.freeq.at"
     @Published var channels: [ChannelState] = []
     @Published var activeChannel: String? = nil
@@ -453,7 +454,16 @@ class AppState: ObservableObject {
     }
 
     func sendRaw(_ line: String) {
-        try? client?.sendRaw(line: line)
+        guard let client = client else {
+            print("❌ sendRaw: NO CLIENT")
+            return
+        }
+        do {
+            try client.sendRaw(line: line)
+            print("✅ sendRaw OK: \(line.prefix(50))")
+        } catch {
+            print("❌ sendRaw ERROR: \(error)")
+        }
     }
 
     func sendReaction(target: String, msgId: String, emoji: String) {
@@ -477,6 +487,26 @@ class AppState: ObservableObject {
             sendRaw("CHATHISTORY BEFORE \(channel) timestamp=\(iso) 50")
         } else {
             sendRaw("CHATHISTORY LATEST \(channel) * 50")
+        }
+    }
+
+    func fetchPins(channel: String) {
+        let name = channel.hasPrefix("#") ? String(channel.dropFirst()) : channel
+        guard let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/channels/\(encoded)/pins") else { return }
+        Task {
+            do {
+                let (data, _) = try await URLSession.shared.data(from: url)
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let pinsArray = json["pins"] as? [[String: Any]] {
+                    let msgIds = Set(pinsArray.compactMap { $0["msgid"] as? String })
+                    await MainActor.run {
+                        if let ch = self.channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
+                            ch.pins = msgIds
+                        }
+                    }
+                }
+            } catch { /* network error */ }
         }
     }
 
@@ -775,6 +805,8 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 }
                 // Request history
                 state.requestHistory(channel: channel)
+                // Fetch pinned messages
+                state.fetchPins(channel: channel)
                 // Don't show "you joined" system message — the user knows they joined
             } else {
                 let msg = ChatMessage(
@@ -843,6 +875,20 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     let dm = state.getOrCreateDM(bufferName)
                     dm.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
                 }
+                return
+            }
+
+            // Handle pin/unpin notifications (update pins set, show as action message)
+            if let pinMsgid = ircMsg.pinMsgid, target.hasPrefix("#") {
+                let ch = state.getOrCreateChannel(target)
+                ch.pins.insert(pinMsgid)
+                ch.appendIfNew(msg)
+                return
+            }
+            if let unpinMsgid = ircMsg.unpinMsgid, target.hasPrefix("#") {
+                let ch = state.getOrCreateChannel(target)
+                ch.pins.remove(unpinMsgid)
+                ch.appendIfNew(msg)
                 return
             }
 

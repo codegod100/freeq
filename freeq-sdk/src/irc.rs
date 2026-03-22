@@ -262,4 +262,17 @@ mod tests {
         let msg = Message::parse("@draft/reply PRIVMSG #chan :text").unwrap();
         assert_eq!(msg.tags.get("draft/reply").unwrap(), "");
     }
+
+    #[test]
+    fn parse_pin_notice() {
+        // Exact format server sends for PIN broadcast
+        let msg = Message::parse(
+            "@+freeq.at/pin=01KM9EDCZD9QVT7G4PYPR2C9TG :zapnap!~u@host NOTICE #naptest :\x01ACTION pinned a message\x01"
+        ).unwrap();
+        assert_eq!(msg.tags.get("+freeq.at/pin").unwrap(), "01KM9EDCZD9QVT7G4PYPR2C9TG");
+        assert_eq!(msg.prefix.as_deref(), Some("zapnap!~u@host"));
+        assert_eq!(msg.command, "NOTICE");
+        assert_eq!(msg.params[0], "#naptest");
+        assert!(msg.params[1].contains("ACTION pinned a message"));
+    }
 }

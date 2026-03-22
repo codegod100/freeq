@@ -92,7 +92,7 @@ struct FreeqApp: App {
         appState.pendingWebToken = token
         appState.brokerToken = brokerToken
         appState.authenticatedDID = did
-        appState.serverAddress = "irc.freeq.at:6667"
+        appState.serverAddress = ServerConfig.ircServer
         appState.connect(nick: nick)
     }
 }

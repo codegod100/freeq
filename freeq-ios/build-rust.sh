@@ -7,6 +7,19 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Prefer rustup-managed cargo/rustc over Homebrew (which lacks iOS targets)
+export PATH="$HOME/.cargo/bin:$PATH"
+# If Homebrew rustc still wins, force rustup's rustc
+if rustc --print sysroot 2>/dev/null | grep -q Cellar; then
+    for tc in "$HOME/.rustup"/toolchains/stable-*; do
+        if [ -x "$tc/bin/rustc" ]; then
+            export RUSTC="$tc/bin/rustc"
+            echo "==> Overriding Homebrew rustc with: $RUSTC"
+            break
+        fi
+    done
+fi
+
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
 echo "==> Building for iOS device (aarch64-apple-ios)..."

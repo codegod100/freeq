@@ -322,8 +322,9 @@ struct MessageListView: View {
         }
 
         Button(action: {
+            print("[PIN] channel=\(channel.name) msgid=\(msg.id)")
             appState.sendRaw("PIN \(channel.name) \(msg.id)")
-            ToastManager.shared.show("Pinned!", icon: "pin.fill")
+            ToastManager.shared.show("PIN \(msg.id.prefix(8))...", icon: "pin.fill")
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         }) {
             Label("Pin Message", systemImage: "pin")
@@ -456,6 +457,7 @@ struct MessageListView: View {
     @ViewBuilder
     private func messageRow(_ msg: ChatMessage, showHeader: Bool) -> some View {
         let mention = isMention(msg) && msg.from.lowercased() != appState.nick.lowercased()
+        let pinned = channel.pins.contains(msg.id)
 
         VStack(alignment: .leading, spacing: 0) {
             // Reply context — tap to open thread
@@ -537,10 +539,12 @@ struct MessageListView: View {
                     .padding(.top, 4)
             }
         }
-        // Mention highlight
-        .background(mention ? Theme.accent.opacity(0.08) : Color.clear)
+        // Mention/pin highlight
+        .background(mention || pinned ? Theme.accent.opacity(0.08) : Color.clear)
         .overlay(alignment: .leading) {
-            if mention {
+            if pinned {
+                Rectangle().fill(Color.orange).frame(width: 3)
+            } else if mention {
                 Rectangle().fill(Theme.accent).frame(width: 3)
             }
         }
@@ -806,14 +810,14 @@ struct MessageListView: View {
                     cidPart = String(cidPart[cidPart.startIndex..<atIdx])
                 }
                 let pdsUrl = "https://bsky.social/xrpc/com.atproto.sync.getBlob?did=\(did)&cid=\(cidPart)"
-                let proxyUrl = "https://irc.freeq.at/api/v1/blob?url=\(pdsUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? pdsUrl)"
+                let proxyUrl = "\(ServerConfig.apiBaseUrl)/api/v1/blob?url=\(pdsUrl.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? pdsUrl)"
                 if let rewritten = URL(string: proxyUrl) {
                     url = rewritten
                 }
             }
         } else if urlStr.contains("/xrpc/com.atproto.sync.getBlob") {
             // Proxy PDS blob URLs through our server
-            let proxyUrl = "https://irc.freeq.at/api/v1/blob?url=\(urlStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? urlStr)"
+            let proxyUrl = "\(ServerConfig.apiBaseUrl)/api/v1/blob?url=\(urlStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? urlStr)"
             if let rewritten = URL(string: proxyUrl) {
                 url = rewritten
             }
