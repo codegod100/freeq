@@ -107,7 +107,7 @@ struct MemberInfo: Identifiable, Equatable {
     let awayMsg: String?
     let did: String?
 
-    var id: String { nick }
+    var id: String { nick.lowercased() }
 
     var prefix: String {
         if isOp { return "@" }
@@ -929,8 +929,13 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
 
         case .names(let channel, let members):
             let ch = state.getOrCreateChannel(channel)
-            ch.members = members.map {
-                MemberInfo(nick: $0.nick, isOp: $0.isOp, isHalfop: $0.isHalfop, isVoiced: $0.isVoiced, awayMsg: $0.awayMsg, did: nil)
+            // Deduplicate by lowercased nick (server may send same nick with different cases)
+            var seen = Set<String>()
+            ch.members = members.compactMap { m -> MemberInfo? in
+                let key = m.nick.lowercased()
+                guard !seen.contains(key) else { return nil }
+                seen.insert(key)
+                return MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: nil)
             }
             // Prefetch avatars for all channel members
             let nicks = members.map { $0.nick }
