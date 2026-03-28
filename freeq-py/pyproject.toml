@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "freeq-textual"
+version = "0.1.0"
+description = "Textual TUI for freeq powered by freeq-sdk via PyO3"
+requires-python = ">=3.12"
+dependencies = [
+  "textual>=0.63.0",
+]
+
+[project.scripts]
+freeq-textual = "freeq_textual.__main__:main"
+
+[tool.maturin]
+python-source = "python"
+module-name = "freeq_textual._freeq"

@@ -1,0 +1,20 @@
+[package]
+name = "freeq-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PyO3 bindings for the freeq Rust SDK with a Textual TUI scaffold"
+
+[lib]
+name = "_freeq"
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = { workspace = true }
+freeq-sdk = { path = "../freeq-sdk", default-features = true }
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py312"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true

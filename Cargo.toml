@@ -5,6 +5,7 @@ members = [
     "freeq-sdk",
     "freeq-sdk-ffi",
     "freeq-tui",
+    "freeq-py",
     "freeq-bots",
     "freeq-auth-broker",
     "freeq-windows-core",

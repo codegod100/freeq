@@ -78,3 +78,23 @@ jobs:
       - name: Build
         working-directory: freeq-app
         run: npm run build
+
+  nix:
+    name: Nix freeq-textual
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v19
+
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+
+      - name: Configure Cachix
+        if: ${{ github.event_name != 'pull_request' && vars.CACHIX_CACHE_NAME != '' && secrets.CACHIX_AUTH_TOKEN != '' }}
+        uses: cachix/cachix-action@v15
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build freeq-textual
+        run: nix build .#freeq-textual
