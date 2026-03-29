@@ -565,15 +565,19 @@ where
                         .map(|s| s.to_string());
                     let in_use = in_use_by_session.is_some();
 
-                    // Check if the nick is in use by the same DID (multi-device OK)
-                    let in_use_by_same_did = in_use_by_session.as_ref().is_some_and(|sid| {
-                        let session_dids = state.session_dids.lock();
-                        let my_did = conn.authenticated_did.as_deref();
-                        match (session_dids.get(sid), my_did) {
-                            (Some(other_did), Some(my)) => other_did == my,
-                            _ => false,
-                        }
-                    });
+                    // Check if the nick is in use by the same session (case change)
+                    // or same DID (multi-device OK)
+                    let in_use_by_self = in_use_by_session.as_ref()
+                        .is_some_and(|sid| sid == &session_id);
+                    let in_use_by_same_did = in_use_by_self
+                        || in_use_by_session.as_ref().is_some_and(|sid| {
+                            let session_dids = state.session_dids.lock();
+                            let my_did = conn.authenticated_did.as_deref();
+                            match (session_dids.get(sid), my_did) {
+                                (Some(other_did), Some(my)) => other_did == my,
+                                _ => false,
+                            }
+                        });
 
                     let owner_did = state.nick_owners.lock().get(&nick_lower).cloned();
                     let my_did = conn.authenticated_did.as_deref();
@@ -585,7 +589,7 @@ where
                             .is_some_and(|owner| my_did.is_none_or(|my| my != owner))
                     };
 
-                    if in_use && !in_use_by_same_did {
+                    if in_use && !in_use_by_same_did && !in_use_by_self {
                         // During CAP/SASL negotiation, allow the nick if it's owned
                         // by a DID (attach_same_did will handle multi-device at SASL success).
                         let allow_during_negotiation =
@@ -602,7 +606,7 @@ where
                             // attach_same_did will handle at SASL success.
                             conn.nick = Some(nick.clone());
                         }
-                    } else if in_use && in_use_by_same_did {
+                    } else if in_use && in_use_by_same_did && !in_use_by_self {
                         // Same DID, multi-device — allow the nick, just stash it
                         conn.nick = Some(nick.clone());
                     } else if nick_stolen {
