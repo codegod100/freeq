@@ -923,7 +923,7 @@ async fn mint_web_token(
     handle: &str,
 ) -> Result<(String, String), anyhow::Error> {
     let body = serde_json::json!({"did": did, "handle": handle});
-    let sig = sign_body(&config.shared_secret, &body)?;
+    let (sig, ts) = sign_body(&config.shared_secret, &body)?;
     let url = format!(
         "{}/auth/broker/web-token",
         config.freeq_server_url.trim_end_matches('/')
@@ -932,6 +932,7 @@ async fn mint_web_token(
     let resp = client
         .post(&url)
         .header("X-Broker-Signature", sig)
+        .header("X-Broker-Timestamp", ts)
         .json(&body)
         .send()
         .await?;
@@ -973,7 +974,7 @@ async fn push_web_session_with_token(
         "dpop_key_b64": pending.dpop_key_b64,
         "dpop_nonce": dpop_nonce,
     });
-    let sig = sign_body(&config.shared_secret, &body)?;
+    let (sig, ts) = sign_body(&config.shared_secret, &body)?;
     let url = format!(
         "{}/auth/broker/session",
         config.freeq_server_url.trim_end_matches('/')
@@ -982,6 +983,7 @@ async fn push_web_session_with_token(
     let resp = client
         .post(&url)
         .header("X-Broker-Signature", sig)
+        .header("X-Broker-Timestamp", ts)
         .json(&body)
         .send()
         .await?;
@@ -994,14 +996,25 @@ async fn push_web_session_with_token(
     Ok(())
 }
 
-fn sign_body(secret: &str, body: &serde_json::Value) -> Result<String, anyhow::Error> {
+/// Sign a request body with HMAC-SHA256. Returns (signature, timestamp) pair.
+/// The MAC covers `ts={timestamp}\n` || body_bytes to prevent replay attacks.
+fn sign_body(secret: &str, body: &serde_json::Value) -> Result<(String, String), anyhow::Error> {
     use base64::Engine;
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())?;
     let bytes = serde_json::to_vec(body)?;
+    mac.update(format!("ts={timestamp}\n").as_bytes());
     mac.update(&bytes);
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+    Ok((
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()),
+        timestamp,
+    ))
 }
 
 fn init_db(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {

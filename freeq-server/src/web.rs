@@ -1409,30 +1409,39 @@ fn verify_broker_signature_raw(
             "Missing broker signature".to_string(),
         ))?;
 
-    // Replay protection: check timestamp freshness (optional for backward compat)
-    if let Some(ts_str) = headers
+    // Replay protection: require timestamp and enforce ≤60s skew.
+    let ts_str = headers
         .get("x-broker-timestamp")
         .and_then(|v| v.to_str().ok())
-        && let Ok(ts) = ts_str.parse::<u64>()
-    {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        if now.abs_diff(ts) > 60 {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "Broker request expired (timestamp > 60s)".to_string(),
-            ));
-        }
+        .ok_or((
+            StatusCode::UNAUTHORIZED,
+            "Missing X-Broker-Timestamp header".to_string(),
+        ))?;
+    let ts: u64 = ts_str.parse().map_err(|_| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Invalid X-Broker-Timestamp".to_string(),
+        )
+    })?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now.abs_diff(ts) > 60 {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Broker request expired (timestamp > 60s)".to_string(),
+        ));
     }
 
+    // MAC covers ts={timestamp}\n || body to bind the timestamp to the signature.
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             "HMAC init failed".to_string(),
         )
     })?;
+    mac.update(format!("ts={ts_str}\n").as_bytes());
     mac.update(body_bytes);
     let expected =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
