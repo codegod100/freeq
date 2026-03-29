@@ -1072,10 +1072,17 @@ fn handle_edit(
     };
     match original {
         Some(Some(row)) => {
-            // Extract nick from the stored sender hostmask
+            // Verify authorship: prefer DID comparison (secure), fall back to nick (IRC compat for guests).
             let original_nick = row.sender.split('!').next().unwrap_or("");
-            let current_nick = nick;
-            if !original_nick.eq_ignore_ascii_case(current_nick) {
+            let is_author = if let Some(ref my_did) = conn.authenticated_did {
+                // Authenticated user: check if the original sender nick is owned by the same DID.
+                let original_owner = state.nick_owners.lock().get(&original_nick.to_lowercase()).cloned();
+                original_owner.as_deref() == Some(my_did.as_str())
+            } else {
+                // Guest: fall back to nick comparison (IRC compat)
+                original_nick.eq_ignore_ascii_case(nick)
+            };
+            if !is_author {
                 let reply = Message::from_server(
                     &state.server_name,
                     "FAIL",
@@ -1350,8 +1357,14 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
     match original {
         Some(Some(row)) => {
             let original_nick = row.sender.split('!').next().unwrap_or("");
-            let current_nick = nick;
-            if !original_nick.eq_ignore_ascii_case(current_nick) {
+            // Verify authorship: prefer DID comparison (secure), fall back to nick (IRC compat for guests).
+            let is_author = if let Some(ref my_did) = conn.authenticated_did {
+                let original_owner = state.nick_owners.lock().get(&original_nick.to_lowercase()).cloned();
+                original_owner.as_deref() == Some(my_did.as_str())
+            } else {
+                original_nick.eq_ignore_ascii_case(nick)
+            };
+            if !is_author {
                 // Also allow ops to delete messages (channels only)
                 let is_op = is_channel && state
                     .channels
