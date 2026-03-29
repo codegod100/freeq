@@ -993,8 +993,14 @@ where
                 if !conn.registered {
                     continue;
                 }
-                if let Some(target_nick) = msg.params.first() {
-                    handle_whois(&conn, target_nick, &state, &server_name, &session_id, &send);
+                // Support comma-separated nicks per RFC 2812
+                if let Some(target) = msg.params.first() {
+                    for nick_target in target.split(',') {
+                        let nick_target = nick_target.trim();
+                        if !nick_target.is_empty() {
+                            handle_whois(&conn, nick_target, &state, &server_name, &session_id, &send);
+                        }
+                    }
                 }
             }
             "MSGSIG" => {

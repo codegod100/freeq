@@ -924,7 +924,11 @@ pub(super) fn handle_mode(
                     return;
                 }
 
-                let mask = mode_arg.unwrap();
+                let mask = mode_arg.unwrap().trim();
+                if mask.is_empty() {
+                    return; // Reject empty/whitespace-only ban masks
+                }
+                let mask = mask; // rebind after trim
                 if adding {
                     let entry = BanEntry::new(mask.to_string(), conn.hostmask());
                     let mut channels = state.channels.lock();
