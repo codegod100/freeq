@@ -2005,6 +2005,10 @@ async fn auth_callback(
         access_jwt: access_token.to_string(),
         pds_url: pending.pds_url.clone(),
         web_token: Some(web_token),
+        created_at: SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
     };
 
     // Store web session for server-proxied operations (media upload)

@@ -151,6 +151,9 @@ pub struct OAuthResult {
     /// One-time token for SASL web-token auth (consumed on first use).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_token: Option<String>,
+    /// When this result was created (Unix timestamp seconds).
+    #[serde(skip)]
+    pub created_at: u64,
 }
 
 /// A linked external identity attached to an AT Protocol DID.
@@ -1326,6 +1329,28 @@ impl Server {
                         let pruned = before - completions.len();
                         if pruned > 0 {
                             tracing::info!("Pruned {pruned} stale login completions");
+                        }
+                    }
+                    // Prune stale OAuth pending/complete maps (10 min TTL)
+                    {
+                        let now = SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        let mut pending = cleanup_state.oauth_pending.lock();
+                        let before = pending.len();
+                        pending.retain(|_, p| now.saturating_sub(p.created_at) < 600);
+                        let pruned = before - pending.len();
+                        if pruned > 0 {
+                            tracing::info!("Pruned {pruned} stale OAuth pending entries");
+                        }
+                        drop(pending);
+                        let mut complete = cleanup_state.oauth_complete.lock();
+                        let before = complete.len();
+                        complete.retain(|_, r| now.saturating_sub(r.created_at) < 600);
+                        let pruned = before - complete.len();
+                        if pruned > 0 {
+                            tracing::info!("Pruned {pruned} stale OAuth complete entries");
                         }
                     }
                     // Prune stale web sessions (24h TTL — PDS tokens expire anyway)
