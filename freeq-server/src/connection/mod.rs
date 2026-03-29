@@ -754,7 +754,7 @@ where
                 if let Some(channels) = msg.params.first() {
                     for channel in channels.split(',') {
                         let channel = normalize_channel(channel);
-                        handle_part(&conn, &channel, &state, &session_id);
+                        handle_part(&conn, &channel, &state, &server_name, &session_id, &send);
                     }
                 }
             }

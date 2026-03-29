@@ -1544,8 +1544,29 @@ pub(super) fn handle_part(
     conn: &Connection,
     channel: &str,
     state: &Arc<SharedState>,
+    server_name: &str,
     session_id: &str,
+    send: &impl Fn(&Arc<SharedState>, &str, String),
 ) {
+    let nick = conn.nick_or_star();
+
+    // Verify user is in the channel
+    let in_channel = state
+        .channels
+        .lock()
+        .get(channel)
+        .map(|ch| ch.members.contains(session_id))
+        .unwrap_or(false);
+    if !in_channel {
+        let reply = Message::from_server(
+            server_name,
+            crate::irc::ERR_NOTONCHANNEL,
+            vec![nick, channel, "You're not on that channel"],
+        );
+        send(state, session_id, format!("{reply}\r\n"));
+        return;
+    }
+
     let hostmask = conn.hostmask();
     let part_msg = format!(":{hostmask} PART {channel}\r\n");
 
