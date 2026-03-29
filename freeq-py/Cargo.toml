@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = { workspace = true }
+freeq-auth-broker = { path = "../freeq-auth-broker" }
 freeq-sdk = { path = "../freeq-sdk", default-features = true }
 pyo3 = { version = "0.23", features = ["extension-module", "abi3-py312"] }
 serde_json = { workspace = true }

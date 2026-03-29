@@ -1873,3 +1873,127 @@ fn rand_jitter(max: u64) -> u64 {
         .subsec_nanos() as u64;
     nanos % max
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncWriteExt, BufReader};
+
+    async fn run_irc_with_server_lines(lines: &[&str]) -> Vec<Event> {
+        let (client_side, mut server_side) = tokio::io::duplex(16_384);
+        let (client_read, client_write) = tokio::io::split(client_side);
+        let (event_tx, mut event_rx) = mpsc::channel(4096);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(16);
+        let echo_registry: EchoRegistry =
+            std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new()));
+
+        let task = tokio::spawn(async move {
+            run_irc(
+                BufReader::new(client_read),
+                client_write,
+                &ConnectConfig {
+                    server_addr: "irc.freeq.at:6697".to_string(),
+                    nick: "nandi".to_string(),
+                    user: "nandi".to_string(),
+                    realname: "test".to_string(),
+                    tls: false,
+                    tls_insecure: false,
+                    web_token: None,
+                },
+                None,
+                event_tx,
+                cmd_rx,
+                echo_registry,
+            )
+            .await
+        });
+
+        for line in lines {
+            server_side
+                .write_all(line.as_bytes())
+                .await
+                .expect("server write should succeed");
+        }
+        server_side
+            .shutdown()
+            .await
+            .expect("server shutdown should succeed");
+
+        let mut events = Vec::new();
+        while let Some(event) = event_rx.recv().await {
+            let done = matches!(event, Event::Disconnected { .. });
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+
+        task.await
+            .expect("run_irc task join should succeed")
+            .expect("run_irc should exit cleanly");
+        events
+    }
+
+    #[tokio::test]
+    async fn parses_chathistory_replay_batch_events() {
+        let events = run_irc_with_server_lines(&[
+            ":irc.freeq.at BATCH +hist123 chathistory #freeq\r\n",
+            "@time=2026-03-28T12:00:01.000Z;batch=hist123;msgid=abc123 :alice!u@h PRIVMSG #freeq :hello from history\r\n",
+            ":irc.freeq.at BATCH -hist123\r\n",
+        ])
+        .await;
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::BatchStart { id, batch_type, target }
+                if id == "hist123" && batch_type == "chathistory" && target == "#freeq"
+        )));
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::Message { from, target, text, tags }
+                if from == "alice"
+                    && target == "#freeq"
+                    && text == "hello from history"
+                    && tags.get("batch").map(String::as_str) == Some("hist123")
+                    && tags.get("time").map(String::as_str) == Some("2026-03-28T12:00:01.000Z")
+                    && tags.get("msgid").map(String::as_str) == Some("abc123")
+        )));
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::BatchEnd { id } if id == "hist123"
+        )));
+    }
+
+    #[tokio::test]
+    async fn parses_multiple_messages_in_replay_batch() {
+        let events = run_irc_with_server_lines(&[
+            ":irc.freeq.at BATCH +hist456 chathistory #python\r\n",
+            "@time=2026-03-28T12:00:02.000Z;batch=hist456 :bob!u@h PRIVMSG #python :first\r\n",
+            "@time=2026-03-28T12:00:03.000Z;batch=hist456 :carol!u@h PRIVMSG #python :second\r\n",
+            ":irc.freeq.at BATCH -hist456\r\n",
+        ])
+        .await;
+
+        let replay_messages: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Message { from, target, text, tags }
+                    if tags.get("batch").map(String::as_str) == Some("hist456") =>
+                {
+                    Some((from.as_str(), target.as_str(), text.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            replay_messages,
+            vec![
+                ("bob", "#python", "first"),
+                ("carol", "#python", "second"),
+            ]
+        );
+    }
+}
