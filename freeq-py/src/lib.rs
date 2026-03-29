@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::Receiver;
 
+use freeq_auth_broker::EmbeddedBroker;
 use freeq_sdk::client::{self, ClientHandle, ConnectConfig};
 use freeq_sdk::event::Event;
 
@@ -16,12 +17,6 @@ fn runtime_err(message: impl Into<String>) -> PyErr {
 fn require_handle(handle: &Option<ClientHandle>) -> PyResult<&ClientHandle> {
     handle
         .as_ref()
-        .ok_or_else(|| runtime_err("client is not connected"))
-}
-
-fn require_events(events: &mut Option<Receiver<Event>>) -> PyResult<&mut Receiver<Event>> {
-    events
-        .as_mut()
         .ok_or_else(|| runtime_err("client is not connected"))
 }
 
@@ -138,8 +133,15 @@ fn event_to_json(event: Event) -> Value {
 pub struct FreeqClient {
     runtime: Runtime,
     config: ConnectConfig,
+    current_nick: String,
     handle: Option<ClientHandle>,
     events: Option<Receiver<Event>>,
+}
+
+#[pyclass(module = "freeq_textual._freeq", unsendable)]
+pub struct FreeqAuthBroker {
+    runtime: Runtime,
+    broker: EmbeddedBroker,
 }
 
 #[pymethods]
@@ -178,6 +180,7 @@ impl FreeqClient {
                 tls_insecure,
                 web_token,
             },
+            current_nick: nick,
             handle: None,
             events: None,
         })
@@ -194,6 +197,25 @@ impl FreeqClient {
         Ok(())
     }
 
+    fn disconnect(&mut self) -> PyResult<()> {
+        if let Some(handle) = self.handle.take() {
+            let _ = self.runtime.block_on(handle.quit(Some("reconnecting")));
+        }
+        self.events = None;
+        Ok(())
+    }
+
+    fn reconnect_with_web_token(&mut self, web_token: String) -> PyResult<()> {
+        self.disconnect()?;
+        self.config.web_token = Some(web_token);
+        self.connect()
+    }
+
+    #[pyo3(signature = (web_token=None))]
+    fn set_web_token(&mut self, web_token: Option<String>) {
+        self.config.web_token = web_token;
+    }
+
     fn join(&self, channel: &str) -> PyResult<()> {
         let handle = require_handle(&self.handle)?;
         self.runtime
@@ -208,10 +230,24 @@ impl FreeqClient {
             .map_err(|err| runtime_err(err.to_string()))
     }
 
+    fn history_latest(&self, target: &str, count: usize) -> PyResult<()> {
+        let handle = require_handle(&self.handle)?;
+        self.runtime
+            .block_on(handle.history_latest(target, count))
+            .map_err(|err| runtime_err(err.to_string()))
+    }
+
     fn raw(&self, line: &str) -> PyResult<()> {
         let handle = require_handle(&self.handle)?;
         self.runtime
             .block_on(handle.raw(line))
+            .map_err(|err| runtime_err(err.to_string()))
+    }
+
+    fn set_nick(&self, nick: &str) -> PyResult<()> {
+        let handle = require_handle(&self.handle)?;
+        self.runtime
+            .block_on(handle.raw(&format!("NICK {nick}")))
             .map_err(|err| runtime_err(err.to_string()))
     }
 
@@ -225,34 +261,56 @@ impl FreeqClient {
 
     #[pyo3(signature = (timeout_ms=0))]
     fn poll_event_json(&mut self, timeout_ms: u64) -> PyResult<Option<String>> {
-        let receiver = require_events(&mut self.events)?;
-        let next_event = if timeout_ms == 0 {
+        let Some(receiver) = self.events.as_mut() else {
+            return Ok(None);
+        };
+        let (next_event, channel_closed) = if timeout_ms == 0 {
             match receiver.try_recv() {
-                Ok(event) => Some(event),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => None,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                    return Err(runtime_err("event channel closed"));
-                }
+                Ok(event) => (Some(event), false),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => (None, false),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => (None, true),
             }
         } else {
-            self.runtime
+            match self
+                .runtime
                 .block_on(async {
                     tokio::time::timeout(Duration::from_millis(timeout_ms), receiver.recv()).await
                 })
                 .map_err(|err| runtime_err(err.to_string()))?
+            {
+                Some(event) => (Some(event), false),
+                None => (None, true),
+            }
         };
 
+        if channel_closed {
+            self.events = None;
+        }
+
         match next_event {
-            Some(event) => serde_json::to_string(&event_to_json(event))
+            Some(event) => {
+                match &event {
+                    Event::Registered { nick } => {
+                        self.current_nick = nick.clone();
+                    }
+                    Event::NickChanged { old_nick, new_nick } => {
+                        if self.current_nick.eq_ignore_ascii_case(old_nick) {
+                            self.current_nick = new_nick.clone();
+                        }
+                    }
+                    _ => {}
+                }
+                serde_json::to_string(&event_to_json(event))
                 .map(Some)
-                .map_err(|err| runtime_err(err.to_string())),
+                .map_err(|err| runtime_err(err.to_string()))
+            }
             None => Ok(None),
         }
     }
 
     #[getter]
     fn nick(&self) -> String {
-        self.config.nick.clone()
+        self.current_nick.clone()
     }
 
     #[getter]
@@ -261,8 +319,112 @@ impl FreeqClient {
     }
 }
 
+#[pymethods]
+impl FreeqAuthBroker {
+    #[new]
+    #[pyo3(signature = (shared_secret, freeq_server_url=None))]
+    fn new(shared_secret: String, freeq_server_url: Option<String>) -> PyResult<Self> {
+        if shared_secret.trim().is_empty() {
+            return Err(PyValueError::new_err("shared_secret must not be empty"));
+        }
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| runtime_err(format!("failed to build tokio runtime: {err}")))?;
+        let broker = runtime
+            .block_on(freeq_auth_broker::spawn_embedded_broker(
+                shared_secret,
+                freeq_server_url,
+            ))
+            .map_err(|err| runtime_err(err.to_string()))?;
+        Ok(Self { runtime, broker })
+    }
+
+    #[getter]
+    fn base_url(&self) -> String {
+        self.broker.base_url().to_string()
+    }
+
+    fn start_login(&self, handle: &str) -> PyResult<String> {
+        if handle.trim().is_empty() {
+            return Err(PyValueError::new_err("handle must not be empty"));
+        }
+        let (session_id, url) = self.broker.start_login(handle);
+        serde_json::to_string(&json!({
+            "session_id": session_id,
+            "url": url,
+        }))
+        .map_err(|err| runtime_err(err.to_string()))
+    }
+
+    fn poll_auth_result_json(&self, session_id: &str) -> PyResult<Option<String>> {
+        let value = self
+            .runtime
+            .block_on(self.broker.poll_auth_result(session_id));
+        value
+            .map(|payload| serde_json::to_string(&payload).map_err(|err| runtime_err(err.to_string())))
+            .transpose()
+    }
+}
+
 #[pymodule]
 fn _freeq(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FreeqClient>()?;
+    module.add_class::<FreeqAuthBroker>()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_to_json;
+    use freeq_sdk::event::Event;
+    use std::collections::HashMap;
+
+    #[test]
+    fn event_to_json_preserves_replay_batch_start_fields() {
+        let value = event_to_json(Event::BatchStart {
+            id: "hist123".to_string(),
+            batch_type: "chathistory".to_string(),
+            target: "#freeq".to_string(),
+        });
+
+        assert_eq!(value["type"], "batch_start");
+        assert_eq!(value["id"], "hist123");
+        assert_eq!(value["batch_type"], "chathistory");
+        assert_eq!(value["target"], "#freeq");
+    }
+
+    #[test]
+    fn event_to_json_preserves_batched_message_tags() {
+        let mut tags = HashMap::new();
+        tags.insert("batch".to_string(), "hist123".to_string());
+        tags.insert("time".to_string(), "2026-03-28T12:00:01.000Z".to_string());
+        tags.insert("msgid".to_string(), "abc123".to_string());
+
+        let value = event_to_json(Event::Message {
+            from: "alice".to_string(),
+            target: "#freeq".to_string(),
+            text: "hello from history".to_string(),
+            tags,
+        });
+
+        assert_eq!(value["type"], "message");
+        assert_eq!(value["from"], "alice");
+        assert_eq!(value["target"], "#freeq");
+        assert_eq!(value["text"], "hello from history");
+        assert_eq!(value["tags"]["batch"], "hist123");
+        assert_eq!(value["tags"]["time"], "2026-03-28T12:00:01.000Z");
+        assert_eq!(value["tags"]["msgid"], "abc123");
+    }
+
+    #[test]
+    fn event_to_json_preserves_replay_batch_end_fields() {
+        let value = event_to_json(Event::BatchEnd {
+            id: "hist123".to_string(),
+        });
+
+        assert_eq!(value["type"], "batch_end");
+        assert_eq!(value["id"], "hist123");
+    }
 }

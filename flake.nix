@@ -90,13 +90,22 @@
             pkgs.pkg-config
             pkgs.openssl
             python
+            python.pkgs.venvShellHook
             python.pkgs.pip
             python.pkgs.textual
           ];
 
           env = {
             PYO3_PYTHON = "${python}/bin/python3.12";
+            PYTHONPATH = "${python.pkgs.textual}/${python.sitePackages}";
           };
+
+          venvDir = ".venv";
+
+          postShellHook = ''
+            echo "Virtualenv ready at $VIRTUAL_ENV"
+            echo "Run: maturin develop --manifest-path freeq-py/Cargo.toml"
+          '';
         };
       }
     );

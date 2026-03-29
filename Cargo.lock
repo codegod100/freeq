@@ -1886,6 +1886,7 @@ name = "freeq-py"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "freeq-auth-broker",
  "freeq-sdk",
  "pyo3",
  "serde_json",
