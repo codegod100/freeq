@@ -454,12 +454,12 @@ class FreeqTextualApp(App[None]):
 
     # ── Click detection on message log ─────────────────────────────────────
 
-    def _on_click(self, event: events.Click) -> None:
-        """Handle clicks anywhere — detect clicks on reply indicators in the message log."""
-        if event.widget is None or event.widget.id != "messages":
+    @on(events.Click, "#messages")
+    def _on_message_log_click(self, event: events.Click) -> None:
+        """Handle clicks on the message log to detect reply indicator clicks."""
+        log = event.widget
+        if log is None:
             return
-
-        log = self.query_one("#messages", RichLog)
 
         # Convert click y to virtual line index
         virtual_y = int(event.y + log.scroll_y)
