@@ -86,7 +86,12 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     def _thread_header(self, app: FreeqTextualApp) -> str:
         widget = app.query_one("#thread-header", Static)
-        return str(widget.renderable or "")
+        content = getattr(widget, 'content', None)
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content
+        return str(content)
 
     def _thread_rendered_lines(self, app: FreeqTextualApp) -> list[str]:
         log = app.query_one("#thread-messages", RichLog)
