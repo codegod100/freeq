@@ -37,3 +37,11 @@ freeq-ios/freeq.xcodeproj/
 .env
 .env.secrets
 freeq-macos/FreeqSDK.xcframework/macos-arm64/libfreeq_sdk_ffi.a
+
+# Local Python / Textual artifacts
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.so
+result
