@@ -2,18 +2,48 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import webbrowser
 
-from textual import on
+from rich.text import Text
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Input, ListItem, ListView, RichLog, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
+
+
+# ── Nick colorization ──────────────────────────────────────────────────────
+
+_NICK_PALETTE = [
+    "cyan",
+    "bright_magenta",
+    "bright_green",
+    "bright_yellow",
+    "bright_blue",
+    "bright_cyan",
+    "magenta",
+    "green",
+    "yellow",
+    "blue",
+    "red",
+    "bright_red",
+]
+
+
+def _nick_color(nick: str) -> str:
+    """Deterministic color for a nick based on hash."""
+    digest = hashlib.md5(nick.encode()).hexdigest()
+    idx = int(digest, 16) % len(_NICK_PALETTE)
+    return _NICK_PALETTE[idx]
+
+
+# ── Data classes ───────────────────────────────────────────────────────────
 
 
 @dataclass(slots=True)
@@ -26,7 +56,34 @@ class BufferState:
 class BatchState:
     target: str
     batch_type: str
-    lines: list[tuple[str, str]]
+    lines: list[tuple[str, Text]]
+    thread_roots: list[str | None]
+
+
+@dataclass(slots=True)
+class MessageState:
+    buffer_key: str
+    sender: str
+    text: str
+    thread_root: str
+    msgid: str = ""
+    reply_to: str = ""
+    is_reply: bool = False
+
+
+@dataclass(slots=True)
+class ThreadState:
+    buffer_key: str
+    root_msgid: str
+    root_sender: str
+    root_text: str
+    reply_count: int = 0
+    latest_sender: str = ""
+    latest_text: str = ""
+    latest_activity: int = 0
+
+
+# ── Buffer sidebar ─────────────────────────────────────────────────────────
 
 
 class BufferList(ListView):
@@ -42,12 +99,58 @@ class BufferList(ListView):
             self.append(item)
 
 
+# ── Main app ───────────────────────────────────────────────────────────────
+
+
 class FreeqTextualApp(App[None]):
+    DEFAULT_CSS = """
+    #sidebar {
+        width: 20;
+    }
+
+    #messages {
+        border: none;
+    }
+
+    #thread-panel {
+        display: none;
+        width: 40;
+        border: round $success;
+        padding: 0 1;
+        background: $surface;
+    }
+
+    #thread-panel.visible {
+        display: block;
+    }
+
+    #thread-header {
+        text-style: bold;
+        padding: 0 0 1 0;
+    }
+
+    #thread-messages {
+        border: none;
+        height: 1fr;
+    }
+
+    #thread-reply {
+        border: none;
+        dock: bottom;
+    }
+
+    #composer {
+        border: none;
+    }
+    """
+
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
+        Binding("escape", "close_thread", "Close thread", show=False),
     ]
 
     active_buffer = reactive("status")
+    open_thread_root = reactive("")
 
     def __init__(
         self,
@@ -70,47 +173,111 @@ class FreeqTextualApp(App[None]):
         self.config_path = config_path
         self.ui_config = ui_config or {}
         self.buffers: dict[str, BufferState] = {"status": BufferState("status")}
-        self.messages: dict[str, list[str]] = defaultdict(list)
+        self.messages: dict[str, list[Text]] = defaultdict(list)
         self.pending_auth_session: str | None = None
         self.pending_rejoin: set[str] = set()
         self.batches: dict[str, BatchState] = {}
         self.channel_members: dict[str, set[str]] = defaultdict(set)
+        self.channel_topics: dict[str, str] = {}
+        self.message_index: dict[str, MessageState] = {}
+        self.threads: dict[str, ThreadState] = {}
+        self._thread_activity = 0
         self.restore_history_targets: set[str] = set()
-        self._scroll_to_end = False
+        self._scroll_mode = "preserve"
         self._theme_ready = False
+        # Maps buffer_key -> list of (thread_root | None) per display line
+        self._line_threads: dict[str, list[str | None]] = defaultdict(list)
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
-            yield RichLog(id="messages", wrap=True, markup=True, auto_scroll=False)
+            yield RichLog(
+                id="messages",
+                highlight=True,
+                markup=False,
+                wrap=True,
+                auto_scroll=False,
+            )
+            with Vertical(id="thread-panel"):
+                yield Static("", id="thread-header")
+                yield RichLog(
+                    id="thread-messages",
+                    highlight=True,
+                    markup=False,
+                    wrap=True,
+                    auto_scroll=True,
+                )
+                yield Input(
+                    placeholder="Reply to thread...",
+                    id="thread-reply",
+                )
         yield Input(
             placeholder="Type a message or /join #channel",
             id="composer",
             classes="-textual-compact",
         )
-        yield Footer()
+        yield Footer(compact=True)
 
     def on_mount(self) -> None:
         self.theme = self.ui_config.get("theme", self.theme)
         self._theme_ready = True
         composer = self.query_one("#composer", Input)
-        self.client.connect()
-        if self.initial_channel:
-            self.client.join(self.initial_channel)
+        self._refresh_sidebar()
+        self._append_status(f"connecting to {self.client.server_addr}...", "dim")
+        self._scroll_mode = "end"
+        self._render_active_buffer()
+        composer.focus()
+        self.set_timer(0.01, self._start_client)
         self.set_interval(0.1, self._poll_events)
         if self.auth_broker:
             self.set_interval(0.5, self._poll_auth)
-        self._refresh_sidebar()
-        self._render_active_buffer()
-        composer.focus()
         if self.cached_auth:
             self._restore_auth()
         elif self.auth_handle:
             self._begin_auth(self.auth_handle)
 
+    # ── Rich text builders ─────────────────────────────────────────────────
+
+    def _format_nick(self, nick: str) -> Text:
+        """Colorized nick."""
+        return Text(nick, style=_nick_color(nick))
+
+    def _format_message(self, sender: str, text: str) -> Text:
+        """A chat message: `<nick>: <text>` with colored nick."""
+        parts: list[Text] = []
+        parts.append(self._format_nick(sender))
+        parts.append(Text(": "))
+        parts.append(Text(text))
+        return Text().assemble(*parts)
+
+    def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
+        """Dim reply indicator: `  ↳ replying to <nick>: <snippet>`."""
+        indicator = Text()
+        indicator.append("  \u21b3 ", style="dim")
+        indicator.append("replying to ", style="dim italic")
+        indicator.append(parent_sender, style=f"dim {_nick_color(parent_sender)}")
+        indicator.append(": ", style="dim")
+        indicator.append(snippet, style="dim")
+        return indicator
+
+    def _format_system(self, text: str, style: str = "") -> Text:
+        """System/status message with optional style."""
+        return Text(text, style=style)
+
+    # ── Helpers ─────────────────────────────────────────────────────────────
+
+    def _start_client(self) -> None:
+        try:
+            self.client.connect()
+            if self.initial_channel:
+                self.client.join(self.initial_channel)
+        except Exception as exc:  # noqa: BLE001
+            self._append_status(f"connect failed: {exc}", "red")
+            self._render_active_buffer()
+
     def _refresh_sidebar(self) -> None:
-        ordered = sorted(self.buffers.values(), key=lambda buffer: (buffer.name != "status", buffer.name))
+        ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
         self.query_one(BufferList).update_buffers(ordered, self.active_buffer)
 
     def _buffer_key(self, buffer_name: str) -> str:
@@ -121,6 +288,13 @@ class FreeqTextualApp(App[None]):
     def _display_name(self, buffer_name: str) -> str:
         key = self._buffer_key(buffer_name)
         return self.buffers.get(key, BufferState(buffer_name)).name
+
+    def _message_buffer_name(self, target: str, sender: str) -> str:
+        if target.startswith("#") or target.startswith("&"):
+            return target
+        if sender.casefold() == self.client.nick.casefold():
+            return target
+        return sender
 
     def _nick_key(self, nick: str) -> str:
         return nick.lstrip("@+").casefold()
@@ -133,51 +307,213 @@ class FreeqTextualApp(App[None]):
             self.buffers[key].name = buffer_name
         return key
 
-    def _append_line(self, buffer_name: str, line: str, *, mark_unread: bool = True) -> None:
+    def _append_status(self, text: str, style: str = "") -> None:
+        """Append a styled line to the status buffer."""
+        key = self._ensure_buffer("status")
+        self.messages[key].append(self._format_system(text, style))
+        self._line_threads[key].append(None)
+
+    def _append_line(self, buffer_name: str, rich: Text, *, mark_unread: bool = True, thread_root: str = "") -> None:
         key = self._ensure_buffer(buffer_name)
         if key != self.active_buffer and mark_unread:
             self.buffers[key].unread += 1
-        self.messages[key].append(line)
+        self.messages[key].append(rich)
+        self._line_threads[key].append(thread_root or None)
 
-    def _prepend_lines(self, buffer_name: str, lines: list[str]) -> None:
+    def _prepend_lines(self, buffer_name: str, lines: list[Text], *, thread_roots: list[str | None] | None = None) -> None:
         key = self._ensure_buffer(buffer_name)
         self.messages[key] = list(lines) + self.messages[key]
+        roots = thread_roots or [None] * len(lines)
+        self._line_threads[key] = list(roots) + self._line_threads[key]
 
     def _request_history(self, channel: str) -> None:
         self.client.history_latest(self._display_name(channel), 50)
 
-    def _session_channels(self) -> list[str]:
-        return sorted(
-            buffer.name
-            for key, buffer in self.buffers.items()
-            if key != "status" and (buffer.name.startswith("#") or buffer.name.startswith("&"))
-        )
+    def _snippet(self, text: str, length: int = 40) -> str:
+        normalized = " ".join(text.split())
+        if len(normalized) <= length:
+            return normalized
+        return normalized[: length - 3].rstrip() + "..."
+
+    def _thread_reply_to(self, tags: dict) -> str | None:
+        return tags.get("+draft/reply") or tags.get("+reply")
+
+    def _touch_thread(self, thread: ThreadState) -> None:
+        self._thread_activity += 1
+        thread.latest_activity = self._thread_activity
+
+    # ── Message recording ──────────────────────────────────────────────────
+
+    def _record_message(self, buffer_name: str, sender: str, text: str, tags: dict) -> None:
+        buffer_key = self._ensure_buffer(buffer_name)
+        msgid = tags.get("msgid", "")
+        reply_to = self._thread_reply_to(tags) or ""
+        thread_root = msgid or reply_to or ""
+        is_reply = bool(reply_to)
+
+        if reply_to:
+            parent = self.message_index.get(reply_to)
+            if parent is not None:
+                thread_root = parent.thread_root
+            else:
+                thread_root = reply_to
+
+            thread = self.threads.get(thread_root)
+            if thread is None:
+                root_sender = parent.sender if parent is not None else "unknown"
+                root_text = parent.text if parent is not None else "(parent not loaded)"
+                thread = ThreadState(
+                    buffer_key=buffer_key,
+                    root_msgid=thread_root,
+                    root_sender=root_sender,
+                    root_text=root_text,
+                )
+                self.threads[thread_root] = thread
+            thread.buffer_key = buffer_key
+            thread.reply_count += 1
+            thread.latest_sender = sender
+            thread.latest_text = text
+            self._touch_thread(thread)
+
+        if msgid:
+            self.message_index[msgid] = MessageState(
+                buffer_key=buffer_key,
+                sender=sender,
+                text=text,
+                thread_root=thread_root or msgid,
+                msgid=msgid,
+                reply_to=reply_to,
+                is_reply=is_reply,
+            )
+            thread = self.threads.get(msgid)
+            if thread is not None:
+                thread.buffer_key = buffer_key
+                thread.root_sender = sender
+                thread.root_text = text
+
+        # If a thread is currently open and this message belongs to it, refresh
+        if thread_root and thread_root == self.open_thread_root:
+            self._render_thread_panel()
+
+    def _collect_thread_messages(self, thread_root: str) -> list[MessageState]:
+        """Collect root + all replies for a thread, in order."""
+        root = self.message_index.get(thread_root)
+        result: list[MessageState] = []
+        if root:
+            result.append(root)
+        for msg in self.message_index.values():
+            if msg.thread_root == thread_root and msg.is_reply:
+                result.append(msg)
+        return result
+
+    # ── Thread panel ───────────────────────────────────────────────────────
+
+    def _open_thread(self, thread_root: str) -> None:
+        """Open the thread panel for a given root msgid."""
+        if not thread_root:
+            return
+        self.open_thread_root = thread_root
+        panel = self.query_one("#thread-panel")
+        panel.add_class("visible")
+        self._render_thread_panel()
+        # Focus the reply input inside the thread panel
+        self.query_one("#thread-reply", Input).focus()
+
+    def _close_thread(self) -> None:
+        """Close the thread panel."""
+        self.open_thread_root = ""
+        panel = self.query_one("#thread-panel")
+        panel.remove_class("visible")
+        self.query_one("#composer", Input).focus()
+
+    def _render_thread_panel(self) -> None:
+        """Render messages inside the thread panel."""
+        if not self.open_thread_root:
+            return
+
+        header = self.query_one("#thread-header", Static)
+        log = self.query_one("#thread-messages", RichLog)
+
+        thread = self.threads.get(self.open_thread_root)
+        root_msg = self.message_index.get(self.open_thread_root)
+        if not thread and not root_msg:
+            header.update("Thread not found")
+            return
+
+        messages = self._collect_thread_messages(self.open_thread_root)
+        count = len(messages)
+        header.update(f"Thread ({count} msg{'s' if count != 1 else ''})")
+
+        log.clear()
+        for msg in messages:
+            log.write(self._format_message(msg.sender, msg.text))
+
+        # Update placeholder with the root msgid for context
+        reply_input = self.query_one("#thread-reply", Input)
+        reply_input.placeholder = f"Reply to thread ({self.open_thread_root[:8]}...)"
+
+    # ── Click detection on message log ─────────────────────────────────────
+
+    def _on_click(self, event: events.Click) -> None:
+        """Handle clicks anywhere — detect clicks on reply indicators in the message log."""
+        if event.widget is None or event.widget.id != "messages":
+            return
+
+        log = self.query_one("#messages", RichLog)
+
+        # Convert click y to virtual line index
+        virtual_y = int(event.y + log.scroll_y)
+        line_threads = self._line_threads.get(self.active_buffer, [])
+
+        if 0 <= virtual_y < len(line_threads):
+            thread_root = line_threads[virtual_y]
+            if thread_root:
+                self._open_thread(thread_root)
+
+    # ── Render active buffer ───────────────────────────────────────────────
 
     def _render_active_buffer(self) -> None:
-        self.title = f"freeq - {self._display_name(self.active_buffer)}"
-        log = self.query_one(RichLog)
+        active_name = self._display_name(self.active_buffer)
+        topic = self.channel_topics.get(self.active_buffer, "").strip()
+        self.title = f"freeq - {active_name}" if not topic else f"freeq - {active_name} | {topic}"
+        log = self.query_one("#messages", RichLog)
         log.clear()
         for line in self.messages[self.active_buffer]:
-            log.write(line)
-        if self._scroll_to_end:
+            log.write(line, scroll_end=False)
+        if self._scroll_mode == "end":
             log.scroll_end(animate=False)
-        else:
+        elif self._scroll_mode == "home":
             log.scroll_home(animate=False)
-        self._scroll_to_end = False
+        self._scroll_mode = "preserve"
         if self.active_buffer in self.buffers:
             self.buffers[self.active_buffer].unread = 0
         self._refresh_sidebar()
 
+    # ── Event polling ──────────────────────────────────────────────────────
+
     def _poll_events(self) -> None:
         saw_event = False
+        render_active = False
         while True:
             event = self.client.poll_event()
             if event is None:
                 break
             saw_event = True
+            prev_active = self.active_buffer
+            prev_lines = len(self.messages[self.active_buffer])
+            prev_topic = self.channel_topics.get(self.active_buffer, "")
             self._handle_event(event)
+            if self.active_buffer != prev_active:
+                render_active = True
+            elif len(self.messages[self.active_buffer]) != prev_lines:
+                render_active = True
+            elif self.channel_topics.get(self.active_buffer, "") != prev_topic:
+                render_active = True
         if saw_event:
-            self._render_active_buffer()
+            if render_active:
+                self._render_active_buffer()
+            else:
+                self._refresh_sidebar()
 
     def _poll_auth(self) -> None:
         if self.auth_broker is None or self.pending_auth_session is None:
@@ -187,13 +523,13 @@ class FreeqTextualApp(App[None]):
             return
         self.pending_auth_session = None
         if "error" in result:
-            self._append_line("status", f"[red]auth failed[/]: {result['error']}", mark_unread=False)
+            self._append_status(f"auth failed: {result['error']}", "red")
             self._render_active_buffer()
             return
         token = result.get("token")
         handle = result.get("handle", "?")
         if not token:
-            self._append_line("status", "[red]auth failed[/]: broker returned no token", mark_unread=False)
+            self._append_status("auth failed: broker returned no token", "red")
             self._render_active_buffer()
             return
         self._save_auth_session(result)
@@ -204,22 +540,18 @@ class FreeqTextualApp(App[None]):
             if name.startswith("#") or name.startswith("&")
         }
         self.client.reconnect_with_web_token(token)
-        self._append_line("status", f"[green]auth ok[/]: reconnecting as {handle}", mark_unread=False)
+        self._append_status(f"auth ok: reconnecting as {handle}", "green")
         self._render_active_buffer()
 
     def _begin_auth(self, handle: str) -> None:
         if self.auth_broker is None:
-            self._append_line("status", "[red]auth unavailable[/]: set BROKER_SHARED_SECRET", mark_unread=False)
+            self._append_status("auth unavailable: set BROKER_SHARED_SECRET", "red")
             self._render_active_buffer()
             return
         login = self.auth_broker.start_login(handle)
         self.pending_auth_session = login["session_id"]
         webbrowser.open(login["url"])
-        self._append_line(
-            "status",
-            f"[yellow]auth[/]: opened browser for {handle} via {self.auth_broker.base_url}",
-            mark_unread=False,
-        )
+        self._append_status(f"auth: opened browser for {handle} via {self.auth_broker.base_url}", "yellow")
         self._render_active_buffer()
 
     def _restore_auth(self) -> None:
@@ -232,7 +564,7 @@ class FreeqTextualApp(App[None]):
             return
         result = self.auth_broker.refresh_session(broker_token)
         if result is None or "token" not in result:
-            self._append_line("status", f"[yellow]auth[/]: cached session for {handle} expired", mark_unread=False)
+            self._append_status(f"auth: cached session for {handle} expired", "yellow")
             self._clear_saved_session()
             self._render_active_buffer()
             return
@@ -246,7 +578,7 @@ class FreeqTextualApp(App[None]):
             self._ensure_buffer(channel)
         self._save_auth_session({**self.cached_auth, **result, "channels": cached_channels})
         self.client.reconnect_with_web_token(result["token"])
-        self._append_line("status", f"[green]auth restored[/]: {handle}", mark_unread=False)
+        self._append_status(f"auth restored: {handle}", "green")
         self._render_active_buffer()
 
     def _save_auth_session(self, result: dict) -> None:
@@ -298,15 +630,17 @@ class FreeqTextualApp(App[None]):
         if self._theme_ready:
             self._save_ui_config()
 
+    # ── Event handling ─────────────────────────────────────────────────────
+
     def _handle_event(self, event: dict) -> None:
         event_type = event.get("type")
         if event_type == "connected":
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[b]Connected[/] to {self.client.server_addr}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            self._append_status(f"Connected to {self.client.server_addr}", "bold")
             return
         if event_type == "registered":
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[b]Registered[/] as {event['nick']}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            self._append_status(f"Registered as {event['nick']}", "bold")
             for channel in sorted(self.pending_rejoin):
                 self.client.join(channel)
             self.pending_rejoin.clear()
@@ -318,16 +652,16 @@ class FreeqTextualApp(App[None]):
                 if self._nick_key(old_nick) in members:
                     members.discard(self._nick_key(old_nick))
                     members.add(self._nick_key(new_nick))
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[yellow]nick[/]: {old_nick} -> {new_nick}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            self._append_status(f"nick: {old_nick} -> {new_nick}", "yellow")
             return
         if event_type == "authenticated":
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[green]authenticated[/] as {event['did']}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            self._append_status(f"authenticated as {event['did']}", "green")
             return
         if event_type == "auth_failed":
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[red]auth failed[/]: {event['reason']}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            self._append_status(f"auth failed: {event['reason']}", "red")
             return
         if event_type == "names":
             channel = event["channel"]
@@ -349,10 +683,18 @@ class FreeqTextualApp(App[None]):
                 self._ensure_buffer(channel)
                 if self.active_buffer == "status":
                     self.active_buffer = key
+                    self._scroll_mode = "end"
                 self._persist_session_channels()
             elif not already_present:
-                self._scroll_to_end = self.active_buffer == key
-                self._append_line(channel, f"[green]+[/] {event['nick']} joined {channel}")
+                self._scroll_mode = "end" if self.active_buffer == key else "preserve"
+                self._append_line(
+                    channel,
+                    Text().assemble(
+                        Text("+ ", style="green"),
+                        self._format_nick(event["nick"]),
+                        Text(f" joined {channel}"),
+                    ),
+                )
             return
         if event_type == "batch_start":
             batch_id = event["id"]
@@ -361,24 +703,28 @@ class FreeqTextualApp(App[None]):
                 target=target,
                 batch_type=event.get("batch_type", ""),
                 lines=[],
+                thread_roots=[],
             )
             return
         if event_type == "batch_end":
             batch_id = event["id"]
             batch = self.batches.pop(batch_id, None)
             if batch is not None and batch.lines:
-                ordered = [line for _timestamp, line in sorted(batch.lines, key=lambda item: item[0])]
-                self._prepend_lines(batch.target, ordered)
+                indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
+                ordered = [line for _i, (_ts, line) in indexed]
+                roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
+                self._prepend_lines(batch.target, ordered, thread_roots=roots)
                 if batch.batch_type == "chathistory":
                     self.restore_history_targets.discard(self._buffer_key(batch.target))
                     self.active_buffer = self._buffer_key(batch.target)
+                    self._scroll_mode = "home"
             return
         if event_type == "names_end":
             channel = event["channel"]
             key = self._buffer_key(channel)
             if key in self.restore_history_targets:
                 self.restore_history_targets.discard(key)
-                self.set_timer(0.1, lambda channel=channel: self._request_history(channel))
+                self.set_timer(0.1, lambda ch=channel: self._request_history(ch))
             return
         if event_type == "parted":
             channel = event["channel"]
@@ -387,38 +733,120 @@ class FreeqTextualApp(App[None]):
             if event["nick"].casefold() == self.client.nick.casefold():
                 if self.active_buffer == key:
                     self.active_buffer = "status"
+                    self._scroll_mode = "end"
                 self.restore_history_targets.discard(key)
                 self._persist_session_channels()
             else:
-                self._scroll_to_end = self.active_buffer == key
-                self._append_line(channel, f"[yellow]-[/] {event['nick']} left {channel}")
+                self._scroll_mode = "end" if self.active_buffer == key else "preserve"
+                self._append_line(
+                    channel,
+                    Text().assemble(
+                        Text("- ", style="yellow"),
+                        self._format_nick(event["nick"]),
+                        Text(f" left {channel}"),
+                    ),
+                )
             return
         if event_type == "message":
             target = event["target"]
             sender = event["from"]
             text = event["text"]
-            line = f"[cyan]{sender}[/]: {text}"
-            batch_id = event.get("tags", {}).get("batch")
+            tags = event.get("tags", {})
+            buffer_name = self._message_buffer_name(target, sender)
+            buffer_key = self._buffer_key(buffer_name)
+            self._record_message(buffer_name, sender, text, tags)
+            reply_to = self._thread_reply_to(tags)
+            thread_root = ""
+            if reply_to:
+                parent = self.message_index.get(reply_to)
+                if parent:
+                    thread_root = parent.thread_root
+                else:
+                    thread_root = reply_to
+            batch_id = tags.get("batch")
             if batch_id and batch_id in self.batches:
-                batch_target = self.batches[batch_id].target or self._display_name(target)
-                timestamp = event.get("tags", {}).get("time", "")
-                self.batches[batch_id].lines.append((timestamp, line))
+                if reply_to and thread_root:
+                    parent = self.message_index.get(reply_to)
+                    parent_snip = self._snippet(parent.text, 50) if parent else "(original not loaded)"
+                    parent_sender = parent.sender if parent else "?"
+                    self.batches[batch_id].lines.append(
+                        (tags.get("time", ""), self._format_reply_indicator(parent_sender, parent_snip, thread_root))
+                    )
+                    self.batches[batch_id].thread_roots.append(thread_root)
+                self.batches[batch_id].lines.append(
+                    (tags.get("time", ""), self._format_message(sender, text))
+                )
+                self.batches[batch_id].thread_roots.append(None)
             else:
-                self._scroll_to_end = self.active_buffer == self._buffer_key(target)
-                self._append_line(target, line)
+                self._scroll_mode = "end" if self.active_buffer == buffer_key else "preserve"
+                if reply_to and thread_root:
+                    parent = self.message_index.get(reply_to)
+                    parent_snip = self._snippet(parent.text, 50) if parent else "(original not loaded)"
+                    parent_sender = parent.sender if parent else "?"
+                    self._append_line(
+                        buffer_name,
+                        self._format_reply_indicator(parent_sender, parent_snip, thread_root),
+                        mark_unread=False,
+                        thread_root=thread_root,
+                    )
+                self._append_line(buffer_name, self._format_message(sender, text))
+            return
+        if event_type == "topic_changed":
+            channel = event["channel"]
+            topic = event["topic"]
+            set_by = event.get("set_by")
+            key = self._ensure_buffer(channel)
+            self.channel_topics[key] = topic
+            self._scroll_mode = "end" if self.active_buffer == key else "preserve"
+            suffix = f" ({set_by})" if set_by else ""
+            topic_text = Text()
+            topic_text.append("topic: ", style="magenta")
+            topic_text.append(topic + suffix)
+            self._append_line(channel, topic_text, mark_unread=False)
             return
         if event_type == "server_notice":
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[magenta]notice[/]: {event['text']}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            notice = Text()
+            notice.append("notice: ", style="magenta")
+            notice.append(event["text"])
+            self._append_line("status", notice, mark_unread=False)
             return
         if event_type == "disconnected":
             self.channel_members.clear()
             self.restore_history_targets.clear()
-            self._scroll_to_end = self.active_buffer == "status"
-            self._append_line("status", f"[red]disconnected[/]: {event['reason']}", mark_unread=False)
+            self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            self._append_status(f"disconnected: {event['reason']}", "red")
             return
-        self._scroll_to_end = self.active_buffer == "status"
-        self._append_line("status", f"[dim]{event}[/dim]", mark_unread=False)
+        self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+        self._append_line("status", self._format_system(str(event), "dim"), mark_unread=False)
+
+    # ── Actions ────────────────────────────────────────────────────────────
+
+    def action_close_thread(self) -> None:
+        """Close the open thread panel."""
+        if self.open_thread_root:
+            self._close_thread()
+
+    def action_open_thread(self, thread_root: str = "") -> None:
+        """Open thread panel. Called from /thread command."""
+        if thread_root:
+            self._open_thread(thread_root)
+            return
+        self._open_thread_via_command()
+
+    def _open_thread_via_command(self) -> None:
+        """Fallback: /thread with no args — find most recent reply indicator."""
+        threads = self._line_threads.get(self.active_buffer, [])
+        for root in reversed(threads):
+            if root:
+                self._open_thread(root)
+                return
+
+    def _send_reply(self, target: str, reply_to_msgid: str, text: str) -> None:
+        """Send a reply using @+draft/reply IRCv3 tag via raw IRC."""
+        self.client.raw(f"@+draft/reply={reply_to_msgid} PRIVMSG {target} :{text}")
+
+    # ── Command input (main composer) ──────────────────────────────────────
 
     @on(Input.Submitted, "#composer")
     def handle_submit(self, event: Input.Submitted) -> None:
@@ -426,40 +854,117 @@ class FreeqTextualApp(App[None]):
         event.input.value = ""
         if not text:
             return
-        if text.startswith("/join "):
-            channel = text.split(maxsplit=1)[1].strip()
+        if text.startswith("/"):
+            command, _, raw_args = text[1:].partition(" ")
+            args = raw_args.strip()
+        else:
+            command = ""
+            args = ""
+        if command == "join" and args:
+            channel = args
             self.client.join(channel)
             self._ensure_buffer(channel)
             self.active_buffer = self._buffer_key(channel)
+            self._scroll_mode = "end"
             self._persist_session_channels()
             self._render_active_buffer()
             return
-        if text.startswith("/auth "):
-            handle = text.split(maxsplit=1)[1].strip()
-            self._begin_auth(handle)
+        if command == "auth" and args:
+            self._begin_auth(args)
             return
-        if text.startswith("/nick "):
-            nick = text.split(maxsplit=1)[1].strip()
-            self.client.set_nick(nick)
-            self._append_line("status", f"changing nick to {nick}", mark_unread=False)
+        if command == "nick" and args:
+            self.client.set_nick(args)
+            self._append_status(f"changing nick to {args}")
             self._render_active_buffer()
             return
-        if text.startswith("/raw "):
-            self.client.raw(text.split(maxsplit=1)[1])
+        if command == "raw" and args:
+            self.client.raw(args)
+            return
+        if command == "topic":
+            target = self.active_buffer
+            if target == "status":
+                self._append_status("join a channel before setting topic")
+                self._render_active_buffer()
+                return
+            display_target = self._display_name(target)
+            if args:
+                self.client.raw(f"TOPIC {display_target} :{args}")
+            else:
+                self.client.raw(f"TOPIC {display_target}")
+            return
+        if command == "thread" and args:
+            if args in self.threads or args in self.message_index:
+                msg = self.message_index.get(args)
+                root = msg.thread_root if msg else args
+                self._open_thread(root)
+            else:
+                self._append_status(f"no thread found for msgid {args}")
+                self._render_active_buffer()
+            return
+        if command == "thread":
+            self._open_thread_via_command()
+            return
+        if command == "reply" and args:
+            parts = args.split(None, 1)
+            if len(parts) < 2:
+                self._append_status("usage: /reply <msgid> <text>")
+                self._render_active_buffer()
+                return
+            reply_msgid, reply_text = parts[0], parts[1]
+            target = self._display_name(self.active_buffer)
+            if self.active_buffer == "status":
+                self._append_status("join a channel before replying")
+                self._render_active_buffer()
+                return
+            self._send_reply(target, reply_msgid, reply_text)
+            return
+        if command:
+            self._append_status(f"invalid command: /{command}")
+            self._render_active_buffer()
             return
         target = self.active_buffer
         if target == "status":
-            self._append_line("status", "join a channel before sending messages", mark_unread=False)
+            self._append_status("join a channel before sending messages")
             self._render_active_buffer()
             return
         self.client.send_message(self._display_name(target), text)
+
+    # ── Thread reply input ─────────────────────────────────────────────────
+
+    @on(Input.Submitted, "#thread-reply")
+    def handle_thread_reply(self, event: Input.Submitted) -> None:
+        """Handle reply submitted from the thread panel's reply input."""
+        text = event.value.strip()
+        event.input.value = ""
+        if not text or not self.open_thread_root:
+            return
+        target = self._display_name(self.active_buffer)
+        if self.active_buffer == "status":
+            return
+        self._send_reply(target, self.open_thread_root, text)
+        # Keep focus on the reply input for rapid replies
+        self.query_one("#thread-reply", Input).focus()
+
+    # ── Sidebar ────────────────────────────────────────────────────────────
 
     @on(ListView.Selected, "#sidebar")
     def handle_sidebar_select(self, event: ListView.Selected) -> None:
         if event.item.name is None:
             return
         self.active_buffer = self._buffer_key(event.item.name)
+        self.open_thread_root = ""
+        panel = self.query_one("#thread-panel")
+        panel.remove_class("visible")
+        self._scroll_mode = "end"
         self._render_active_buffer()
+        self.query_one("#composer", Input).focus()
+
+    def _session_channels(self) -> list[str]:
+        return sorted(
+            b.name
+            for key, b in self.buffers.items()
+            if key != "status" and (b.name.startswith("#") or b.name.startswith("&"))
+        )
 
     def on_unmount(self) -> None:
         self._persist_session_channels()
