@@ -224,6 +224,16 @@ export interface Store {
   setChannelSettingsOpen: (channel: string | null) => void;
 }
 
+/** Safely parse JSON from localStorage, returning fallback on any error. */
+function safeJsonParse<T>(value: string | null, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function getOrCreateChannel(channels: Map<string, Channel>, name: string): Channel {
   const key = name.toLowerCase();
   let ch = channels.get(key);
@@ -267,11 +277,11 @@ export const useStore = create<Store>((set, get) => ({
   messageDensity: (localStorage.getItem('freeq-density') as 'default' | 'compact' | 'cozy') || 'default',
   showJoinPart: localStorage.getItem('freeq-show-join-part') === 'true',
   loadExternalMedia: localStorage.getItem('freeq-load-media') !== 'false',
-  favorites: new Set(JSON.parse(localStorage.getItem('freeq-favorites') || '[]')),
-  mutedChannels: new Set(JSON.parse(localStorage.getItem('freeq-muted') || '[]')),
-  bookmarks: JSON.parse(localStorage.getItem('freeq-bookmarks') || '[]').map((b: any) => ({ ...b, timestamp: new Date(b.timestamp) })),
+  favorites: new Set(safeJsonParse(localStorage.getItem('freeq-favorites'), [])),
+  mutedChannels: new Set(safeJsonParse(localStorage.getItem('freeq-muted'), [])),
+  bookmarks: safeJsonParse(localStorage.getItem('freeq-bookmarks'), []).map((b: any) => ({ ...b, timestamp: new Date(b.timestamp) })),
   bookmarksPanelOpen: false,
-  hiddenDMs: new Set(JSON.parse(localStorage.getItem('freeq-hidden-dms') || '[]')),
+  hiddenDMs: new Set(safeJsonParse(localStorage.getItem('freeq-hidden-dms'), [])),
   searchOpen: false,
   scrollToMsgId: null,
   searchQuery: '',
