@@ -471,9 +471,182 @@ A <code>WARN</code> log is emitted if the CWD fallback is used (no HOME env var 
   </tbody>
 </table>
 
+<!-- ================================================================== -->
+<h2>Round 2: Deep Offensive Audit</h2>
+<p>Second-pass audit targeting logic bugs, race conditions, identity confusion, privilege escalation, and protocol injection across 6 parallel investigation tracks.</p>
+
+<div class="summary-grid">
+  <div class="summary-card"><div class="num" style="color:var(--red)">3</div><div class="label">Critical Fixed</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--orange)">2</div><div class="label">High Fixed</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--green)">1</div><div class="label">Verified Secure</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--yellow)">15+</div><div class="label">Open (Documented)</div></div>
+</div>
+
+<!-- R2-1 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge critical">Critical</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">REST API channel history exposed without authentication</span>
+  </div>
+  <p><strong>Impact:</strong> <code>/api/v1/channels/{name}/history</code> returned full message history to any
+     unauthenticated HTTP request, including for invite-only and key-protected channels.</p>
+  <p><strong>Fix:</strong> Returns 403 Forbidden for channels with <code>+i</code> or <code>+k</code> modes.
+     Public channels remain accessible (IRC model). Use IRC CHATHISTORY for restricted channels.</p>
+  <p><span class="commit">7bb6563</span></p>
+</div>
+
+<!-- R2-2 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge critical">Critical</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">Message edit/delete authorization used nick instead of DID</span>
+  </div>
+  <p><strong>Impact:</strong> An attacker could change their nick to match an original message sender
+     and edit or delete their messages. Critical integrity violation.</p>
+  <p><strong>Fix:</strong> For authenticated users, authorship now verified by comparing DIDs via
+     <code>nick_owners</code>. For guests, falls back to nick comparison (IRC compat).
+     Ops can still delete any message in their channel.</p>
+  <p><span class="commit">5a4a6d0</span></p>
+</div>
+
+<!-- R2-3 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge critical">Critical</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">S2S message fields allow IRC protocol injection</span>
+  </div>
+  <p><strong>Impact:</strong> A malicious federated peer could inject <code>\r\n</code> into S2S Privmsg
+     <code>from</code>, <code>target</code>, or <code>text</code> fields, causing arbitrary IRC commands to be injected
+     into local clients' streams. Also applied to Join nicks/channels and Topic text.</p>
+  <p><strong>Fix:</strong> Added <code>sanitize_s2s_str()</code> that strips <code>\r</code>, <code>\n</code>, <code>\0</code> and enforces
+     length limits on all peer-provided fields before they reach IRC output.</p>
+  <p><span class="commit">1b0219e</span></p>
+</div>
+
+<!-- R2-4 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge high">High</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">OAuth pending/complete maps had no TTL (memory exhaustion)</span>
+  </div>
+  <p><strong>Impact:</strong> Attacker could spam OAuth flows to fill <code>oauth_pending</code> and
+     <code>oauth_complete</code> HashMaps indefinitely, exhausting server memory.</p>
+  <p><strong>Fix:</strong> Added 10-minute TTL with periodic pruning in the existing cleanup task.
+     Added <code>created_at</code> timestamp to <code>OAuthResult</code>.</p>
+  <p><span class="commit">06bf978</span></p>
+</div>
+
+<!-- R2-5 -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge high">High</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">No channel name or topic length limits</span>
+  </div>
+  <p><strong>Impact:</strong> Attacker could create channels with MB-length names or set MB-length
+     topics, causing memory exhaustion and degraded performance.</p>
+  <p><strong>Fix:</strong> Channel names limited to 64 characters, topics to 512 characters.
+     Rejects with appropriate IRC error codes.</p>
+  <p><span class="commit">870e8d6</span></p>
+</div>
+
+<!-- R2-6 verified -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Verified Secure</span>
+    <span class="finding-title">Nick ownership enforcement on NICK command</span>
+  </div>
+  <p>Initially flagged as a vulnerability, but code review confirmed the NICK handler
+     at line 523-531 already checks <code>nick_owners</code> and rejects non-owners with
+     "Nickname is registered to another identity". Registration at line 273-303
+     force-renames non-owners to Guest nicks. No fix needed.</p>
+</div>
+
+<!-- R2 open findings -->
+<h3>Open Round 2 Findings (Documented for Future Work)</h3>
+
+<table>
+  <thead><tr><th>Area</th><th>Finding</th><th>Severity</th></tr></thead>
+  <tbody>
+    <tr><td>S2S</td><td>Join <code>is_op</code> flag trusted blindly — peer can spoof ops for remote users</td><td>Critical</td></tr>
+    <tr><td>S2S</td><td>SyncResponse <code>is_op</code> and <code>did_ops</code> accepted without DID authority verification</td><td>Critical</td></tr>
+    <tr><td>S2S</td><td>Mode +o adds to persistent <code>did_ops</code> without founder veto</td><td>Critical</td></tr>
+    <tr><td>S2S</td><td>SyncResponse invites merged without founder authority check (bypass +i)</td><td>High</td></tr>
+    <tr><td>S2S</td><td>Nick spoofing — Privmsg <code>from</code> not verified against peer's actual user list</td><td>High</td></tr>
+    <tr><td>Auth</td><td>Ghost session recovery restores ops even after founder de-opped user</td><td>High</td></tr>
+    <tr><td>Auth</td><td>Multi-device attach inherits ops from old session after revocation</td><td>High</td></tr>
+    <tr><td>Auth</td><td>MSGSIG registers keys without proof-of-possession challenge</td><td>High</td></tr>
+    <tr><td>Auth</td><td><code>did:web</code> resolution fetches arbitrary domains (potential SSRF)</td><td>High</td></tr>
+    <tr><td>Auth</td><td><code>alsoKnownAs</code> handle not validated against DID (handle spoofing)</td><td>High</td></tr>
+    <tr><td>Privacy</td><td>DM metadata (<code>dm:did_a,did_b</code>) stored plaintext in DB channel column</td><td>High</td></tr>
+    <tr><td>Privacy</td><td>WHOIS reveals real DID + Bluesky handle to any user</td><td>Medium</td></tr>
+    <tr><td>Privacy</td><td>S2S Join messages include DIDs (harvestable by malicious peers)</td><td>Medium</td></tr>
+    <tr><td>DoS</td><td>No global connection limit (only per-IP 20); distributed bypass</td><td>Medium</td></tr>
+    <tr><td>DoS</td><td>No per-channel ban/invite count limits; unbounded accumulation</td><td>Medium</td></tr>
+    <tr><td>DoS</td><td>No limit on spawned agents per parent; recursive spawning possible</td><td>Medium</td></tr>
+    <tr><td>DoS</td><td>REST rate limiter state (IpRateLimiter) never evicts old IPs</td><td>Low</td></tr>
+    <tr><td>DoS</td><td>No automatic database message pruning; disk exhaustion possible</td><td>Medium</td></tr>
+  </tbody>
+</table>
+
+<!-- R2 commit log -->
+<h3>Round 2 Commit Log</h3>
+<table>
+  <thead><tr><th>Commit</th><th>Severity</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>7bb6563</code></td><td><span class="badge critical">Critical</span></td>
+        <td>Restrict REST API history for invite-only and keyed channels</td></tr>
+    <tr><td><code>5a4a6d0</code></td><td><span class="badge critical">Critical</span></td>
+        <td>Use DID-based authorship check for message edit/delete</td></tr>
+    <tr><td><code>1b0219e</code></td><td><span class="badge critical">Critical</span></td>
+        <td>Sanitize S2S message fields to prevent IRC protocol injection</td></tr>
+    <tr><td><code>06bf978</code></td><td><span class="badge high">High</span></td>
+        <td>Add TTL cleanup for oauth_pending and oauth_complete maps</td></tr>
+    <tr><td><code>870e8d6</code></td><td><span class="badge high">High</span></td>
+        <td>Add channel name length limit (64) and topic length limit (512)</td></tr>
+  </tbody>
+</table>
+
+<!-- R2 deployment impact -->
+<h3>Round 2 Deployment Impact</h3>
+
+<div class="impact-box safe">
+<strong>REST API history restriction:</strong> Channels with <code>+i</code> or <code>+k</code> will now return 403.
+Web clients using the REST history endpoint for private channels will need to use the
+WebSocket/IRC CHATHISTORY command instead. Public channel history is unaffected.
+</div>
+
+<div class="impact-box safe">
+<strong>Edit/delete DID check:</strong> Authenticated users can only edit/delete messages sent by
+nicks they own (same DID). Guests can still edit/delete their own messages by nick.
+No behavioral change for users who don't change nicks.
+</div>
+
+<div class="impact-box safe">
+<strong>S2S field sanitization:</strong> Transparent to legitimate peers. Only affects peers sending
+malformed strings with control characters. Length limits (512 for from, 200 for channel/target,
+4096 for text) are generous and won't affect normal operation.
+</div>
+
+<div class="impact-box safe">
+<strong>OAuth map cleanup:</strong> OAuth flows older than 10 minutes are now pruned. Users who
+start an OAuth flow and don't complete it within 10 minutes will need to restart.
+Normal OAuth flows complete in seconds.
+</div>
+
+<div class="impact-box safe">
+<strong>Channel/topic limits:</strong> Channel names &gt;64 chars and topics &gt;512 chars are rejected.
+No known channels use names this long. Standard IRC limits are even shorter (50 chars).
+</div>
+
 <hr style="border-color: var(--border); margin: 2rem 0;">
 <p class="meta">
-  Generated 2026-03-29. 6 findings fixed across 6 commits. All tests passing.
+  Generated 2026-03-29. Round 1: 6 findings fixed. Round 2: 5 findings fixed, 1 verified secure, 18+ documented.
+  Total: 11 commits, 11 findings fixed. All 21 server tests + 4 SDK tests passing.
   <br>Scope: freeq-server v0.1.0, freeq-sdk v0.1.0, freeq-auth-broker, freeq-app.
 </p>
 
