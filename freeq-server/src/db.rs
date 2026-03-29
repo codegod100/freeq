@@ -14,30 +14,37 @@ use crate::server::{BanEntry, ChannelState, TopicInfo};
 const EAR_PREFIX: &str = "EAR1:";
 
 /// Encrypt text with AES-256-GCM for storage at rest.
+/// Panics on encryption failure — this indicates a broken key or AES implementation
+/// and must not silently degrade to plaintext storage.
 fn encrypt_at_rest(key: &[u8; 32], plaintext: &str) -> String {
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     let cipher = Aes256Gcm::new(key.into());
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from_slice(&nonce_bytes);
-    match cipher.encrypt(nonce, plaintext.as_bytes()) {
-        Ok(ct) => {
-            use base64::Engine;
-            let mut combined = Vec::with_capacity(12 + ct.len());
-            combined.extend_from_slice(&nonce_bytes);
-            combined.extend_from_slice(&ct);
-            format!(
-                "{EAR_PREFIX}{}",
-                base64::engine::general_purpose::STANDARD.encode(&combined)
-            )
-        }
-        Err(_) => plaintext.to_string(), // fallback: store plaintext
-    }
+    let ct = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .expect("AES-256-GCM encryption failed — this should never happen with a valid key");
+    use base64::Engine;
+    let mut combined = Vec::with_capacity(12 + ct.len());
+    combined.extend_from_slice(&nonce_bytes);
+    combined.extend_from_slice(&ct);
+    format!(
+        "{EAR_PREFIX}{}",
+        base64::engine::general_purpose::STANDARD.encode(&combined)
+    )
 }
 
-/// Decrypt text from at-rest storage. Returns plaintext if not encrypted.
+/// Decrypt text from at-rest storage.
+/// Legacy unencrypted data (without EAR1: prefix) is returned as-is with a warning.
+/// Decryption failures on encrypted data return an error placeholder and log at ERROR.
 fn decrypt_at_rest(key: &[u8; 32], stored: &str) -> String {
     if !stored.starts_with(EAR_PREFIX) {
-        return stored.to_string(); // not encrypted — return as-is (legacy data)
+        // Legacy plaintext data — return as-is but log so operators can identify
+        // unencrypted records during migration.
+        if !stored.is_empty() {
+            tracing::debug!("Returning unencrypted legacy message — consider re-encrypting historical data");
+        }
+        return stored.to_string();
     }
     use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
     use base64::Engine;
@@ -49,10 +56,19 @@ fn decrypt_at_rest(key: &[u8; 32], stored: &str) -> String {
             let cipher = Aes256Gcm::new(key.into());
             match cipher.decrypt(nonce, ct) {
                 Ok(pt) => String::from_utf8_lossy(&pt).to_string(),
-                Err(_) => stored.to_string(), // can't decrypt — return raw
+                Err(e) => {
+                    tracing::error!(
+                        "Decryption failed (wrong key or corrupt data): {e} — \
+                         returning placeholder. Check db-encryption-key.secret."
+                    );
+                    "[decryption failed]".to_string()
+                }
             }
         }
-        _ => stored.to_string(),
+        _ => {
+            tracing::error!("Malformed encrypted message (bad base64 or too short)");
+            "[decryption failed]".to_string()
+        }
     }
 }
 
