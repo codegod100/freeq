@@ -23,6 +23,17 @@ pub(super) fn handle_join(
     let hostmask = conn.hostmask();
     let did = conn.authenticated_did.as_deref();
 
+    // Reject excessively long channel names to prevent memory abuse.
+    if channel.len() > 64 {
+        let reply = Message::from_server(
+            server_name,
+            "479",
+            vec![nick, channel, "Channel name too long (max 64 characters)"],
+        );
+        send(state, session_id, format!("{reply}\r\n"));
+        return;
+    }
+
     // A channel is "new" only if it doesn't exist at all — not locally,
     // not via S2S. If remote members are present (from S2S sync), the
     // channel already exists on the federation and the joining user
@@ -1367,6 +1378,16 @@ pub(super) fn handle_topic(
 
     match new_topic {
         Some(text) => {
+            // Enforce topic length limit to prevent memory abuse.
+            if text.len() > 512 {
+                let reply = Message::from_server(
+                    server_name,
+                    "FAIL",
+                    vec!["TOPIC", "TOO_LONG", "Topic too long (max 512 characters)"],
+                );
+                send(state, session_id, format!("{reply}\r\n"));
+                return;
+            }
             // Check +t: if topic_locked, only ops can set topic
             let (is_op, is_locked) = {
                 let channels = state.channels.lock();
