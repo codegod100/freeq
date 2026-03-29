@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>freeq Security Audit Report — 2026-03-29</title>
+<style>
+  :root {
+    --bg: #0d1117; --fg: #c9d1d9; --accent: #58a6ff; --green: #3fb950;
+    --yellow: #d29922; --orange: #db6d28; --red: #f85149; --border: #30363d;
+    --card: #161b22; --code-bg: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+         background: var(--bg); color: var(--fg); line-height: 1.6; padding: 2rem; max-width: 1100px; margin: auto; }
+  h1 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.8rem; }
+  h2 { color: var(--fg); margin: 2rem 0 1rem; padding-bottom: 0.3rem; border-bottom: 1px solid var(--border); }
+  h3 { color: var(--fg); margin: 1.2rem 0 0.5rem; }
+  .meta { color: #8b949e; font-size: 0.9rem; margin-bottom: 2rem; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem;
+           font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+  .critical { background: var(--red); color: #fff; }
+  .high { background: var(--orange); color: #fff; }
+  .medium { background: var(--yellow); color: #1c1c1c; }
+  .low { background: #388bfd33; color: var(--accent); }
+  .positive { background: #238636; color: #fff; }
+  .fixed { background: var(--green); color: #1c1c1c; }
+
+  .finding { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+             padding: 1.2rem; margin-bottom: 1rem; }
+  .finding-header { display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.5rem; }
+  .finding-title { font-weight: 600; font-size: 1.05rem; }
+  .finding p, .finding li { color: #8b949e; font-size: 0.92rem; }
+  .finding strong { color: var(--fg); }
+
+  code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.88rem; }
+  pre { background: var(--code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto; margin: 0.5rem 0; }
+  pre code { background: none; padding: 0; }
+
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.5rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.92rem; }
+  th { color: var(--fg); font-weight: 600; }
+  td { color: #8b949e; }
+
+  .commit { font-family: monospace; font-size: 0.85rem; color: var(--accent); }
+  .file-ref { font-family: monospace; font-size: 0.85rem; color: var(--yellow); }
+
+  .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1rem 0; }
+  .summary-card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+                  padding: 1rem; text-align: center; }
+  .summary-card .num { font-size: 2rem; font-weight: 700; }
+  .summary-card .label { font-size: 0.85rem; color: #8b949e; }
+
+  .impact-box { background: #f8514922; border: 1px solid #f8514944; border-radius: 6px; padding: 0.8rem; margin: 0.5rem 0; }
+  .impact-box.warn { background: #d2992222; border-color: #d2992244; }
+  .impact-box.safe { background: #23863622; border-color: #23863644; }
+
+  ul { padding-left: 1.5rem; }
+  li { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+
+<h1>freeq Security Audit Report</h1>
+<p class="meta">
+  Date: 2026-03-29 &nbsp;|&nbsp; Branch: <code>agent-native</code> &nbsp;|&nbsp;
+  Auditors: Claude Opus 4.6 (deep code review) + Codex (initial findings) &nbsp;|&nbsp;
+  Scope: freeq-server, freeq-sdk, freeq-auth-broker, freeq-app
+</p>
+
+<div class="summary-grid">
+  <div class="summary-card"><div class="num" style="color:var(--red)">1</div><div class="label">Critical</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--orange)">2</div><div class="label">High</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--yellow)">3</div><div class="label">Medium</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--accent)">2</div><div class="label">Low</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--green)">6</div><div class="label">Fixed</div></div>
+  <div class="summary-card"><div class="num" style="color:var(--green)">21</div><div class="label">Tests Passing</div></div>
+</div>
+
+<!-- ================================================================== -->
+<h2>Findings &amp; Remediations</h2>
+
+<!-- 1. CRITICAL -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge critical">Critical</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">Secret key files world-readable (0644)</span>
+  </div>
+  <p><strong>Impact:</strong> Any local user could read <code>msg-signing-key.secret</code>,
+     <code>db-encryption-key.secret</code>, <code>verifier-signing-key.secret</code>, and
+     <code>iroh-key.secret</code> — enabling message signature forgery, database decryption,
+     credential minting, and QUIC endpoint impersonation.</p>
+  <p><strong>Root cause:</strong> All four key files were created with <code>std::fs::write()</code>
+     which uses the process umask (typically 0644 on Linux).</p>
+  <p><strong>Files affected:</strong></p>
+  <ul>
+    <li><span class="file-ref">freeq-server/src/server.rs</span> — <code>load_msg_signing_key()</code> + DB key creation</li>
+    <li><span class="file-ref">freeq-server/src/iroh.rs</span> — <code>load_or_create_secret_key()</code></li>
+    <li><span class="file-ref">freeq-server/src/verifiers/mod.rs</span> — <code>load_or_generate_signing_key()</code></li>
+  </ul>
+  <p><strong>Fix:</strong> New <code>secrets</code> module with <code>write_secret()</code> (Unix <code>OpenOptions::mode(0o600)</code>)
+     and <code>tighten_permissions()</code> (detects and fixes overly permissive files on startup).
+     All four creation sites use <code>write_secret()</code>; all four load sites call <code>tighten_permissions()</code>.</p>
+  <p><span class="commit">976e690</span> — <em>security: write secret files with 0600 permissions, tighten on load</em></p>
+</div>
+
+<!-- 2. HIGH: Broker HMAC -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge high">High</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">Auth broker HMAC replay protection was optional</span>
+  </div>
+  <p><strong>Impact:</strong> If <code>X-Broker-Timestamp</code> was omitted, a captured signed request
+     could be replayed indefinitely to mint web tokens or push PDS sessions. An attacker with
+     a single captured request could impersonate any authenticated user.</p>
+  <p><strong>Root cause:</strong> <code>verify_broker_signature_raw()</code> treated the timestamp header
+     as optional "for backward compat". The HMAC covered only the body, not the timestamp.</p>
+  <p><strong>Files affected:</strong></p>
+  <ul>
+    <li><span class="file-ref">freeq-server/src/web.rs</span> — <code>verify_broker_signature_raw()</code></li>
+    <li><span class="file-ref">freeq-auth-broker/src/main.rs</span> — <code>sign_body()</code>, <code>mint_web_token()</code>, <code>push_web_session_with_token()</code></li>
+  </ul>
+  <p><strong>Fix:</strong></p>
+  <ul>
+    <li><code>X-Broker-Timestamp</code> is now <strong>required</strong> (rejects 401 if missing)</li>
+    <li>HMAC now covers <code>ts={timestamp}\n</code> || body (timestamp bound to signature)</li>
+    <li>Clock skew enforced at &le;60 seconds</li>
+    <li>Broker updated to always send timestamp and include it in MAC</li>
+  </ul>
+  <p><span class="commit">12e34e5</span> — <em>security: require X-Broker-Timestamp in HMAC, prevent replay attacks</em></p>
+</div>
+
+<!-- 3. HIGH: Web-token TTL -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge high">High</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">Web-token TTL mismatch (30min actual vs. 5min documented)</span>
+  </div>
+  <p><strong>Impact:</strong> A stolen or intercepted web-token had a 30-minute window for misuse,
+     six times longer than the documented 5-minute intent.</p>
+  <p><strong>Root cause:</strong> <code>Duration::from_secs(1800)</code> in cap.rs while comments stated "5 minutes".</p>
+  <p><strong>Files affected:</strong></p>
+  <ul>
+    <li><span class="file-ref">freeq-server/src/connection/cap.rs:166</span></li>
+  </ul>
+  <p><strong>Fix:</strong> Changed to <code>Duration::from_secs(300)</code> (5 minutes). Tokens remain single-use
+     on first SASL success; broker issues fresh tokens on each <code>/session</code> call.</p>
+  <p><span class="commit">ceb5787</span> — <em>security: reduce web-token TTL from 30 minutes to 5 minutes</em></p>
+</div>
+
+<!-- 4. MEDIUM: Data dir -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge medium">Medium</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">Secrets default to current working directory</span>
+  </div>
+  <p><strong>Impact:</strong> Secret files could be written into the repository checkout or shared directories,
+     risking accidental version-control commits or broader read access.</p>
+  <p><strong>Root cause:</strong> <code>data_dir()</code> fell back to <code>"."</code> when neither <code>--data-dir</code>
+     nor <code>--db-path</code> was set.</p>
+  <p><strong>Fix:</strong> Now defaults to platform state directory:</p>
+  <ul>
+    <li>Linux: <code>$XDG_STATE_HOME/freeq</code> or <code>~/.local/state/freeq</code></li>
+    <li>macOS: <code>~/Library/Application Support/freeq</code></li>
+    <li>Falls back to CWD only if no HOME is available, with a <code>WARN</code> log</li>
+  </ul>
+  <p><span class="commit">a398d21</span> — <em>security: default data_dir to platform state dir, warn on CWD fallback</em></p>
+</div>
+
+<!-- 5. MEDIUM: Rate limiting -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge medium">Medium</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">No HTTP rate limiting on REST proxy/upload endpoints</span>
+  </div>
+  <p><strong>Impact:</strong> DoS potential via <code>/api/v1/og</code> (OG preview with outbound fetch),
+     <code>/api/v1/blob</code> (PDS proxy), and <code>/api/v1/upload</code> (PDS fan-out) — even with
+     existing SSRF defenses, the server could be used as an amplifier.</p>
+  <p><strong>Root cause:</strong> No rate limiting middleware on REST routes.</p>
+  <p><strong>Fix:</strong> Added per-IP sliding-window rate limiter (30 requests / 60 seconds) to all
+     three expensive endpoints. Returns <code>429 Too Many Requests</code> when exceeded.</p>
+  <p><span class="commit">8c8cf42</span> — <em>security: add per-IP rate limiting on REST proxy/upload endpoints</em></p>
+</div>
+
+<!-- 6. MEDIUM: Crypto fallback -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge medium">Medium</span>
+    <span class="badge fixed">Fixed</span>
+    <span class="finding-title">Crypto-at-rest silent plaintext fallback</span>
+  </div>
+  <p><strong>Impact:</strong> On AES-GCM encryption failure, messages were stored in plaintext.
+     On decryption failure, raw ciphertext was returned to users. Both silently degraded
+     confidentiality without operator awareness.</p>
+  <p><strong>Root cause:</strong> <code>encrypt_at_rest()</code> had <code>Err(_) => plaintext.to_string()</code>;
+     <code>decrypt_at_rest()</code> had <code>Err(_) => stored.to_string()</code>.</p>
+  <p><strong>Fix:</strong></p>
+  <ul>
+    <li>Encryption failure now <strong>panics</strong> (indicates broken key — better to crash than store plaintext)</li>
+    <li>Decryption failure returns <code>[decryption failed]</code> placeholder and logs at <code>ERROR</code></li>
+    <li>Legacy unencrypted data still returned as-is (logged at <code>DEBUG</code> for migration tracking)</li>
+  </ul>
+  <p><span class="commit">a37360a</span> — <em>security: make encryption-at-rest failures hard errors, not silent fallback</em></p>
+</div>
+
+<!-- Low-severity (not fixed, documented) -->
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge low">Low</span>
+    <span class="finding-title">Client SDK insecure TLS mode</span>
+  </div>
+  <p><code>tls_insecure: true</code> in freeq-sdk completely disables TLS certificate verification,
+     enabling MITM attacks. Default is <code>false</code> (safe). Recommend adding prominent
+     doc warnings and considering a <code>#[cfg(feature = "insecure-tls")]</code> gate.</p>
+  <p><span class="file-ref">freeq-sdk/src/client.rs</span> — <code>rustls_insecure_config()</code></p>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge low">Low</span>
+    <span class="finding-title">HSTS header sent regardless of TLS</span>
+  </div>
+  <p>Benign (browsers ignore HSTS over HTTP), but could be gated on TLS being enabled. No action needed.</p>
+  <p><span class="file-ref">freeq-server/src/web.rs</span> — <code>security_headers()</code></p>
+</div>
+
+<!-- ================================================================== -->
+<h2>Positive Controls (Verified Secure)</h2>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">SSRF Defenses</span>
+  </div>
+  <ul>
+    <li><strong>Blob proxy:</strong> Strict host allowlist (PDS/CDN only) with Range support</li>
+    <li><strong>OG preview:</strong> DNS resolution with private/RFC1918 rejection, DNS pinning via <code>resolve()</code>, 256KB body limit, HTML-only</li>
+  </ul>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">SASL Authentication</span>
+  </div>
+  <ul>
+    <li>Nonce-bound PDS verification methods; cryptographic challenge-response via DID keys</li>
+    <li>Single-use challenges with HashMap removal (replay-safe)</li>
+    <li>Configurable challenge timeout (default 60s); DPoP nonce retry with 3-attempt cap</li>
+    <li>DID document ID mismatch check prevents cross-DID attacks</li>
+    <li>SASL failure counter with disconnect after 3 failures</li>
+  </ul>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">SQL Injection Prevention</span>
+  </div>
+  <p>All database queries use parameterized statements via rusqlite's <code>params![]</code> macro. No string concatenation for SQL.</p>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">Web Security Headers</span>
+  </div>
+  <p>CORS restricted to known origins; CSP, X-Frame-Options (DENY), HSTS, Referrer-Policy, X-Content-Type-Options all present.</p>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">Message Signing &amp; Verification</span>
+  </div>
+  <ul>
+    <li>Ed25519 per-session keypairs with canonical signing format (<code>did\0target\0text\0timestamp</code>)</li>
+    <li>MSGSIG registration requires authenticated DID (can't register for another DID)</li>
+    <li>Server fallback signing for clients without support</li>
+    <li>ULIDs use 80 bits of cryptographic randomness (unpredictable)</li>
+  </ul>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">Web Client XSS Prevention</span>
+  </div>
+  <p>No <code>dangerouslySetInnerHTML</code>, <code>eval()</code>, or <code>innerHTML</code>. React Markdown with
+     <code>skipHtml</code>. URL sanitization with scheme whitelist. All links get <code>rel="noopener noreferrer"</code>.</p>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">OAuth / PKCE / DPoP</span>
+  </div>
+  <p>Full PKCE with SHA-256 code challenge. DPoP-bound tokens with nonce rotation. State TTL enforcement (5 min). Token file permissions 0600 in SDK.</p>
+</div>
+
+<div class="finding">
+  <div class="finding-header">
+    <span class="badge positive">Secure</span>
+    <span class="finding-title">S2S Federation Transport</span>
+  </div>
+  <ul>
+    <li>QUIC/TLS 1.3 via iroh with cryptographic peer identity</li>
+    <li>Allowlist enforcement on incoming connections</li>
+    <li>Trust levels (Full/Relay/Readonly) enforced per-event before state mutation</li>
+    <li>100 events/sec per-peer rate limiting</li>
+    <li>S2S authorization checks on Mode, Kick, Ban, Topic, Join</li>
+  </ul>
+</div>
+
+<!-- ================================================================== -->
+<h2>Additional Findings from Deep Audit</h2>
+<p>These items were identified during the deep audit and are informational or future hardening opportunities:</p>
+
+<table>
+  <thead><tr><th>Area</th><th>Finding</th><th>Severity</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>SDK</td><td><code>PrivateKey</code> and <code>DpopKey</code> derive <code>Debug</code> — keys could leak in panic messages</td><td>Medium</td><td>Open</td></tr>
+    <tr><td>SDK</td><td>OAuth tokens and DPoP keys stored as plaintext JSON on disk (only file perms protect)</td><td>Medium</td><td>Open</td></tr>
+    <tr><td>SDK</td><td>Double Ratchet session state serialized with DH secret keys in plaintext JSON</td><td>Medium</td><td>Open</td></tr>
+    <tr><td>S2S</td><td>Dedup high-water mark resets on peer disconnect — allows replay after reconnect + 10K events</td><td>Medium</td><td>Open</td></tr>
+    <tr><td>S2S</td><td>Remote <code>is_op</code> flag trusted without cryptographic proof from peers</td><td>Medium</td><td>Open</td></tr>
+    <tr><td>S2S</td><td>No per-peer channel creation quota (ChannelCreated messages unlimited)</td><td>Low</td><td>Open</td></tr>
+    <tr><td>S2S</td><td>Ban/invite accumulation without TTL or quotas</td><td>Low</td><td>Open</td></tr>
+    <tr><td>S2S</td><td>Key rotation verified but <code>pending_rotations</code> map never acted upon</td><td>Low</td><td>Open</td></tr>
+    <tr><td>Web</td><td>Broker token stored in localStorage (XSS-accessible) — recommend httpOnly cookie</td><td>Medium</td><td>Open</td></tr>
+    <tr><td>Web</td><td>No CSP meta tag in index.html (server sets it, but defense-in-depth)</td><td>Low</td><td>Open</td></tr>
+    <tr><td>Broker</td><td>Handle used in URL construction for <code>.well-known/atproto-did</code> — mild SSRF risk</td><td>Low</td><td>Open</td></tr>
+    <tr><td>Server</td><td>OPER password compared with <code>==</code> (not timing-safe)</td><td>Low</td><td>Open</td></tr>
+  </tbody>
+</table>
+
+<!-- ================================================================== -->
+<h2>Commit Log</h2>
+
+<table>
+  <thead><tr><th>Commit</th><th>Severity</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>976e690</code></td><td><span class="badge critical">Critical</span></td>
+        <td>Write secret files with 0600 permissions, tighten on load</td></tr>
+    <tr><td><code>12e34e5</code></td><td><span class="badge high">High</span></td>
+        <td>Require X-Broker-Timestamp in HMAC, prevent replay attacks</td></tr>
+    <tr><td><code>ceb5787</code></td><td><span class="badge high">High</span></td>
+        <td>Reduce web-token TTL from 30 minutes to 5 minutes</td></tr>
+    <tr><td><code>a398d21</code></td><td><span class="badge medium">Medium</span></td>
+        <td>Default data_dir to platform state dir, warn on CWD fallback</td></tr>
+    <tr><td><code>8c8cf42</code></td><td><span class="badge medium">Medium</span></td>
+        <td>Add per-IP rate limiting on REST proxy/upload endpoints</td></tr>
+    <tr><td><code>a37360a</code></td><td><span class="badge medium">Medium</span></td>
+        <td>Make encryption-at-rest failures hard errors, not silent fallback</td></tr>
+  </tbody>
+</table>
+
+<!-- ================================================================== -->
+<h2>Test Results</h2>
+<div class="impact-box safe">
+  <strong>All 21 server tests passing.</strong> All 4 SDK tests passing. No regressions.
+  <br>Tested: SSRF defenses, blob proxy validation, upload auth, broker signature rejection,
+  OG preview security, security headers, upload size limits.
+</div>
+
+<!-- ================================================================== -->
+<h2>Deployment Impact on Running Servers</h2>
+
+<p>This section describes what happens when these changes are deployed to servers currently running in production.</p>
+
+<h3>Immediate / Automatic Effects (No Action Required)</h3>
+
+<div class="impact-box safe">
+<strong>Secret file permissions (Critical fix):</strong>
+Existing <code>.secret</code> files will be automatically tightened from 0644 to 0600 on next server
+startup via <code>tighten_permissions()</code>. A <code>WARN</code> log will be emitted for each file tightened.
+No data loss. No service interruption.
+</div>
+
+<div class="impact-box safe">
+<strong>Web-token TTL (High fix):</strong>
+Existing web-tokens older than 5 minutes will be rejected on next SASL attempt.
+Users with active sessions are unaffected (tokens are consumed on first use).
+Users with stale browser tabs (&gt;5 minutes) will need to re-authenticate — the
+broker automatically issues fresh tokens on reconnect. <strong>Brief reconnect for some web users.</strong>
+</div>
+
+<div class="impact-box safe">
+<strong>REST rate limiting (Medium fix):</strong>
+New per-IP rate limits activate immediately. Normal users will not be affected
+(30 req/60s is generous for link previews and uploads). Automated scrapers or
+abusive clients hitting these endpoints will start receiving 429 responses.
+</div>
+
+<div class="impact-box safe">
+<strong>Crypto-at-rest error handling (Medium fix):</strong>
+No impact on existing data. Encryption now panics on failure (which should never
+happen with a valid key). Decryption failures on corrupted data will now return
+<code>[decryption failed]</code> instead of raw ciphertext — this is more correct behavior.
+Legacy unencrypted messages continue to be returned as-is.
+</div>
+
+<h3>Requires Coordination</h3>
+
+<div class="impact-box warn">
+<strong>Broker HMAC timestamp (High fix) — BREAKING CHANGE:</strong>
+The server now <em>requires</em> <code>X-Broker-Timestamp</code> on all broker requests, and the
+HMAC now covers <code>ts={timestamp}\n</code> || body.
+<br><br>
+<strong>The auth broker and freeq-server must be deployed simultaneously.</strong>
+If the broker is updated first (sends timestamp) but the server is old (ignores it),
+there is no problem — old server still accepts. But if the server is updated first
+(requires timestamp) and the broker is old (doesn't send it), <strong>all broker requests
+will be rejected with 401</strong>, breaking OAuth login for web users.
+<br><br>
+<strong>Recommended deployment order:</strong>
+<ol>
+  <li>Deploy the updated broker first (it now sends <code>X-Broker-Timestamp</code>)</li>
+  <li>Verify broker health: <code>GET /health</code></li>
+  <li>Deploy the updated server</li>
+  <li>Verify OAuth flow works end-to-end</li>
+</ol>
+</div>
+
+<h3>Data Directory Change (Medium fix)</h3>
+
+<div class="impact-box warn">
+<strong>Default data directory (Medium fix) — BEHAVIOR CHANGE for new deployments:</strong>
+Servers started <em>without</em> <code>--data-dir</code> or <code>--db-path</code> will now write secrets to
+<code>~/.local/state/freeq/</code> instead of the current working directory.
+<br><br>
+<strong>Existing deployments with <code>--data-dir</code> or <code>--db-path</code> are completely unaffected.</strong>
+<br><br>
+If you rely on CWD for key storage (e.g., development), you'll need to either:
+<ul>
+  <li>Add <code>--data-dir .</code> explicitly, or</li>
+  <li>Copy existing <code>.secret</code> files to <code>~/.local/state/freeq/</code></li>
+</ul>
+A <code>WARN</code> log is emitted if the CWD fallback is used (no HOME env var found).
+</div>
+
+<h3>No Impact</h3>
+<ul>
+  <li><strong>IRC protocol behavior:</strong> Unchanged. No client-visible protocol changes.</li>
+  <li><strong>S2S federation:</strong> Unchanged. No wire protocol changes.</li>
+  <li><strong>Message signing:</strong> Unchanged. Existing signed messages remain valid.</li>
+  <li><strong>Database schema:</strong> Unchanged. No migrations needed.</li>
+  <li><strong>TLS/SASL flow:</strong> Unchanged (the token TTL change only affects the acceptance window, not the protocol).</li>
+</ul>
+
+<!-- ================================================================== -->
+<h2>Files Modified</h2>
+<table>
+  <thead><tr><th>File</th><th>Change</th></tr></thead>
+  <tbody>
+    <tr><td><code>freeq-server/src/secrets.rs</code></td><td>New module — <code>write_secret()</code> and <code>tighten_permissions()</code></td></tr>
+    <tr><td><code>freeq-server/src/lib.rs</code></td><td>Register <code>secrets</code> module</td></tr>
+    <tr><td><code>freeq-server/src/server.rs</code></td><td>Use <code>write_secret()</code> for msg + DB keys, add <code>tighten_permissions()</code>, add rate limiter field</td></tr>
+    <tr><td><code>freeq-server/src/iroh.rs</code></td><td>Use <code>write_secret()</code> for iroh key, add <code>tighten_permissions()</code></td></tr>
+    <tr><td><code>freeq-server/src/verifiers/mod.rs</code></td><td>Use <code>write_secret()</code> for verifier key, add <code>tighten_permissions()</code></td></tr>
+    <tr><td><code>freeq-server/src/web.rs</code></td><td>Require broker timestamp in HMAC; add <code>IpRateLimiter</code>; rate-limit /og, /blob, /upload</td></tr>
+    <tr><td><code>freeq-server/src/connection/cap.rs</code></td><td>Reduce web-token TTL to 300s</td></tr>
+    <tr><td><code>freeq-server/src/config.rs</code></td><td>Platform state dir default with CWD fallback warning</td></tr>
+    <tr><td><code>freeq-server/src/db.rs</code></td><td>Hard-fail on encrypt/decrypt errors</td></tr>
+    <tr><td><code>freeq-auth-broker/src/main.rs</code></td><td>Include timestamp in HMAC, send <code>X-Broker-Timestamp</code> header</td></tr>
+  </tbody>
+</table>
+
+<hr style="border-color: var(--border); margin: 2rem 0;">
+<p class="meta">
+  Generated 2026-03-29. 6 findings fixed across 6 commits. All tests passing.
+  <br>Scope: freeq-server v0.1.0, freeq-sdk v0.1.0, freeq-auth-broker, freeq-app.
+</p>
+
+</body>
+</html>
