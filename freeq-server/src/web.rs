@@ -2594,45 +2594,38 @@ async fn api_og_preview(Query(q): Query<OgQuery>) -> impl IntoResponse {
         }
     };
 
-    // Block SSRF: reject private/loopback IPs and hostnames
-    if let Some(host) = url.host_str() {
-        // Block obvious private hostnames
-        let host_lower = host.to_lowercase();
-        if host_lower == "localhost"
-            || host_lower.ends_with(".local")
-            || host_lower.ends_with(".internal")
-        {
+    // Block SSRF: resolve hostname, reject private IPs, and pin DNS to
+    // prevent TOCTOU / DNS-rebinding between validation and fetch.
+    let host = match url.host_str() {
+        Some(h) => h.to_string(),
+        None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Private host"})),
+                Json(serde_json::json!({"error": "No host in URL"})),
             )
                 .into_response();
         }
-        // Resolve and check for private IPs
-        if let Ok(addrs) = tokio::net::lookup_host(format!("{host}:80")).await {
-            for addr in addrs {
-                let ip = addr.ip();
-                if ip.is_loopback()
-                    || ip.is_unspecified()
-                    || matches!(ip, std::net::IpAddr::V4(v4) if v4.is_private() || v4.is_link_local())
-                    || matches!(ip, std::net::IpAddr::V6(v6) if v6.is_loopback())
-                {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Private IP"})),
-                    )
-                        .into_response();
-                }
-            }
+    };
+    let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+    let addrs = match freeq_sdk::ssrf::resolve_and_check(&host, port).await {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Blocked: {e}")})),
+            )
+                .into_response();
         }
-    }
+    };
 
-    // Fetch with timeout
-    let client = reqwest::Client::builder()
+    // Build a DNS-pinned client so reqwest uses the validated IPs
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .unwrap();
+        .redirect(reqwest::redirect::Policy::limited(3));
+    for addr in &addrs {
+        builder = builder.resolve(&host, *addr);
+    }
+    let client = builder.build().unwrap();
 
     let resp = match client
         .get(url.as_str())

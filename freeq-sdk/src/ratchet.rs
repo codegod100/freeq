@@ -367,13 +367,53 @@ impl Session {
     }
 
     /// Serialize session state for persistence.
+    ///
+    /// **Deprecated**: Writes keys as plaintext JSON. Use
+    /// [`to_encrypted_bytes`](Self::to_encrypted_bytes) instead.
     pub fn to_bytes(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("Session is serializable")
     }
 
     /// Deserialize session state.
+    ///
+    /// **Deprecated**: Reads plaintext JSON. Use
+    /// [`from_encrypted_bytes`](Self::from_encrypted_bytes) instead.
     pub fn from_bytes(data: &[u8]) -> Result<Self, RatchetError> {
         serde_json::from_slice(data).map_err(|_| RatchetError::InvalidSession)
+    }
+
+    /// Serialize and encrypt session state for persistence.
+    ///
+    /// Output format: `nonce (12 bytes) || AES-256-GCM ciphertext+tag`.
+    /// The `key` must be exactly 32 bytes (e.g. derived via HKDF).
+    pub fn to_encrypted_bytes(&self, key: &[u8; 32]) -> Result<Vec<u8>, RatchetError> {
+        let plaintext = serde_json::to_vec(self).map_err(|_| RatchetError::CryptoError)?;
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| RatchetError::CryptoError)?;
+        let nonce = Aes256Gcm::generate_nonce(OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_slice())
+            .map_err(|_| RatchetError::CryptoError)?;
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    /// Decrypt and deserialize session state.
+    ///
+    /// Expects the format produced by [`to_encrypted_bytes`](Self::to_encrypted_bytes):
+    /// `nonce (12 bytes) || ciphertext+tag`.
+    pub fn from_encrypted_bytes(key: &[u8; 32], data: &[u8]) -> Result<Self, RatchetError> {
+        if data.len() < 12 {
+            return Err(RatchetError::InvalidSession);
+        }
+        let (nonce_bytes, ciphertext) = data.split_at(12);
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|_| RatchetError::CryptoError)?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| RatchetError::DecryptFailed)?;
+        serde_json::from_slice(&plaintext).map_err(|_| RatchetError::InvalidSession)
     }
 
     /// Get our current ratchet public key (for including in key bundles).
@@ -614,5 +654,50 @@ mod tests {
                 assert_eq!(alice.decrypt(&w).unwrap(), format!("B:{i}"));
             }
         }
+    }
+
+    #[test]
+    fn encrypted_session_serialization() {
+        let (mut alice, mut bob) = make_sessions();
+        let key = [0xABu8; 32];
+
+        let w1 = alice.encrypt("before persist").unwrap();
+        assert_eq!(bob.decrypt(&w1).unwrap(), "before persist");
+
+        // Serialize with encryption and restore
+        let alice_enc = alice.to_encrypted_bytes(&key).unwrap();
+        let bob_enc = bob.to_encrypted_bytes(&key).unwrap();
+
+        // Encrypted bytes should differ from plaintext
+        assert_ne!(alice_enc, alice.to_bytes());
+
+        let mut alice2 = Session::from_encrypted_bytes(&key, &alice_enc).unwrap();
+        let mut bob2 = Session::from_encrypted_bytes(&key, &bob_enc).unwrap();
+
+        // Continue conversation after restore
+        let w2 = bob2.encrypt("after encrypted persist").unwrap();
+        assert_eq!(alice2.decrypt(&w2).unwrap(), "after encrypted persist");
+    }
+
+    #[test]
+    fn encrypted_session_wrong_key_fails() {
+        let (alice, _bob) = make_sessions();
+        let key = [0xABu8; 32];
+        let wrong_key = [0xCDu8; 32];
+
+        let enc = alice.to_encrypted_bytes(&key).unwrap();
+        assert!(Session::from_encrypted_bytes(&wrong_key, &enc).is_err());
+    }
+
+    #[test]
+    fn encrypted_session_tampered_fails() {
+        let (alice, _bob) = make_sessions();
+        let key = [0xABu8; 32];
+
+        let mut enc = alice.to_encrypted_bytes(&key).unwrap();
+        // Flip a byte in the ciphertext
+        let last = enc.len() - 1;
+        enc[last] ^= 0xFF;
+        assert!(Session::from_encrypted_bytes(&key, &enc).is_err());
     }
 }

@@ -23,6 +23,25 @@ pub(super) fn handle_join(
     let hostmask = conn.hostmask();
     let did = conn.authenticated_did.as_deref();
 
+    // Per-user channel limit to prevent memory exhaustion (M-15)
+    const MAX_CHANNELS_PER_USER: usize = 100;
+    if !conn.is_oper {
+        let channels = state.channels.lock();
+        let current_count = channels
+            .values()
+            .filter(|ch| ch.members.contains(session_id))
+            .count();
+        if current_count >= MAX_CHANNELS_PER_USER {
+            let reply = Message::from_server(
+                server_name,
+                irc::ERR_TOOMANYCHANNELS,
+                vec![nick, channel, "You have joined too many channels"],
+            );
+            send(state, session_id, format!("{reply}\r\n"));
+            return;
+        }
+    }
+
     // A channel is "new" only if it doesn't exist at all — not locally,
     // not via S2S. If remote members are present (from S2S sync), the
     // channel already exists on the federation and the joining user

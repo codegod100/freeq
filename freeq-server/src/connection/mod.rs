@@ -914,7 +914,8 @@ where
                             drop(channels);
                             // Notify channel with tag for clients to update cache
                             let notice = format!(
-                                "@+freeq.at/pin={msgid} :{nick}!~u@host NOTICE {channel} :\x01ACTION pinned a message\x01\r\n"
+                                "@+freeq.at/pin={} :{nick}!~u@host NOTICE {channel} :\x01ACTION pinned a message\x01\r\n",
+                                irc::escape_tag_value(msgid)
                             );
                             helpers::broadcast_to_channel(&state, &channel, &notice);
                         }
@@ -925,7 +926,8 @@ where
                             drop(channels);
                             // Notify channel with tag for clients to update cache
                             let notice = format!(
-                                "@+freeq.at/unpin={msgid} :{nick}!~u@host NOTICE {channel} :\x01ACTION unpinned a message\x01\r\n"
+                                "@+freeq.at/unpin={} :{nick}!~u@host NOTICE {channel} :\x01ACTION unpinned a message\x01\r\n",
+                                irc::escape_tag_value(msgid)
                             );
                             helpers::broadcast_to_channel(&state, &channel, &notice);
                         } else {
@@ -1311,7 +1313,7 @@ where
                 let _name = &msg.params[0]; // oper name (unused — we just check password)
                 let password = &msg.params[1];
                 let granted = if let Some(ref oper_pw) = state.config.oper_password {
-                    password == oper_pw
+                    constant_time_eq(password.as_bytes(), oper_pw.as_bytes())
                 } else {
                     false
                 };
@@ -1459,7 +1461,7 @@ where
                         }
 
                         // Send governance TAGMSG to the target agent
-                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={r}")).unwrap_or_default();
+                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={}", irc::escape_tag_value(r))).unwrap_or_default();
                         let hostmask = conn.hostmask();
                         let gov_msg = format!(
                             "@+freeq.at/governance={action};+freeq.at/issued-by={}{reason_tag} :{hostmask} TAGMSG {target_nick}\r\n",
@@ -1562,7 +1564,8 @@ where
                                     let target_session = state.nick_to_session.lock().get_session(&target_nick).map(|s| s.to_string());
                                     if let Some(ref ts) = target_session {
                                         let line = format!(
-                                            "@+freeq.at/governance=approval_granted;+freeq.at/capability={capability} :{server_name} TAGMSG {target_nick}\r\n"
+                                            "@+freeq.at/governance=approval_granted;+freeq.at/capability={} :{server_name} TAGMSG {target_nick}\r\n",
+                                            irc::escape_tag_value(&capability)
                                         );
                                         if let Some(tx) = state.connections.lock().get(ts) {
                                             let _ = tx.try_send(line);
@@ -1617,9 +1620,10 @@ where
                                 if denied {
                                     let target_session = state.nick_to_session.lock().get_session(&target_nick).map(|s| s.to_string());
                                     if let Some(ref ts) = target_session {
-                                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={r}")).unwrap_or_default();
+                                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={}", irc::escape_tag_value(r))).unwrap_or_default();
                                         let line = format!(
-                                            "@+freeq.at/governance=approval_denied;+freeq.at/capability={capability}{reason_tag} :{server_name} TAGMSG {target_nick}\r\n"
+                                            "@+freeq.at/governance=approval_denied;+freeq.at/capability={}{reason_tag} :{server_name} TAGMSG {target_nick}\r\n",
+                                            irc::escape_tag_value(&capability)
                                         );
                                         if let Some(tx) = state.connections.lock().get(ts) {
                                             let _ = tx.try_send(line);
@@ -1926,7 +1930,8 @@ where
 
                     // Send structured TAGMSG for rich clients
                     let tagmsg = format!(
-                        "@+freeq.at/event=approval_request;+freeq.at/approval-id={approval_id};+freeq.at/capability={capability} :{} TAGMSG {channel}\r\n",
+                        "@+freeq.at/event=approval_request;+freeq.at/approval-id={approval_id};+freeq.at/capability={} :{} TAGMSG {channel}\r\n",
+                        irc::escape_tag_value(capability),
                         conn.hostmask()
                     );
                     helpers::broadcast_to_channel(&state, &channel, &tagmsg);
@@ -2014,8 +2019,8 @@ where
 
                                 // Send governance signal to agent
                                 let gov_line = format!(
-                                    "@+freeq.at/governance=budget_exceeded;+freeq.at/spent={:.2};+freeq.at/limit={:.2};+freeq.at/unit={unit} :{server_name} TAGMSG {nick}\r\n",
-                                    total_spent, budget.max_amount
+                                    "@+freeq.at/governance=budget_exceeded;+freeq.at/spent={:.2};+freeq.at/limit={:.2};+freeq.at/unit={} :{server_name} TAGMSG {nick}\r\n",
+                                    total_spent, budget.max_amount, irc::escape_tag_value(&unit)
                                 );
                                 send(&state, &session_id, gov_line);
                             }
@@ -2544,6 +2549,18 @@ where
 
     write_handle.abort();
     Ok(())
+}
+
+/// Constant-time byte comparison to prevent timing side-channel attacks (M-16).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 /// Detect the client software from the USER realname field.

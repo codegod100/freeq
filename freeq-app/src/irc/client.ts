@@ -1178,12 +1178,24 @@ function handleAuthenticate(msg: IRCMessage) {
   const param = msg.params[0] || '';
   if (param === '+' || !param) return;
 
-  // Server sent the challenge — respond with our credentials
+  // Server sent the challenge — decode it to extract the nonce, then respond.
+  // The challenge_nonce binds our PDS-verified session to this specific
+  // challenge, preventing token replay across different servers/sessions.
+  let challengeNonce: string | undefined;
+  try {
+    const challengeJson = atob(param.replace(/-/g, '+').replace(/_/g, '/'));
+    const challenge = JSON.parse(challengeJson);
+    challengeNonce = challenge.nonce;
+  } catch {
+    // If we can't decode the challenge, proceed without the nonce.
+    // The server will reject PDS methods that lack it.
+  }
   const response = JSON.stringify({
     did: saslDid,
     method: saslMethod || 'pds-session',
     signature: saslToken,
     pds_url: saslPdsUrl,
+    challenge_nonce: challengeNonce,
   });
   const encoded = btoa(response)
     .replace(/\+/g, '-')

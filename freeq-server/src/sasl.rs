@@ -40,6 +40,10 @@ pub struct ChallengeResponse {
     pub pds_url: Option<String>,
     #[serde(default)]
     pub dpop_proof: Option<String>,
+    /// Echo of the server's challenge nonce.  Required for PDS methods to
+    /// bind the response to the specific challenge that was issued.
+    #[serde(default)]
+    pub challenge_nonce: Option<String>,
 }
 
 /// Stored challenge data: the struct for validation + raw bytes for signature verification.
@@ -128,6 +132,38 @@ pub async fn verify_response(
     }
 }
 
+/// Verify that the client's response includes the correct challenge nonce.
+///
+/// PDS-based methods (pds-session, pds-oauth) don't cryptographically sign the
+/// challenge — the PDS verifies the access token independently.  To bind the
+/// PDS verification to the specific challenge issued for this TCP connection,
+/// the client must echo back the challenge nonce.  Without this check, a stolen
+/// PDS access JWT could be replayed against any freeq server.
+fn verify_challenge_nonce(
+    challenge: &Challenge,
+    response: &ChallengeResponse,
+) -> Result<(), String> {
+    match response.challenge_nonce.as_deref() {
+        Some(nonce) => {
+            if nonce != challenge.nonce {
+                tracing::warn!(
+                    did = %response.did,
+                    "Challenge nonce mismatch in PDS verification"
+                );
+                return Err("Challenge nonce mismatch".to_string());
+            }
+            Ok(())
+        }
+        None => {
+            tracing::warn!(
+                did = %response.did,
+                "PDS auth response missing challenge_nonce — rejecting"
+            );
+            Err("PDS verification requires challenge_nonce field".to_string())
+        }
+    }
+}
+
 /// Verify via cryptographic signature against DID document keys.
 async fn verify_crypto(
     challenge_bytes: &[u8],
@@ -182,16 +218,21 @@ async fn verify_crypto(
 
 /// Verify via PDS session token.
 ///
-/// 1. Resolve DID document to find PDS service endpoint
-/// 2. Verify the claimed PDS URL matches the DID document
-/// 3. Call PDS getSession to verify the token
-/// 4. Confirm the DID matches
+/// 1. Verify the client echoed back the correct challenge nonce
+/// 2. Resolve DID document to find PDS service endpoint
+/// 3. Verify the claimed PDS URL matches the DID document
+/// 4. Call PDS getSession to verify the token
+/// 5. Confirm the DID matches
 async fn verify_pds_session(
-    _challenge: &Challenge,
+    challenge: &Challenge,
     response: &ChallengeResponse,
     resolver: &DidResolver,
 ) -> Result<String, String> {
     tracing::info!(did = %response.did, "Verifying SASL response (pds-session)");
+
+    // Verify the client echoed back the challenge nonce, binding this
+    // response to the specific challenge issued for this connection.
+    verify_challenge_nonce(challenge, response)?;
 
     let claimed_pds = response
         .pds_url
@@ -248,11 +289,15 @@ async fn verify_pds_session(
 /// The client provides both the access token and a DPoP proof that the
 /// server can forward to the PDS's getSession endpoint.
 async fn verify_pds_oauth(
-    _challenge: &Challenge,
+    challenge: &Challenge,
     response: &ChallengeResponse,
     resolver: &DidResolver,
 ) -> Result<String, String> {
     tracing::info!(did = %response.did, "Verifying SASL response (pds-oauth)");
+
+    // Verify the client echoed back the challenge nonce, binding this
+    // response to the specific challenge issued for this connection.
+    verify_challenge_nonce(challenge, response)?;
 
     let claimed_pds = response
         .pds_url
@@ -424,6 +469,7 @@ mod tests {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None,
         };
         let json = serde_json::to_vec(&resp).unwrap();
         let encoded = URL_SAFE_NO_PAD.encode(&json);
@@ -439,6 +485,7 @@ mod tests {
             method: Some("pds-session".to_string()),
             pds_url: Some("https://pds.example.com".to_string()),
             dpop_proof: None,
+            challenge_nonce: Some("test-nonce".to_string()),
         };
         let json = serde_json::to_vec(&resp).unwrap();
         let encoded = URL_SAFE_NO_PAD.encode(&json);
@@ -473,6 +520,7 @@ mod tests {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None,
         };
 
         let result = verify_response(&challenge, &challenge_bytes, &response, &resolver).await;
@@ -506,6 +554,7 @@ mod tests {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None,
         };
 
         let result = verify_response(&challenge, &challenge_bytes, &response, &resolver).await;
@@ -537,6 +586,7 @@ mod tests {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None,
         };
 
         let result = verify_response(&challenge, &challenge_bytes, &response, &resolver).await;
@@ -568,6 +618,7 @@ mod tests {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None,
         };
 
         let result = verify_response(&challenge, &challenge_bytes, &response, &resolver).await;

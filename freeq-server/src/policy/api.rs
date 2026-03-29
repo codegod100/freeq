@@ -324,6 +324,28 @@ async fn verify_github(
             .into_response();
     }
 
+    // Validate GitHub username and org name to prevent URL injection.
+    // GitHub names: 1-39 chars, alphanumeric or hyphens, no path separators.
+    fn is_valid_github_name(s: &str) -> bool {
+        !s.is_empty()
+            && s.len() <= 39
+            && s.chars().all(|c| c.is_alphanumeric() || c == '-')
+    }
+
+    if !is_valid_github_name(&req.org) || !is_valid_github_name(&req.github_username) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(CredentialResponse {
+                status: "error".into(),
+                credential_type: "github_membership".into(),
+                issuer: "github".into(),
+                error: Some("invalid github_username or org format".into()),
+                metadata: None,
+            }),
+        )
+            .into_response();
+    }
+
     // Check GitHub API for public org membership
     // GET https://api.github.com/orgs/{org}/public_members/{username}
     // Returns 204 if member, 404 if not

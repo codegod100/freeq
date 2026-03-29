@@ -85,7 +85,7 @@ impl PolicyEngine {
             channel_id: channel_id.to_string(),
             signers: vec![AuthoritySigner {
                 did: self.authority_did.clone(),
-                public_key: format!("hmac-sha256:{}", hex::encode(&self.signing_key[..16])),
+                public_key: format!("hmac-sha256:{}", canonical::sha256_hex(&self.signing_key)),
                 label: Some("Primary authority".into()),
                 endpoint: None,
             }],

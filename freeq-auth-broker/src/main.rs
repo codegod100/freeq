@@ -10,7 +10,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
+use axum::http::Method;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 use aes_gcm::aead::Aead;
@@ -180,10 +181,63 @@ async fn resolve_did(did: &str) -> Result<DidDocument, anyhow::Error> {
     if did.starts_with("did:web:") {
         let domain = did.trim_start_matches("did:web:").replace(':', "/");
         let url = format!("https://{domain}/.well-known/did.json");
+
+        // SSRF protection: resolve hostname and reject private IPs
+        let host = domain.split('/').next().unwrap_or(&domain);
+        reject_private_host(host).await?;
+
         let doc: DidDocument = reqwest::get(&url).await?.json().await?;
         return Ok(doc);
     }
     Err(anyhow::anyhow!("Unsupported DID method"))
+}
+
+/// SSRF protection: resolve a hostname and reject private/loopback IPs.
+async fn reject_private_host(host: &str) -> Result<(), anyhow::Error> {
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".localhost")
+    {
+        anyhow::bail!("SSRF blocked: private hostname {host}");
+    }
+
+    // If the host is an IP literal, check directly
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_ip(&ip) {
+            anyhow::bail!("SSRF blocked: private IP {ip}");
+        }
+        return Ok(());
+    }
+
+    let addrs: Vec<std::net::SocketAddr> =
+        tokio::net::lookup_host(format!("{host}:443")).await?.collect();
+    for addr in &addrs {
+        if is_private_ip(&addr.ip()) {
+            anyhow::bail!("SSRF blocked: {} resolves to private IP {}", host, addr.ip());
+        }
+    }
+    Ok(())
+}
+
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGNAT
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
+        }
+    }
 }
 
 fn pds_endpoint(doc: &DidDocument) -> Option<String> {
@@ -292,7 +346,16 @@ async fn main() {
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
         .route("/session", post(session))
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([
+                    "https://irc.freeq.at".parse().unwrap(),
+                    "http://localhost:5173".parse().unwrap(),
+                    "http://127.0.0.1:5173".parse().unwrap(),
+                ]))
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(AllowHeaders::any()),
+        )
         .with_state(state);
 
     let addr = std::env::var("BROKER_ADDR").unwrap_or_else(|_| {
@@ -786,14 +849,29 @@ async fn auth_callback(
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&result).unwrap_or_default());
     let redirect = format!("{return_to}#oauth={payload}");
-    tracing::info!(redirect = %redirect, "OAuth callback redirecting to app");
+    tracing::info!(redirect_base = %return_to, "OAuth callback redirecting to app");
     Ok(Redirect::temporary(&redirect).into_response())
 }
 
+const ALLOWED_ORIGINS: &[&str] = &[
+    "https://irc.freeq.at",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+];
+
 async fn session(
     State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
     Json(req): Json<BrokerSessionRequest>,
 ) -> Result<Json<BrokerSessionResponse>, (StatusCode, String)> {
+    // M-13: CSRF protection — reject requests from disallowed origins
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if !ALLOWED_ORIGINS.contains(&origin) {
+            tracing::warn!(origin = %origin, "Rejected /session request from disallowed origin");
+            return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
+        }
+    }
+
     let record = get_session(&state, &req.broker_token)
         .await
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid broker token".to_string()))?;

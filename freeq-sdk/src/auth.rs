@@ -27,6 +27,11 @@ pub struct Challenge {
 /// - `method` = `"pds-session"`: `signature` is a PDS access JWT (Bearer token, no DPoP).
 /// - `method` = `"pds-oauth"`: `signature` is a DPoP-bound access token,
 ///   `dpop_proof` is a DPoP proof for the PDS getSession endpoint.
+///
+/// For PDS methods, `challenge_nonce` **must** contain the nonce from the
+/// server's challenge.  This binds the PDS-verified session to the specific
+/// challenge issued for this connection, preventing token replay across
+/// different servers or sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChallengeResponse {
     pub did: String,
@@ -37,6 +42,11 @@ pub struct ChallengeResponse {
     pub pds_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_proof: Option<String>,
+    /// Echo of the server's challenge nonce.  Required for `pds-session` and
+    /// `pds-oauth` methods so the server can verify the response is bound to
+    /// the challenge it issued (the PDS itself has no knowledge of our nonce).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub challenge_nonce: Option<String>,
 }
 
 /// Decode a base64url-encoded challenge from the server.
@@ -94,6 +104,7 @@ impl ChallengeSigner for KeySigner {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None, // Not needed: crypto method signs the full challenge
         })
     }
 }
@@ -209,8 +220,14 @@ impl ChallengeSigner for PdsSessionSigner {
         *self.dpop_nonce.write().unwrap() = Some(nonce.to_string());
     }
 
-    fn respond(&self, _challenge_bytes: &[u8]) -> anyhow::Result<ChallengeResponse> {
+    fn respond(&self, challenge_bytes: &[u8]) -> anyhow::Result<ChallengeResponse> {
         let access_token = self.access_token.read().unwrap().clone();
+
+        // Extract the nonce from the challenge so we can echo it back,
+        // binding this response to the specific challenge the server issued.
+        let challenge_nonce = serde_json::from_slice::<Challenge>(challenge_bytes)
+            .ok()
+            .map(|c| c.nonce);
 
         if let Some(ref dpop_key) = self.dpop_key {
             // OAuth mode: create a DPoP proof targeting the PDS getSession endpoint.
@@ -232,6 +249,7 @@ impl ChallengeSigner for PdsSessionSigner {
                 method: Some("pds-oauth".to_string()),
                 pds_url: Some(self.pds_url.clone()),
                 dpop_proof: Some(dpop_proof),
+                challenge_nonce,
             })
         } else {
             // App-password mode: plain Bearer token
@@ -241,29 +259,28 @@ impl ChallengeSigner for PdsSessionSigner {
                 method: Some("pds-session".to_string()),
                 pds_url: Some(self.pds_url.clone()),
                 dpop_proof: None,
+                challenge_nonce,
             })
         }
     }
 }
 
-/// A stub signer for development/testing.
+/// A stub signer for testing only. Returns an error in its respond() method
+/// to ensure it can never be used to bypass authentication.
+/// Only available in test builds.
+#[cfg(test)]
 pub struct StubSigner {
     pub did: String,
 }
 
+#[cfg(test)]
 impl ChallengeSigner for StubSigner {
     fn did(&self) -> &str {
         &self.did
     }
 
-    fn respond(&self, challenge_bytes: &[u8]) -> anyhow::Result<ChallengeResponse> {
-        Ok(ChallengeResponse {
-            did: self.did.clone(),
-            signature: URL_SAFE_NO_PAD.encode(challenge_bytes),
-            method: None,
-            pds_url: None,
-            dpop_proof: None,
-        })
+    fn respond(&self, _challenge_bytes: &[u8]) -> anyhow::Result<ChallengeResponse> {
+        anyhow::bail!("StubSigner cannot produce real signatures; use KeySigner or PdsSessionSigner")
     }
 }
 
@@ -296,10 +313,17 @@ mod tests {
             "https://pds.example.com".to_string(),
         );
 
-        let response = signer.respond(b"challenge").unwrap();
+        let challenge = Challenge {
+            session_id: "sess-1".to_string(),
+            nonce: "test-nonce-abc".to_string(),
+            timestamp: 1000,
+        };
+        let challenge_bytes = serde_json::to_vec(&challenge).unwrap();
+        let response = signer.respond(&challenge_bytes).unwrap();
         assert_eq!(response.method.as_deref(), Some("pds-session"));
         assert!(response.dpop_proof.is_none());
         assert_eq!(response.signature, "jwt-token-here");
+        assert_eq!(response.challenge_nonce.as_deref(), Some("test-nonce-abc"));
     }
 
     #[test]
@@ -313,10 +337,17 @@ mod tests {
             Some("test-nonce".to_string()),
         );
 
-        let response = signer.respond(b"challenge").unwrap();
+        let challenge = Challenge {
+            session_id: "sess-2".to_string(),
+            nonce: "test-nonce-def".to_string(),
+            timestamp: 2000,
+        };
+        let challenge_bytes = serde_json::to_vec(&challenge).unwrap();
+        let response = signer.respond(&challenge_bytes).unwrap();
         assert_eq!(response.method.as_deref(), Some("pds-oauth"));
         assert!(response.dpop_proof.is_some());
         assert_eq!(response.pds_url.as_deref(), Some("https://pds.example.com"));
+        assert_eq!(response.challenge_nonce.as_deref(), Some("test-nonce-def"));
     }
 
     #[test]
@@ -327,6 +358,7 @@ mod tests {
             method: None,
             pds_url: None,
             dpop_proof: None,
+            challenge_nonce: None,
         };
         let encoded = encode_response(&resp);
         let bytes = URL_SAFE_NO_PAD.decode(&encoded).unwrap();
@@ -344,6 +376,7 @@ mod tests {
             method: Some("pds-oauth".to_string()),
             pds_url: Some("https://pds.example.com".to_string()),
             dpop_proof: Some("dpop.proof.jwt".to_string()),
+            challenge_nonce: Some("server-nonce-xyz".to_string()),
         };
         let encoded = encode_response(&resp);
         let bytes = URL_SAFE_NO_PAD.decode(&encoded).unwrap();

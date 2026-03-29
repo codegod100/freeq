@@ -231,7 +231,11 @@ pub fn initiate(
     our_identity: &IdentityKeyPair,
     our_did: &str,
     their_bundle: &PreKeyBundle,
+    their_did_verify_key: &ed25519_dalek::VerifyingKey,
 ) -> Result<InitiatorResult, X3dhError> {
+    // Verify the signed pre-key signature before using the bundle
+    their_bundle.verify_spk_signature(their_did_verify_key)?;
+
     let ik_b = their_bundle.identity_public()?;
     let spk_b = their_bundle.signed_pre_key_public()?;
 
@@ -241,8 +245,17 @@ pub fn initiate(
 
     // X3DH: three DH computations
     let dh1 = our_identity.secret.diffie_hellman(&spk_b); // DH(IK_A, SPK_B)
+    if dh1.as_bytes().iter().all(|&b| b == 0) {
+        return Err(X3dhError::SmallSubgroupAttack);
+    }
     let dh2 = ek_secret.diffie_hellman(&ik_b); // DH(EK_A, IK_B)
+    if dh2.as_bytes().iter().all(|&b| b == 0) {
+        return Err(X3dhError::SmallSubgroupAttack);
+    }
     let dh3 = ek_secret.diffie_hellman(&spk_b); // DH(EK_A, SPK_B)
+    if dh3.as_bytes().iter().all(|&b| b == 0) {
+        return Err(X3dhError::SmallSubgroupAttack);
+    }
 
     // Concatenate and derive shared secret
     let mut ikm = Vec::with_capacity(96);
@@ -298,8 +311,17 @@ pub fn respond(
 
     // X3DH: three DH computations (Bob's side, reversed)
     let dh1 = our_spk.secret.diffie_hellman(&ik_a); // DH(SPK_B, IK_A)
+    if dh1.as_bytes().iter().all(|&b| b == 0) {
+        return Err(X3dhError::SmallSubgroupAttack);
+    }
     let dh2 = our_identity.secret.diffie_hellman(&ek_a); // DH(IK_B, EK_A)
+    if dh2.as_bytes().iter().all(|&b| b == 0) {
+        return Err(X3dhError::SmallSubgroupAttack);
+    }
     let dh3 = our_spk.secret.diffie_hellman(&ek_a); // DH(SPK_B, EK_A)
+    if dh3.as_bytes().iter().all(|&b| b == 0) {
+        return Err(X3dhError::SmallSubgroupAttack);
+    }
 
     let mut ikm = Vec::with_capacity(96);
     ikm.extend_from_slice(dh1.as_bytes());
@@ -333,6 +355,8 @@ pub enum X3dhError {
     PreKeyMismatch,
     #[error("KDF failed")]
     KdfFailed,
+    #[error("DH computation produced zero shared secret (possible small subgroup attack)")]
+    SmallSubgroupAttack,
 }
 
 #[cfg(test)]
@@ -353,7 +377,7 @@ mod tests {
 
         // Alice initiates
         let alice_identity = IdentityKeyPair::generate();
-        let result = initiate(&alice_identity, "did:plc:alice", &bob_bundle).unwrap();
+        let result = initiate(&alice_identity, "did:plc:alice", &bob_bundle, &bob_verify_key).unwrap();
 
         // Bob responds
         let (bob_shared, bob_ratchet_secret) =
