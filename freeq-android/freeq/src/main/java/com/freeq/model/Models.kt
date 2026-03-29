@@ -51,7 +51,7 @@ class ChannelState(val name: String) {
     val members = mutableStateListOf<MemberInfo>()
     var topic = mutableStateOf("")
     val typingUsers = mutableStateMapOf<String, Date>()
-    var lastActivityTime: Long = System.currentTimeMillis()
+    var lastActivityTime = mutableStateOf(0L)
     var hasMoreHistory = mutableStateOf(true)
 
     private val messageIds = mutableSetOf<String>()
@@ -75,8 +75,9 @@ class ChannelState(val name: String) {
         } else {
             messages.add(msg)
         }
-        if (msg.timestamp.time > lastActivityTime) {
-            lastActivityTime = msg.timestamp.time
+        // Only real messages (not system join/part) update lastActivityTime
+        if (msg.from.isNotEmpty() && msg.timestamp.time > lastActivityTime.value) {
+            lastActivityTime.value = msg.timestamp.time
         }
     }
 
@@ -595,7 +596,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
         if (nick.isEmpty()) return ChannelState("")
         dmBuffers.firstOrNull { it.name.equals(nick, ignoreCase = true) }?.let { return it }
         val dm = ChannelState(nick)
-        dm.lastActivityTime = 0L // Don't appear as recent until a message arrives
+        dm.lastActivityTime.value = 0L // Don't appear as recent until a message arrives
         dmBuffers.add(dm)
         requestHistory(nick)
         return dm
@@ -719,7 +720,6 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
             is FreeqEvent.Joined -> {
                 val ch = state.getOrCreateChannel(event.channel)
-                ch.lastActivityTime = System.currentTimeMillis()
                 if (event.nick.equals(state.nick.value, ignoreCase = true)) {
                     // We joined — clear stale members before NAMES arrives
                     ch.members.clear()
@@ -899,7 +899,6 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
             is FreeqEvent.TopicChanged -> {
                 val ch = state.getOrCreateChannel(event.channel)
                 ch.topic.value = event.topic.text
-                ch.lastActivityTime = System.currentTimeMillis()
             }
 
             is FreeqEvent.ModeChanged -> {
