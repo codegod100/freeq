@@ -63,11 +63,35 @@
             mainProgram = "freeq-textual";
           };
         };
+
+        freeq-textual-dev = pkgs.writeShellApplication {
+          name = "freeq-textual-dev";
+          runtimeInputs = [ freeq-textual ];
+          text = ''
+            exec freeq-textual "$@"
+          '';
+        };
+
+        freeq-textual-editable = pkgs.writeShellApplication {
+          name = "freeq-textual-editable";
+          runtimeInputs = [
+            pkgs.maturin
+            python
+          ];
+          text = ''
+            repo_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+            cd "$repo_root"
+            maturin develop --manifest-path freeq-py/Cargo.toml
+            exec python3 -m freeq_textual "$@"
+          '';
+        };
       in
       {
         packages = {
           default = freeq-textual;
           freeq-textual = freeq-textual;
+          freeq-textual-dev = freeq-textual-dev;
+          freeq-textual-editable = freeq-textual-editable;
         };
 
         apps = {
@@ -79,6 +103,10 @@
             type = "app";
             program = "${freeq-textual}/bin/freeq-textual";
           };
+          dev-textual = {
+            type = "app";
+            program = "${freeq-textual-dev}/bin/freeq-textual-dev";
+          };
         };
 
         devShells.default = pkgs.mkShell {
@@ -89,10 +117,12 @@
             pkgs.maturin
             pkgs.pkg-config
             pkgs.openssl
+            pkgs.watchexec
             python
             python.pkgs.venvShellHook
             python.pkgs.pip
             python.pkgs.textual
+            python.pkgs."textual-dev"
           ];
 
           env = {
@@ -104,7 +134,7 @@
 
           postShellHook = ''
             echo "Virtualenv ready at $VIRTUAL_ENV"
-            echo "Run: maturin develop --manifest-path freeq-py/Cargo.toml"
+            echo "Run: just dev-textual"
           '';
         };
       }

@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-from pathlib import Path
 
-from .app import FreeqTextualApp
-from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
+from .bootstrap import build_app
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,42 +29,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
-    session_path = Path(args.session_path).expanduser() if args.session_path else Path.home() / ".config" / "freeq" / "freeq-textual-session.json"
-    config_path = Path(args.config_path).expanduser() if args.config_path else Path.home() / ".config" / "freeq" / "freeq-textual-config.json"
-    cached_auth = None
-    ui_config = None
-    if session_path.exists():
-        try:
-            cached_auth = json.loads(session_path.read_text())
-        except Exception:  # noqa: BLE001
-            cached_auth = None
-    if config_path.exists():
-        try:
-            ui_config = json.loads(config_path.read_text())
-        except Exception:  # noqa: BLE001
-            ui_config = None
-    client = FreeqClient(
-        server_addr=args.server,
+    app = build_app(
+        server=args.server,
         nick=args.nick,
+        channel=args.channel,
+        auth_handle=args.auth_handle,
+        broker_url=args.broker_url,
+        session_path=args.session_path,
+        config_path=args.config_path,
+        freeq_server_url=args.freeq_server_url,
+        broker_shared_secret=args.broker_shared_secret,
+        web_token=args.web_token,
         tls=args.tls,
         tls_insecure=args.tls_insecure,
-        web_token=args.web_token,
-    )
-    auth_broker = BrokerAuthFlow(args.broker_url) if args.broker_url else None
-    if args.broker_shared_secret:
-        auth_broker = FreeqAuthBroker(
-            args.broker_shared_secret,
-            freeq_server_url=args.freeq_server_url,
-        )
-    app = FreeqTextualApp(
-        client=client,
-        initial_channel=args.channel,
-        auth_broker=auth_broker,
-        auth_handle=args.auth_handle,
-        session_path=session_path,
-        cached_auth=cached_auth,
-        config_path=config_path,
-        ui_config=ui_config,
     )
     app.run()
 
