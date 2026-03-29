@@ -525,6 +525,8 @@ pub struct SharedState {
     pub ghost_sessions: Mutex<HashMap<String, GhostSession>>,
     /// Spawned (virtual) agents: child_did → SpawnedAgent.
     pub spawned_agents: Mutex<HashMap<String, SpawnedAgent>>,
+    /// Per-IP rate limiter for expensive REST endpoints (OG preview, blob proxy, upload).
+    pub rest_rate_limiter: crate::web::IpRateLimiter,
 }
 
 /// A spawned virtual agent (child of a real agent session).
@@ -977,6 +979,8 @@ impl Server {
             upload_tokens: Mutex::new(HashMap::new()),
             ghost_sessions: Mutex::new(HashMap::new()),
             spawned_agents: Mutex::new(HashMap::new()),
+            // 30 requests per 60-second window per IP for expensive REST endpoints
+            rest_rate_limiter: crate::web::IpRateLimiter::new(30, 60),
         }))
     }
 

@@ -2213,10 +2213,14 @@ fn mobile_nick_from_handle(handle: &str) -> String {
 /// Server proxies the upload to the user's PDS using their stored OAuth credentials.
 /// Returns JSON: `{ "url": "...", "content_type": "...", "size": N }`.
 async fn api_upload(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     State(state): State<Arc<SharedState>>,
     headers: axum::http::HeaderMap,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !state.rest_rate_limiter.check(addr.ip()) {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string()));
+    }
     let mut file_data: Option<Vec<u8>> = None;
     let mut content_type = String::from("application/octet-stream");
     let mut did = String::new();
@@ -2473,9 +2477,14 @@ struct OgQuery {
 /// and sandbox CSP headers that prevent browser/AVPlayer playback.
 /// Supports Range requests for video seeking / AVPlayer compatibility.
 async fn api_blob_proxy(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<Arc<SharedState>>,
     headers: axum::http::HeaderMap,
     Query(q): Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
+    if !state.rest_rate_limiter.check(addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+    }
     let Some(url) = q.get("url") else {
         return (StatusCode::BAD_REQUEST, "missing url parameter").into_response();
     };
@@ -2580,7 +2589,18 @@ async fn api_blob_proxy(
 
 /// Fetch OpenGraph metadata from a URL and return as JSON.
 /// Avoids clients leaking browsing data to third-party proxy services.
-async fn api_og_preview(Query(q): Query<OgQuery>) -> impl IntoResponse {
+async fn api_og_preview(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<Arc<SharedState>>,
+    Query(q): Query<OgQuery>,
+) -> impl IntoResponse {
+    if !state.rest_rate_limiter.check(addr.ip()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "Rate limit exceeded"})),
+        )
+            .into_response();
+    }
     // Validate URL
     let url = match url::Url::parse(&q.url) {
         Ok(u) if u.scheme() == "http" || u.scheme() == "https" => u,
@@ -2778,6 +2798,47 @@ async fn api_upload_keys(
             axum::http::StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({ "error": "Missing 'did' or 'bundle'" })),
         ),
+    }
+}
+
+// ── Per-IP rate limiting ──────────────────────────────────────────────
+
+/// Simple per-IP sliding-window rate limiter.
+/// Tracks (window_start_secs, request_count) per IP. Resets each window.
+pub struct IpRateLimiter {
+    max_requests: u32,
+    window_secs: u64,
+    state: parking_lot::Mutex<std::collections::HashMap<std::net::IpAddr, (u64, u32)>>,
+}
+
+impl IpRateLimiter {
+    pub fn new(max_requests: u32, window_secs: u64) -> Self {
+        Self {
+            max_requests,
+            window_secs,
+            state: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Returns true if the request is allowed, false if rate-limited.
+    pub fn check(&self, ip: std::net::IpAddr) -> bool {
+        let now = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut map = self.state.lock();
+        let entry = map.entry(ip).or_insert((now, 0));
+        if now - entry.0 >= self.window_secs {
+            *entry = (now, 1);
+            true
+        } else {
+            entry.1 += 1;
+            entry.1 <= self.max_requests
+        }
+    }
+
+    pub fn window_secs(&self) -> u64 {
+        self.window_secs
     }
 }
 
