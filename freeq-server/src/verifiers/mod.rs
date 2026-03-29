@@ -50,6 +50,7 @@ pub struct PendingVerification {
 /// Load or generate a persistent signing key from the given path.
 fn load_or_generate_signing_key(path: &std::path::Path) -> SigningKey {
     if path.exists() {
+        crate::secrets::tighten_permissions(path);
         if let Ok(data) = std::fs::read(path)
             && let Ok(bytes) = <[u8; 32]>::try_from(data.as_slice())
         {
@@ -63,7 +64,7 @@ fn load_or_generate_signing_key(path: &std::path::Path) -> SigningKey {
         tracing::warn!("Corrupt signing key at {}, regenerating", path.display());
     }
     let key = SigningKey::generate(&mut rand::rngs::OsRng);
-    if let Err(e) = std::fs::write(path, key.to_bytes()) {
+    if let Err(e) = crate::secrets::write_secret(path, &key.to_bytes()) {
         tracing::error!("Failed to persist signing key to {}: {}", path.display(), e);
     } else {
         tracing::info!(

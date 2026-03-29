@@ -729,6 +729,7 @@ fn derive_key_from_signing(signing_key: &ed25519_dalek::SigningKey) -> [u8; 32] 
 fn load_msg_signing_key(data_dir: &str) -> ed25519_dalek::SigningKey {
     let key_path = std::path::Path::new(data_dir).join("msg-signing-key.secret");
     if key_path.exists() {
+        crate::secrets::tighten_permissions(&key_path);
         if let Ok(data) = std::fs::read(&key_path)
             && let Ok(bytes) = <[u8; 32]>::try_from(data.as_slice())
         {
@@ -741,7 +742,7 @@ fn load_msg_signing_key(data_dir: &str) -> ed25519_dalek::SigningKey {
         );
     }
     let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-    if let Err(e) = std::fs::write(&key_path, key.to_bytes()) {
+    if let Err(e) = crate::secrets::write_secret(&key_path, &key.to_bytes()) {
         tracing::error!("Failed to persist msg signing key: {e}");
     } else {
         tracing::info!("Generated message signing key at {}", key_path.display());
@@ -778,6 +779,7 @@ impl Server {
             let key_path = std::path::Path::new(self.config.data_dir.as_deref().unwrap_or("."))
                 .join("db-encryption-key.secret");
             if key_path.exists() {
+                crate::secrets::tighten_permissions(&key_path);
                 if let Ok(data) = std::fs::read(&key_path) {
                     if let Ok(bytes) = <[u8; 32]>::try_from(data.as_slice()) {
                         tracing::info!("Loaded DB encryption key from {}", key_path.display());
@@ -794,7 +796,7 @@ impl Server {
                 // First run with separate key: derive from signing key for backward compat
                 // with existing encrypted messages, then persist for future independence.
                 let key = derive_key_from_signing(&msg_signing_key);
-                if let Err(e) = std::fs::write(&key_path, key) {
+                if let Err(e) = crate::secrets::write_secret(&key_path, &key) {
                     tracing::error!("Failed to persist DB encryption key: {e}");
                 } else {
                     tracing::info!("Generated DB encryption key at {}", key_path.display());
