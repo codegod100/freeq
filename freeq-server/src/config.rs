@@ -179,7 +179,7 @@ impl ServerConfig {
     }
 
     /// Resolve the data directory for state files.
-    /// Priority: --data-dir > parent of --db-path > current directory.
+    /// Priority: --data-dir > parent of --db-path > platform state dir > CWD (with warning).
     pub fn data_dir(&self) -> std::path::PathBuf {
         if let Some(ref dir) = self.data_dir {
             std::path::PathBuf::from(dir)
@@ -188,8 +188,45 @@ impl ServerConfig {
                 .parent()
                 .map(|p| p.to_path_buf())
                 .unwrap_or_else(|| std::path::PathBuf::from("."))
+        } else if let Some(state_dir) = Self::platform_state_dir() {
+            let dir = state_dir.join("freeq");
+            if !dir.exists() {
+                let _ = std::fs::create_dir_all(&dir);
+            }
+            dir
         } else {
+            tracing::warn!(
+                "No --data-dir set and no platform state directory found; \
+                 falling back to current working directory. \
+                 Secret keys will be written to CWD — use --data-dir in production."
+            );
             std::path::PathBuf::from(".")
         }
+    }
+
+    /// Returns the platform-appropriate state directory, if available.
+    /// Linux: $XDG_STATE_HOME or ~/.local/state
+    /// macOS: ~/Library/Application Support
+    fn platform_state_dir() -> Option<std::path::PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(home) = std::env::var_os("HOME") {
+                return Some(
+                    std::path::PathBuf::from(home).join("Library/Application Support"),
+                );
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
+                if !xdg.is_empty() {
+                    return Some(std::path::PathBuf::from(xdg));
+                }
+            }
+            if let Some(home) = std::env::var_os("HOME") {
+                return Some(std::path::PathBuf::from(home).join(".local/state"));
+            }
+        }
+        None
     }
 }
