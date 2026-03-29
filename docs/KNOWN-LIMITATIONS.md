@@ -26,8 +26,6 @@
 
 ## S2S Federation
 
-- **Invite sync**: Invites are local-only. A user invited on server A can
-  only join on server A. Relay of invite tokens to peers is not implemented.
 - **Channel key removal**: `-k` cannot propagate via SyncResponse (additive
   only). Needs a protocol change or CRDT-backed key state.
 - **Outgoing peer enforcement**: `--s2s-allowed-peers` only checks incoming
@@ -100,7 +98,7 @@ The following were previously listed as limitations and have been fixed:
 - ~~No hostname cloaking~~ → `freeq/plc/xxxxxxxx` for DID users, `freeq/guest` for guests
 - ~~No S2S ban enforcement~~ → Bans sync via S2S, enforced on join (nick + DID)
 - ~~No S2S authorization~~ → Mode/kick/topic/join all verified server-side
-- ~~No S2S rate limiting~~ → 100 events/sec per peer
+- ~~No S2S invite sync~~ → Invites sync via S2S, consumed on join
 - ~~No CHATHISTORY~~ → IRCv3 CHATHISTORY with batch support
 - ~~No account-notify~~ → IRCv3 account-notify + extended-join
 - ~~Open federation by default~~ → `--s2s-allowed-peers` for allowlist mode

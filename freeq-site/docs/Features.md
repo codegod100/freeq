@@ -86,13 +86,13 @@ This document catalogs every feature implemented in Freeq, organized by category
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| OPER (server operator) | ❌ | Not implemented |
+| OPER (server operator) | ✅ | `OPER <name> <password>` + auto-OPER via `--oper-dids` |
 | WALLOPS | ❌ | Not implemented |
 | LINKS | ❌ | Not implemented |
 | STATS | ❌ | Not implemented |
 | Channel modes: `+s` / `+p` (secret/private) | ❌ | Not implemented |
 | Channel modes: `+l` (user limit) | ❌ | Not implemented |
-| Hostname cloaking | ❌ | |
+| Hostname cloaking | ✅ | 🆕 `freeq/plc/xxxxxxxx` for DID users, `freeq/guest` for guests |
 | Reverse DNS lookup | ❌ | |
 | K-line / G-line (server bans) | ❌ | |
 
@@ -121,7 +121,8 @@ This document catalogs every feature implemented in Freeq, organized by category
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| `away-notify` | ❌ | |
+| `away-notify` | ✅ | Broadcasts AWAY changes to shared channel members |
+| `msgid` (message IDs) | ✅ | 🆕 ULID on every PRIVMSG/NOTICE, stored in DB, included in history replay |
 | `account-tag` | ❌ | |
 | `labeled-response` | ❌ | |
 | `invite-notify` | ❌ | |
@@ -129,7 +130,6 @@ This document catalogs every feature implemented in Freeq, organized by category
 | `cap-notify` | ❌ | |
 | `setname` | ❌ | |
 | `standard-replies` | ❌ | |
-| `msgid` (message IDs) | ❌ | |
 
 ---
 
@@ -298,6 +298,10 @@ This document catalogs every feature implemented in Freeq, organized by category
 | DID-based ops sync | ✅ | Union merge |
 | Founder sync (first-write-wins) | ✅ | No timestamp dependency |
 | ChannelCreated propagation | ✅ | Founder + DID ops + created_at |
+| Ban sync (S2S) | ✅ | 🆕 S2sMessage::Ban variant, authorized set/remove, SyncResponse carries bans |
+| Invite sync (S2S) | ✅ | 🆕 S2sMessage::Invite variant, relays invite tokens to peers |
+| S2S Join enforcement | ✅ | 🆕 Incoming S2S Joins check bans (nick + DID) and +i (invite only) |
+| Policy sync (S2S) | ✅ | 🆕 S2sMessage::PolicySync for channel policy documents |
 
 ### CRDT State Layer (Automerge)
 
@@ -318,8 +322,6 @@ This document catalogs every feature implemented in Freeq, organized by category
 
 | Limitation | Notes |
 |------------|-------|
-| Bans not propagated cross-server | Only local bans enforced |
-| S2S Join doesn't check bans or +i | Remote server should enforce |
 | ChannelCreated race in narrow window | Both servers may create simultaneously |
 | Rogue server can add `did_ops` | Authorization-on-write not implemented |
 
@@ -360,10 +362,30 @@ This document catalogs every feature implemented in Freeq, organized by category
 | `GET /api/v1/channels` | ✅ | List all channels |
 | `GET /api/v1/channels/{name}/history` | ✅ | Paginated, `?limit=N&before=T` |
 | `GET /api/v1/channels/{name}/topic` | ✅ | |
+| `GET /api/v1/channels/{name}/pins` | ✅ | 🆕 Pinned messages for a channel |
+| `GET /api/v1/channels/{name}/events` | ✅ | 🆕 SSE event stream |
+| `GET /api/v1/channels/{name}/audit` | ✅ | 🆕 Channel audit log |
+| `GET /api/v1/channels/{name}/agent-capabilities` | ✅ | 🆕 Agent capabilities |
+| `GET /api/v1/channels/{name}/approvals` | ✅ | 🆕 Pending approvals |
+| `GET /api/v1/channels/{name}/budget` | ✅ | 🆕 Channel budget info |
+| `GET /api/v1/channels/{name}/spend` | ✅ | 🆕 Channel spend info |
 | `GET /api/v1/users/{nick}` | ✅ | Online status, DID, handle |
 | `GET /api/v1/users/{nick}/whois` | ✅ | + channels |
-| CORS support | ✅ | Permissive by default |
-| Read-only (no write endpoints) | ✅ | By design |
+| `GET /api/v1/signing-key` | ✅ | 🆕 Server ed25519 public key |
+| `GET /api/v1/signing-keys/{did}` | ✅ | 🆕 Per-DID client signing key |
+| `GET /api/v1/verify/{msgid}` | ✅ | 🆕 Verify message signature |
+| `GET /api/v1/actors/{did}` | ✅ | 🆕 Actor identity info |
+| `GET /api/v1/keys/{did}` | ✅ | 🆕 E2EE public keys for a DID |
+| `POST /api/v1/keys` | ✅ | 🆕 Upload E2EE public keys |
+| `POST /api/v1/upload` | ✅ | 🆕 Upload media to PDS (auth required) |
+| `GET /api/v1/blob` | ✅ | 🆕 PDS blob proxy with Range support |
+| `GET /api/v1/og` | ✅ | 🆕 OpenGraph link preview |
+| `GET /api/v1/tasks/{task_id}` | ✅ | 🆕 Agent task status |
+| `GET /api/v1/agents/manifests` | ✅ | 🆕 List agent manifests |
+| `GET /api/v1/agents/manifests/{did}` | ✅ | 🆕 Get agent manifest |
+| `GET /api/v1/agents/spawned` | ✅ | 🆕 List spawned agents |
+| CORS support | ✅ | Configurable allowed origins |
+| Security headers | ✅ | CSP, HSTS, X-Frame-Options, etc. |
 
 ---
 
@@ -382,6 +404,45 @@ This document catalogs every feature implemented in Freeq, organized by category
 | CDN URL generation (bsky.app) | ✅ | |
 | DPoP nonce retry for PDS uploads | ✅ | Up to 3 attempts |
 | Tag escaping/unescaping (IRCv3 spec) | ✅ | `\:`, `\s`, `\\`, `\r`, `\n` |
+
+---
+
+## 11.5. Message Signing 🆕
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Client-side ed25519 session keys | ✅ | Per-session keypair, registered via `MSGSIG` command |
+| Client message signing (`+freeq.at/sig`) | ✅ | Non-repudiation — client signs every PRIVMSG |
+| Server signature verification | ✅ | Verifies client sigs, relays unchanged |
+| Server fallback signing | ✅ | Server signs if client doesn't support signing |
+| Public key endpoint (server) | ✅ | `GET /api/v1/signing-key` |
+| Public key endpoint (per-DID) | ✅ | `GET /api/v1/signing-keys/{did}` |
+| Signature verification endpoint | ✅ | `GET /api/v1/verify/{msgid}` |
+| S2S signature preservation | ✅ | `msgid` + `sig` carried across federation |
+
+---
+
+## 11.6. Message Editing & Deletion 🆕
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Message editing (`+draft/edit=<msgid>`) | ✅ | Server verifies authorship, stores with `replaces_msgid` |
+| Message deletion (`+draft/delete=<msgid>`) | ✅ | Soft delete via TAGMSG (`deleted_at` timestamp) |
+| Author or ops can delete | ✅ | Permission-checked |
+| Edits update in-memory history | ✅ | Broadcasts to channel |
+| Deleted messages excluded from history | ✅ | Excluded from CHATHISTORY and JOIN replay |
+
+---
+
+## 11.7. Pinned Messages 🆕
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| `PIN <channel> <msgid>` command | ✅ | Ops can pin messages |
+| `UNPIN <channel> <msgid>` command | ✅ | Ops can unpin messages |
+| `PINS <channel>` command | ✅ | List pinned messages |
+| REST API (`GET /api/v1/channels/{name}/pins`) | ✅ | Web client support |
+| Duplicate pin prevention | ✅ | |
 
 ---
 

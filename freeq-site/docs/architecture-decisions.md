@@ -198,7 +198,7 @@ This is why the moderation log is better than a simple ban set — you can retro
 
 ---
 
-## 3. Why This Matters (BlueYard Thesis Alignment)
+## 3. Why This Matters
 
 This project sits at the intersection of:
 
