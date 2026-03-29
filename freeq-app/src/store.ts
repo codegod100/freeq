@@ -363,8 +363,13 @@ export const useStore = create<Store>((set, get) => ({
   removeChannel: (name) => set((s) => {
     const channels = new Map(s.channels);
     channels.delete(name.toLowerCase());
+    // Clean up any in-flight batches targeting this channel
+    const batches = new Map(s.batches);
+    for (const [id, batch] of batches) {
+      if (batch.target.toLowerCase() === name.toLowerCase()) batches.delete(id);
+    }
     const activeChannel = s.activeChannel.toLowerCase() === name.toLowerCase() ? 'server' : s.activeChannel;
-    return { channels, activeChannel };
+    return { channels, batches, activeChannel };
   }),
 
   setActiveChannel: (name) => set((s) => {
@@ -407,6 +412,7 @@ export const useStore = create<Store>((set, get) => ({
     return { channels };
   }),
   addMember: (channel, member) => set((s) => {
+    if (!member.nick || !member.nick.trim()) return {}; // Reject empty/whitespace nicks
     const channels = new Map(s.channels);
     const ch = getOrCreateChannel(channels, channel);
     const existing = ch.members.get(member.nick.toLowerCase());
@@ -456,6 +462,7 @@ export const useStore = create<Store>((set, get) => ({
   }),
 
   renameUser: (oldNick, newNick) => set((s) => {
+    if (!oldNick.trim() || !newNick.trim()) return {}; // Reject empty nicks
     const channels = new Map(s.channels);
     for (const [key, ch] of channels) {
       const member = ch.members.get(oldNick.toLowerCase());
@@ -513,15 +520,15 @@ export const useStore = create<Store>((set, get) => ({
     const adding = mode.startsWith('+');
     const modeChar = mode.replace(/^[+-]/, '');
 
-    // User modes (+o, +h, +v)
+    // User modes (+o, +h, +v) — only apply if member exists (don't create phantoms)
     if ((modeChar === 'o' || modeChar === 'h' || modeChar === 'v') && arg) {
-      const member = ch.members.get(arg.toLowerCase()) ?? {
-        nick: arg, isOp: false, isHalfop: false, isVoiced: false,
-      };
-      if (modeChar === 'o') member.isOp = adding;
-      if (modeChar === 'h') member.isHalfop = adding;
-      if (modeChar === 'v') member.isVoiced = adding;
-      ch.members.set(arg.toLowerCase(), { ...member });
+      const member = ch.members.get(arg.toLowerCase());
+      if (member) {
+        if (modeChar === 'o') member.isOp = adding;
+        if (modeChar === 'h') member.isHalfop = adding;
+        if (modeChar === 'v') member.isVoiced = adding;
+        ch.members.set(arg.toLowerCase(), { ...member });
+      }
     } else {
       // Channel modes
       if (adding) ch.modes.add(modeChar);

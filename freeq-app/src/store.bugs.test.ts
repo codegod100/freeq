@@ -49,29 +49,19 @@ function ensureChannel(name: string) {
 // ═══════════════════════════════════════════════════════════════
 
 describe('handleMode phantom members', () => {
-  it('MODE +o on non-existent nick creates phantom member', () => {
+  it('MODE +o on non-existent nick does NOT create phantom member (FIXED)', () => {
     ensureChannel('#test');
     useStore.getState().handleMode('#test', '+o', 'ghost_user', 'server');
     const ch = useStore.getState().channels.get('#test')!;
-    // BUG: ghost_user should NOT be in members — they never joined
-    const ghost = ch.members.get('ghost_user');
-    if (ghost) {
-      // This is the bug — phantom member created
-      expect(ghost.nick).toBe('ghost_user');
-      expect(ghost.isOp).toBe(true);
-      // Document: phantom member has no DID, no profile, incomplete state
-      expect(ghost.did).toBeUndefined();
-    }
+    // FIXED: ghost_user should NOT be in members
+    expect(ch.members.has('ghost_user')).toBe(false);
   });
 
-  it('MODE +v on non-existent nick creates phantom member', () => {
+  it('MODE +v on non-existent nick does NOT create phantom member (FIXED)', () => {
     ensureChannel('#test');
     useStore.getState().handleMode('#test', '+v', 'phantom', 'server');
     const ch = useStore.getState().channels.get('#test')!;
-    const phantom = ch.members.get('phantom');
-    if (phantom) {
-      expect(phantom.isVoiced).toBe(true);
-    }
+    expect(ch.members.has('phantom')).toBe(false);
   });
 
   it('MODE +o on existing member does NOT create phantom', () => {
@@ -90,18 +80,14 @@ describe('handleMode phantom members', () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe('renameUser edge cases', () => {
-  it('renameUser with empty new nick creates phantom', () => {
+  it('renameUser with empty new nick is rejected (FIXED)', () => {
     ensureChannel('#test');
     useStore.getState().addMember('#test', { nick: 'alice' });
     useStore.getState().renameUser('alice', '');
     const ch = useStore.getState().channels.get('#test')!;
-    // BUG: empty nick member created
-    const empty = ch.members.get('');
-    const alice = ch.members.get('alice');
-    // Document actual behavior
-    if (empty) {
-      expect(empty.nick).toBe('');
-    }
+    // FIXED: rename rejected, alice still present
+    expect(ch.members.has('alice')).toBe(true);
+    expect(ch.members.has('')).toBe(false);
   });
 
   it('renameUser with same name (case change) works', () => {
@@ -221,24 +207,14 @@ describe('setActiveChannel edge cases', () => {
 // ═══════════════════════════════════════════════════════════════
 
 describe('removeChannel batch cleanup', () => {
-  it('removing channel with pending batch leaves orphan batch', () => {
+  it('removing channel cleans up pending batches (FIXED)', () => {
     ensureChannel('#leaving');
     useStore.getState().startBatch('b1', 'chathistory', '#leaving');
     useStore.getState().addBatchMessage('b1', mkMsg({ text: 'batch msg' }));
-    // Remove the channel while batch is pending
+    // Remove the channel — should also clean up the batch
     useStore.getState().removeChannel('#leaving');
-    // BUG: batch still exists
-    const hasBatch = useStore.getState().batches.has('b1');
-    if (hasBatch) {
-      // This is the bug — orphan batch
-      // When endBatch fires, it'll recreate the channel
-      useStore.getState().endBatch('b1');
-      const recreated = useStore.getState().channels.has('#leaving');
-      if (recreated) {
-        // BUG CONFIRMED: channel was recreated by orphan batch
-        expect(recreated).toBe(true);
-      }
-    }
+    // FIXED: batch should be cleaned up
+    expect(useStore.getState().batches.has('b1')).toBe(false);
   });
 });
 

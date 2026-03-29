@@ -609,7 +609,7 @@ async function handleLine(rawLine: string) {
 
     case 'NICK': {
       const newNick = msg.params[0];
-      if (from === nick) {
+      if (from.toLowerCase() === nick.toLowerCase()) {
         nick = newNick;
         store.setNick(nick);
       }
@@ -620,7 +620,7 @@ async function handleLine(rawLine: string) {
     case 'JOIN': {
       const channel = msg.params[0];
       const account = msg.params[1]; // extended-join
-      if (from === nick) {
+      if (from.toLowerCase() === nick.toLowerCase()) {
         store.addChannel(channel);
         store.clearMembers(channel); // Clear stale members before NAMES reply arrives
         // Only auto-switch if no saved channel preference or still on server tab
@@ -649,7 +649,7 @@ async function handleLine(rawLine: string) {
 
     case 'PART': {
       const channel = msg.params[0];
-      if (from === nick) {
+      if (from.toLowerCase() === nick.toLowerCase()) {
         store.removeChannel(channel);
         joinedChannels.delete(channel.toLowerCase());
         saveJoinedChannels();
