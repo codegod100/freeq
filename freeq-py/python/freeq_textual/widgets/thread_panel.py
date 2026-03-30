@@ -93,13 +93,14 @@ class ThreadPanelContent(Vertical):
         reply_input = self.query_one("#thread-reply", Input)
         reply_input.placeholder = f"Reply to thread ({self.thread_root[:8]}...)"
 
-        # Render messages
+        # Render messages with width wrapping
         log = self.query_one("#thread-messages", ScrollableLog)
         _dbg(f"  on_mount: lines={len(log.lines)} msgs={len(messages)}")
         log.clear()
-        formatter = self._formatter or (lambda s, t: Text(f"{s}: {t}"))
+        formatter = self._formatter or (lambda s, t, w=0: Text(f"{s}: {t}"))
+        width = max(40, log.size.width - 3)  # account for scrollbar and padding
         for msg in messages:
-            formatted = formatter(msg.sender, msg.text)
+            formatted = formatter(msg.sender, msg.text, width)
             log.write(formatted)
             log.write(Text(" "))
         _dbg(f"  after writes: lines={len(log.lines)}")
