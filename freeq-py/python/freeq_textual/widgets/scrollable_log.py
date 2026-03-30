@@ -41,6 +41,10 @@ class ScrollableLog(RichLog):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._location_lines: dict[str, int] = {}  # location -> line index
+        # Pending locations: parallel to RichLog's _deferred_renders, one per write call
+        # Each entry is the location string (or None for writes without location)
+        # This keeps locations in sync with deferred render order
+        self._pending_locations: list[str | None] = []
     
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
         """Write content, optionally tracking location for later scrolling.
@@ -53,12 +57,17 @@ class ScrollableLog(RichLog):
             scroll_end: Auto-scroll to end (passed to RichLog)
             location: Optional location identifier (e.g., msgid) to scroll to later
         """
+        # Track location for deferred renders - must add to pending even if empty
+        # to keep indices in sync with _deferred_renders
+        if not self._size_known:
+            self._pending_locations.append(location or None)
+        
         before = len(self.lines)
         result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end)
         added = len(self.lines) - before
         
-        if location:
-            # Track first line where this location appears
+        # If render was NOT deferred, track location now with correct line index
+        if location and self._size_known:
             if location not in self._location_lines:
                 self._location_lines[location] = before
         
@@ -69,6 +78,7 @@ class ScrollableLog(RichLog):
         """Clear content and location tracking."""
         super().clear()
         self._location_lines.clear()
+        self._pending_locations.clear()
     
     
     def scroll_to_location(self, location: str) -> bool:
@@ -83,10 +93,10 @@ class ScrollableLog(RichLog):
         all our write() calls get queued in _deferred_renders. This means self.lines
         is empty when we try to scroll - nothing has actually been rendered.
         
-        Solution: Before scrolling, check for deferred renders. If found:
-        1. Force _size_known=True (the widget has a size by now)
-        2. Replay all deferred writes
-        3. Now self.lines is populated and we can scroll
+        LOCATION TRACKING FIX:
+        When writes are deferred, we can't track the line index (it's always 0).
+        So we store locations in _pending_locations during deferred writes, then
+        apply them with correct line indices when processing deferred renders.
         
         Args:
             location: Location identifier (e.g., msgid)
@@ -96,15 +106,24 @@ class ScrollableLog(RichLog):
         """
         # Process any deferred renders first (happens when log hasn't been sized yet)
         if self._deferred_renders:
-            _dbg(f"scroll_to_location: processing {len(self._deferred_renders)} deferred renders")
+            _dbg(f"scroll_to_location: processing {len(self._deferred_renders)} deferred renders, {len(self._pending_locations)} pending locations")
             # Force size to be known so deferred renders process
             if not self._size_known and self.size.width:
                 self._size_known = True
-            # Process deferred renders
+            # Process deferred renders, applying pending locations (parallel lists)
+            pending_idx = 0
             deferred = list(self._deferred_renders)
             self._deferred_renders.clear()
             for dr in deferred:
-                self.write(*dr)
+                before = len(self.lines)
+                self.write(*dr)  # This will add lines now that _size_known is True
+                # Apply pending location if present (None for writes without location)
+                if pending_idx < len(self._pending_locations):
+                    loc = self._pending_locations[pending_idx]
+                    if loc and loc not in self._location_lines:
+                        self._location_lines[loc] = before
+                    pending_idx += 1
+            self._pending_locations.clear()
         
         line_index = self._location_lines.get(location)
         if line_index is None:
