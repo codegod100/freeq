@@ -1,5 +1,6 @@
 """Custom widgets for freeq-textual."""
 
+import datetime
 from dataclasses import dataclass
 
 from rich.text import Text
@@ -9,6 +10,13 @@ from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Button, Input, ListItem, ListView, RichLog, Static
+
+
+# Debug logging - writes to /tmp/freeq-tui.log for troubleshooting thread panel issues
+# Can be disabled by commenting out the body or redirecting to null
+def _dbg(msg: str) -> None:
+    with open("/tmp/freeq-tui.log", "a") as f:
+        f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
 
 
 class BufferList(ListView):
@@ -110,6 +118,7 @@ class ThreadPanel(Vertical):
             messages: List of ThreadMessage objects to display
             formatter: Callable(sender, text) -> Text to format messages
         """
+        _dbg(f"ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)")
         self.open_root = thread_root
         self.add_class("visible")
 
@@ -134,6 +143,7 @@ class ThreadPanel(Vertical):
 
     def close(self) -> None:
         """Close the thread panel."""
+        _dbg(f"ThreadPanel.close() open_root was {self.open_root[:8] if self.open_root else 'empty'}")
         self.open_root = ""
         self.remove_class("visible")
         self.post_message(self.Closed())
