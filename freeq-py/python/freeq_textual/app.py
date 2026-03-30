@@ -1270,6 +1270,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg(f"  already loading history for {key}")
             return
         self._history_loading.add(key)
+        # Show loading indicator
+        self._append_line(self.active_buffer.lstrip("#"), Text("--- Loading older messages ---", style="dim italic"), mark_unread=False)
         _dbg(f"ScrolledToTop: requesting history for {key}")
         self._request_history(self.active_buffer)
 
