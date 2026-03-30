@@ -330,6 +330,17 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_coord_channel ON coordination_events(channel, timestamp);
             CREATE INDEX IF NOT EXISTS idx_coord_ref ON coordination_events(ref_id);
             CREATE INDEX IF NOT EXISTS idx_coord_actor ON coordination_events(actor_did, timestamp);
+            
+            CREATE TABLE IF NOT EXISTS reactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msgid TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                sender TEXT NOT NULL,
+                emoji TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                UNIQUE(msgid, sender, emoji)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reactions_msgid ON reactions(msgid);
             ",
         )?;
 
@@ -821,6 +832,48 @@ impl Db {
     }
 
     // ── User channel persistence (auto-rejoin) ────────────────────────
+
+    // ── Reactions ─────────────────────────────────────────────────────
+
+    /// Store a reaction (emoji) on a message.
+    pub fn add_reaction(
+        &self,
+        msgid: &str,
+        channel: &str,
+        sender: &str,
+        emoji: &str,
+    ) -> SqlResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO reactions (msgid, channel, sender, emoji, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![msgid, channel, sender, emoji, now as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Get all reactions for a message.
+    /// Returns Vec<(sender, emoji)>
+    pub fn get_reactions(&self, msgid: &str) -> SqlResult<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT sender, emoji FROM reactions WHERE msgid = ?1 ORDER BY timestamp")?;
+        let rows = stmt.query_map(params![msgid], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
+    /// Remove a specific reaction.
+    pub fn remove_reaction(&self, msgid: &str, sender: &str, emoji: &str) -> SqlResult<usize> {
+        self.conn.execute(
+            "DELETE FROM reactions WHERE msgid = ?1 AND sender = ?2 AND emoji = ?3",
+            params![msgid, sender, emoji],
+        )
+    }
 
     /// Record that a DID-authenticated user has joined a channel.
     pub fn add_user_channel(&self, did: &str, channel: &str) -> SqlResult<()> {

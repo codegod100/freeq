@@ -137,6 +137,24 @@ pub(super) fn handle_tagmsg(
     };
     let tagged_line_with_time = format!("{tag_msg_with_time}\r\n");
 
+    // Store reaction if present
+    if let Some(emoji) = tags.get("+react") {
+        if let Some(ref did) = conn.authenticated_did {
+            if let Some(target_msgid) = tags.get("+draft/reply") {
+                state.with_db(|db| {
+                    let _ = db.add_reaction(target_msgid, target, &conn.nick, emoji);
+                });
+                tracing::debug!(
+                    msgid = %target_msgid,
+                    emoji = %emoji,
+                    sender = %conn.nick,
+                    channel = %target,
+                    "Stored reaction"
+                );
+            }
+        }
+    }
+
     // Generate a PRIVMSG fallback for plain clients (server-side downgrade).
     // Only for known tag types — unknown TAGMSGs are silently dropped for plain clients.
     let plain_fallback = tags.get("+react").map(|emoji| {
@@ -850,6 +868,17 @@ pub(super) fn handle_chathistory(
         if has_tags {
             if let Some(ref mid) = row.msgid {
                 tags.insert("msgid".to_string(), mid.clone());
+                // Include reactions if any
+                let reactions = state.with_db(|db| db.get_reactions(mid)).unwrap_or_default();
+                if !reactions.is_empty() {
+                    // Format: "sender:emoji,sender:emoji,..."
+                    let reactions_str = reactions
+                        .iter()
+                        .map(|(s, e)| format!("{}:{}", s, e))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    tags.insert("+freeq.at/reactions".to_string(), reactions_str);
+                }
             }
             if let Some(ref replaces) = row.replaces_msgid {
                 tags.entry("+draft/edit".to_string())

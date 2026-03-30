@@ -1916,6 +1916,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             buffer_name = self._message_buffer_name(target, sender)
             buffer_key = self._buffer_key(buffer_name)
             self._record_message(buffer_name, sender, text, tags)
+            
+            # Parse reactions from +freeq.at/reactions tag
+            msgid = tags.get("msgid", "")
+            if msgid and "+freeq.at/reactions" in tags:
+                reactions_str = tags["+freeq.at/reactions"]
+                # Format: "sender:emoji,sender:emoji,..."
+                for reaction in reactions_str.split(","):
+                    if ":" in reaction:
+                        r_sender, r_emoji = reaction.split(":", 1)
+                        self._reactions[msgid].append((r_sender, r_emoji))
+            
             reply_to = self._thread_reply_to(tags)
             thread_root = ""
             if reply_to:
@@ -1925,7 +1936,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 else:
                     thread_root = reply_to
             batch_id = tags.get("batch")
-            msgid = tags.get("msgid", "")
             if batch_id and batch_id in self.batches:
                 if reply_to and thread_root:
                     parent = self.message_index.get(reply_to)
