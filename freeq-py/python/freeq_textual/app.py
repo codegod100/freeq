@@ -208,6 +208,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.channel_members: dict[str, set[str]] = defaultdict(set)
         self.channel_topics: dict[str, str] = {}
         self.message_index: dict[str, MessageState] = {}
+        self._reactions: dict[str, list[tuple[str, str]]] = defaultdict(list)  # msgid -> [(sender, emoji), ...]
         self.threads: dict[str, ThreadState] = {}
         self._thread_activity = 0
         self.restore_history_targets: set[str] = set()
@@ -488,7 +489,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
         return lines
 
-    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "") -> tuple[list[Text], list[str | None]]:
+    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None) -> tuple[list[Text], list[str | None]]:
         """Return tuple of (lines, thread_roots) for a chat message.
         
         With avatars:
@@ -502,6 +503,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         roots: list[str | None] = []
+        
+        # Get reactions for this message
+        reactions_text = Text()
+        if msgid and msgid in self._reactions:
+            for r_sender, r_emoji in self._reactions[msgid]:
+                reactions_text.append(f" {r_emoji}")
+        
         
         # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
         time_str = self._format_timestamp(timestamp)
@@ -518,6 +526,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             block.append_text(time_text)
             block.append(": ")
             block.append_text(self._format_message_body(text))
+            block.append_text(reactions_text)  # Add reactions!
             result.append(block)
             # Message line also gets thread_root if it's a reply (larger click target)
             roots.append(reply_thread_root)
@@ -577,13 +586,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Flush remaining text
         if current:
             if line_num == 0 and not reply_indicator:
-                lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
+                last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current))
+                last_line.append_text(reactions_text)  # Add reactions to last line
+                lines.append(last_line)
             else:
                 cont = Text(indent, no_wrap=False, overflow="fold")
                 cont.append_text(self._format_message_body(current))
+                cont.append_text(reactions_text)  # Add reactions to last line
                 lines.append(cont)
             # Message line gets thread_root for replies (larger click target)
             roots.append(reply_thread_root)
+        else:
+            # No message text, just add reactions to last line if any
+            if reactions_text and lines:
+                lines[-1].append_text(reactions_text)
         
         
         # Ensure at least 2 lines for avatar display
@@ -808,7 +824,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
                 reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
-                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp)
+                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid)
                 for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
                     render_roots.append(block_root)
@@ -1467,11 +1483,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Handle emoji selection - send reaction via TAGMSG."""
         _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
         if event.msgid:
-            # Send reaction via TAGMSG with +react tag
-            # Server expects: @+react=🔥 TAGMSG #channel
+            # Send reaction via TAGMSG with +react tag and +draft/reply for target msgid
+            # @+draft/reply=msgid +react=emoji TAGMSG #channel
             target = self._display_name(self.active_buffer)
-            self.client.raw(f"@+react={event.emoji} TAGMSG {target}")
-            _dbg(f"  sent: @+react={event.emoji} TAGMSG {target}")
+            self.client.raw(f"@+draft/reply={event.msgid} +react={event.emoji} TAGMSG {target}")
+            _dbg(f"  sent: @+draft/reply={event.msgid[:8]} +react={event.emoji} TAGMSG {target}")
 
     # ── Render active buffer ───────────────────────────────────────────────
 
@@ -1956,14 +1972,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 sender = event["from"]
                 target = event["target"]
                 emoji = tags["+react"]
-                buffer_name = self._message_buffer_name(target, sender)
-                # Show reaction as system message
-                self._append_line(
-                    buffer_name,
-                    Text(f"{sender} reacted with {emoji}", style="dim"),
-                    mark_unread=True,
-                )
-                self._render_active_buffer()
+                # Get the msgid being reacted to (from +draft/reply tag)
+                target_msgid = tags.get("+draft/reply")
+                if target_msgid:
+                    # Store reaction on the message
+                    self._reactions[target_msgid].append((sender, emoji))
+                    _dbg(f"  reaction: {sender} reacted {emoji} on {target_msgid[:8]}")
+                    # Re-render to show reaction on message
+                    self._render_active_buffer()
+                else:
+                    # No target msgid, show as system message
+                    buffer_name = self._message_buffer_name(target, sender)
+                    self._append_line(
+                        buffer_name,
+                        Text(f"{sender} reacted with {emoji}", style="dim"),
+                        mark_unread=True,
+                    )
             return
         if event_type == "disconnected":
             self.channel_members.clear()
