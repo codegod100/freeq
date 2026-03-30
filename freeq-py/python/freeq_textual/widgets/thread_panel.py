@@ -111,7 +111,7 @@ class ThreadPanel(Vertical):
         _dbg(f"  on_mount: lines={len(log.lines)} msgs={len(messages)}")
         log.clear()
         formatter = self._formatter or (lambda s, t, w=0: Text(f"{s}: {t}"))
-        width = max(40, log.size.width - 3)
+        width = max(40, log.size.width - 1)  # minimal gap for thread panel
         for msg in messages:
             formatted = formatter(msg.sender, msg.text, width)
             log.write(formatted)
@@ -148,7 +148,7 @@ class ThreadPanel(Vertical):
         # Re-render
         log = self.query_one("#thread-messages", ScrollableLog)
         log.clear()
-        width = max(40, log.size.width - 3)
+        width = max(40, log.size.width - 1)  # minimal gap for thread panel
         for msg in messages:
             formatted = self._formatter(msg.sender, msg.text, width)
             log.write(formatted)
