@@ -241,7 +241,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._load_message = "Connecting..."
         self._connected = False  # Track if we've received connected event
         self._history_loading_key: str | None = None  # Buffer key currently loading history
-        self._reply_to_msgid: str | None = None  # Target msgid for next message (set by ReplyPanel)
+        # NOTE: NO global _reply_to_msgid! ReplyPanel owns its state.
+        # Friends don't let friends use global state!
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1419,15 +1420,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     
     def _on_menu_reply(self, msgid: str | None) -> None:
         """Handle Reply from context menu - show reply panel."""
-        _dbg(f"Context menu Reply: msgid={msgid}")
-        _dbg(f"_on_menu_reply called: msgid={msgid}")
+        _dbg(f"_on_menu_reply(msgid={msgid[:8] if msgid else None})")
         
         if not msgid:
             return
         
         # Close any existing reply panel
+        count = len(list(self.query(ReplyPanel)))
         for panel in self.query(ReplyPanel):
+            _dbg(f"  removing existing ReplyPanel")
             panel.remove()
+        _dbg(f"  removed {count} existing panels")
         
         # Get message context
         msg = self.message_index.get(msgid)
@@ -1435,10 +1438,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg(f"  msgid {msgid} not found in index")
             return
         
-        # Store reply target for composer
-        self._reply_to_msgid = msgid
-        
-        # Create and mount reply panel as overlay
+        # Create and mount reply panel - IT OWNS ITS STATE!
+        # No global _reply_to_msgid needed, ReplyPanel has its own reply_to_msgid
         panel = ReplyPanel(
             reply_to_msgid=msgid,
             context=msg.text,
@@ -2067,15 +2068,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._render_active_buffer()
             return
         
-        # Check if replying to a specific message
-        if self._reply_to_msgid:
-            self._send_reply(self._display_name(target), self._reply_to_msgid, text)
-            self._reply_to_msgid = None  # Clear after sending
-            # Close reply panel if open
-            for panel in self.query(ReplyPanel):
-                panel.remove()
-        else:
-            self.client.send_message(self._display_name(target), text)
+        # Send message - ReplyPanel handles its own replies via ReplySent message
+        # Main composer sends normal messages (no global state needed!)
+        self.client.send_message(self._display_name(target), text)
 
     # ── Sidebar ────────────────────────────────────────────────────────────
 
