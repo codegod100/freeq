@@ -20,6 +20,7 @@ class ContextMenu(Vertical):
     
     DEFAULT_CSS = """
     ContextMenu {
+        dock: top;
         layer: overlay;
         background: $surface;
         border: round $primary;
@@ -57,8 +58,6 @@ class ContextMenu(Vertical):
         self,
         actions: list[tuple[str, Callable]],
         msgid: str | None = None,
-        screen_x: int = 0,
-        screen_y: int = 0,
         id: str | None = None,
     ) -> None:
         """Create context menu.
@@ -66,13 +65,10 @@ class ContextMenu(Vertical):
         Args:
             actions: List of (label, callback) tuples
             msgid: The message ID this menu applies to
-            screen_x, screen_y: Screen coordinates to position menu
         """
         super().__init__(id=id)
         self._actions = actions
         self._msgid = msgid
-        self._screen_x = screen_x
-        self._screen_y = screen_y
         self._buttons: list[Button] = []
     
     def compose(self):
@@ -84,11 +80,9 @@ class ContextMenu(Vertical):
             yield btn
     
     def on_mount(self) -> None:
-        """Position menu at click location."""
-        # Use absolute positioning via CSS
-        self.styles.position = "absolute"
-        self.styles.left = self._screen_x
-        self.styles.top = self._screen_y
+        """Focus first button."""
+        if self._buttons:
+            self._buttons[0].focus()
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press - call callback and close menu."""
