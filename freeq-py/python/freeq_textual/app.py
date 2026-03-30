@@ -40,6 +40,8 @@ except ImportError:  # pragma: no cover - dependency is optional outside the dev
 
 
 # ── Debug logging ─────────────────────────────────────────────────────────
+# Writes to /tmp/freeq-tui.log for troubleshooting thread panel issues.
+# Can be disabled by commenting out the body or setting _DBG_PATH to /dev/null.
 
 _DBG_PATH = "/tmp/freeq-tui.log"
 
@@ -941,9 +943,11 @@ class FreeqTextualApp(App[None]):
         """Open the thread panel for a given root msgid."""
         if not thread_root:
             return
+        _dbg(f"_open_thread({thread_root[:8]!r})")
         self.open_thread_root = thread_root
         panel = self.query_one("#thread-panel", ThreadPanel)
         messages = self._collect_thread_messages(thread_root)
+        _dbg(f"  collected {len(messages)} messages")
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         panel.open(thread_root, thread_msgs, self._format_message)
         self._refresh_layout_widths()
@@ -951,6 +955,7 @@ class FreeqTextualApp(App[None]):
 
     def _close_thread(self) -> None:
         """Close the thread panel."""
+        _dbg(f"_close_thread() open_thread_root was {self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         self.open_thread_root = ""
         panel = self.query_one("#thread-panel", ThreadPanel)
         panel.close()
@@ -962,6 +967,7 @@ class FreeqTextualApp(App[None]):
     def handle_thread_panel_closed(self, event: ThreadPanel.Closed) -> None:
         """Handle thread panel closed event."""
         del event
+        _dbg(f"handle_thread_panel_closed() open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         self.open_thread_root = ""
         self._refresh_layout_widths()
         self._render_active_buffer()
