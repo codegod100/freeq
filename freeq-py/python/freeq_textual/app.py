@@ -621,7 +621,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     ) -> tuple[list[str | None], list[str | None]]:
         """Write lines to log, tracking thread_roots and msgids per rendered line.
         
-        Returns tuple of (rendered_thread_roots, rendered_msgids).
+        DESIGN: thread_root is passed to log.write() so the COMPONENT tracks it.
+        This ensures thread_roots are correct even when width changes (thread panel opens).
+        
+        Returns tuple of (rendered_thread_roots, rendered_msgids) for backwards compatibility.
+        NOTE: These returned lists may be INACCURATE after deferred renders - use
+        log.thread_root_at() instead for click detection.
         """
         rendered_threads: list[str | None] = []
         rendered_msgids_result: list[str | None] = []
@@ -630,14 +635,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         width = log.size.width
         for line, thread_root, msgid in zip(lines, roots, mids):
             before = len(log.lines)
-            # Pass location=msgid for scroll-to-message support
+            # Pass location and thread_root to the component - IT tracks them
             location = msgid if msgid else None
-            log.write(line, width=width, scroll_end=False, location=location or "")
+            log.write(line, width=width, scroll_end=False, location=location or "", thread_root=thread_root)
             added = max(1, len(log.lines) - before)
             rendered_threads.extend([thread_root] * added)
             rendered_msgids_result.extend([msgid] * added)
         
-        _dbg(f"_write_render_lines: wrote {len(lines)} lines, {len(rendered_msgids_result)} rendered, locations={len(log._location_lines)}")
+        _dbg(f"_write_render_lines: wrote {len(lines)} lines, {len(rendered_msgids_result)} rendered")
         return rendered_threads, rendered_msgids_result
 
     # ── Helpers ─────────────────────────────────────────────────────────────
@@ -1196,22 +1201,44 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     @on(ScrollableLog.Clicked)
     def _on_scrollable_log_clicked(self, event: ScrollableLog.Clicked) -> None:
-        """Handle clicks from ScrollableLog widget."""
+        """Handle clicks from ScrollableLog widget.
+        
+        DESIGN: Query the component directly for thread_root - never use app dict.
+        The component knows its actual rendered lines; app dict becomes stale on width change.
+        """
         # Get the messages log widget directly
         try:
             log = self.query_one("#messages", ScrollableLog)
         except NoMatches:
             return
             
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y}\n')
-        _dbg(f"ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y}")
-        
         virtual_y = int(event.y + event.scroll_y)
-        line_threads = self._rendered_line_threads.get(self.active_buffer, [])
-        _dbg(f"  virtual_y={virtual_y} threads_len={len(line_threads)}")
-        if 0 <= virtual_y < len(line_threads) and line_threads[virtual_y]:
-            self._open_thread(line_threads[virtual_y])
+        
+        # Get thread_root from the COMPONENT, not from app dict
+        thread_root = log.thread_root_at(virtual_y)
+        
+        # Show what's rendered at clicked line
+        line_text = "?"
+        if hasattr(log, 'lines') and 0 <= virtual_y < len(log.lines):
+            line_text = str(log.lines[virtual_y])[:80]
+        
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y} virtual_y={virtual_y}\n')
+            f.write(f'  line[{virtual_y}] = {line_text}\n')
+            f.write(f'  thread_root = {thread_root[:8] if thread_root else None}\n')
+            # Show nearby lines with thread_roots (from component)
+            for i in range(max(0, virtual_y-3), min(len(log._thread_roots), virtual_y+4)):
+                root = log._thread_roots[i] if i < len(log._thread_roots) else None
+                f.write(f'    [{i}] root={root[:8] if root else None!r}\n')
+        
+        _dbg(f"ScrollableLog.Clicked: y={event.y} virtual_y={virtual_y} thread_root={thread_root[:8] if thread_root else 'None'}")
+        if thread_root:
+            _dbg(f"  opening thread: {thread_root[:8]}")
+            with open('/tmp/freeq-click.log', 'a') as f:
+                f.write(f'  OPENING THREAD: {thread_root[:8]}\n')
+            self._open_thread(thread_root)
+        else:
+            _dbg(f"  no thread at virtual_y={virtual_y}")
 
     def on_click(self, event: events.Click) -> None:
         """Catch ALL clicks at app level."""
