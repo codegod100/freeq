@@ -24,7 +24,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import ThreadMessage, ThreadPanel, ScrollableLog
+from .widgets import BufferList, ScrollableLog, ThreadMessage, ThreadPanel
 
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -130,23 +130,6 @@ class ThreadState:
     latest_sender: str = ""
     latest_text: str = ""
     latest_activity: int = 0
-
-
-# ── Buffer sidebar ─────────────────────────────────────────────────────────
-
-
-class BufferList(ListView):
-    def update_buffers(self, buffers: list[BufferState], active: str) -> None:
-        self.clear()
-        for buffer in buffers:
-            label = FreeqTextualApp._buffer_label(buffer)
-            item = ListItem(Static(label), name=buffer.name)
-            if buffer.name == active:
-                item.add_class("active")
-            self.append(item)
-
-
-# ── Main app ───────────────────────────────────────────────────────────────
 
 
 class FreeqTextualApp(App[None]):
