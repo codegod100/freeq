@@ -114,7 +114,11 @@ class ThreadPanel(Vertical):
         width = log.size.width
         for msg in messages:
             formatted = formatter(msg.sender, msg.text, width)
-            log.write(formatted)
+            # Only pass width if > 0, otherwise let RichLog compute it
+            if width > 0:
+                log.write(formatted, width=width)
+            else:
+                log.write(formatted)
             log.write(Text(" "))
         _dbg(f"  after writes: lines={len(log.lines)}")
 
@@ -151,7 +155,10 @@ class ThreadPanel(Vertical):
         width = log.size.width
         for msg in messages:
             formatted = self._formatter(msg.sender, msg.text, width)
-            log.write(formatted)
+            if width > 0:
+                log.write(formatted, width=width)
+            else:
+                log.write(formatted)
             log.write(Text(" "))
         
         header = self.query_one("#thread-header", Static)

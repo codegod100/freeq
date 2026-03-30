@@ -596,9 +596,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     ) -> list[str | None]:
         rendered_threads: list[str | None] = []
         roots = thread_roots or [None] * len(lines)
+        width = log.size.width
         for line, thread_root in zip(lines, roots):
             before = len(log.lines)
-            log.write(line, scroll_end=False)
+            # Pass width explicitly to ensure wrapping at correct width
+            log.write(line, width=width, scroll_end=False)
             added = max(1, len(log.lines) - before)
             rendered_threads.extend([thread_root] * added)
         return rendered_threads
