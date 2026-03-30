@@ -49,9 +49,9 @@ class EmojiPicker(AutoLogMixin, Vertical):
     EmojiPicker Button {
         background: transparent;
         border: none;
-        padding: 0;
-        min-width: 2;
-        height: 1;
+        padding: 0 1;
+        min-width: 3;
+        height: 3;
     }
     
     EmojiPicker Button:hover {
@@ -67,6 +67,7 @@ class EmojiPicker(AutoLogMixin, Vertical):
         text-align: center;
         margin-bottom: 0;
         height: 1;
+        display: none;
     }
     """
 
