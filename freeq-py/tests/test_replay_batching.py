@@ -571,7 +571,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertTrue(app.query_one("#thread-panel").has_class("visible"))
 
-            app.handle_thread_close_button(SimpleNamespace(button=app.query_one("#thread-close", Button)))
+            app._close_thread()
             await pilot.pause()
 
             self.assertFalse(app.query_one("#thread-panel").has_class("visible"))
