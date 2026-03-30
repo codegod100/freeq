@@ -1191,9 +1191,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         )
         self._rendered_line_threads[self.active_buffer] = rendered_threads
         self._rendered_line_msgids[self.active_buffer] = rendered_msgids
+        
+        # Debug: count how many lines have thread_roots
+        thread_lines = sum(1 for t in rendered_threads if t is not None)
         _dbg(
             f"render buffer={self.active_buffer} logical={len(self.messages[self.active_buffer])} "
-            f"render_lines={len(render_lines)} rendered={len(rendered_threads)} roots={render_roots[:5]}"
+            f"render_lines={len(render_lines)} rendered={len(rendered_threads)} "
+            f"thread_lines={thread_lines} roots_sample={render_roots[:5]}"
         )
         if self._scroll_mode == "end":
             log.scroll_end(animate=False)
