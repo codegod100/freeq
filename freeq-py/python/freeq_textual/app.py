@@ -15,7 +15,7 @@ from urllib.request import urlopen
 
 from rich.text import Text
 from textual import events, on
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -159,6 +159,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("escape", "close_thread", "Close thread", show=False),
+        Binding("ctrl+p", "command_palette", "Command palette", show=False),
     ]
 
     active_buffer = reactive("status")
@@ -1775,6 +1776,26 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             from .widgets.debug import set_debug_callback
             set_debug_callback(debug_panel.log)
             debug_panel.log("debug panel toggled on")
+
+    def get_system_commands(self, screen) -> list[SystemCommand]:
+        """Add custom commands to the command palette."""
+        from .widgets import DebugPanel
+        commands = list(super().get_system_commands(screen))
+        # Add debug panel toggle
+        try:
+            self.query_one("#debug-panel", DebugPanel)
+            commands.append(SystemCommand(
+                "Debug panel",
+                "Hide the debug panel",
+                self.action_toggle_debug,
+            ))
+        except Exception:
+            commands.append(SystemCommand(
+                "Debug panel",
+                "Show the debug panel",
+                self.action_toggle_debug,
+            ))
+        return commands
 
     def _open_thread_via_command(self) -> None:
         """Fallback: /thread with no args — find most recent reply indicator."""
