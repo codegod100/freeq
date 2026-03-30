@@ -344,7 +344,11 @@ class FreeqTextualApp(App[None]):
         return body
 
     def _format_message(self, sender: str, text: str, width: int = 0) -> Text:
-        """A chat message: `<nick>: <text>` with colored nick, optionally wrapped to width."""
+        """A chat message: `<nick>: <text>` with colored nick, optionally wrapped to width.
+        
+        Note: This is for channel messages with indent-based wrapping.
+        For thread panel, use _format_thread_message instead.
+        """
         parts: list[Text] = []
         if self._avatars_enabled:
             avatar = self._format_avatar(sender)
@@ -375,6 +379,37 @@ class FreeqTextualApp(App[None]):
         
         parts.append(self._format_message_body(text))
         return Text().assemble(*parts)
+
+    def _format_thread_message(self, sender: str, text: str, width: int = 0) -> Text:
+        """Simple thread message: `<nick>: <text>` with colored nick, no indent alignment."""
+        name = Text(sender, style=f"bold {_nick_color(sender)}")
+        
+        if width > 0 and len(text) + len(sender) + 2 > width:
+            # Wrap needed - first line on same line as nick
+            available = width - len(sender) - 2  # ": "
+            words = text.split()
+            lines: list[str] = []
+            current = ""
+            for word in words:
+                test = f"{current} {word}".strip()
+                if len(test) <= available:
+                    current = test
+                else:
+                    if current:
+                        lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+            
+            if lines:
+                result = Text().assemble(name, ": ", self._format_message_body(lines[0]))
+                for cont_line in lines[1:]:
+                    result.append(Text("\n"))
+                    result.append(self._format_message_body(cont_line))
+                return result
+        
+        
+        return Text().assemble(name, ": ", self._format_message_body(text))
 
     def _format_header_lines(self, sender: str) -> list[Text]:
         """Return header line(s): avatar + nick. Only called when avatars enabled."""
@@ -969,7 +1004,7 @@ class FreeqTextualApp(App[None]):
         
         # Mount new ThreadPanel
         body = self.query_one("#body", Horizontal)
-        panel = ThreadPanel(thread_root, thread_msgs, self._format_message, id="thread-panel")
+        panel = ThreadPanel(thread_root, thread_msgs, self._format_thread_message, id="thread-panel")
         body.mount(panel)
         
         # Defer re-render until after layout updates
