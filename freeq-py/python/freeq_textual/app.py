@@ -1157,9 +1157,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
 
         # Convert click y to virtual line index
-        virtual_y = int(event.y + log.scroll_y)
+        # Note: event.y is 1-indexed (screen coordinates), so subtract 1
+        virtual_y = int(event.y - 1 + log.scroll_y)
         line_threads = self._rendered_line_threads.get(self.active_buffer, [])
         _dbg(f"  virtual_y={virtual_y} rendered_rows={len(line_threads)} active={self.active_buffer}")
+        
+        # Debug: show actual line content at clicked position
+        if hasattr(log, 'lines') and 0 <= virtual_y < len(log.lines):
+            line_text = str(log.lines[virtual_y])[:60]
+            _dbg(f"  line[{virtual_y}] content: {line_text!r}")
+        
         if line_threads:
             lo = max(0, virtual_y - 2)
             hi = min(len(line_threads), virtual_y + 3)
