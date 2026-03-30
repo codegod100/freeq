@@ -309,6 +309,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     # ── Rich text builders ─────────────────────────────────────────────────
 
+    def _ensure_emoji_presentation(self, emoji: str) -> str:
+        """Add emoji variant selector to emojis that might render as text.
+        
+        Some emojis (heart, skull, etc.) default to text presentation in terminals,
+        appearing smaller than full-color emojis. This forces emoji presentation.
+        """
+        # Characters that need explicit emoji presentation
+        NEEDS_EMOJI_VS = {
+            '♥', '♡', '☠', '☢', '☣', '⚠', '⚡', '✝', '✡', '☪',
+            '☮', '☯', '☸', '♈', '♉', '♊', '♋', '♌', '♍', '♎',
+            '♏', '♐', '♑', '♒', '♓', '⛎', '❄', '☄', '⚜', '♻'
+        }
+        if emoji in NEEDS_EMOJI_VS:
+            return emoji + '\ufe0f'  # Add emoji variant selector
+        return emoji
+
     def _format_nick(self, nick: str) -> Text:
         """Colorized nick."""
         return Text(nick, style=_nick_color(nick))
@@ -508,7 +524,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         reactions_text = Text()
         if msgid and msgid in self._reactions:
             for r_sender, r_emoji in self._reactions[msgid]:
-                reactions_text.append(f" {r_emoji}")
+                reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
         
         
         # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
@@ -847,7 +863,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 reactions_text = Text()
                 if msgid and msgid in self._reactions:
                     for r_sender, r_emoji in self._reactions[msgid]:
-                        reactions_text.append(f" {r_emoji}")
+                        reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
                 msg_lines = self._format_message_lines(text, indent, width)
                 for i, msg_line in enumerate(msg_lines):
                     renderable.append(msg_line)
