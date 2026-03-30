@@ -50,6 +50,8 @@ class ScrollableLog(RichLog):
         # Each entry is the location string (or None for writes without location)
         # This keeps locations in sync with deferred render order
         self._pending_locations: list[str | None] = []
+        # Pending scroll target (set by scroll_to_location before on_resize fires)
+        self._pending_scroll_target: str | None = None
 
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
         """Write content, optionally tracking location for later scrolling.
@@ -124,6 +126,15 @@ class ScrollableLog(RichLog):
             # Clear pending locations
             self._pending_locations.clear()
             _dbg(f"ScrollableLog.on_resize: done, {len(self._location_lines)} locations tracked")
+            
+            # Check for pending scroll target
+            if self._pending_scroll_target:
+                target = self._pending_scroll_target
+                self._pending_scroll_target = None
+                line_index = self._location_lines.get(target)
+                if line_index is not None:
+                    _dbg(f"  on_resize: pending scroll to {target[:8]} at line {line_index}")
+                    self.app.call_later(self._do_scroll, line_index)
         else:
             # Already sized - just let RichLog handle it
             super().on_resize(event)
@@ -150,23 +161,12 @@ class ScrollableLog(RichLog):
         Returns:
             True if location found and scrolled, False otherwise
         """
-        # Process any deferred renders first (fallback if on_resize hasn't fired yet)
-        if self._deferred_renders and self.size.width:
-            _dbg(f"scroll_to_location: processing deferred renders (fallback)")
-            # Manually process like on_resize does
-            self._size_known = True
-            deferred = list(self._deferred_renders)
-            pending = list(self._pending_locations)
-            self._deferred_renders.clear()
-            self._pending_locations.clear()
-            
-            for dr, loc in zip(deferred, pending):
-                before = len(self.lines)
-                super().write(*dr)
-                if loc and loc not in self._location_lines:
-                    self._location_lines[loc] = before
+        # If deferred renders exist, set pending target and let on_resize handle it
+        if self._deferred_renders and not self._size_known:
+            _dbg(f"scroll_to_location({location[:8]}): deferred renders exist, setting pending target")
+            self._pending_scroll_target = location
+            return True  # Will scroll when on_resize fires
         
-
         line_index = self._location_lines.get(location)
         if line_index is None:
             _dbg(f"scroll_to_location({location[:8]}): NOT FOUND in {len(self._location_lines)} locations")
