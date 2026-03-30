@@ -1239,8 +1239,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         The event sender IS the ScrollableLog that was clicked.
         """
         # Get the ScrollableLog that emitted this event
-        # Textual sets _sender when posting the message
-        log = event._sender
+        log = event.sender
         if not isinstance(log, ScrollableLog):
             return
         
