@@ -264,7 +264,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             app._append_line(
                 "#freeq",
                 app._format_message("zoe", "latest live message"),
-                line_meta=("zoe", "latest live message"),
+                line_meta=("zoe", "latest live message", "2026-03-28T12:00:04.000Z"),
             )
             app.active_buffer = "#freeq"
             app._render_active_buffer()
@@ -296,7 +296,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreaterEqual(len(rendered), 3)
             self.assertEqual(
                 rendered[:3],
-                ["alice: oldest", "bob: second oldest", "zoe: latest live message"],
+                ["alice 12:00pm 3/28: oldest", "bob 12:00pm 3/28: second oldest", "zoe 12:00pm 3/28: latest live message"],
             )
 
     async def test_replay_batch_switches_visible_room(self) -> None:
@@ -322,7 +322,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             rendered = self._rendered_lines(app)
 
             self.assertEqual(app.active_buffer, "#python")
-            self.assertEqual(rendered[:1], ["carol: replayed line"])
+            self.assertEqual(rendered[:1], ["carol 12:00pm 3/28: replayed line"])
 
     async def test_restore_rejoin_sequence_requests_join_and_renders_replay_batch(self) -> None:
         client = FakeClient()
@@ -353,7 +353,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(client.join_calls, ["#freeq"])
             self.assertEqual(app.active_buffer, "#freeq")
-            self.assertEqual(rendered[:1], ["alice: restored replay line"])
+            self.assertEqual(rendered[:1], ["alice 12:00pm 3/28: restored replay line"])
 
     async def test_consecutive_messages_from_same_sender_are_grouped(self) -> None:
         client = FakeClient()

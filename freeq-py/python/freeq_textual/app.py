@@ -114,7 +114,7 @@ class BatchState:
     lines: list[tuple[str, Text]]
     thread_roots: list[str | None]
     msgids: list[str | None]
-    line_metas: list[tuple[str, str] | None]
+    line_metas: list[tuple[str, str, str] | None]  # (sender, text, timestamp) or None
 
 
 @dataclass(slots=True)
@@ -194,8 +194,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._avatars_enabled = False
         # Maps buffer_key -> list of (thread_root | None) per logical appended line
         self._line_threads: dict[str, list[str | None]] = defaultdict(list)
-        # Maps buffer_key -> list of (sender, raw_text) for normal messages, else None
-        self._line_message_meta: dict[str, list[tuple[str, str] | None]] = defaultdict(list)
+        # Maps buffer_key -> list of (sender, raw_text, timestamp) for normal messages, else None
+        self._line_message_meta: dict[str, list[tuple[str, str, str] | None]] = defaultdict(list)
         # Maps buffer_key -> list of msgid per logical line (for scroll-to-message)
         self._line_msgids: dict[str, list[str | None]] = defaultdict(list)
         # Maps buffer_key -> list of (thread_root | None) per rendered RichLog row
@@ -465,29 +465,34 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
         return lines
 
-    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None) -> tuple[list[Text], list[str | None]]:
+    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "") -> tuple[list[Text], list[str | None]]:
         """Return tuple of (lines, thread_roots) for a chat message.
         
         With avatars:
-        - Line 1: ████ nick
+        - Line 1: ████ nick HH:MMpm MM/DD
         - Line 2: ████ reply indicator (if any) OR first line of message
         - Line 3+:      continuation (same column as line 2 text)
         
         Without avatars:
         - reply indicator (if any)
-        - nick: message on one line with fold overflow
+        - nick HH:MMpm MM/DD: message on one line with fold overflow
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         roots: list[str | None] = []
         
+        # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
+        time_str = self._format_timestamp(timestamp)
+        time_text = Text(f" {time_str}", style="dim") if time_str else Text()
+        
         if not self._avatars_enabled:
-            # No avatar: reply indicator, then nick: message on one line
+            # No avatar: reply indicator, then nick timestamp: message on one line
             result: list[Text] = []
             if reply_indicator:
                 result.append(reply_indicator)
                 roots.append(reply_thread_root)
             block = Text(no_wrap=False, overflow="fold")
             block.append_text(name)
+            block.append_text(time_text)
             block.append(": ")
             block.append_text(self._format_message_body(text))
             result.append(block)
@@ -501,12 +506,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         indent = "     "  # 5 spaces - aligns with where text starts after "████ "
         text_avail = max(20, width - 5)
         
-        # Line 1: avatar row 1 + nick
+        # Line 1: avatar row 1 + nick + timestamp
         line1 = Text()
         for color in rows[0]:
             line1.append("\u2588", style=color)
         line1.append(" ")
         line1.append_text(name)
+        line1.append_text(time_text)
         lines = [line1]
         roots = [None]  # nick line has no thread_root
         
@@ -712,7 +718,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         mark_unread: bool = True,
         thread_root: str = "",
         msgid: str = "",
-        line_meta: tuple[str, str] | None = None,
+        line_meta: tuple[str, str, str] | None = None,
     ) -> None:
         key = self._ensure_buffer(buffer_name)
         if key != self.active_buffer and mark_unread:
@@ -729,7 +735,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         *,
         thread_roots: list[str | None] | None = None,
         msgids: list[str | None] | None = None,
-        line_metas: list[tuple[str, str] | None] | None = None,
+        line_metas: list[tuple[str, str, str] | None] | None = None,
     ) -> None:
         key = self._ensure_buffer(buffer_name)
         self.messages[key] = list(lines) + self.messages[key]
@@ -775,7 +781,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 previous_was_chat = False
                 continue
 
-            sender, text = line_meta
+            sender, text, timestamp = line_meta
             sender_key = self._nick_key(sender)
             is_first = not previous_was_chat or previous_sender != sender_key
             if is_first:
@@ -783,7 +789,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
                 reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
-                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root)
+                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp)
                 for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
                     render_roots.append(block_root)
@@ -817,6 +823,31 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _request_history(self, channel: str) -> None:
         self.client.history_latest(self._display_name(channel), 50)
+
+    def _format_timestamp(self, timestamp: str) -> str:
+        """Format IRCv3 server-time as 12hr with date (e.g., '2:30pm 1/15').
+        
+        IRCv3 time format: '2024-01-15T14:30:00.000Z' (ISO 8601)
+        """
+        if not timestamp:
+            return ""
+        try:
+            import datetime
+            # Parse ISO 8601 timestamp
+            # Handle both with and without milliseconds
+            if '.' in timestamp:
+                dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            else:
+                dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            # Format as 12hr with date: "2:30pm 1/15"
+            hour = dt.hour % 12 or 12  # 0 -> 12
+            minute = dt.minute
+            ampm = 'am' if dt.hour < 12 else 'pm'
+            month = dt.month
+            day = dt.day
+            return f"{hour}:{minute:02d}{ampm} {month}/{day}"
+        except Exception:
+            return ""
 
     def _snippet(self, text: str, length: int = 40) -> str:
         normalized = " ".join(text.split())
@@ -1661,7 +1692,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 )
                 self.batches[batch_id].thread_roots.append(thread_root or None)
                 self.batches[batch_id].msgids.append(msgid or None)
-                self.batches[batch_id].line_metas.append((sender, text))
+                self.batches[batch_id].line_metas.append((sender, text, tags.get("time", "")))
             else:
                 self._scroll_mode = "end" if self.active_buffer == buffer_key else "preserve"
                 if reply_to and thread_root:
@@ -1680,7 +1711,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     buffer_name,
                     self._format_message(sender, text),
                     msgid=msgid,
-                    line_meta=(sender, text),
+                    line_meta=(sender, text, tags.get("time", "")),
                     thread_root=thread_root,
                 )
             return
