@@ -163,13 +163,13 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test():
             body = app._format_message_body("x" * 200)
-            line = app._format_message_line("alice", "x" * 200)
+            block = app._format_chat_block("alice", "x" * 200)
             reply = app._format_reply_indicator("alice", "x" * 120, "root1")
 
         self.assertEqual(body.overflow, "fold")
         self.assertFalse(body.no_wrap)
-        self.assertEqual(line.overflow, "fold")
-        self.assertFalse(line.no_wrap)
+        self.assertEqual(block.overflow, "fold")
+        self.assertFalse(block.no_wrap)
         self.assertEqual(reply.overflow, "fold")
         self.assertFalse(reply.no_wrap)
 
@@ -273,10 +273,10 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             rendered = self._rendered_lines(app)
 
-            self.assertGreaterEqual(len(rendered), 6)
+            self.assertGreaterEqual(len(rendered), 3)
             self.assertEqual(
-                rendered[:6],
-                ["alice", "oldest", "bob", "second oldest", "zoe", "latest live message"],
+                rendered[:3],
+                ["alice: oldest", "bob: second oldest", "zoe: latest live message"],
             )
 
     async def test_replay_batch_switches_visible_room(self) -> None:
@@ -302,7 +302,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             rendered = self._rendered_lines(app)
 
             self.assertEqual(app.active_buffer, "#python")
-            self.assertEqual(rendered[:2], ["carol", "replayed line"])
+            self.assertEqual(rendered[:1], ["carol: replayed line"])
 
     async def test_restore_rejoin_sequence_requests_join_and_renders_replay_batch(self) -> None:
         client = FakeClient()
@@ -333,7 +333,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(client.join_calls, ["#freeq"])
             self.assertEqual(app.active_buffer, "#freeq")
-            self.assertEqual(rendered[:2], ["alice", "restored replay line"])
+            self.assertEqual(rendered[:1], ["alice: restored replay line"])
 
     async def test_consecutive_messages_from_same_sender_are_grouped(self) -> None:
         client = FakeClient()
@@ -369,7 +369,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             rendered = self._rendered_lines(app)
 
-            self.assertEqual(rendered[:5], ["alice", "first line", "second line", "bob", "third line"])
+            self.assertEqual(rendered[:3], ["alice: first line", "second line", "bob: third line"])
 
     async def test_inactive_events_do_not_reset_visible_scroll_position(self) -> None:
         client = FakeClient()
@@ -484,12 +484,10 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             rendered = self._rendered_lines(app)
-            bob_index = rendered.index("bob")
             reply_index = next(index for index, line in enumerate(rendered) if "replying to alice" in line)
-            body_index = rendered.index("reply body")
+            bob_index = next(index for index, line in enumerate(rendered) if line.startswith("bob:"))
 
-            self.assertLess(bob_index, reply_index)
-            self.assertLess(reply_index, body_index)
+            self.assertLess(reply_index, bob_index)
 
     async def test_opening_thread_rerenders_main_log_for_new_width(self) -> None:
         client = FakeClient()
