@@ -21,10 +21,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, RichLog, Static
+from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import ThreadMessage, ThreadPanel
+from .widgets import ThreadMessage, ThreadPanel, ScrollableLog
 
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -156,16 +156,11 @@ class FreeqTextualApp(App[None]):
     }
 
     #messages {
-        border: none;
-        overflow-x: hidden;
         width: 1fr;
-        min-width: 0;
-        padding: 0;
-        scrollbar-gutter: stable;
-        scrollbar-size: 1 1;
     }
 
     # Thread panel CSS is now in ThreadPanel widget
+    # ScrollableLog has its own CSS with padding
 
     #composer {
         border: solid $panel-lighten-2;
@@ -234,7 +229,7 @@ class FreeqTextualApp(App[None]):
         yield Header()
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
-            yield RichLog(
+            yield ScrollableLog(
                 id="messages",
                 highlight=True,
                 markup=False,
@@ -540,7 +535,7 @@ class FreeqTextualApp(App[None]):
 
     def _write_render_lines(
         self,
-        log: RichLog,
+        log: ScrollableLog,
         lines: list[object],
         *,
         thread_roots: list[str | None] | None = None,
@@ -1029,7 +1024,7 @@ class FreeqTextualApp(App[None]):
         active_name = self._display_name(self.active_buffer)
         topic = self.channel_topics.get(self.active_buffer, "").strip()
         self.title = f"freeq - {active_name}" if not topic else f"freeq - {active_name} | {topic}"
-        log = self.query_one("#messages", RichLog)
+        log = self.query_one("#messages", ScrollableLog)
         width = max(40, log.size.width - 3)  # account for scrollbar and padding
         log.clear()
         render_lines, render_roots = self._renderable_lines(self.active_buffer, width)

@@ -19,6 +19,22 @@ def _dbg(msg: str) -> None:
         f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
 
 
+class ScrollableLog(RichLog):
+    """A RichLog with padding between text and scrollbar."""
+
+    DEFAULT_CSS = """
+    ScrollableLog {
+        border: none;
+        overflow-x: hidden;
+        width: 1fr;
+        min-width: 0;
+        padding: 0 1;
+        scrollbar-gutter: stable;
+        scrollbar-size: 1 1;
+    }
+    """
+
+
 class BufferList(ListView):
     """Sidebar widget showing list of buffers (channels and DMs)."""
 
@@ -107,7 +123,7 @@ class ThreadPanel(Vertical):
         with Horizontal(id="thread-header-row"):
             yield Static("", id="thread-header")
             yield Button("Close", id="thread-close")
-        yield RichLog(id="thread-messages", highlight=True, markup=False, min_width=0, wrap=True, auto_scroll=True)
+        yield ScrollableLog(id="thread-messages", highlight=True, markup=False, min_width=0, wrap=True, auto_scroll=True)
         yield Input(placeholder="Reply to thread...", id="thread-reply")
 
     def open(self, thread_root: str, messages: list[ThreadMessage], formatter) -> None:
@@ -120,8 +136,25 @@ class ThreadPanel(Vertical):
         """
         _dbg(f"ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)")
         _dbg(f"  messages: {[(m.sender, m.text[:30] if len(m.text) > 30 else m.text) for m in messages]}")
+        _dbg(f"  classes before: {self.classes}")
         self.open_root = thread_root
         self.add_class("visible")
+        _dbg(f"  classes after add_class: {self.classes}")
+
+        # Store for deferred rendering
+        self._pending_messages = messages
+        self._pending_formatter = formatter
+        
+        # Small delay to let CSS take effect and layout compute
+        self.set_timer(0.05, self._render_messages)
+
+    def _render_messages(self) -> None:
+        """Render messages after CSS has taken effect."""
+        messages = getattr(self, '_pending_messages', [])
+        formatter = getattr(self, '_pending_formatter', lambda s, t: Text(f"{s}: {t}"))
+        
+        if not messages:
+            return
 
         # Update header
         header = self.query_one("#thread-header", Static)
@@ -129,19 +162,19 @@ class ThreadPanel(Vertical):
 
         # Update placeholder
         reply_input = self.query_one("#thread-reply", Input)
-        reply_input.placeholder = f"Reply to thread ({thread_root[:8]}...)"
+        reply_input.placeholder = f"Reply to thread ({self.open_root[:8]}...)"
 
         # Render messages
-        log = self.query_one("#thread-messages", RichLog)
-        _dbg(f"  RichLog before clear: {len(log.lines)} lines")
+        log = self.query_one("#thread-messages", ScrollableLog)
+        _dbg(f"  RichLog before clear: lines={len(log.lines)} virtual_size={log.virtual_size} has_focus={log.has_focus} display={log.styles.display}")
         log.clear()
-        _dbg(f"  RichLog after clear: {len(log.lines)} lines")
+        _dbg(f"  RichLog after clear: lines={len(log.lines)}")
         for i, msg in enumerate(messages):
             formatted = formatter(msg.sender, msg.text)
             _dbg(f"  writing msg {i}: sender={msg.sender!r} text={msg.text[:30]!r} formatted.plain={formatted.plain[:50]!r}")
             log.write(formatted)
             log.write(Text(" "))
-        _dbg(f"  RichLog after writes: {len(log.lines)} lines")
+        _dbg(f"  RichLog after writes: lines={len(log.lines)} virtual_size={log.virtual_size}")
 
         # Focus the reply input
         reply_input.focus()
@@ -154,11 +187,11 @@ class ThreadPanel(Vertical):
         
         # Clear the message log
         try:
-            log = self.query_one("#thread-messages", RichLog)
-            _dbg(f"  clearing RichLog, had {len(log.lines)} lines")
+            log = self.query_one("#thread-messages", ScrollableLog)
+            _dbg(f"  clearing ScrollableLog, had {len(log.lines)} lines")
             log.clear()
         except Exception as e:
-            _dbg(f"  exception clearing RichLog: {e}")
+            _dbg(f"  exception clearing ScrollableLog: {e}")
         
         self.post_message(self.Closed())
 
