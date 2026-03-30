@@ -23,7 +23,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
+from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
 from .widgets.layout_render import LayoutAwareRender
 
 try:
@@ -213,6 +213,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._is_loading = True  # Loading state - shows spinner until data loaded
         self._load_message = "Connecting..."
         self._connected = False  # Track if we've received connected event
+        self._history_loading_key: str | None = None  # Buffer key currently loading history
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1290,6 +1291,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg(f"  already loading history for {key}")
             return
         self._history_loading.add(key)
+        self._history_loading_key = key
+        # Mount inline spinner at top of messages panel
+        try:
+            # Mount to the body container so it docks at top
+            body = self.query_one("#body")
+            spinner = InlineSpinner("Loading older messages...", id="history-spinner")
+            body.mount(spinner)
+        except Exception as e:
+            _dbg(f"  failed to mount spinner: {e}")
         _dbg(f"ScrolledToTop: requesting history for {key}")
         self._request_history(self.active_buffer)
 
@@ -1648,6 +1658,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     key = self._buffer_key(batch.target)
                     self.restore_history_targets.discard(key)
                     self._history_loading.discard(key)  # Allow more history requests
+                    # Remove loading spinner
+                    try:
+                        spinner = self.query_one("#history-spinner", InlineSpinner)
+                        spinner.remove()
+                    except Exception:
+                        pass
                     self.active_buffer = key
                     self._scroll_mode = "home"
                     self._check_loading_complete()
