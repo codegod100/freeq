@@ -1033,8 +1033,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _open_thread(self, thread_root: str) -> None:
         """Open the thread panel - swap to MessagesPanelWithThread."""
         if not thread_root:
+            _dbg(f"_open_thread: empty thread_root, ignoring")
             return
-        _dbg(f"_open_thread({thread_root[:8]!r})")
+        _dbg(f"_open_thread({thread_root[:8]!r}) current open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         self.open_thread_root = thread_root
         
         # Collect messages
@@ -1047,16 +1048,25 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         old = None
         try:
             old = self.query_one(MessagesPanel)
+            _dbg(f"  found MessagesPanel to remove")
         except Exception:
+            _dbg(f"  no MessagesPanel found, checking for MessagesPanelWithThread")
+            try:
+                old = self.query_one(MessagesPanelWithThread)
+                _dbg(f"  found MessagesPanelWithThread instead (thread already open?)")
+            except Exception:
+                _dbg(f"  neither panel found")
             pass
         
         if old:
             old.remove()
+            _dbg(f"  removed old panel")
         
         new_panel = MessagesPanelWithThread(
             thread_root, thread_msgs, self._format_thread_message
         )
         body.mount(new_panel)
+        _dbg(f"  mounted MessagesPanelWithThread")
         # Panel triggers render via on_mount -> trigger_app_render -> request_render
         
         # Set scroll mode for when the scheduled render happens
@@ -1074,14 +1084,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         old = None
         try:
             old = self.query_one(MessagesPanelWithThread)
+            _dbg(f"_close_thread: found MessagesPanelWithThread to remove")
         except Exception:
+            _dbg(f"_close_thread: no MessagesPanelWithThread found")
             pass
         
         if old:
             old.remove()
+            _dbg(f"_close_thread: removed old panel")
         
         new_panel = MessagesPanel()
         body.mount(new_panel)
+        _dbg(f"_close_thread: mounted new MessagesPanel")
         # Panel triggers render via on_mount
         self.call_later(lambda: self.query_one("#composer", Input).focus())
 
@@ -1150,9 +1164,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
         if 0 <= virtual_y < len(line_threads):
             thread_root = line_threads[virtual_y]
-            _dbg(f"  thread_root={thread_root!r}")
+            _dbg(f"  thread_root={thread_root[:8] if thread_root else None!r}, open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
             if thread_root:
+                _dbg(f"  calling _open_thread({thread_root[:8]})")
                 self._open_thread(thread_root)
+            else:
+                _dbg(f"  no thread_root at line {virtual_y}, ignoring click")
+        else:
+            _dbg(f"  virtual_y={virtual_y} out of range [0, {len(line_threads)})")
 
     # ── Render active buffer ───────────────────────────────────────────────
 
