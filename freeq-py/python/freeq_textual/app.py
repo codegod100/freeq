@@ -66,16 +66,13 @@ except ImportError:  # pragma: no cover - dependency is optional outside the dev
 
 
 # ── Debug logging ─────────────────────────────────────────────────────────
-# Writes to /tmp/freeq-tui.log for troubleshooting thread panel issues.
-# Can be disabled by commenting out the body or setting _DBG_PATH to /dev/null.
+# SINGLE LOG FILE: /tmp/freeq.log - ALL logging goes here!
+# DO NOT create additional log files!
+# DO NOT log to different files for different modules!
+# ALL FRIENDS LOG TO THE SAME PLACE!
 
-_DBG_PATH = "/tmp/freeq-tui.log"
-
-
-def _dbg(msg: str) -> None:
-    import datetime
-    with open(_DBG_PATH, "a") as f:
-        f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
+# Import the ONE TRUE _dbg from widgets/debug.py
+from .widgets.debug import _dbg  # noqa: E402 - must import after module setup
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1467,11 +1464,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     
     @on(EmojiPicker.EmojiSelected)
     def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:
-        """Handle emoji selection - send reaction."""
+        """Handle emoji selection - send reaction via TAGMSG."""
         _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
         if event.msgid:
-            # Send reaction via IRC
-            self.client.raw(f"REACT {event.msgid} {event.emoji}")
+            # Send reaction via TAGMSG with +react tag
+            # Server expects: @+react=🔥 TAGMSG #channel
+            target = self._display_name(self.active_buffer)
+            self.client.raw(f"@+react={event.emoji} TAGMSG {target}")
+            _dbg(f"  sent: @+react={event.emoji} TAGMSG {target}")
 
     # ── Render active buffer ───────────────────────────────────────────────
 

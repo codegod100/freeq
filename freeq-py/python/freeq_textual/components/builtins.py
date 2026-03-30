@@ -57,10 +57,6 @@ class AutoLogMixin:
 # REPLY PANEL - Default implementation
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ─────────────────────────────────────────────────────────────────────────────
-# REPLY PANEL - Default implementation
-# ─────────────────────────────────────────────────────────────────────────────
-
 # NOTE: _context is RESERVED by Textual! Use _reply_context or similar.
 # TypeError: 'str' object is not callable happens if you override it.
 
