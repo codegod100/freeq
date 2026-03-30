@@ -159,7 +159,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("escape", "close_thread", "Close thread", show=False),
-        Binding("ctrl+shift+d", "toggle_debug", "Debug panel", show=True),
     ]
 
     active_buffer = reactive("status")
