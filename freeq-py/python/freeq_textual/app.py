@@ -1235,11 +1235,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _on_scrollable_log_clicked(self, event: ScrollableLog.Clicked) -> None:
         """Handle clicks from ScrollableLog widget.
         
-        DESIGN: Query the component directly for thread_root - never use app dict.
-        The component knows its actual rendered lines; app dict becomes stale on width change.
+        DESIGN: Use the widget that emitted the event directly - never query by ID.
+        The event sender IS the ScrollableLog that was clicked.
         """
-        # Get the messages log widget directly
-        log = self.query_one("#messages", ScrollableLog)
+        # Get the ScrollableLog that emitted this event
+        # (could be #messages or #thread-messages depending on which was clicked)
+        log = event.widget
+        if not isinstance(log, ScrollableLog):
+            return
         
         virtual_y = int(event.y + event.scroll_y)
         
