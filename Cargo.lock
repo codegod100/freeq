@@ -1822,10 +1822,12 @@ dependencies = [
 name = "freeq-auth-broker"
 version = "0.1.1"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "axum",
  "base64",
  "chrono",
+ "hkdf",
  "hmac",
  "p256",
  "percent-encoding",
@@ -1926,6 +1928,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "url",
  "webpki-roots",
  "x25519-dalek",
 ]
