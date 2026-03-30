@@ -14,14 +14,14 @@ import webbrowser
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from rich.columns import Columns
 from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, ListItem, ListView, RichLog, Static
+from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, RichLog, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
 
@@ -157,6 +157,9 @@ class FreeqTextualApp(App[None]):
         overflow-x: hidden;
         width: 1fr;
         min-width: 0;
+        padding: 0;
+        scrollbar-gutter: stable;
+        scrollbar-size: 1 1;
     }
 
     #thread-panel {
@@ -170,19 +173,37 @@ class FreeqTextualApp(App[None]):
         display: block;
     }
 
+    #thread-header-row {
+        height: auto;
+        padding: 0 0 1 0;
+        align: center middle;
+    }
+
     #thread-header {
         text-style: bold;
-        padding: 0 0 1 0;
+        width: 1fr;
+    }
+
+    #thread-close {
+        min-width: 8;
+        width: auto;
+        height: 1;
+        padding: 0 1;
+        border: none;
+        background: transparent;
     }
 
     #thread-messages {
         border: none;
         height: 1fr;
         overflow-x: hidden;
+        padding: 0 1 0 0;
     }
 
     #thread-reply {
-        border: none;
+        border: solid $panel-lighten-2;
+        height: 3;
+        padding: 0 1;
         dock: bottom;
     }
 
@@ -244,6 +265,7 @@ class FreeqTextualApp(App[None]):
         self._nick_handles: dict[str, str] = {}
         self._avatar_palettes: dict[str, list[str]] = {}
         self._avatar_images: dict[str, object] = {}
+        self._avatar_rows: dict[str, list[list[str]]] = {}
         self._pending_whois: set[str] = set()
         self._pending_avatar_fetches: set[str] = set()
         self._avatar_updates: SimpleQueue[tuple[str, list[str] | None, object | None]] = SimpleQueue()
@@ -261,7 +283,9 @@ class FreeqTextualApp(App[None]):
                 auto_scroll=False,
             )
             with Vertical(id="thread-panel"):
-                yield Static("", id="thread-header")
+                with Horizontal(id="thread-header-row"):
+                    yield Static("", id="thread-header")
+                    yield Button("Close", id="thread-close")
                 yield RichLog(
                     id="thread-messages",
                     highlight=True,
@@ -287,6 +311,8 @@ class FreeqTextualApp(App[None]):
         self._avatars_enabled = self._detect_avatar_support()
         composer = self.query_one("#composer", Input)
         self._refresh_layout_widths()
+        if self._avatars_enabled and Pixels is None:
+            self._append_status("avatars: rich-pixels unavailable, using tile fallback", "yellow")
         self._append_status(f"connecting to {self.client.server_addr}...", "dim")
         self._scroll_mode = "end"
         self._render_active_buffer()
@@ -326,20 +352,33 @@ class FreeqTextualApp(App[None]):
         )
 
     def _format_avatar(self, nick: str) -> Text:
-        colors = self._avatar_palettes.get(self._nick_key(nick)) or _avatar_palette(nick)
+        nick_key = self._nick_key(nick)
+        rows = self._avatar_rows.get(nick_key)
+        if rows:
+            avatar = Text()
+            for color in rows[0]:
+                avatar.append("█", style=color)
+            avatar.append(" ")
+            return avatar
+
+        colors = self._avatar_palettes.get(nick_key) or _avatar_palette(nick)
         avatar = Text()
-        avatar.append("▀", style=f"{colors[0]} on {colors[1]}")
-        avatar.append("▀", style=f"{colors[2]} on {colors[3]}")
+        avatar.append("█", style=colors[0])
+        avatar.append("█", style=colors[1])
+        avatar.append("█", style=colors[2])
+        avatar.append("█", style=colors[3])
         avatar.append(" ")
         return avatar
 
-    def _avatar_renderable(self, nick: str) -> object:
-        nick_key = self._nick_key(nick)
-        if Pixels is not None:
-            image = self._avatar_images.get(nick_key)
-            if image is not None:
-                return Pixels.from_image(image)
-        return self._format_avatar(nick)
+    def _fallback_avatar_rows(self, nick: str) -> list[list[str]]:
+        colors = self._avatar_palettes.get(self._nick_key(nick)) or _avatar_palette(nick)
+        return [
+            [colors[0], colors[1], colors[2], colors[3]],
+            [colors[3], colors[2], colors[1], colors[0]],
+        ]
+
+    def _avatar_rows_for_nick(self, nick: str) -> list[list[str]]:
+        return self._avatar_rows.get(self._nick_key(nick)) or self._fallback_avatar_rows(nick)
 
     def _short_url(self, url: str, *, limit: int = 36) -> str:
         parsed = urlparse(url)
@@ -352,8 +391,14 @@ class FreeqTextualApp(App[None]):
             return display
         return display[: limit - 3].rstrip("/") + "..."
 
+    def _display_url(self, url: str) -> str:
+        # Add soft break opportunities so long URLs wrap instead of being cropped.
+        for token in ("/", "?", "&", "=", "#", "-", "_", "."):
+            url = url.replace(token, f"{token}\u200b")
+        return url
+
     def _format_message_body(self, text: str) -> Text:
-        body = Text()
+        body = Text(no_wrap=False, overflow="fold")
         last_end = 0
         for match in _URL_RE.finditer(text):
             start, end = match.span("url")
@@ -361,9 +406,10 @@ class FreeqTextualApp(App[None]):
                 body.append(text[last_end:start])
             url = match.group("url")
             body.append(
-                self._short_url(url),
+                f"[link: {self._short_url(url)}]",
                 style=f"underline cyan link {url}",
             )
+            body.append(f" {self._display_url(url)}", style="dim")
             last_end = end
         if last_end < len(text):
             body.append(text[last_end:])
@@ -381,21 +427,34 @@ class FreeqTextualApp(App[None]):
         parts.append(self._format_message_body(text))
         return Text().assemble(*parts)
 
-    def _format_message_header(self, sender: str) -> Text:
+    def _format_message_header(self, sender: str) -> list[Text]:
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         if not self._avatars_enabled:
-            return name
-        avatar = self._avatar_renderable(sender)
-        if isinstance(avatar, Text):
-            return Text().assemble(avatar, name)
-        return Columns([avatar, name], expand=False, padding=(0, 1))
+            return [name]
 
-    def _format_message_line(self, text: str) -> Text:
-        return Text().assemble(Text("   "), self._format_message_body(text))
+        rows = self._avatar_rows_for_nick(sender)
+        lines: list[Text] = []
+        for row_index, row in enumerate(rows):
+            line = Text()
+            for color in row:
+                line.append("█", style=color)
+            if row_index == 0:
+                line.append(" ")
+                line.append_text(name)
+            lines.append(line)
+        return lines
+
+    def _format_message_line(self, sender: str, text: str) -> Text:
+        line = Text(no_wrap=False, overflow="fold")
+        if self._avatars_enabled:
+            # Indent to align with header text (avatar width = 4 chars + 1 space)
+            line.append("     ")
+        line.append_text(self._format_message_body(text))
+        return self._with_trailing_padding(line)
 
     def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
         """Dim reply indicator: `  ↳ replying to <nick>: <snippet>`."""
-        indicator = Text()
+        indicator = Text(no_wrap=False, overflow="fold")
         indicator.append("  \u21b3 ", style="dim")
         indicator.append("replying to ", style="dim italic")
         indicator.append(parent_sender, style=f"dim {_nick_color(parent_sender)}")
@@ -405,7 +464,12 @@ class FreeqTextualApp(App[None]):
 
     def _format_system(self, text: str, style: str = "") -> Text:
         """System/status message with optional style."""
-        return Text(text, style=style)
+        return Text(text, style=style, no_wrap=False, overflow="fold")
+
+    def _with_trailing_padding(self, line: Text, spaces: int = 2) -> Text:
+        padded = line.copy()
+        padded.append(" " * spaces)
+        return padded
 
     def _is_reply_indicator(self, line: Text) -> bool:
         return line.plain.startswith("  \u21b3 ")
@@ -457,9 +521,7 @@ class FreeqTextualApp(App[None]):
     @staticmethod
     def _thread_panel_width_cells(total_width: int, sidebar_width: int) -> int:
         available = max(0, total_width - sidebar_width)
-        preferred = max(18, available // 3)
-        max_allowed = max(18, available - 36)
-        return max(18, min(34, preferred, max_allowed))
+        return max(18, min(44, (available * 3) // 10))
 
     def _refresh_layout_widths(self) -> None:
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
@@ -568,13 +630,14 @@ class FreeqTextualApp(App[None]):
             sender_key = self._nick_key(sender)
             show_header = not previous_was_chat or previous_sender != sender_key
             if show_header:
-                renderable.append(self._format_message_header(sender))
-                render_roots.append(None)
+                for header_line in self._format_message_header(sender):
+                    renderable.append(header_line)
+                    render_roots.append(None)
             for pending_line, pending_root in pending_reply_indicators:
                 renderable.append(pending_line)
                 render_roots.append(pending_root)
             pending_reply_indicators.clear()
-            renderable.append(self._format_message_line(text))
+            renderable.append(self._format_message_line(sender, text))
             render_roots.append(None)
 
             next_meta = metas[index + 1] if index + 1 < len(metas) else None
@@ -653,8 +716,23 @@ class FreeqTextualApp(App[None]):
     def _prepare_avatar_image(self, image: object) -> object | None:
         if Image is None or ImageOps is None or not isinstance(image, Image.Image):
             return None
-        prepared = ImageOps.fit(image.convert("RGB"), (8, 8), method=Image.Resampling.LANCZOS)
+        prepared = ImageOps.fit(image.convert("RGB"), (4, 2), method=Image.Resampling.LANCZOS)
         return prepared
+
+    def _avatar_rows_from_image(self, image: object) -> list[list[str]] | None:
+        if Image is None or not isinstance(image, Image.Image):
+            return None
+        width, height = image.size
+        if width <= 0 or height <= 0:
+            return None
+        rows: list[list[str]] = []
+        for y in range(height):
+            row: list[str] = []
+            for x in range(width):
+                red, green, blue = image.getpixel((x, y))
+                row.append(f"#{red:02x}{green:02x}{blue:02x}")
+            rows.append(row)
+        return rows
 
     def _fetch_bluesky_avatar_data(self, handle: str) -> tuple[list[str] | None, object | None]:
         if Image is None:
@@ -711,11 +789,18 @@ class FreeqTextualApp(App[None]):
                 self._avatar_palettes.pop(nick_key, None)
             if avatar_image is not None:
                 self._avatar_images[nick_key] = avatar_image
+                rows = self._avatar_rows_from_image(avatar_image)
+                if rows:
+                    self._avatar_rows[nick_key] = rows
             else:
                 self._avatar_images.pop(nick_key, None)
+                self._avatar_rows.pop(nick_key, None)
             updated_any = True
         if updated_any:
-            self._render_active_buffer()
+            try:
+                self._render_active_buffer()
+            except NoMatches:
+                return
 
     # ── Message recording ──────────────────────────────────────────────────
 
@@ -789,8 +874,9 @@ class FreeqTextualApp(App[None]):
             return
         self.open_thread_root = thread_root
         panel = self.query_one("#thread-panel")
-        self._refresh_layout_widths()
         panel.add_class("visible")
+        self._refresh_layout_widths()
+        self._render_active_buffer()
         self._render_thread_panel()
         # Focus the reply input inside the thread panel
         self.query_one("#thread-reply", Input).focus()
@@ -801,6 +887,7 @@ class FreeqTextualApp(App[None]):
         panel = self.query_one("#thread-panel")
         panel.remove_class("visible")
         self._refresh_layout_widths()
+        self._render_active_buffer()
         self.query_one("#composer", Input).focus()
 
     def _render_thread_panel(self) -> None:
@@ -822,19 +909,13 @@ class FreeqTextualApp(App[None]):
         header.update(f"Thread ({count} msg{'s' if count != 1 else ''})")
 
         log.clear()
-        thread_lines: list[Text] = []
+        thread_lines: list[object] = []
         thread_roots: list[str | None] = []
-        previous_sender: str | None = None
         for msg in messages:
-            sender_key = self._nick_key(msg.sender)
-            if sender_key != previous_sender:
-                thread_lines.append(self._format_message_header(msg.sender))
-                thread_roots.append(None)
-            thread_lines.append(self._format_message_line(msg.text))
+            thread_lines.append(self._with_trailing_padding(self._format_message(msg.sender, msg.text)))
             thread_roots.append(None)
             thread_lines.append(Text(" "))
             thread_roots.append(None)
-            previous_sender = sender_key
         self._write_render_lines(log, thread_lines, thread_roots=thread_roots)
 
         # Update placeholder with the root msgid for context
@@ -897,6 +978,9 @@ class FreeqTextualApp(App[None]):
     def on_resize(self, event: events.Resize) -> None:
         del event
         self._refresh_layout_widths()
+        self._render_active_buffer()
+        if self.open_thread_root:
+            self._render_thread_panel()
 
     # ── Event polling ──────────────────────────────────────────────────────
 
@@ -1256,6 +1340,11 @@ class FreeqTextualApp(App[None]):
         """Close the open thread panel."""
         if self.open_thread_root:
             self._close_thread()
+
+    @on(Button.Pressed, "#thread-close")
+    def handle_thread_close_button(self, event: Button.Pressed) -> None:
+        del event
+        self.action_close_thread()
 
     def action_open_thread(self, thread_root: str = "") -> None:
         """Open thread panel. Called from /thread command."""

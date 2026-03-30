@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import sys
 import json
+import re
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
+
+from PIL import Image as PILImage
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
@@ -14,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from textual.widgets import RichLog  # noqa: E402
 from textual.widgets import Static  # noqa: E402
 from textual.widgets import Input  # noqa: E402
+from textual.widgets import Button  # noqa: E402
 
 from freeq_textual.app import BufferState, FreeqTextualApp  # noqa: E402
 
@@ -66,7 +70,11 @@ class FakeBroker:
 
 class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
     def _normalize_line(self, text: str) -> str:
-        return text.removeprefix("▀▀ ").strip()
+        text = re.sub(r"^[▀█▄ ]+", "", text).strip()
+        return text
+
+    def _normalize_text(self, text: str) -> str:
+        return text.replace("\u200b", "")
 
     def test_sidebar_width_tracks_buffer_labels_with_bounds(self) -> None:
         narrow = [
@@ -82,9 +90,21 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(FreeqTextualApp._sidebar_width_cells(wide), 22)
 
     def test_thread_panel_width_shrinks_on_narrow_layouts(self) -> None:
-        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(80, 12), 22)
-        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(100, 16), 28)
-        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(140, 16), 34)
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(80, 12), 20)
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(100, 16), 25)
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(120, 16), 31)
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(140, 16), 37)
+
+    def test_thread_panel_width_preserves_minimum_chat_width(self) -> None:
+        cases = [
+            (80, 12),
+            (90, 16),
+            (100, 16),
+            (120, 22),
+        ]
+        for total_width, sidebar_width in cases:
+            thread_width = FreeqTextualApp._thread_panel_width_cells(total_width, sidebar_width)
+            self.assertEqual(thread_width, max(18, min(44, ((total_width - sidebar_width) * 3) // 10)))
 
     async def test_message_format_includes_avatar_only_when_enabled(self) -> None:
         client = FakeClient()
@@ -120,7 +140,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             with patch.dict("os.environ", {"TERM_PROGRAM": "WezTerm"}, clear=False):
                 self.assertTrue(app._detect_avatar_support())
 
-    async def test_long_urls_are_shortened_in_message_display(self) -> None:
+    async def test_long_urls_render_clickable_label_and_full_url(self) -> None:
         client = FakeClient()
         app = FreeqTextualApp(client)
 
@@ -131,8 +151,27 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 "see https://example.com/really/long/path/that/keeps/going?with=query",
             )
 
-        self.assertIn("alice: see example.com/really/long/path/that...", rendered.plain)
-        self.assertNotIn("https://example.com/really/long/path/that/keeps/going?with=query", rendered.plain)
+        plain = self._normalize_text(rendered.plain)
+        self.assertIn(
+            "alice: see [link: example.com/really/long/path/that...] https://example.com/really/long/path/that/keeps/going?with=query",
+            plain,
+        )
+
+    async def test_message_body_uses_fold_overflow(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test():
+            body = app._format_message_body("x" * 200)
+            line = app._format_message_line("alice", "x" * 200)
+            reply = app._format_reply_indicator("alice", "x" * 120, "root1")
+
+        self.assertEqual(body.overflow, "fold")
+        self.assertFalse(body.no_wrap)
+        self.assertEqual(line.overflow, "fold")
+        self.assertFalse(line.no_wrap)
+        self.assertEqual(reply.overflow, "fold")
+        self.assertFalse(reply.no_wrap)
 
     async def test_composer_accepts_typed_text(self) -> None:
         client = FakeClient()
@@ -167,7 +206,9 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 text = str(renderable)
             text = text.strip()
             if text:
-                result.append(self._normalize_line(text))
+                normalized = self._normalize_line(text)
+                if normalized:
+                    result.append(normalized)
         return result
 
     def _thread_header(self, app: FreeqTextualApp) -> str:
@@ -190,7 +231,9 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 text = str(renderable)
             text = text.strip()
             if text:
-                result.append(self._normalize_line(text))
+                normalized = self._normalize_line(text)
+                if normalized:
+                    result.append(normalized)
         return result
 
     async def test_replay_batch_renders_into_visible_log_in_sorted_order(self) -> None:
@@ -406,8 +449,8 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Thread", header)
             self.assertIn("2 msg", header)
-            self.assertIn("alice", rendered)
-            self.assertIn("bob", rendered)
+            self.assertIn("alice:", rendered_text)
+            self.assertIn("bob:", rendered_text)
             self.assertIn("root message for thread", rendered_text)
             self.assertIn("reply in thread", rendered_text)
 
@@ -447,6 +490,74 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertLess(bob_index, reply_index)
             self.assertLess(reply_index, body_index)
+
+    async def test_opening_thread_rerenders_main_log_for_new_width(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "root message " * 10,
+                    "tags": {"msgid": "root1"},
+                },
+                {
+                    "type": "message",
+                    "from": "bob",
+                    "target": "#freeq",
+                    "text": "reply body",
+                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                },
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            panel = app.query_one("#thread-panel")
+            visibility_during_render: list[bool] = []
+
+            original_render = app._render_active_buffer
+
+            def wrapped_render() -> None:
+                visibility_during_render.append(panel.has_class("visible"))
+                original_render()
+
+            with patch.object(app, "_render_active_buffer", side_effect=wrapped_render) as render_active:
+                app._open_thread("root1")
+                await pilot.pause()
+
+            self.assertGreaterEqual(render_active.call_count, 1)
+            self.assertIn(True, visibility_during_render)
+
+    async def test_thread_close_button_hides_panel(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "root message",
+                    "tags": {"msgid": "root1"},
+                }
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            app._open_thread("root1")
+            await pilot.pause()
+            self.assertTrue(app.query_one("#thread-panel").has_class("visible"))
+
+            app.handle_thread_close_button(SimpleNamespace(button=app.query_one("#thread-close", Button)))
+            await pilot.pause()
+
+            self.assertFalse(app.query_one("#thread-panel").has_class("visible"))
 
     async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
         client = FakeClient()
@@ -581,12 +692,13 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient()
         app = FreeqTextualApp(client)
         fetch_calls: list[str] = []
+        avatar_image = PILImage.new("RGB", (8, 8), "#336699")
 
-        def fake_fetch(handle: str) -> list[str]:
+        def fake_fetch(handle: str) -> tuple[list[str], PILImage.Image]:
             fetch_calls.append(handle)
-            return ["#010203", "#040506", "#070809", "#0a0b0c"]
+            return ["#010203", "#040506", "#070809", "#0a0b0c"], avatar_image
 
-        app._fetch_bluesky_avatar_palette = fake_fetch  # type: ignore[method-assign]
+        app._fetch_bluesky_avatar_data = fake_fetch  # type: ignore[method-assign]
 
         async with app.run_test() as pilot:
             app._avatars_enabled = True
@@ -624,9 +736,12 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 app._avatar_palettes["alice"],
                 ["#010203", "#040506", "#070809", "#0a0b0c"],
             )
+            self.assertIs(app._avatar_images["alice"], avatar_image)
             rendered = self._rendered_lines(app)
-            self.assertEqual(rendered[:2], ["alice", "hello there"])
-            self.assertTrue(app._format_message("alice", "hello there").plain.startswith("▀▀ "))
+            rendered_text = " ".join(rendered)
+            self.assertIn("alice", rendered_text)
+            self.assertIn("hello there", rendered_text)
+            self.assertNotEqual(app._format_message("alice", "hello there").plain, "alice: hello there")
 
 
 if __name__ == "__main__":
