@@ -427,25 +427,61 @@ class FreeqTextualApp(App[None]):
         parts.append(self._format_message_body(text))
         return Text().assemble(*parts)
 
-    def _format_chat_block(self, sender: str, text: str) -> Text:
-        """Single Text: nick + message body as one block so wrapping stays aligned."""
+    def _format_header_lines(self, sender: str) -> list[Text]:
+        """Return header line(s): avatar + nick. Only called when avatars enabled."""
+        rows = self._avatar_rows_for_nick(sender)
+        name = Text(sender, style=f"bold {_nick_color(sender)}")
+        lines: list[Text] = []
+        # Row 1: avatar + nick
+        line1 = Text()
+        for color in rows[0]:
+            line1.append("\u2588", style=color)
+        line1.append(" ")
+        line1.append_text(name)
+        lines.append(line1)
+        # Row 2: avatar only
+        line2 = Text()
+        for color in rows[1]:
+            line2.append("\u2588", style=color)
+        lines.append(line2)
+        return lines
+
+    def _format_message_lines(self, text: str, indent: int, width: int) -> list[Text]:
+        """Wrap message text to width, each line prefixed with indent spaces."""
+        available = max(20, width - indent)
+        words = text.split()
+        lines: list[Text] = []
+        current = ""
+        for word in words:
+            test = f"{current} {word}".strip()
+            if len(test) <= available:
+                current = test
+            else:
+                if current:
+                    lines.append(Text(" " * indent + current))
+                current = word
+        if current:
+            lines.append(Text(" " * indent + current))
+        return lines
+
+    def _format_chat_block(self, sender: str, text: str, width: int = 80) -> list[Text]:
+        """Return list of lines for a chat message."""
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         body = self._format_message_body(text)
-        block = Text(no_wrap=False, overflow="fold")
+        
         if self._avatars_enabled:
-            rows = self._avatar_rows_for_nick(sender)
-            # Just first row of avatar + nick + message (4x1 inline)
-            for color in rows[0]:
-                block.append("\u2588", style=color)
-            block.append(" ")
-            block.append_text(name)
-            block.append(": ")
-            block.append_text(body)
+            # Avatar + nick as header, then message lines below
+            lines = self._format_header_lines(sender)
+            indent = 5  # avatar width
+            lines.extend(self._format_message_lines(text, indent, width))
+            return lines
         else:
+            # No avatar: nick: message on one line
+            block = Text(no_wrap=False, overflow="fold")
             block.append_text(name)
             block.append(": ")
             block.append_text(body)
-        return block
+            return [block]
 
     def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
         """Dim reply indicator: `  ↳ replying to <nick>: <snippet>`."""
@@ -592,7 +628,7 @@ class FreeqTextualApp(App[None]):
         metas = line_metas or [None] * len(lines)
         self._line_message_meta[key] = list(metas) + self._line_message_meta[key]
 
-    def _renderable_lines(self, buffer_key: str) -> tuple[list[object], list[str | None]]:
+    def _renderable_lines(self, buffer_key: str, width: int = 80) -> tuple[list[object], list[str | None]]:
         renderable: list[object] = []
         render_roots: list[str | None] = []
         lines = self.messages[buffer_key]
@@ -629,19 +665,19 @@ class FreeqTextualApp(App[None]):
                     renderable.append(pending_line)
                     render_roots.append(pending_root)
                 pending_reply_indicators.clear()
-                renderable.append(self._format_chat_block(sender, text))
-                render_roots.append(None)
+                for block_line in self._format_chat_block(sender, text, width):
+                    renderable.append(block_line)
+                    render_roots.append(None)
             else:
                 # Continuation of same sender - just message body, indented
                 for pending_line, pending_root in pending_reply_indicators:
                     renderable.append(pending_line)
                     render_roots.append(pending_root)
                 pending_reply_indicators.clear()
-                indent = "     " if self._avatars_enabled else ""
-                cont_line = Text(indent, no_wrap=False, overflow="fold")
-                cont_line.append_text(self._format_message_body(text))
-                renderable.append(cont_line)
-                render_roots.append(None)
+                indent = 5 if self._avatars_enabled else 0
+                for msg_line in self._format_message_lines(text, indent, width):
+                    renderable.append(msg_line)
+                    render_roots.append(None)
 
             next_meta = metas[index + 1] if index + 1 < len(metas) else None
             next_sender = self._nick_key(next_meta[0]) if next_meta is not None else None
@@ -957,8 +993,9 @@ class FreeqTextualApp(App[None]):
         topic = self.channel_topics.get(self.active_buffer, "").strip()
         self.title = f"freeq - {active_name}" if not topic else f"freeq - {active_name} | {topic}"
         log = self.query_one("#messages", RichLog)
+        width = max(40, log.size.width - 3)  # account for scrollbar and padding
         log.clear()
-        render_lines, render_roots = self._renderable_lines(self.active_buffer)
+        render_lines, render_roots = self._renderable_lines(self.active_buffer, width)
         rendered_threads = self._write_render_lines(
             log,
             render_lines,
