@@ -110,17 +110,12 @@ class ThreadPanel(Vertical):
             messages: List of ThreadMessage objects to display
             formatter: Callable(sender, text) -> Text to format messages
         """
-        import datetime
-        with open("/tmp/freeq-tui.log", "a") as f:
-            f.write(f"{datetime.datetime.now().isoformat()} ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)\n")
-
         self.open_root = thread_root
         self.add_class("visible")
 
         # Update header
         header = self.query_one("#thread-header", Static)
-        count = len(messages)
-        header.update(f"Thread ({count} msg{'s' if count != 1 else ''})")
+        header.update(f"Thread ({len(messages)} msg{'s' if len(messages) != 1 else ''})")
 
         # Update placeholder
         reply_input = self.query_one("#thread-reply", Input)
@@ -133,8 +128,6 @@ class ThreadPanel(Vertical):
             formatted = formatter(msg.sender, msg.text)
             log.write(formatted)
             log.write(Text(" "))
-        log.refresh()
-        self.refresh()
 
         # Focus the reply input
         reply_input.focus()
