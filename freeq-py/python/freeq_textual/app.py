@@ -1217,6 +1217,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
         self._send_reply(target, event.thread_root, event.text)
     
+    # NOTE: DO NOT REMOVE ReplyPanel handler. User wants this feature.
+    # If it's broken, fix it. Don't just delete it.
     @on(ReplyPanel.ReplySent)
     def handle_reply_panel_reply(self, event: ReplyPanel.ReplySent) -> None:
         """Handle reply sent from reply panel."""
