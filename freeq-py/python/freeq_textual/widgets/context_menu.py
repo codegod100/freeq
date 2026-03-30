@@ -1,9 +1,14 @@
 """Context menu for right-click actions."""
 
-from textual.widgets import Static, Button
+from textual.widgets import Button
 from textual.containers import Vertical
 from textual.message import Message
-from typing import Optional, Callable
+from typing import Callable
+
+def _dbg(msg: str) -> None:
+    import datetime
+    with open("/tmp/freeq.log", "a") as f:
+        f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
 
 
 class ContextMenu(Vertical):
@@ -20,10 +25,10 @@ class ContextMenu(Vertical):
     
     DEFAULT_CSS = """
     ContextMenu {
-        layer: overlay;
+        dock: top;
         background: $surface;
         border: round $primary;
-        padding: 0;
+        padding: 0 1;
         margin: 0;
         width: auto;
         height: auto;
@@ -33,7 +38,6 @@ class ContextMenu(Vertical):
         background: transparent;
         border: none;
         padding: 0 2;
-        height: auto;
     }
     
     ContextMenu Button:hover {

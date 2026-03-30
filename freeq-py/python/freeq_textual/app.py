@@ -1360,7 +1360,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Show context menu at click position."""
         from .widgets.context_menu import ContextMenu
         
-        _dbg(f"_show_context_menu: x={event.x} y={event.y}")
+        _dbg(f"_show_context_menu: x={event.x} y={event.y} screen_x={event.screen_x} screen_y={event.screen_y}")
         
         # Close any existing menu
         for menu in self.query(ContextMenu):
@@ -1370,7 +1370,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         virtual_y = int(event.y + log.scroll_y)
         msgid = self._get_msgid_at_line(virtual_y)
         
-        # Create menu - mount to log widget at click position
+        # Create menu
         menu = ContextMenu(
             actions=[
                 ("Reply", self._on_menu_reply),
@@ -1378,10 +1378,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             ],
             msgid=msgid,
         )
-        log.mount(menu)
-        # Position relative to the log widget
-        menu.styles.left = event.x
-        menu.styles.top = event.y
+        # Mount to screen, dock to top
+        self.screen.mount(menu)
         _dbg(f"  mounted ContextMenu msgid={msgid}")
     
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
