@@ -77,6 +77,17 @@ class ScrollableLog(RichLog):
         Called when opening a thread to scroll to the thread root message.
         The location is the msgid of the message to scroll to.
         
+        DEFERRED RENDERS FIX:
+        RichLog defers ALL writes until the widget has been sized (_size_known=True).
+        When opening a thread panel, the new ScrollableLog hasn't been sized yet, so
+        all our write() calls get queued in _deferred_renders. This means self.lines
+        is empty when we try to scroll - nothing has actually been rendered.
+        
+        Solution: Before scrolling, check for deferred renders. If found:
+        1. Force _size_known=True (the widget has a size by now)
+        2. Replay all deferred writes
+        3. Now self.lines is populated and we can scroll
+        
         Args:
             location: Location identifier (e.g., msgid)
         
