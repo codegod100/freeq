@@ -120,7 +120,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_format_includes_avatar_only_when_enabled(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test():
             app._avatars_enabled = False
@@ -135,7 +135,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_format_skips_avatar_without_bluesky_palette(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test():
             app._avatars_enabled = True
@@ -149,7 +149,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         self._avatar_patcher.stop()
         try:
             client = FakeClient()
-            app = FreeqTextualApp(client, _for_test=True)
+            app = FreeqTextualApp(client)
 
             with patch("rich.console.Console.color_system", new_callable=PropertyMock, return_value=None):
                 with patch.dict("os.environ", {"TERM_PROGRAM": "WezTerm"}, clear=False):
@@ -160,7 +160,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_long_urls_render_clickable_hyperlink(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test():
             app._avatars_enabled = False
@@ -175,7 +175,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_body_uses_fold_overflow(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test():
             body = app._format_message_body("x" * 200)
@@ -194,7 +194,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_composer_accepts_typed_text(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             composer = app.query_one("#composer", Input)
@@ -258,7 +258,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replay_batch_renders_into_visible_log_in_sorted_order(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app._append_line(
@@ -301,7 +301,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_replay_batch_switches_visible_room(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             client.queue_events(
@@ -326,7 +326,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_restore_rejoin_sequence_requests_join_and_renders_replay_batch(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app._ensure_buffer("#freeq")
@@ -357,7 +357,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_consecutive_messages_from_same_sender_are_grouped(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app.active_buffer = "#freeq"
@@ -393,7 +393,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_inactive_events_do_not_reset_visible_scroll_position(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             for index in range(40):
@@ -415,7 +415,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_incoming_direct_message_routes_to_sender_buffer(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             client.queue_events(
@@ -436,7 +436,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_panel_shows_thread_messages_when_opened(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app.active_buffer = "#freeq"
@@ -482,7 +482,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reply_indicator_renders_between_name_and_message(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app.active_buffer = "#freeq"
@@ -513,7 +513,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_opening_thread_rerenders_main_log_for_new_width(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app.active_buffer = "#freeq"
@@ -553,7 +553,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_thread_close_button_hides_panel(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app.active_buffer = "#freeq"
@@ -580,7 +580,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
             app.active_buffer = "#freeq"
@@ -629,7 +629,6 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 "handle": "nandi.example",
                 "channels": ["#freeq", "#python"],
             },
-            _for_test=True,
         )
 
         async with app.run_test() as pilot:
@@ -653,7 +652,6 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 "handle": "nandi.example",
                 "channels": ["#freeq", "#python"],
             },
-            _for_test=True,
         )
 
         async with app.run_test():
@@ -673,7 +671,6 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                     "handle": "nandi.example",
                     "channels": [],
                 },
-                _for_test=True,
             )
 
             async with app.run_test() as pilot:
@@ -695,7 +692,6 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 "handle": "nandi.example",
                 "channels": ["#freeq"],
             },
-            _for_test=True,
         )
 
         async with app.run_test() as pilot:
@@ -713,7 +709,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_message_triggers_whois_and_whois_reply_fetches_bluesky_avatar(self) -> None:
         client = FakeClient()
-        app = FreeqTextualApp(client, _for_test=True)
+        app = FreeqTextualApp(client)
         fetch_calls: list[str] = []
         avatar_image = PILImage.new("RGB", (8, 8), "#336699")
 

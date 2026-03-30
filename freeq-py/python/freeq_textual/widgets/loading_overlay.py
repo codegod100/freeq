@@ -1,14 +1,19 @@
-"""Loading overlay with spinner."""
+"""Loading overlay with spinner.
+
+Uses component lifecycle - mounted when loading, removed when done.
+NOT CSS class toggling - if visibility changes, it's a different component.
+"""
 
 from textual.widget import Widget
 from textual.widgets import Static
 
 
 class LoadingOverlay(Widget):
-    """Full-screen loading overlay with spinner."""
+    """Full-screen loading overlay with spinner. Mounted when loading, removed when done."""
 
     DEFAULT_CSS = """
     LoadingOverlay {
+        dock: top;  /* Layer above content */
         align: center middle;
         width: 100%;
         height: 100%;
@@ -38,8 +43,7 @@ class LoadingOverlay(Widget):
         return f"\n\n{frame} {self._message}\n\n"
 
     def on_mount(self) -> None:
-        # Animate spinner (NO TIMERS comment in layout_render.py applies to layout,
-        # spinner animation is cosmetic, not layout-related)
+        # Animate spinner
         self.set_interval(0.08, self._advance_frame)
 
     def _advance_frame(self) -> None:
