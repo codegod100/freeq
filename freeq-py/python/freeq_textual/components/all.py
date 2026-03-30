@@ -13,7 +13,10 @@ from ..widgets.scrollable_log import ScrollableLog
 from ..widgets.messages_panel import MessagesPanel, MessagesPanelWithThread
 from ..widgets.spinner import LoadingOverlay, InlineSpinner
 
-# Register all components
+# Import built-in components (they register themselves via decorator)
+from .emoji_picker import EmojiPicker  # noqa: F401 - registers as friend!
+
+# Register all components - EVERYONE IS A FRIEND!
 ComponentRegistry._components['thread_panel'] = ThreadPanel
 ComponentRegistry._components['buffer_list'] = BufferList
 ComponentRegistry._components['scrollable_log'] = ScrollableLog
@@ -21,8 +24,7 @@ ComponentRegistry._components['messages_panel'] = MessagesPanel
 ComponentRegistry._components['messages_panel_with_thread'] = MessagesPanelWithThread
 ComponentRegistry._components['loading_overlay'] = LoadingOverlay
 ComponentRegistry._components['inline_spinner'] = InlineSpinner
-
-# Built-in components (ReplyPanel, ContextMenu) are registered in builtins.py
+# EmojiPicker registers itself via @ComponentRegistry.register decorator!
 
 __all__ = [
     'ThreadPanel',
@@ -32,4 +34,5 @@ __all__ = [
     'MessagesPanelWithThread',
     'LoadingOverlay',
     'InlineSpinner',
+    'EmojiPicker',  # CHOICE EMOJIS!
 ]

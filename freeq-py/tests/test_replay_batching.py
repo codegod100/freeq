@@ -883,6 +883,37 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("hello there", rendered_text)
             self.assertNotEqual(app._format_message("alice", "hello there").plain, "alice: hello there")
 
+    async def test_history_exhausted_stops_loading_more(self) -> None:
+        """When CHATHISTORY returns empty batch, mark buffer as exhausted."""
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+        app._is_loading = False  # Don't try to update overlay in test
+        async with app.run_test() as pilot:
+            # Join channel and load initial history
+            client.queue_events(
+                {"type": "connected"},
+                {"type": "join", "channel": "#test", "members": []},
+                {"type": "names_end", "channel": "#test"},
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            # Load history - empty batch means end of history
+            client.queue_events(
+                {"type": "batch_start", "id": "b1", "batch_type": "chathistory", "target": "#test"},
+                {"type": "batch_end", "id": "b1", "target": "#test"},  # Empty batch!
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            # Buffer should be marked as exhausted
+            self.assertIn("#test", app._history_exhausted)
+
+            # Now try to load more - should be skipped
+            app._request_history_from_scroll()
+            # Should NOT add to _history_loading
+            self.assertNotIn("#test", app._history_loading)
+
 
 if __name__ == "__main__":
     unittest.main()
