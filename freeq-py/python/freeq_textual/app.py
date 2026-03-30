@@ -1319,8 +1319,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(events.Click, "#messages")
     def _on_message_log_click(self, event: events.Click) -> None:
         """Handle clicks on the message log to detect reply indicator clicks."""
-        log = event.sender
-        _dbg(f"click y={event.y} widget={event.sender} scroll_y={log.scroll_y if log else '?'}")
+        # events.Click has widget attribute (set in constructor)
+        log = event.widget
+        _dbg(f"click y={event.y} widget={event.widget} scroll_y={log.scroll_y if log else '?'}")
         _dbg(f"  thread_panel_open={self._thread_panel_is_open()}, open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         if log is None:
             return
