@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger("freeq.client")
 
 from ._freeq import FreeqAuthBroker as _FreeqAuthBroker
 from ._freeq import FreeqClient as _FreeqClient
@@ -62,6 +65,7 @@ class FreeqClient:
         self._inner.history_before(target, msgid, count)
 
     def raw(self, line: str) -> None:
+        logger.debug(f"CLIENT RAW: {line}")
         self._inner.raw(line)
 
     def set_nick(self, nick: str) -> None:
@@ -77,7 +81,9 @@ class FreeqClient:
         payload = self._inner.poll_event_json(timeout_ms)
         if payload is None:
             return None
-        return json.loads(payload)
+        parsed = json.loads(payload)
+        logger.debug(f"CLIENT RECV: {parsed.get('type')} {parsed.get('command', '')}")
+        return parsed
 
 
 class FreeqAuthBroker:
