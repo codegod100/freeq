@@ -1197,15 +1197,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(ScrollableLog.Clicked)
     def _on_scrollable_log_clicked(self, event: ScrollableLog.Clicked) -> None:
         """Handle clicks from ScrollableLog widget."""
-        widget_id = getattr(event.sender, 'id', '?')
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'ScrollableLog.Clicked: id={widget_id} y={event.y} scroll_y={event.scroll_y}\n')
-        _dbg(f"ScrollableLog.Clicked: id={widget_id} y={event.y}")
-        
-        # Only handle messages log clicks
-        if widget_id != "messages":
+        # Get the messages log widget directly
+        try:
+            log = self.query_one("#messages", ScrollableLog)
+        except NoMatches:
             return
             
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y}\n')
+        _dbg(f"ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y}")
+        
         virtual_y = int(event.y + event.scroll_y)
         line_threads = self._rendered_line_threads.get(self.active_buffer, [])
         _dbg(f"  virtual_y={virtual_y} threads_len={len(line_threads)}")
