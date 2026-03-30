@@ -7,38 +7,38 @@ from .debug import _dbg
 
 class ScrollableLog(RichLog):
     """A RichLog with thumb-only scrollbar (transparent track) and no horizontal scroll.
-    
+
     HORIZONTAL SCROLL:
     We hide the horizontal scrollbar (overflow-x: hidden) because we handle line wrapping
     explicitly via the width parameter in write(). All content should fit within the container
     width, so there's no need for horizontal scrolling.
-    
+
     WRAPPING FIXES:
-    
+
     1. RichLog.wrap defaults to False, which OVERRIDES Text.overflow settings.
        When wrap=False, RichLog forces no_wrap=True and overflow="ignore" on all Text objects.
        This breaks our Text(no_wrap=False, overflow="fold") wrapping for single long words.
        Solution: Pass wrap=True to RichLog (done in compose() of MessagesPanel* widgets).
-    
+
     2. RichLog.write() needs explicit width parameter for correct wrapping.
        Without width, it measures the renderable and uses its natural width, which can exceed
        the container width and cause horizontal scrolling instead of wrapping.
        Solution: Pass width=log.size.width to write() calls.
-    
+
     LOCATION SCROLLING:
-    
+
     When opening a thread panel, we want the main log to scroll to show the thread root message.
     This is done by tracking the msgid of each message and storing which line it appears on.
-    
+
     Flow:
     1. App calls log.write(line, width=w, location=msgid) for each rendered line
     2. ScrollableLog stores _location_lines[msgid] = line_index
     3. When thread opens, app sets _scroll_mode="message" and _scroll_target_msgid=thread_root
     4. _render_active_buffer() calls log.scroll_to_location(msgid)
     5. scroll_to_location() scrolls to make that line visible
-    
+
     This allows clicking a reply indicator to open the thread AND scroll to the original message.
-    
+
     NOTE: Terminal mouse selection works for copying text - hold and drag to select,
     then use terminal's copy shortcut (usually Ctrl+Shift+C or Cmd+C).
     """
@@ -50,10 +50,10 @@ class ScrollableLog(RichLog):
         # Each entry is the location string (or None for writes without location)
         # This keeps locations in sync with deferred render order
         self._pending_locations: list[str | None] = []
-    
+
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
         """Write content, optionally tracking location for later scrolling.
-        
+
         Args:
             content: Rich renderable or string
             width: Width to render (passed to RichLog)
@@ -67,27 +67,68 @@ class ScrollableLog(RichLog):
         if not self._size_known:
             self._pending_locations.append(location or None)
             _dbg(f"ScrollableLog.write: DEFERRED location={location[:8] if location else 'None'}, pending_count={len(self._pending_locations)}")
-        
+
         before = len(self.lines)
         result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end)
         added = len(self.lines) - before
-        
+
         # If render was NOT deferred, track location now with correct line index
         if location and self._size_known:
             if location not in self._location_lines:
                 self._location_lines[location] = before
                 _dbg(f"ScrollableLog.write: TRACKED location={location[:8]} -> line {before}")
-        
-        
+
+
         return result
-    
+
     def clear(self) -> None:
         """Clear content and location tracking."""
         super().clear()
         self._location_lines.clear()
         self._pending_locations.clear()
-    
-    
+
+    def on_resize(self, event) -> None:
+        """Process deferred renders and apply pending locations.
+
+        RichLog defers writes until the widget is sized. When the resize event
+        fires, RichLog processes the deferred renders. We need to apply our
+        pending locations to the correct line indices after processing.
+        """
+        # Check if this is the first sizing
+        if event.size.width and not self._size_known:
+            # Size becomes known - RichLog will process deferred renders
+            # Set flag first so our write() knows size is known
+            self._size_known = True
+
+            # Get the deferred renders and pending locations
+            deferred = list(self._deferred_renders)
+            pending = list(self._pending_locations)
+
+            _dbg(f"ScrollableLog.on_resize: processing {len(deferred)} deferred renders, {len(pending)} pending locations")
+
+            # Clear the queues (RichLog does this internally too)
+            self._deferred_renders.clear()
+
+            # Process each deferred render, tracking line indices
+            for i, (dr, loc) in enumerate(zip(deferred, pending)):
+                before = len(self.lines)
+                # Write the deferred render (dr is tuple of content, width, expand, shrink, scroll_end)
+                super().write(*dr)
+                after = len(self.lines)
+                # Track location if present
+                if loc:
+                    if loc not in self._location_lines:
+                        self._location_lines[loc] = before
+                        _dbg(f"  [{i}] location={loc[:8]} -> line {before} (added {after - before} lines)")
+
+            # Clear pending locations
+            self._pending_locations.clear()
+            _dbg(f"ScrollableLog.on_resize: done, {len(self._location_lines)} locations tracked")
+        else:
+            # Already sized - just let RichLog handle it
+            super().on_resize(event)
+
+
     def scroll_to_location(self, location: str) -> bool:
         """Scroll to make the line with given location visible.
         
@@ -100,10 +141,8 @@ class ScrollableLog(RichLog):
         all our write() calls get queued in _deferred_renders. This means self.lines
         is empty when we try to scroll - nothing has actually been rendered.
         
-        LOCATION TRACKING FIX:
-        When writes are deferred, we can't track the line index (it's always 0).
-        So we store locations in _pending_locations during deferred writes, then
-        apply them with correct line indices when processing deferred renders.
+        The on_resize handler processes deferred renders and applies pending locations.
+        But if scroll_to_location is called before resize fires, we process them here.
         
         Args:
             location: Location identifier (e.g., msgid)
@@ -111,47 +150,38 @@ class ScrollableLog(RichLog):
         Returns:
             True if location found and scrolled, False otherwise
         """
-        # Process any deferred renders first (happens when log hasn't been sized yet)
-        if self._deferred_renders:
-            _dbg(f"scroll_to_location: processing {len(self._deferred_renders)} deferred renders, {len(self._pending_locations)} pending locations")
-            _dbg(f"  pending_locations = {self._pending_locations[:5]}... (showing first 5)")
-            # Force size to be known so deferred renders process
-            if not self._size_known and self.size.width:
-                self._size_known = True
-            # Process deferred renders, applying pending locations (parallel lists)
-            pending_idx = 0
+        # Process any deferred renders first (fallback if on_resize hasn't fired yet)
+        if self._deferred_renders and self.size.width:
+            _dbg(f"scroll_to_location: processing deferred renders (fallback)")
+            # Manually process like on_resize does
+            self._size_known = True
             deferred = list(self._deferred_renders)
+            pending = list(self._pending_locations)
             self._deferred_renders.clear()
-            for i, dr in enumerate(deferred):
-                before = len(self.lines)
-                _dbg(f"  deferred[{i}]: before={before}, dr has {len(dr)} elements")
-                self.write(*dr)  # This will add lines now that _size_known is True
-                after = len(self.lines)
-                # Apply pending location if present (None for writes without location)
-                if pending_idx < len(self._pending_locations):
-                    loc = self._pending_locations[pending_idx]
-                    _dbg(f"  pending[{pending_idx}] = {loc!r}, lines went {before} -> {after}")
-                    if loc and loc not in self._location_lines:
-                        self._location_lines[loc] = before
-                        _dbg(f"    mapped {loc[:8]} -> line {before}")
-                    pending_idx += 1
             self._pending_locations.clear()
+            
+            for dr, loc in zip(deferred, pending):
+                before = len(self.lines)
+                super().write(*dr)
+                if loc and loc not in self._location_lines:
+                    self._location_lines[loc] = before
         
+
         line_index = self._location_lines.get(location)
         if line_index is None:
             _dbg(f"scroll_to_location({location[:8]}): NOT FOUND in {len(self._location_lines)} locations")
             _dbg(f"  available locations: {list(self._location_lines.keys())[:5]}...")
             return False
-        
+
         _dbg(f"scroll_to_location({location[:8]}): found at line {line_index}, total lines={len(self.lines)}, virtual_size={self.virtual_size}")
         _dbg(f"  scrolling to y={line_index}")
-        
+
         # Scroll to the line (line_index is 0-based row in lines list)
         # RichLog stores lines as Strip objects, we need to scroll to virtual y
         self.scroll_to(y=line_index, animate=False)
         _dbg(f"  after scroll: scroll_y={self.scroll_y}")
         return True
-    
+
     def location_line(self, location: str) -> int | None:
         """Get the line index for a location, or None if not found."""
         return self._location_lines.get(location)
