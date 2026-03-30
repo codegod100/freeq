@@ -11,7 +11,6 @@ from queue import SimpleQueue
 import re
 import threading
 import webbrowser
-from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from rich.text import Text
@@ -308,17 +307,6 @@ class FreeqTextualApp(App[None]):
     def _avatar_rows_for_nick(self, nick: str) -> list[list[str]]:
         return self._avatar_rows.get(self._nick_key(nick)) or self._fallback_avatar_rows(nick)
 
-    def _short_url(self, url: str, *, limit: int = 36) -> str:
-        parsed = urlparse(url)
-        display = parsed.netloc + parsed.path
-        if parsed.query:
-            display += "?"
-        if not display:
-            display = url
-        if len(display) <= limit:
-            return display
-        return display[: limit - 3].rstrip("/") + "..."
-
     def _display_url(self, url: str) -> str:
         # Add soft break opportunities so long URLs wrap instead of being cropped.
         for token in ("/", "?", "&", "=", "#", "-", "_", "."):
@@ -333,11 +321,9 @@ class FreeqTextualApp(App[None]):
             if start > last_end:
                 body.append(text[last_end:start])
             url = match.group("url")
-            body.append(
-                f"[link: {self._short_url(url)}]",
-                style=f"underline cyan link {url}",
-            )
-            body.append(f" {self._display_url(url)}", style="dim")
+            # Wrap URL text itself in hyperlink (works across line wraps)
+            display_url = self._display_url(url)
+            body.append(display_url, style=f"underline cyan link {url}")
             last_end = end
         if last_end < len(text):
             body.append(text[last_end:])
