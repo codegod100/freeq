@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 import hashlib
@@ -12,6 +13,16 @@ import re
 import threading
 import webbrowser
 from urllib.request import urlopen
+
+# Setup logger
+logger = logging.getLogger("freeq")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    handler = logging.FileHandler("/tmp/freeq.log", mode='w')
+    handler.setLevel(logging.DEBUG)
+    formatter = logging.Formatter('%(asctime)s %(levelname).1s %(name)s: %(message)s', datefmt='%H:%M:%S')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 from rich.text import Text
 from textual import events, on
@@ -845,12 +856,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 break
         
         display_name = self._display_name(channel)
+        logger.debug(f"_request_history: channel={channel} oldest_msgid={oldest_msgid[:12] if oldest_msgid else 'None'}")
         if oldest_msgid:
-            _dbg(f"_request_history: BEFORE {display_name} msgid={oldest_msgid[:8]}")
             self.client.history_before(display_name, oldest_msgid, 50)
+            logger.debug(f"  sent history_before({display_name}, {oldest_msgid[:12]}, 50)")
         else:
-            _dbg(f"_request_history: LATEST {display_name} (no oldest msgid)")
             self.client.history_latest(display_name, 50)
+            logger.debug(f"  sent history_latest({display_name}, 50)")
 
     def _format_timestamp(self, timestamp: str) -> str:
         """Format IRCv3 server-time as 12hr with date (e.g., '2:30pm 1/15').
@@ -1296,24 +1308,26 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _request_history_from_scroll(self) -> None:
         """Called when user scrolls to top - request older history."""
+        logger.debug(f"_request_history_from_scroll buffer={self.active_buffer}")
         if self.active_buffer == "status":
+            logger.debug("  skipping: status buffer")
             return
         # Prevent duplicate requests
         key = self._buffer_key(self.active_buffer)
         if key in self._history_loading:
-            _dbg(f"  already loading history for {key}")
+            logger.debug(f"  skipping: already loading {key}")
             return
         self._history_loading.add(key)
         self._history_loading_key = key
         # Mount inline spinner at top of messages panel
         try:
-            # Mount to the body container so it docks at top
             body = self.query_one("#body")
             spinner = InlineSpinner("Loading older messages...", id="history-spinner")
             body.mount(spinner)
+            logger.debug("  mounted spinner")
         except Exception as e:
-            _dbg(f"  failed to mount spinner: {e}")
-        _dbg(f"ScrolledToTop: requesting history for {key}")
+            logger.warning(f"  spinner error: {e}")
+        logger.debug(f"  calling _request_history({self.active_buffer})")
         self._request_history(self.active_buffer)
 
     def on_click(self, event: events.Click) -> None:
@@ -1649,6 +1663,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "batch_start":
             batch_id = event["id"]
             target = self._display_name(event.get("target") or "status")
+            logger.debug(f"batch_start: id={batch_id} target={target} type={event.get('batch_type')}")
             self.batches[batch_id] = BatchState(
                 target=target,
                 batch_type=event.get("batch_type", ""),
@@ -1661,6 +1676,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "batch_end":
             batch_id = event["id"]
             batch = self.batches.pop(batch_id, None)
+            logger.debug(f"batch_end: id={batch_id} lines={len(batch.lines) if batch else 0}")
             if batch is not None and batch.lines:
                 indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
                 ordered = [line for _i, (_ts, line) in indexed]
