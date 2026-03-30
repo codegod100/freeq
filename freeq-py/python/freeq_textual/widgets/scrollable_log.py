@@ -2,6 +2,8 @@
 
 from textual.widgets import RichLog
 
+from .debug import _dbg
+
 
 class ScrollableLog(RichLog):
     """A RichLog with thumb-only scrollbar (transparent track).
@@ -81,9 +83,24 @@ class ScrollableLog(RichLog):
         Returns:
             True if location found and scrolled, False otherwise
         """
+        # Process any deferred renders first (happens when log hasn't been sized yet)
+        if self._deferred_renders:
+            _dbg(f"scroll_to_location: processing {len(self._deferred_renders)} deferred renders")
+            # Force size to be known so deferred renders process
+            if not self._size_known and self.size.width:
+                self._size_known = True
+            # Process deferred renders
+            deferred = list(self._deferred_renders)
+            self._deferred_renders.clear()
+            for dr in deferred:
+                self.write(*dr)
+        
         line_index = self._location_lines.get(location)
         if line_index is None:
+            _dbg(f"scroll_to_location({location[:8]}): NOT FOUND in {len(self._location_lines)} locations")
             return False
+        
+        _dbg(f"scroll_to_location({location[:8]}): found at line {line_index}, total lines={len(self.lines)}, virtual_size={self.virtual_size}")
         
         # Scroll to the line (line_index is 0-based row in lines list)
         # RichLog stores lines as Strip objects, we need to scroll to virtual y
