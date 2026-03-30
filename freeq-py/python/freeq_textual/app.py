@@ -42,6 +42,7 @@ from .components.all import *  # noqa: F401 - registers all widgets as friends!
 # DO NOT import directly - use registry so everyone can be swapped
 ReplyPanel = get_component('reply_panel')
 ContextMenu = get_component('context_menu')
+EmojiPicker = get_component('emoji_picker')
 ThreadPanel = get_component('thread_panel')
 BufferList = get_component('buffer_list')
 ScrollableLog = get_component('scrollable_log')
@@ -214,6 +215,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._thread_activity = 0
         self.restore_history_targets: set[str] = set()
         self._history_loading: set[str] = set()  # Channels currently loading history (prevent duplicates)
+        self._history_exhausted: set[str] = set()  # Channels where we've hit the end of history
         self._scroll_mode = "preserve"
         self._scroll_target_msgid = ""
         self._theme_ready = False
@@ -300,6 +302,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Update the loading overlay message."""
         if not self._is_loading:
             return
+        if self.is_headless:
+            return  # No overlay in headless mode
         self._load_message = message
         overlay = self.query_one("#loading-overlay", LoadingOverlay)
         overlay.message = message  # Reactive property updates display
@@ -1316,6 +1320,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         key = self._buffer_key(self.active_buffer)
         if key in self._history_loading:
             return
+        if key in self._history_exhausted:
+            _dbg(f"History exhausted for {key}, skipping load")
+            return
         self._history_loading.add(key)
         self._history_loading_key = key
         # Remove any existing spinner from previous scroll request
@@ -1329,18 +1336,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._request_history(self.active_buffer)
 
     def on_click(self, event: events.Click) -> None:
-        """Catch ALL clicks at app level - close context menu."""
+        """Catch ALL clicks at app level - close context menu and emoji picker."""
         widget_id = getattr(event.widget, 'id', '?')
         widget_class = type(event.widget).__name__
         
         # Log all clicks
         _dbg(f"CLICK: {widget_class}(id={widget_id}) button={event.button} x={event.x} y={event.y}")
         
-        # Only close context menu if clicking OUTSIDE of #messages
+        # Only close menus/pickers if clicking OUTSIDE of #messages
         # (Clicks on #messages are handled by _on_message_log_click which may open a menu)
         if widget_id != 'messages':
             for menu in self.query(ContextMenu):
                 menu.remove()
+            for picker in self.query(EmojiPicker):
+                picker.remove()
 
     @on(events.Click, "#messages")
     def _on_message_log_click(self, event: events.Click) -> None:
@@ -1441,12 +1450,27 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"  mounted ReplyPanel for {msgid[:8]}")
     
     def _on_menu_react(self, msgid: str | None) -> None:
-        """Handle React from context menu."""
+        """Handle React from context menu - show emoji picker."""
         _dbg(f"Context menu React: msgid={msgid}")
-        _dbg(f"_on_menu_react called: msgid={msgid}")
-        if msgid:
-            # For now, send a default reaction (thumbs up)
-            self.client.raw(f"REACT {msgid} 👍")
+        if not msgid:
+            return
+        
+        # Close any existing emoji picker
+        for picker in self.query(EmojiPicker):
+            picker.remove()
+        
+        # Create and mount emoji picker
+        picker = EmojiPicker(msgid=msgid)
+        self.screen.mount(picker)
+        _dbg(f"  mounted EmojiPicker for {msgid[:8]}")
+    
+    @on(EmojiPicker.EmojiSelected)
+    def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:
+        """Handle emoji selection - send reaction."""
+        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
+        if event.msgid:
+            # Send reaction via IRC
+            self.client.raw(f"REACT {event.msgid} {event.emoji}")
 
     # ── Render active buffer ───────────────────────────────────────────────
 
@@ -1778,6 +1802,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     key = self._buffer_key(batch.target)
                     self.restore_history_targets.discard(key)
                     self._history_loading.discard(key)
+                    self._history_exhausted.add(key)  # No more history for this buffer!
+                    _dbg(f"History exhausted for {key}")
+                    # Remove spinner
+                    for spinner in self.query(InlineSpinner):
+                        spinner.remove()
                     self._check_loading_complete()
                 return
             
@@ -1952,6 +1981,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _send_reply(self, target: str, reply_to_msgid: str, text: str) -> None:
         """Send a reply using @+draft/reply IRCv3 tag via raw IRC."""
+        _dbg(f"_send_reply(target={target!r}, msgid={reply_to_msgid[:8]!r}, text={text[:20]!r})")
         self.client.raw(f"@+draft/reply={reply_to_msgid} PRIVMSG {target} :{text}")
 
     # ── Command input (main composer) ──────────────────────────────────────

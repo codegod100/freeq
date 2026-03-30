@@ -65,6 +65,7 @@ Each component has a protocol interface defining what it must implement:
 |------|---------|-------------|
 | `reply_panel` | `ReplyPanel` | Panel for composing replies |
 | `context_menu` | `ContextMenu` | Popup menu for message actions |
+| `emoji_picker` | `EmojiPicker` | Emoji picker with CHOICE EMOJIS |
 | `thread_panel` | `ThreadPanel` | Thread view with messages |
 | `buffer_list` | `BufferList` | Sidebar channel list |
 | `scrollable_log` | `ScrollableLog` | Message log with scrollbar |

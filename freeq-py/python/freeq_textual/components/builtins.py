@@ -154,6 +154,7 @@ class ReplyPanel(AutoLogMixin, Vertical):
         super().on_input_submitted(event)  # AutoLogMixin logs input
         text = event.value.strip()
         if text:
+            self._log(f"posting ReplySent(msgid={self.reply_to_msgid[:8]}, target={self._target})")
             self.post_message(self.ReplySent(text, self.reply_to_msgid, self._target))
         self.remove()
 
