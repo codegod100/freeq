@@ -834,11 +834,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return renderable, render_roots, render_msgids
 
     def _request_history(self, channel: str) -> None:
-        """Request older history for a channel.
-        
-        Uses CHATHISTORY BEFORE with the timestamp of the oldest message we have.
-        Falls back to LATEST if we have no messages yet.
-        """
+        """Request older history for a channel."""
         key = self._buffer_key(channel)
         msgids = self._line_msgids.get(key, [])
         # Find the first (oldest) non-None msgid and its timestamp
@@ -853,14 +849,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 break
         
         display_name = self._display_name(channel)
-        logger.debug(f"_request_history: channel={channel} oldest_msgid={oldest_msgid[:12] if oldest_msgid else 'None'} timestamp={oldest_timestamp}")
         if oldest_timestamp:
-            # Server expects: CHATHISTORY BEFORE #channel timestamp=2024-01-15T14:30:00.000Z 50
+            logger.info(f"HISTORY BEFORE {display_name} {oldest_timestamp}")
             self.client.raw(f"CHATHISTORY BEFORE {display_name} timestamp={oldest_timestamp} 50")
-            logger.debug(f"  sent CHATHISTORY BEFORE {display_name} timestamp={oldest_timestamp} 50")
         else:
+            logger.info(f"HISTORY LATEST {display_name}")
             self.client.history_latest(display_name, 50)
-            logger.debug(f"  sent history_latest({display_name}, 50)")
 
     def _format_timestamp(self, timestamp: str) -> str:
         """Format IRCv3 server-time as 12hr with date (e.g., '2:30pm 1/15').
@@ -1308,14 +1302,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _request_history_from_scroll(self) -> None:
         """Called when user scrolls to top - request older history."""
-        logger.debug(f"_request_history_from_scroll buffer={self.active_buffer}")
         if self.active_buffer == "status":
-            logger.debug("  skipping: status buffer")
             return
-        # Prevent duplicate requests
         key = self._buffer_key(self.active_buffer)
         if key in self._history_loading:
-            logger.debug(f"  skipping: already loading {key}")
             return
         self._history_loading.add(key)
         self._history_loading_key = key
@@ -1324,10 +1314,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             body = self.query_one("#body")
             spinner = InlineSpinner("Loading older messages...", id="history-spinner")
             body.mount(spinner)
-            logger.debug("  mounted spinner")
-        except Exception as e:
-            logger.warning(f"  spinner error: {e}")
-        logger.debug(f"  calling _request_history({self.active_buffer})")
+        except Exception:
+            pass
         self._request_history(self.active_buffer)
 
     def on_click(self, event: events.Click) -> None:
@@ -1448,8 +1436,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if event is None:
                 break
             saw_event = True
-            event_type = event.get("type", "?")
-            logger.debug(f"poll_event: type={event_type}")
             prev_active = self.active_buffer
             prev_lines = len(self.messages[self.active_buffer])
             prev_topic = self.channel_topics.get(self.active_buffer, "")
@@ -1665,7 +1651,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "batch_start":
             batch_id = event["id"]
             target = self._display_name(event.get("target") or "status")
-            logger.debug(f"batch_start: id={batch_id} target={target} type={event.get('batch_type')}")
             self.batches[batch_id] = BatchState(
                 target=target,
                 batch_type=event.get("batch_type", ""),
@@ -1678,8 +1663,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "batch_end":
             batch_id = event["id"]
             batch = self.batches.pop(batch_id, None)
-            logger.debug(f"batch_end: id={batch_id} lines={len(batch.lines) if batch else 0}")
             if batch is not None and batch.lines:
+                logger.info(f"BATCH END {batch_id}: {len(batch.lines)} lines for {batch.target}")
                 indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
                 ordered = [line for _i, (_ts, line) in indexed]
                 roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
@@ -1688,9 +1673,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
                 if batch.batch_type == "chathistory":
                     key = self._buffer_key(batch.target)
-                    self.restore_history_targets.discard(key)
-                    self._history_loading.discard(key)  # Allow more history requests
-                    # Remove loading spinner
+                    self._history_loading.discard(key)
                     try:
                         spinner = self.query_one("#history-spinner", InlineSpinner)
                         spinner.remove()
@@ -1698,7 +1681,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         pass
                     self.active_buffer = key
                     self._scroll_mode = "home"
-                    self._check_loading_complete()
+                    self._render_active_buffer()
             return
         if event_type == "names_end":
             channel = event["channel"]
