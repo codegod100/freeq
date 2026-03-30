@@ -64,7 +64,7 @@ class ScrollableLog(RichLog):
     def on_click(self, event) -> None:
         """Handle click and emit Clicked message."""
         _dbg(f"ScrollableLog.on_click: y={event.y} scroll_y={self.scroll_y}")
-        self.emit_message(self.Clicked(y=event.y, scroll_y=self.scroll_y))
+        self.post_message(self.Clicked(y=event.y, scroll_y=self.scroll_y))
 
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
         """Write content, optionally tracking location for later scrolling.
