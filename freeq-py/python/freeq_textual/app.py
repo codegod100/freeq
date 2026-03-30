@@ -1071,7 +1071,7 @@ class FreeqTextualApp(App[None]):
         log = self.query_one("#messages", ScrollableLog)
         # More gap when thread panel is open (less space for channel text)
         gap = 5 if self._thread_panel_is_open() else 3
-        width = max(40, log.size.width - gap)
+        width = log.size.width - gap
         log.clear()
         render_lines, render_roots = self._renderable_lines(self.active_buffer, width)
         rendered_threads = self._write_render_lines(
