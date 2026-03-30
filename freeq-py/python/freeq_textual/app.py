@@ -506,6 +506,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Get reactions for this message
         reactions_text = Text()
+        if msgid:
+            # Debug: show exact key comparison
+            for key in self._reactions.keys():
+                if key == msgid:
+                    _dbg(f"  _format_chat_block: EXACT MATCH! {key[:8]} == {msgid[:8]}")
+                elif key.startswith(msgid[:8]) or msgid.startswith(key[:8]):
+                    _dbg(f"  _format_chat_block: PARTIAL MATCH? key={key} msgid={msgid}")
         if msgid and msgid in self._reactions:
             _dbg(f"  _format_chat_block: FOUND reactions for {msgid[:8]}")
             for r_sender, r_emoji in self._reactions[msgid]:
@@ -828,6 +835,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
                 reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
+                # Debug: log every msgid we process
+                if msgid and msgid.startswith("01KMVA36"):
+                    _dbg(f"  RENDERING TARGET MSGID {msgid[:8]}!")
                 block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid)
                 for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
@@ -1498,6 +1508,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             msgids_in_buffer = set(m for m in line_msgids if m)
             _dbg(f"  msgid in buffer msgids? {event.msgid in msgids_in_buffer}")
             _dbg(f"  msgid in message_index? {event.msgid in self.message_index}")
+            
+            # Debug: show sample msgids from buffer
+            sample_msgids = [m for m in line_msgids if m][:5]
+            _dbg(f"  sample buffer msgids: {[m[:8] for m in sample_msgids]}")
             
             # Optimistically add reaction locally (server won't echo without echo-message cap)
             self._reactions[event.msgid].append((self.client.nick, event.emoji))
