@@ -2,6 +2,15 @@
 
 Ensures layout is always computed before any rendering happens.
 Components call request_render() instead of calling render methods directly.
+
+Order of operations:
+1. Resize event (window size change or component mount/unmount)
+2. Layout calculation (CSS resolved, widget sizes computed)
+3. Component lifecycle (on_mount, on_show, etc.)
+4. Rendering (text formatting, width-based wrapping)
+
+NO TIMERS - everything must be event-driven. Layout is forced via _refresh_layout()
+before rendering. No setTimeout/set_timer hacks.
 """
 
 from typing import Callable, TYPE_CHECKING
@@ -50,11 +59,13 @@ class LayoutAwareRender:
         """Execute the queued render callback."""
         self._render_queued = False
         if self._render_callback:
-            # Log layout state before render
+            # Force layout refresh before rendering (NO TIMERS - event driven)
             from .debug import _dbg
             try:
+                app = self  # type: ignore
+                app.screen._refresh_layout()  # type: ignore
                 log = self.query_one("#messages")  # type: ignore
-                _dbg(f"LayoutAwareRender: executing render, log.width={log.size.width}")
+                _dbg(f"LayoutAwareRender: executing render (after layout), log.width={log.size.width}")
             except Exception:
                 pass
             self._render_callback()
@@ -83,13 +94,12 @@ class RenderablePanel:
 
         _dbg(f"RenderablePanel.trigger_app_render: panel.width={widget.size.width}")
 
-        # Look for LayoutAwareRender on the app
+        # Use request_render which forces layout refresh before rendering
         if hasattr(app, "request_render"):
-            # Get the render callback from app
             if hasattr(app, "_render_active_buffer"):
                 app.request_render(app._render_active_buffer)  # type: ignore
             else:
                 app.request_render()  # type: ignore
         elif hasattr(app, "_render_active_buffer"):
-            # Fallback: direct call with call_later
+            # Last resort: direct call_later
             app.call_later(app._render_active_buffer)  # type: ignore
