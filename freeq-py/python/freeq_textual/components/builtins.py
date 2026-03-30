@@ -64,6 +64,18 @@ class AutoLogMixin:
 # NOTE: _context is RESERVED by Textual! Use _reply_context or similar.
 # TypeError: 'str' object is not callable happens if you override it.
 
+# DESIGN PRINCIPLE: Components manage their OWN state!
+# BAD: Global state like app._reply_to_msgid - gets stale, causes bugs
+# GOOD: Component has reply_to_msgid, emits ReplySent with ALL needed data
+#
+# WHY GLOBAL STATE IS BAD:
+# - Gets out of sync when component unmounts
+# - Multiple instances fight over same variable
+# - Hard to debug - who set it? when? where?
+# - Component can't be reused independently
+#
+# FRIENDS DON'T LET FRIENDS USE GLOBAL STATE!
+
 @ComponentRegistry.register('reply_panel')
 class ReplyPanel(AutoLogMixin, Vertical):
     """Reply panel for composing replies to messages.

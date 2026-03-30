@@ -1,6 +1,18 @@
 """BufferList widget - sidebar showing list of buffers (channels and DMs).
 
 WE'RE ALL FRIENDS HERE! This widget is registered in components/all.py
+
+DESIGN PRINCIPLE: Components manage their OWN state!
+BAD: Global state like app.active_buffer - gets stale, causes bugs
+GOOD: Component handles selection, emits Selected message with buffer name
+
+WHY GLOBAL STATE IS BAD:
+- Gets out of sync when component unmounts
+- Multiple instances fight over same variable
+- Hard to debug - who set it? when? where?
+- Component can't be reused independently
+
+FRIENDS DON'T LET FRIENDS USE GLOBAL STATE!
 """
 
 from textual.widgets import ListView, ListItem, Static
