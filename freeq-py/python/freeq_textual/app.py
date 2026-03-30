@@ -1049,11 +1049,26 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return False
 
     def _open_thread(self, thread_root: str) -> None:
-        """Open the thread panel - swap to MessagesPanelWithThread."""
+        """Open the thread panel - swap to MessagesPanelWithThread.
+        
+        Fails hard if:
+        - thread_root is empty
+        - no existing panel to remove (shouldn't happen)
+        - panel swap fails
+        """
         if not thread_root:
-            _dbg(f"_open_thread: empty thread_root, ignoring")
-            return
+            raise ValueError("_open_thread: empty thread_root")
+        
         _dbg(f"_open_thread({thread_root[:8]!r}) current open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
+        
+        # If same thread is already open, just scroll to it
+        if self.open_thread_root == thread_root:
+            _dbg(f"  same thread already open, scrolling")
+            self._scroll_mode = "message"
+            self._scroll_target_msgid = thread_root
+            return
+        
+        
         self.open_thread_root = thread_root
         
         # Collect messages
@@ -1061,25 +1076,32 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"  collected {len(messages)} messages")
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         
-        # Swap containers: remove MessagesPanel, mount MessagesPanelWithThread
+        # Find and remove existing panel - exactly one must exist
         body = self.query_one("#body", Horizontal)
-        old = None
+        
+        # Count existing panels - should be exactly 1
+        old_panel = None
         try:
-            old = self.query_one(MessagesPanel)
-            _dbg(f"  found MessagesPanel to remove")
+            old_panel = self.query_one(MessagesPanel)
+            _dbg(f"  removing MessagesPanel")
         except Exception:
-            _dbg(f"  no MessagesPanel found, checking for MessagesPanelWithThread")
-            try:
-                old = self.query_one(MessagesPanelWithThread)
-                _dbg(f"  found MessagesPanelWithThread instead (thread already open?)")
-            except Exception:
-                _dbg(f"  neither panel found")
             pass
         
-        if old:
-            old.remove()
-            _dbg(f"  removed old panel")
+        try:
+            existing_thread_panel = self.query_one(MessagesPanelWithThread)
+            if old_panel:
+                raise RuntimeError(f"Both MessagesPanel and MessagesPanelWithThread exist - corrupt state")
+            old_panel = existing_thread_panel
+            _dbg(f"  removing MessagesPanelWithThread")
+        except Exception:
+            pass
         
+        if not old_panel:
+            raise RuntimeError("No MessagesPanel or MessagesPanelWithThread found - corrupt state")
+        
+        old_panel.remove()
+        
+        # Mount new panel
         new_panel = MessagesPanelWithThread(
             thread_root, thread_msgs, self._format_thread_message
         )
@@ -1093,23 +1115,23 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Note: NOT calling _render_active_buffer() here - let the scheduled render handle it
 
     def _close_thread(self) -> None:
-        """Close the thread panel - swap back to MessagesPanel."""
+        """Close the thread panel - swap back to MessagesPanel.
+        
+        Fails hard if:
+        - No MessagesPanelWithThread to remove (shouldn't happen)
+        """
         _dbg(f"_close_thread() open_thread_root was {self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
+        
+        if not self.open_thread_root:
+            raise RuntimeError("_close_thread called with no thread open")
+        
         self.open_thread_root = ""
         
-        # Swap containers: remove MessagesPanelWithThread, mount MessagesPanel
+        # Remove MessagesPanelWithThread - must exist
         body = self.query_one("#body", Horizontal)
-        old = None
-        try:
-            old = self.query_one(MessagesPanelWithThread)
-            _dbg(f"_close_thread: found MessagesPanelWithThread to remove")
-        except Exception:
-            _dbg(f"_close_thread: no MessagesPanelWithThread found")
-            pass
-        
-        if old:
-            old.remove()
-            _dbg(f"_close_thread: removed old panel")
+        old = self.query_one(MessagesPanelWithThread)
+        _dbg(f"_close_thread: removing MessagesPanelWithThread")
+        old.remove()
         
         new_panel = MessagesPanel()
         body.mount(new_panel)
@@ -1119,21 +1141,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     @on(ThreadPanel.Closed)
     def handle_thread_panel_closed(self, event: ThreadPanel.Closed) -> None:
-        """Handle thread panel closed event - swap back to MessagesPanel."""
+        """Handle thread panel closed event - swap back to MessagesPanel.
+        
+        Fails hard if no MessagesPanelWithThread exists.
+        """
         del event
         _dbg(f"handle_thread_panel_closed() open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
+        
+        if not self.open_thread_root:
+            raise RuntimeError("handle_thread_panel_closed called with no thread open")
+        
         self.open_thread_root = ""
         
-        # Swap back to MessagesPanel
+        # Remove MessagesPanelWithThread - must exist
         body = self.query_one("#body", Horizontal)
-        old = None
-        try:
-            old = self.query_one(MessagesPanelWithThread)
-        except Exception:
-            pass
-        
-        if old:
-            old.remove()
+        old = self.query_one(MessagesPanelWithThread)
+        old.remove()
         
         new_panel = MessagesPanel()
         body.mount(new_panel)
@@ -1150,16 +1173,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._send_reply(target, event.thread_root, event.text)
 
     def _refresh_thread_panel(self) -> None:
-        """Refresh the thread panel with current messages."""
+        """Refresh the thread panel with current messages.
+        
+        Fails hard if thread panel not found when open_thread_root is set.
+        """
         if not self.open_thread_root:
             return
-        try:
-            panel = self.query_one(MessagesPanelWithThread)
-            messages = self._collect_thread_messages(self.open_thread_root)
-            thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
-            panel.refresh_thread_messages(thread_msgs)
-        except Exception:
-            pass
+        panel = self.query_one(MessagesPanelWithThread)
+        messages = self._collect_thread_messages(self.open_thread_root)
+        thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
+        panel.refresh_thread_messages(thread_msgs)
 
     # ── Click detection on message log ─────────────────────────────────────
 
