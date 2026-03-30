@@ -1483,11 +1483,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Handle emoji selection - send reaction via TAGMSG."""
         _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
         if event.msgid:
+            # Optimistically add reaction locally (server won't echo without echo-message cap)
+            self._reactions[event.msgid].append((self.client.nick, event.emoji))
+            _dbg(f"  added local reaction: {self.client.nick} reacted {event.emoji} on {event.msgid[:8]}")
+            
             # Send reaction via TAGMSG with +react tag and +draft/reply for target msgid
-            # @+draft/reply=msgid +react=emoji TAGMSG #channel
             target = self._display_name(self.active_buffer)
             self.client.raw(f"@+draft/reply={event.msgid} +react={event.emoji} TAGMSG {target}")
             _dbg(f"  sent: @+draft/reply={event.msgid[:8]} +react={event.emoji} TAGMSG {target}")
+            
+            # Re-render to show reaction immediately
+            self._render_active_buffer()
 
     # ── Render active buffer ───────────────────────────────────────────────
 
@@ -1968,6 +1974,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "tagmsg":
             # TAGMSG with tags - check for +react (emoji reaction)
             tags = event.get("tags", {})
+            _dbg(f"TAGMSG: from={event['from']} tags={list(tags.keys())}")
             if "+react" in tags:
                 sender = event["from"]
                 target = event["target"]
@@ -1981,6 +1988,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     # Re-render to show reaction on message
                     self._render_active_buffer()
                 else:
+                    _dbg(f"  reaction without target msgid: {sender} reacted {emoji}")
                     # No target msgid, show as system message
                     buffer_name = self._message_buffer_name(target, sender)
                     self._append_line(
