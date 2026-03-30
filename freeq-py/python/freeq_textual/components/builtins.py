@@ -15,12 +15,49 @@ from ..widgets import _dbg
 from . import ComponentRegistry
 
 
+class AutoLogMixin:
+    """Mixin for components that auto-logs interactions.
+    
+    Use with multiple inheritance:
+        class MyPanel(AutoLogMixin, Vertical):
+            ...
+    
+    Auto-logs:
+    - mount/unmount
+    - button presses
+    - input submissions
+    - focus events
+    """
+    
+    def _log(self, msg: str) -> None:
+        """Log with component class name prefix."""
+        _dbg(f"{self.__class__.__name__}: {msg}")
+    
+    def on_mount(self) -> None:
+        self._log(f"mounted (id={self.id})")
+    
+    def on_unmount(self) -> None:
+        self._log(f"unmounted (id={self.id})")
+    
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self._log(f"button pressed: {event.button.label!r} (id={event.button.id})")
+    
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._log(f"input submitted: {event.value[:50]!r}")
+    
+    def on_focus(self, event) -> None:
+        self._log(f"focus gained")
+    
+    def on_blur(self, event) -> None:
+        self._log(f"focus lost")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REPLY PANEL - Default implementation
 # ─────────────────────────────────────────────────────────────────────────────
 
 @ComponentRegistry.register('reply_panel')
-class ReplyPanel(Vertical):
+class ReplyPanel(AutoLogMixin, Vertical):
     """Reply panel for composing replies to messages.
     
     DO NOT DELETE. This is the default implementation.
@@ -97,14 +134,16 @@ class ReplyPanel(Vertical):
         yield Input(placeholder="Reply...", id="reply-input")
 
     def on_mount(self) -> None:
-        _dbg(f"ReplyPanel.on_mount: reply_to={self.reply_to_msgid[:8]}")
+        super().on_mount()  # AutoLogMixin logs mount
         self.query_one("#reply-input", Input).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        super().on_button_pressed(event)  # AutoLogMixin logs button press
         if event.button.id == "reply-close":
             self.remove()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        super().on_input_submitted(event)  # AutoLogMixin logs input
         text = event.value.strip()
         if text:
             self.post_message(self.ReplySent(text, self.reply_to_msgid, self._target))
@@ -116,7 +155,7 @@ class ReplyPanel(Vertical):
 # ─────────────────────────────────────────────────────────────────────────────
 
 @ComponentRegistry.register('context_menu')
-class ContextMenu(Vertical):
+class ContextMenu(AutoLogMixin, Vertical):
     """Context menu for message actions.
     
     DO NOT DELETE. This is the default implementation.
@@ -169,14 +208,14 @@ class ContextMenu(Vertical):
             yield btn
 
     def on_mount(self) -> None:
-        _dbg(f"ContextMenu.on_mount: msgid={self._msgid}")
+        super().on_mount()  # AutoLogMixin logs mount
         # Focus first button
         buttons = list(self.query(Button))
         if buttons:
             buttons[0].focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        _dbg(f"ContextMenu.button_pressed: {event.button.label}")
+        super().on_button_pressed(event)  # AutoLogMixin logs button press
         callback = getattr(event.button, '_callback', None)
         if callback:
             callback(self._msgid)
