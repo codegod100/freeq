@@ -47,7 +47,9 @@ fn is_private_v6(v6: &Ipv6Addr) -> bool {
 
 /// Returns `true` if the hostname looks like a private/local hostname.
 pub fn is_private_hostname(host: &str) -> bool {
+    // Strip trailing dot (DNS root) before checking
     let h = host.to_lowercase();
+    let h = h.strip_suffix('.').unwrap_or(&h);
     h == "localhost"
         || h.ends_with(".local")
         || h.ends_with(".internal")
