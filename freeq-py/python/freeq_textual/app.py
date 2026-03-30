@@ -570,8 +570,11 @@ class FreeqTextualApp(App[None]):
         sidebar_width = self._sidebar_width_cells(ordered)
         sidebar = self.query_one(BufferList)
         sidebar.styles.width = sidebar_width
-        panel = self.query_one("#thread-panel")
-        panel.styles.width = self._thread_panel_width_cells(self.size.width, sidebar_width)
+        panel = self.query_one("#thread-panel", ThreadPanel)
+        if panel.is_open():
+            panel.styles.width = self._thread_panel_width_cells(self.size.width, sidebar_width)
+        else:
+            panel.styles.width = 0
         sidebar.update_buffers(ordered, self.active_buffer)
 
     def _buffer_key(self, buffer_name: str) -> str:
