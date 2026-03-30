@@ -24,6 +24,7 @@ from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, S
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
 from .widgets import BufferList, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
+from .widgets.layout_render import LayoutAwareRender
 
 try:
     from PIL import Image, ImageOps, UnidentifiedImageError
@@ -138,7 +139,7 @@ class ThreadState:
     latest_activity: int = 0
 
 
-class FreeqTextualApp(App[None]):
+class FreeqTextualApp(App[None], LayoutAwareRender):
     DEFAULT_CSS = """
     #messages {
         width: 1fr;
@@ -991,9 +992,7 @@ class FreeqTextualApp(App[None]):
             thread_root, thread_msgs, self._format_thread_message
         )
         body.mount(new_panel)
-        
-        # Defer re-render until after layout updates
-        self.call_later(self._render_active_buffer)
+        # Panel triggers render via on_mount
 
     def _close_thread(self) -> None:
         """Close the thread panel - swap back to MessagesPanel."""
@@ -1013,9 +1012,7 @@ class FreeqTextualApp(App[None]):
         
         new_panel = MessagesPanel()
         body.mount(new_panel)
-        
-        # Defer re-render until after layout updates
-        self.call_later(self._render_active_buffer)
+        # Panel triggers render via on_mount
         self.call_later(lambda: self.query_one("#composer", Input).focus())
 
     @on(ThreadPanel.Closed)
@@ -1038,7 +1035,7 @@ class FreeqTextualApp(App[None]):
         
         new_panel = MessagesPanel()
         body.mount(new_panel)
-        self._render_active_buffer()
+        # Panel triggers render via on_mount
         self.query_one("#composer", Input).focus()
 
     @on(ThreadPanel.ReplySent)

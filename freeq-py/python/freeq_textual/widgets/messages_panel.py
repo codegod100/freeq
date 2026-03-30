@@ -3,11 +3,12 @@
 from textual.containers import Horizontal
 from textual.widget import Widget
 
+from .layout_render import RenderablePanel
 from .scrollable_log import ScrollableLog
 from .thread_panel import ThreadMessage, ThreadPanel
 
 
-class MessagesPanel(Widget):
+class MessagesPanel(Widget, RenderablePanel):
     """Message log only (thread panel closed)."""
 
     DEFAULT_CSS = """
@@ -15,6 +16,10 @@ class MessagesPanel(Widget):
         width: 1fr;
     }
     """
+
+    def on_mount(self) -> None:
+        # Trigger render after layout is computed
+        self.trigger_app_render()
 
     def compose(self):
         yield ScrollableLog(
@@ -27,7 +32,7 @@ class MessagesPanel(Widget):
         )
 
 
-class MessagesPanelWithThread(Widget):
+class MessagesPanelWithThread(Widget, RenderablePanel):
     """Message log with thread panel side by side (thread panel open)."""
 
     DEFAULT_CSS = """
@@ -47,6 +52,10 @@ class MessagesPanelWithThread(Widget):
         self._thread_root = thread_root
         self._thread_messages = thread_messages
         self._formatter = formatter
+
+    def on_mount(self) -> None:
+        # Trigger render after layout is computed
+        self.trigger_app_render()
 
     def compose(self):
         with Horizontal(id="messages-and-thread"):
