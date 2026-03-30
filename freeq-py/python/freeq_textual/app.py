@@ -26,7 +26,7 @@ if not logger.handlers:
 
 from rich.text import Text
 from textual import events, on
-from textual.app import App, ComposeResult, SystemCommand
+from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
@@ -170,7 +170,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("escape", "close_thread", "Close thread", show=False),
-        Binding("ctrl+p", "command_palette", "Command palette", show=False),
     ]
 
     active_buffer = reactive("status")
@@ -237,7 +236,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             classes="-textual-compact",
         )
         yield Footer(compact=True)
-        # DebugPanel is toggled via action_toggle_debug (ctrl+shift+d)
 
     def on_mount(self) -> None:
         _dbg("App.on_mount()")
@@ -250,12 +248,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if not self.is_headless:
             overlay = LoadingOverlay(self._load_message, id="loading-overlay")
             self.mount(overlay)
-            # Mount debug panel by default
-            from .widgets import DebugPanel
-            from .widgets.debug import set_debug_callback
-            debug_panel = DebugPanel(id="debug-panel")
-            self.mount(debug_panel)
-            set_debug_callback(debug_panel.log)
         
         self._refresh_layout_widths()
         if self._avatars_enabled and Pixels is None:
@@ -1826,42 +1818,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._open_thread(thread_root)
             return
         self._open_thread_via_command()
-
-    def action_toggle_debug(self) -> None:
-        """Toggle the debug panel visibility."""
-        from .widgets import DebugPanel
-        try:
-            debug_panel = self.query_one("#debug-panel", DebugPanel)
-            debug_panel.remove()
-            from .widgets.debug import set_debug_callback
-            set_debug_callback(None)
-        except Exception:
-            # Not found, mount it
-            debug_panel = DebugPanel(id="debug-panel")
-            self.mount(debug_panel)
-            from .widgets.debug import set_debug_callback
-            set_debug_callback(debug_panel.log)
-            debug_panel.log("debug panel toggled on")
-
-    def get_system_commands(self, screen) -> list[SystemCommand]:
-        """Add custom commands to the command palette."""
-        from .widgets import DebugPanel
-        commands = list(super().get_system_commands(screen))
-        # Add debug panel toggle
-        try:
-            self.query_one("#debug-panel", DebugPanel)
-            commands.append(SystemCommand(
-                "Debug panel",
-                "Hide the debug panel",
-                self.action_toggle_debug,
-            ))
-        except Exception:
-            commands.append(SystemCommand(
-                "Debug panel",
-                "Show the debug panel",
-                self.action_toggle_debug,
-            ))
-        return commands
 
     def _open_thread_via_command(self) -> None:
         """Fallback: /thread with no args — find most recent reply indicator."""
