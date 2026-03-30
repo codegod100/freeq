@@ -5,14 +5,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import PropertyMock, patch
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from textual.widgets import RichLog  # noqa: E402
 from textual.widgets import Static  # noqa: E402
+from textual.widgets import Input  # noqa: E402
 
-from freeq_textual.app import FreeqTextualApp  # noqa: E402
+from freeq_textual.app import BufferState, FreeqTextualApp  # noqa: E402
 
 
 class FakeClient:
@@ -22,6 +25,7 @@ class FakeClient:
         self._events: list[dict] = []
         self.join_calls: list[str] = []
         self.history_calls: list[tuple[str, int]] = []
+        self.raw_calls: list[str] = []
 
     def queue_events(self, *events: dict) -> None:
         self._events.extend(events)
@@ -48,7 +52,7 @@ class FakeClient:
         self.nick = nick
 
     def raw(self, line: str) -> None:
-        return
+        self.raw_calls.append(line)
 
     def reconnect_with_web_token(self, web_token: str) -> None:
         return
@@ -61,6 +65,88 @@ class FakeBroker:
 
 
 class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
+    def _normalize_line(self, text: str) -> str:
+        return text.removeprefix("▀▀ ").strip()
+
+    def test_sidebar_width_tracks_buffer_labels_with_bounds(self) -> None:
+        narrow = [
+            BufferState("status"),
+            BufferState("#x"),
+        ]
+        wide = [
+            BufferState("status"),
+            BufferState("#a-very-very-long-channel-name", unread=12),
+        ]
+
+        self.assertEqual(FreeqTextualApp._sidebar_width_cells(narrow), 12)
+        self.assertEqual(FreeqTextualApp._sidebar_width_cells(wide), 22)
+
+    def test_thread_panel_width_shrinks_on_narrow_layouts(self) -> None:
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(80, 12), 22)
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(100, 16), 28)
+        self.assertEqual(FreeqTextualApp._thread_panel_width_cells(140, 16), 34)
+
+    async def test_message_format_includes_avatar_only_when_enabled(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test():
+            app._avatars_enabled = False
+            plain = app._format_message("alice", "hello").plain
+            app._avatars_enabled = True
+            app._avatar_palettes[app._nick_key("alice")] = ["#111111", "#222222", "#333333", "#444444"]
+            with_avatar = app._format_message("alice", "hello").plain
+
+        self.assertEqual(plain, "alice: hello")
+        self.assertTrue(with_avatar.endswith("alice: hello"))
+        self.assertNotEqual(with_avatar, plain)
+
+    async def test_message_format_skips_avatar_without_bluesky_palette(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test():
+            app._avatars_enabled = True
+            rendered = app._format_message("alice", "hello").plain
+
+        self.assertTrue(rendered.endswith("alice: hello"))
+        self.assertNotEqual(rendered, "alice: hello")
+
+    def test_avatar_support_detects_wezterm_without_console_color_hint(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        with patch("rich.console.Console.color_system", new_callable=PropertyMock, return_value=None):
+            with patch.dict("os.environ", {"TERM_PROGRAM": "WezTerm"}, clear=False):
+                self.assertTrue(app._detect_avatar_support())
+
+    async def test_long_urls_are_shortened_in_message_display(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test():
+            app._avatars_enabled = False
+            rendered = app._format_message(
+                "alice",
+                "see https://example.com/really/long/path/that/keeps/going?with=query",
+            )
+
+        self.assertIn("alice: see example.com/really/long/path/that...", rendered.plain)
+        self.assertNotIn("https://example.com/really/long/path/that/keeps/going?with=query", rendered.plain)
+
+    async def test_composer_accepts_typed_text(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            composer = app.query_one("#composer", Input)
+            self.assertTrue(composer.has_focus)
+
+            await pilot.press("h", "i")
+            await pilot.pause()
+
+            self.assertEqual(composer.value, "hi")
+
     def _rendered_lines(self, app: FreeqTextualApp) -> list[str]:
         log = app.query_one(RichLog)
         result: list[str] = []
@@ -81,7 +167,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 text = str(renderable)
             text = text.strip()
             if text:
-                result.append(text)
+                result.append(self._normalize_line(text))
         return result
 
     def _thread_header(self, app: FreeqTextualApp) -> str:
@@ -104,7 +190,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 text = str(renderable)
             text = text.strip()
             if text:
-                result.append(text)
+                result.append(self._normalize_line(text))
         return result
 
     async def test_replay_batch_renders_into_visible_log_in_sorted_order(self) -> None:
@@ -112,7 +198,11 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
-            app._append_line("#freeq", app._format_message("zoe", "latest live message"))
+            app._append_line(
+                "#freeq",
+                app._format_message("zoe", "latest live message"),
+                line_meta=("zoe", "latest live message"),
+            )
             app.active_buffer = "#freeq"
             app._render_active_buffer()
 
@@ -140,8 +230,11 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             rendered = self._rendered_lines(app)
 
-            self.assertGreaterEqual(len(rendered), 3)
-            self.assertEqual(rendered[:3], ["alice: oldest", "bob: second oldest", "zoe: latest live message"])
+            self.assertGreaterEqual(len(rendered), 6)
+            self.assertEqual(
+                rendered[:6],
+                ["alice", "oldest", "bob", "second oldest", "zoe", "latest live message"],
+            )
 
     async def test_replay_batch_switches_visible_room(self) -> None:
         client = FakeClient()
@@ -166,7 +259,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             rendered = self._rendered_lines(app)
 
             self.assertEqual(app.active_buffer, "#python")
-            self.assertIn("carol: replayed line", rendered)
+            self.assertEqual(rendered[:2], ["carol", "replayed line"])
 
     async def test_restore_rejoin_sequence_requests_join_and_renders_replay_batch(self) -> None:
         client = FakeClient()
@@ -197,7 +290,43 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(client.join_calls, ["#freeq"])
             self.assertEqual(app.active_buffer, "#freeq")
-            self.assertIn("alice: restored replay line", rendered)
+            self.assertEqual(rendered[:2], ["alice", "restored replay line"])
+
+    async def test_consecutive_messages_from_same_sender_are_grouped(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "first line",
+                    "tags": {},
+                },
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "second line",
+                    "tags": {},
+                },
+                {
+                    "type": "message",
+                    "from": "bob",
+                    "target": "#freeq",
+                    "text": "third line",
+                    "tags": {},
+                },
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            rendered = self._rendered_lines(app)
+
+            self.assertEqual(rendered[:5], ["alice", "first line", "second line", "bob", "third line"])
 
     async def test_inactive_events_do_not_reset_visible_scroll_position(self) -> None:
         client = FakeClient()
@@ -239,7 +368,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
 
             self.assertIn("zoe", app.buffers)
-            self.assertEqual(app.messages["zoe"][0].plain, "zoe: reply from dm")
+            self.assertEqual(self._normalize_line(app.messages["zoe"][0].plain), "zoe: reply from dm")
             self.assertNotIn("nandi", app.buffers)
 
     async def test_reply_panel_shows_thread_messages_when_opened(self) -> None:
@@ -273,13 +402,89 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             header = self._thread_header(app)
             rendered = self._thread_rendered_lines(app)
+            rendered_text = " ".join(rendered)
 
             self.assertIn("Thread", header)
             self.assertIn("2 msg", header)
-            self.assertIn("alice: root message for thread", rendered)
-            self.assertIn("bob: reply in thread", rendered)
+            self.assertIn("alice", rendered)
+            self.assertIn("bob", rendered)
+            self.assertIn("root message for thread", rendered_text)
+            self.assertIn("reply in thread", rendered_text)
 
             # Thread panel should be visible
+            panel = app.query_one("#thread-panel")
+            self.assertTrue(panel.has_class("visible"))
+
+    async def test_reply_indicator_renders_between_name_and_message(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "root message",
+                    "tags": {"msgid": "root1"},
+                },
+                {
+                    "type": "message",
+                    "from": "bob",
+                    "target": "#freeq",
+                    "text": "reply body",
+                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                },
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            rendered = self._rendered_lines(app)
+            bob_index = rendered.index("bob")
+            reply_index = next(index for index, line in enumerate(rendered) if "replying to alice" in line)
+            body_index = rendered.index("reply body")
+
+            self.assertLess(bob_index, reply_index)
+            self.assertLess(reply_index, body_index)
+
+    async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "root message " * 12,
+                    "tags": {"msgid": "root1"},
+                },
+                {
+                    "type": "message",
+                    "from": "bob",
+                    "target": "#freeq",
+                    "text": "reply in thread",
+                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                },
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            log = app.query_one("#messages", RichLog)
+            thread_rows = app._rendered_line_threads["#freeq"]
+            reply_rows = [index for index, root in enumerate(thread_rows) if root == "root1"]
+
+            self.assertTrue(reply_rows)
+            self.assertGreater(len(thread_rows), len(app._line_threads["#freeq"]))
+
+            click_row = reply_rows[-1]
+            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row))
+            await pilot.pause()
+
+            self.assertEqual(app.open_thread_root, "root1")
             panel = app.query_one("#thread-panel")
             self.assertTrue(panel.has_class("visible"))
 
@@ -371,6 +576,57 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(client.join_calls, ["#freeq"])
             self.assertEqual(client.history_calls, [("#freeq", 50)])
+
+    async def test_message_triggers_whois_and_whois_reply_fetches_bluesky_avatar(self) -> None:
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+        fetch_calls: list[str] = []
+
+        def fake_fetch(handle: str) -> list[str]:
+            fetch_calls.append(handle)
+            return ["#010203", "#040506", "#070809", "#0a0b0c"]
+
+        app._fetch_bluesky_avatar_palette = fake_fetch  # type: ignore[method-assign]
+
+        async with app.run_test() as pilot:
+            app._avatars_enabled = True
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "hello there",
+                    "tags": {},
+                }
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            self.assertEqual(client.raw_calls, ["WHOIS alice"])
+
+            client.queue_events(
+                {
+                    "type": "whois_reply",
+                    "nick": "alice",
+                    "info": "AT Protocol handle: alice.bsky.social",
+                }
+            )
+            app._poll_events()
+            await pilot.pause()
+            await pilot.pause(0.05)
+            app._poll_avatar_updates()
+            await pilot.pause()
+
+            self.assertEqual(fetch_calls, ["alice.bsky.social"])
+            self.assertEqual(app._nick_handles["alice"], "alice.bsky.social")
+            self.assertEqual(
+                app._avatar_palettes["alice"],
+                ["#010203", "#040506", "#070809", "#0a0b0c"],
+            )
+            rendered = self._rendered_lines(app)
+            self.assertEqual(rendered[:2], ["alice", "hello there"])
+            self.assertTrue(app._format_message("alice", "hello there").plain.startswith("▀▀ "))
 
 
 if __name__ == "__main__":

@@ -48,6 +48,8 @@
           ];
 
           propagatedBuildInputs = [
+            python.pkgs.pillow
+            python.pkgs."rich-pixels"
             python.pkgs.textual
           ];
 
@@ -121,13 +123,15 @@
             python
             python.pkgs.venvShellHook
             python.pkgs.pip
+            python.pkgs.pillow
+            python.pkgs."rich-pixels"
             python.pkgs.textual
             python.pkgs."textual-dev"
           ];
 
           env = {
             PYO3_PYTHON = "${python}/bin/python3.12";
-            PYTHONPATH = "${python.pkgs.textual}/${python.sitePackages}";
+            PYTHONPATH = "${python.pkgs.textual}/${python.sitePackages}:${python.pkgs.pillow}/${python.sitePackages}:${python.pkgs.\"rich-pixels\"}/${python.sitePackages}";
           };
 
           venvDir = ".venv";
