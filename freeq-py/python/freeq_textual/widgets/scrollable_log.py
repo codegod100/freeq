@@ -53,11 +53,24 @@ class ScrollableLog(RichLog):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        # CRITICAL: Line-associated state MUST live on the component, not in app dicts.
+        # When the thread panel opens:
+        # 1. OLD MessagesPanel is removed (with its ScrollableLog)
+        # 2. NEW MessagesPanelWithThread is mounted (with NEW ScrollableLog at narrower width)
+        # 3. Lines re-wrap at the new width -> different line count
+        # 4. If thread_roots lived in app._rendered_line_threads dict, it would have STALE indices
+        # 5. The NEW component should track its OWN thread_roots as it renders
+        #
+        # BUG: Currently app stores _rendered_line_threads dict, which gets out of sync when
+        #      component changes or width changes. Fix: move thread_roots tracking here.
+        self._thread_roots: list[str | None] = []  # thread_root per rendered line
         self._location_lines: dict[str, int] = {}  # location -> line index
         # Pending locations: parallel to RichLog's _deferred_renders, one per write call
         # Each entry is the location string (or None for writes without location)
         # This keeps locations in sync with deferred render order
         self._pending_locations: list[str | None] = []
+        # Pending thread_roots: same parallel tracking for thread_roots
+        self._pending_thread_roots: list[str | None] = []
         # Pending scroll target (set by scroll_to_location before on_resize fires)
         self._pending_scroll_target: str | None = None
 
@@ -66,8 +79,8 @@ class ScrollableLog(RichLog):
         _dbg(f"ScrollableLog.on_click: y={event.y} scroll_y={self.scroll_y}")
         self.post_message(self.Clicked(y=event.y, scroll_y=self.scroll_y))
 
-    def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
-        """Write content, optionally tracking location for later scrolling.
+    def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "", thread_root: str | None = None) -> "ScrollableLog":
+        """Write content, tracking location and thread_root for later use.
 
         Args:
             content: Rich renderable or string
@@ -75,39 +88,57 @@ class ScrollableLog(RichLog):
             expand: Expand to widget width (passed to RichLog)
             shrink: Shrink to fit width (passed to RichLog)
             scroll_end: Auto-scroll to end (passed to RichLog)
-            location: Optional location identifier (e.g., msgid) to scroll to later
+            location: Optional location identifier (e.g., msgid) for scroll-to-message
+            thread_root: Optional thread_root if this line is part of a thread
+        
+        DESIGN: thread_root MUST be tracked here, not in app dict.
+        When width changes (thread panel opens), lines re-wrap and indices change.
+        Only the component itself knows its actual rendered lines.
         """
-        # Track location for deferred renders - must add to pending even if empty
+        # Track for deferred renders - must add to pending even if empty
         # to keep indices in sync with _deferred_renders
         if not self._size_known:
             self._pending_locations.append(location or None)
-            _dbg(f"ScrollableLog.write: DEFERRED location={location[:8] if location else 'None'}, pending_count={len(self._pending_locations)}")
+            self._pending_thread_roots.append(thread_root)
+            _dbg(f"ScrollableLog.write: DEFERRED location={location[:8] if location else 'None'}, thread_root={thread_root[:8] if thread_root else 'None'}, pending={len(self._pending_locations)}")
 
         before = len(self.lines)
         result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end)
         added = len(self.lines) - before
 
-        # If render was NOT deferred, track location now with correct line index
-        if location and self._size_known:
-            if location not in self._location_lines:
-                self._location_lines[location] = before
-                _dbg(f"ScrollableLog.write: TRACKED location={location[:8]} -> line {before}")
-
+        # If render was NOT deferred, track now with correct line index
+        if self._size_known:
+            if location:
+                if location not in self._location_lines:
+                    self._location_lines[location] = before
+                    _dbg(f"ScrollableLog.write: TRACKED location={location[:8]} -> line {before}")
+            # Track thread_root for each line added (handles wrapping)
+            if thread_root:
+                for i in range(before, before + max(1, added)):
+                    if i >= len(self._thread_roots):
+                        self._thread_roots.extend([None] * (i - len(self._thread_roots) + 1))
+                    self._thread_roots[i] = thread_root
 
         return result
 
     def clear(self) -> None:
         """Clear content and location tracking."""
         super().clear()
+        self._thread_roots.clear()
         self._location_lines.clear()
         self._pending_locations.clear()
+        self._pending_thread_roots.clear()
 
     def on_resize(self, event) -> None:
-        """Process deferred renders and apply pending locations.
+        """Process deferred renders and apply pending locations/thread_roots.
 
         RichLog defers writes until the widget is sized. When the resize event
         fires, RichLog processes the deferred renders. We need to apply our
-        pending locations to the correct line indices after processing.
+        pending data to the correct line indices after processing.
+        
+        CRITICAL: This is where thread_roots get populated after width changes.
+        When thread panel opens, width shrinks, lines re-wrap, and THIS method
+        builds the correct thread_roots list for the new line count.
         """
         # Check if this is the first sizing
         if event.size.width and not self._size_known:
@@ -115,30 +146,39 @@ class ScrollableLog(RichLog):
             # Set flag first so our write() knows size is known
             self._size_known = True
 
-            # Get the deferred renders and pending locations
+            # Get the deferred renders and pending data
             deferred = list(self._deferred_renders)
-            pending = list(self._pending_locations)
+            pending_locs = list(self._pending_locations)
+            pending_roots = list(self._pending_thread_roots)
 
-            _dbg(f"ScrollableLog.on_resize: processing {len(deferred)} deferred renders, {len(pending)} pending locations")
+            _dbg(f"ScrollableLog.on_resize: processing {len(deferred)} deferred renders, {len(pending_locs)} locations, {len(pending_roots)} roots")
 
             # Clear the queues (RichLog does this internally too)
             self._deferred_renders.clear()
 
             # Process each deferred render, tracking line indices
-            for i, (dr, loc) in enumerate(zip(deferred, pending)):
+            for i, (dr, loc, root) in enumerate(zip(deferred, pending_locs, pending_roots)):
                 before = len(self.lines)
                 # Write the deferred render (dr is tuple of content, width, expand, shrink, scroll_end)
                 super().write(*dr)
                 after = len(self.lines)
+                added = after - before
                 # Track location if present
                 if loc:
                     if loc not in self._location_lines:
                         self._location_lines[loc] = before
-                        _dbg(f"  [{i}] location={loc[:8]} -> line {before} (added {after - before} lines)")
+                        _dbg(f"  [{i}] location={loc[:8]} -> line {before} (added {added} lines)")
+                # Track thread_root for all lines produced by this render
+                if root:
+                    for line_idx in range(before, after):
+                        if line_idx >= len(self._thread_roots):
+                            self._thread_roots.extend([None] * (line_idx - len(self._thread_roots) + 1))
+                        self._thread_roots[line_idx] = root
 
-            # Clear pending locations
+            # Clear pending
             self._pending_locations.clear()
-            _dbg(f"ScrollableLog.on_resize: done, {len(self._location_lines)} locations tracked")
+            self._pending_thread_roots.clear()
+            _dbg(f"ScrollableLog.on_resize: done, {len(self._location_lines)} locations, {len(self._thread_roots)} thread_roots")
             
             # Check for pending scroll target
             if self._pending_scroll_target:
@@ -151,6 +191,16 @@ class ScrollableLog(RichLog):
         else:
             # Already sized - just let RichLog handle it
             super().on_resize(event)
+
+    def thread_root_at(self, line_index: int) -> str | None:
+        """Get thread_root at a line index, or None if not a thread line.
+        
+        This is the CORRECT way to check for thread_roots - querying the component
+        directly instead of using stale data from an app dict.
+        """
+        if 0 <= line_index < len(self._thread_roots):
+            return self._thread_roots[line_index]
+        return None
 
 
     def scroll_to_location(self, location: str) -> bool:
