@@ -427,30 +427,25 @@ class FreeqTextualApp(App[None]):
         parts.append(self._format_message_body(text))
         return Text().assemble(*parts)
 
-    def _format_message_header(self, sender: str) -> list[Text]:
+    def _format_chat_block(self, sender: str, text: str) -> Text:
+        """Single Text: nick + message body as one block so wrapping stays aligned."""
         name = Text(sender, style=f"bold {_nick_color(sender)}")
-        if not self._avatars_enabled:
-            return [name]
-
-        rows = self._avatar_rows_for_nick(sender)
-        lines: list[Text] = []
-        for row_index, row in enumerate(rows):
-            line = Text()
-            for color in row:
-                line.append("█", style=color)
-            if row_index == 0:
-                line.append(" ")
-                line.append_text(name)
-            lines.append(line)
-        return lines
-
-    def _format_message_line(self, sender: str, text: str) -> Text:
-        line = Text(no_wrap=False, overflow="fold")
+        body = self._format_message_body(text)
+        block = Text(no_wrap=False, overflow="fold")
         if self._avatars_enabled:
-            # Indent to align with header text (avatar width = 4 chars + 1 space)
-            line.append("     ")
-        line.append_text(self._format_message_body(text))
-        return self._with_trailing_padding(line)
+            rows = self._avatar_rows_for_nick(sender)
+            # Just first row of avatar + nick + message (4x1 inline)
+            for color in rows[0]:
+                block.append("\u2588", style=color)
+            block.append(" ")
+            block.append_text(name)
+            block.append(": ")
+            block.append_text(body)
+        else:
+            block.append_text(name)
+            block.append(": ")
+            block.append_text(body)
+        return block
 
     def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
         """Dim reply indicator: `  ↳ replying to <nick>: <snippet>`."""
@@ -628,17 +623,25 @@ class FreeqTextualApp(App[None]):
 
             sender, text = line_meta
             sender_key = self._nick_key(sender)
-            show_header = not previous_was_chat or previous_sender != sender_key
-            if show_header:
-                for header_line in self._format_message_header(sender):
-                    renderable.append(header_line)
-                    render_roots.append(None)
-            for pending_line, pending_root in pending_reply_indicators:
-                renderable.append(pending_line)
-                render_roots.append(pending_root)
-            pending_reply_indicators.clear()
-            renderable.append(self._format_message_line(sender, text))
-            render_roots.append(None)
+            is_first = not previous_was_chat or previous_sender != sender_key
+            if is_first:
+                for pending_line, pending_root in pending_reply_indicators:
+                    renderable.append(pending_line)
+                    render_roots.append(pending_root)
+                pending_reply_indicators.clear()
+                renderable.append(self._format_chat_block(sender, text))
+                render_roots.append(None)
+            else:
+                # Continuation of same sender - just message body, indented
+                for pending_line, pending_root in pending_reply_indicators:
+                    renderable.append(pending_line)
+                    render_roots.append(pending_root)
+                pending_reply_indicators.clear()
+                indent = "     " if self._avatars_enabled else ""
+                cont_line = Text(indent, no_wrap=False, overflow="fold")
+                cont_line.append_text(self._format_message_body(text))
+                renderable.append(cont_line)
+                render_roots.append(None)
 
             next_meta = metas[index + 1] if index + 1 < len(metas) else None
             next_sender = self._nick_key(next_meta[0]) if next_meta is not None else None
