@@ -178,9 +178,14 @@ class ScrollableLog(RichLog):
 
         # Scroll to the line (line_index is 0-based row in lines list)
         # RichLog stores lines as Strip objects, we need to scroll to virtual y
-        self.scroll_to(y=line_index, animate=False)
-        _dbg(f"  after scroll: scroll_y={self.scroll_y}")
+        # Use call_later to ensure the widget has rendered before scrolling
+        self.app.call_later(self._do_scroll, line_index)
         return True
+
+    def _do_scroll(self, y: int) -> None:
+        """Actually perform the scroll after render is complete."""
+        self.scroll_to(y=y, animate=False)
+        _dbg(f"  _do_scroll(y={y}): scroll_y={self.scroll_y}, virtual_size={self.virtual_size}")
 
     def location_line(self, location: str) -> int | None:
         """Get the line index for a location, or None if not found."""
