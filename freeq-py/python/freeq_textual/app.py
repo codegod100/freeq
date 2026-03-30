@@ -465,23 +465,95 @@ class FreeqTextualApp(App[None]):
         return lines
 
     def _format_chat_block(self, sender: str, text: str, width: int = 80) -> list[Text]:
-        """Return list of lines for a chat message."""
+        """Return list of lines for a chat message.
+        
+        With avatars:
+        - Line 1: ████ nick
+        - Line 2: ████ first part of message
+        - Line 3+:      continuation (indented)
+        
+        Without avatars:
+        - nick: message on one line with fold overflow
+        """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         body = self._format_message_body(text)
         
-        if self._avatars_enabled:
-            # Avatar + nick as header, then message lines below
-            lines = self._format_header_lines(sender)
-            indent = 5  # avatar width
-            lines.extend(self._format_message_lines(text, indent, width))
-            return lines
-        else:
+        if not self._avatars_enabled:
             # No avatar: nick: message on one line
             block = Text(no_wrap=False, overflow="fold")
             block.append_text(name)
             block.append(": ")
             block.append_text(body)
             return [block]
+        
+        # With avatars: nick on line 1, message starts on line 2
+        rows = self._avatar_rows_for_nick(sender)
+        indent = "     "  # 5 spaces for continuation lines
+        
+        # Calculate available widths
+        line2_avail = max(20, width - 5)  # avatar prefix "████ "
+        cont_avail = max(20, width - 5)  # indent "     "
+        
+        # Line 1: avatar row 1 + nick
+        line1 = Text()
+        for color in rows[0]:
+            line1.append("\u2588", style=color)
+        line1.append(" ")
+        line1.append_text(name)
+        lines = [line1]
+        
+        # Wrap message text
+        words = text.split()
+        current = ""
+        line_num = 0  # 0 = first message line (with avatar row 2), 1+ = continuation
+        
+        for word in words:
+            avail = line2_avail if line_num == 0 else cont_avail
+            test = f"{current} {word}".strip()
+            if len(test) <= avail:
+                current = test
+            else:
+                if current:
+                    if line_num == 0:
+                        lines.append(self._make_avatar_cont_line(rows[1], current))
+                    else:
+                        lines.append(Text(indent + current))
+                current = word
+                line_num += 1
+        
+        
+        # Flush remaining text
+        if current:
+            if line_num == 0:
+                lines.append(self._make_avatar_cont_line(rows[1], current))
+            else:
+                lines.append(Text(indent + current))
+        
+        
+        # Ensure at least 2 lines for avatar display
+        if len(lines) == 1:
+            lines.append(self._make_avatar_cont_line(rows[1], ""))
+        
+        return lines
+
+    def _make_avatar_line(self, colors: list[str], name: Text, text: str) -> Text:
+        """Create line with avatar row 1 + nick."""
+        line = Text()
+        for color in colors:
+            line.append("\u2588", style=color)
+        line.append(" ")
+        line.append_text(name)
+        return line
+
+    def _make_avatar_cont_line(self, colors: list[str], text: str) -> Text:
+        """Create line with avatar row 2 + text."""
+        line = Text()
+        for color in colors:
+            line.append("\u2588", style=color)
+        if text:
+            line.append(" ")
+            line.append(text)
+        return line
 
     def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
         """Dim reply indicator: `  ↳ replying to <nick>: <snippet>`."""
