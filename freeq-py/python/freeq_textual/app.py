@@ -507,8 +507,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Get reactions for this message
         reactions_text = Text()
         if msgid and msgid in self._reactions:
+            _dbg(f"  _format_chat_block: FOUND reactions for {msgid[:8]}")
             for r_sender, r_emoji in self._reactions[msgid]:
                 reactions_text.append(f" {r_emoji}")
+        elif msgid:
+            # Debug: why no match?
+            _dbg(f"  _format_chat_block: no reactions for {msgid[:8]}, keys={[k[:8] for k in self._reactions.keys()]}")
         
         
         # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
@@ -1486,7 +1490,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(EmojiPicker.EmojiSelected)
     def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:
         """Handle emoji selection - send reaction via TAGMSG."""
-        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
+        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None} (full: {event.msgid})")
         if event.msgid:
             # Check if message exists in buffer
             buffer_key = self.active_buffer
