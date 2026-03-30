@@ -23,7 +23,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
+from .widgets import BufferList, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
 from .widgets.layout_render import LayoutAwareRender
 
 try:
@@ -173,6 +173,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         cached_auth: dict | None = None,
         config_path: Path | None = None,
         ui_config: dict | None = None,
+        _for_test: bool = False,  # Skip loading overlay for tests
     ) -> None:
         super().__init__()
         self.client = client
@@ -183,6 +184,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.cached_auth = cached_auth
         self.config_path = config_path
         self.ui_config = ui_config or {}
+        self._skip_loading_overlay = _for_test
         self.buffers: dict[str, BufferState] = {"status": BufferState("status")}
         self.messages: dict[str, list[Text]] = defaultdict(list)
         self.pending_auth_session: str | None = None
@@ -210,6 +212,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._pending_whois: set[str] = set()
         self._pending_avatar_fetches: set[str] = set()
         self._avatar_updates: SimpleQueue[tuple[str, list[str] | None, object | None]] = SimpleQueue()
+        self._is_loading = True  # Loading state - shows spinner until data loaded
+        self._load_message = "Connecting..."
+        self._connected = False  # Track if we've received connected event
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -217,11 +222,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             yield BufferList(id="sidebar")
             yield MessagesPanel()
         yield Input(
-            placeholder="Type a message or /join #channel",
+            placeholder="Type a message or /join /channel",
             id="composer",
             classes="-textual-compact",
         )
         yield Footer(compact=True)
+        if not self._skip_loading_overlay:
+            yield LoadingOverlay(self._load_message, id="loading-overlay")
 
     def on_mount(self) -> None:
         _dbg("App.on_mount()")
@@ -247,6 +254,32 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._begin_auth(self.auth_handle)
         self._seed_self_avatar_handle()
         _dbg("App.on_mount() done")
+
+    def _check_loading_complete(self) -> None:
+        """Check if initial loading is complete and remove loading overlay."""
+        if not self._is_loading:
+            return
+        
+        # Done when connected and no pending history loads
+        if self._connected and not self.restore_history_targets:
+            self._is_loading = False
+            _dbg("Loading complete - removing overlay")
+            try:
+                overlay = self.query_one("#loading-overlay", LoadingOverlay)
+                overlay.remove()
+            except Exception:
+                pass  # Already removed or not found
+
+    def _update_loading_message(self, message: str) -> None:
+        """Update the loading overlay message."""
+        if not self._is_loading:
+            return
+        self._load_message = message
+        try:
+            overlay = self.query_one("#loading-overlay", LoadingOverlay)
+            overlay.update_message(message)
+        except Exception:
+            pass
 
     # ── Rich text builders ─────────────────────────────────────────────────
 
@@ -1270,8 +1303,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _handle_event(self, event: dict) -> None:
         event_type = event.get("type")
         if event_type == "connected":
+            self._connected = True
             self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
             self._append_status(f"Connected to {self.client.server_addr}", "bold")
+            self._update_loading_message("Loading channels...")
+            self._check_loading_complete()
             return
         if event_type == "registered":
             self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
@@ -1366,6 +1402,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     self.restore_history_targets.discard(self._buffer_key(batch.target))
                     self.active_buffer = self._buffer_key(batch.target)
                     self._scroll_mode = "home"
+                    self._check_loading_complete()
             return
         if event_type == "names_end":
             channel = event["channel"]
