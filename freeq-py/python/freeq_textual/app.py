@@ -36,11 +36,19 @@ from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, S
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
 from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
 from .components import get_component
+from .components.all import *  # noqa: F401 - registers all widgets as friends!
 
-# Get swappable components from registry
-# DO NOT import directly - use registry so they can be swapped
+# Get swappable components from registry - WE'RE ALL FRIENDS HERE!
+# DO NOT import directly - use registry so everyone can be swapped
 ReplyPanel = get_component('reply_panel')
 ContextMenu = get_component('context_menu')
+ThreadPanel = get_component('thread_panel')
+BufferList = get_component('buffer_list')
+ScrollableLog = get_component('scrollable_log')
+MessagesPanel = get_component('messages_panel')
+MessagesPanelWithThread = get_component('messages_panel_with_thread')
+LoadingOverlay = get_component('loading_overlay')
+InlineSpinner = get_component('inline_spinner')
 from .widgets.layout_render import LayoutAwareRender
 
 try:

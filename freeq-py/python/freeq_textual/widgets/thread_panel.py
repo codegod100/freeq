@@ -1,4 +1,7 @@
-"""ThreadPanel widget - panel showing thread messages with header, close button, and reply input."""
+"""ThreadPanel widget - panel showing thread messages with header, close button, and reply input.
+
+WE'RE ALL FRIENDS HERE! This widget is registered in components/all.py
+"""
 
 from dataclasses import dataclass
 
@@ -11,6 +14,9 @@ from textual.widgets import Button, Input, Static
 from .debug import _dbg
 from .scrollable_log import ScrollableLog
 
+# Import AutoLogMixin directly from builtins to avoid circular import
+from ..components.builtins import AutoLogMixin
+
 
 @dataclass
 class ThreadMessage:
@@ -19,7 +25,7 @@ class ThreadMessage:
     text: str
 
 
-class ThreadPanel(Vertical):
+class ThreadPanel(AutoLogMixin, Vertical):
     """Open thread panel with width 30%. Mounted when open, removed when closed."""
 
     DEFAULT_CSS = """
@@ -90,13 +96,14 @@ class ThreadPanel(Vertical):
         yield Input(placeholder="Reply to thread...", id="thread-reply")
 
     def on_mount(self) -> None:
+        super().on_mount()  # AutoLogMixin logs mount
         """Render messages when mounted."""
         messages = self._messages
         if not messages:
-            _dbg(f"ThreadPanel.on_mount({self.thread_root[:8]!r}, no messages)")
+            self._log(f"no messages for {self.thread_root[:8]!r}")
             return
 
-        _dbg(f"ThreadPanel.on_mount({self.thread_root[:8]!r}, {len(messages)} msgs)")
+        self._log(f"{len(messages)} msgs for {self.thread_root[:8]!r}")
 
         # Update header
         header = self.query_one("#thread-header", Static)
@@ -125,17 +132,17 @@ class ThreadPanel(Vertical):
         reply_input.focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        super().on_button_pressed(event)  # AutoLogMixin logs button press
         """Handle close button press."""
         if event.button.id == "thread-close":
-            _dbg(f"ThreadPanel.on_button_pressed(close)")
             event.stop()
             self.post_message(self.Closed())
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        super().on_input_submitted(event)  # AutoLogMixin logs input
         """Handle reply submission."""
         if event.input.id == "thread-reply":
             text = event.value.strip()
-            _dbg(f"ThreadPanel.on_input_submitted(text={text[:20]!r}...)")
             event.stop()
             if text and self.thread_root:
                 event.input.value = ""

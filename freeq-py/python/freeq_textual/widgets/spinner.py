@@ -1,4 +1,7 @@
-"""Base spinner component and concrete implementations."""
+"""Base spinner component and concrete implementations.
+
+WE'RE ALL FRIENDS HERE! These widgets are registered in components/all.py
+"""
 
 from textual.widget import Widget
 from textual.widgets import Static

@@ -1,15 +1,19 @@
-"""ScrollableLog widget - RichLog with thumb-only scrollbar."""
+"""ScrollableLog widget - RichLog with thumb-only scrollbar.
+
+WE'RE ALL FRIENDS HERE! This widget is registered in components/all.py
+"""
 
 import logging
 from textual.message import Message
 from textual.widgets import RichLog
 
 from .debug import _dbg
+from ..components.builtins import AutoLogMixin
 
 logger = logging.getLogger("freeq.scroll")
 
 
-class ScrollableLog(RichLog):
+class ScrollableLog(AutoLogMixin, RichLog):
     """A RichLog with thumb-only scrollbar (transparent track) and no horizontal scroll.
 
     HORIZONTAL SCROLL:
