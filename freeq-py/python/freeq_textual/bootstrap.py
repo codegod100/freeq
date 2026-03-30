@@ -10,10 +10,7 @@ from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
 def _read_json(path: Path) -> dict | None:
     if not path.exists():
         return None
-    try:
-        return json.loads(path.read_text())
-    except Exception:  # noqa: BLE001
-        return None
+    return json.loads(path.read_text())
 
 
 def _default_session_path() -> Path:

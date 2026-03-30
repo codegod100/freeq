@@ -278,22 +278,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if self._connected and not self.restore_history_targets:
             self._is_loading = False
             _dbg("Loading complete - removing overlay")
-            try:
-                overlay = self.query_one("#loading-overlay", LoadingOverlay)
-                overlay.remove()
-            except Exception:
-                pass  # Not found
+            overlay = self.query_one("#loading-overlay", LoadingOverlay)
+            overlay.remove()
 
     def _update_loading_message(self, message: str) -> None:
         """Update the loading overlay message."""
         if not self._is_loading:
             return
         self._load_message = message
-        try:
-            overlay = self.query_one("#loading-overlay", LoadingOverlay)
-            overlay.update_message(message)
-        except Exception:
-            pass
+        overlay = self.query_one("#loading-overlay", LoadingOverlay)
+        overlay.update_message(message)
 
     # ── Rich text builders ─────────────────────────────────────────────────
 
@@ -652,13 +646,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     # ── Helpers ─────────────────────────────────────────────────────────────
 
     def _start_client(self) -> None:
-        try:
-            self.client.connect()
-            if self.initial_channel:
-                self.client.join(self.initial_channel)
-        except Exception as exc:  # noqa: BLE001
-            self._append_status(f"connect failed: {exc}", "red")
-            self._render_active_buffer()
+        self.client.connect()
+        if self.initial_channel:
+            self.client.join(self.initial_channel)
 
     def _refresh_sidebar(self) -> None:
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
@@ -879,24 +869,21 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """
         if not timestamp:
             return ""
-        try:
-            import datetime
-            # Parse ISO 8601 timestamp (UTC)
-            if '.' in timestamp:
-                dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            else:
-                dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
-            # Convert to local timezone
-            local_dt = dt.astimezone()
-            # Format as 12hr with date: "2:30pm 1/15"
-            hour = local_dt.hour % 12 or 12
-            minute = local_dt.minute
-            ampm = 'am' if local_dt.hour < 12 else 'pm'
-            month = local_dt.month
-            day = local_dt.day
-            return f"{hour}:{minute:02d}{ampm} {month}/{day}"
-        except Exception:
-            return ""
+        import datetime
+        # Parse ISO 8601 timestamp (UTC)
+        if '.' in timestamp:
+            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        else:
+            dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        # Convert to local timezone
+        local_dt = dt.astimezone()
+        # Format as 12hr with date: "2:30pm 1/15"
+        hour = local_dt.hour % 12 or 12
+        minute = local_dt.minute
+        ampm = 'am' if local_dt.hour < 12 else 'pm'
+        month = local_dt.month
+        day = local_dt.day
+        return f"{hour}:{minute:02d}{ampm} {month}/{day}"
 
     def _snippet(self, text: str, length: int = 40) -> str:
         normalized = " ".join(text.split())
@@ -1009,10 +996,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         def worker() -> None:
             palette: list[str] | None = None
             avatar_image: object | None = None
-            try:
-                palette, avatar_image = self._fetch_bluesky_avatar_data(handle)
-            except (OSError, ValueError, json.JSONDecodeError, UnidentifiedImageError) as exc:
-                _dbg(f"avatar fetch failed nick={nick_key} handle={handle} error={exc}")
+            palette, avatar_image = self._fetch_bluesky_avatar_data(handle)
             self._avatar_updates.put((nick_key, palette, avatar_image))
 
         threading.Thread(target=worker, name=f"freeq-avatar-{nick_key}", daemon=True).start()
@@ -1037,10 +1021,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 self._avatar_rows.pop(nick_key, None)
             updated_any = True
         if updated_any:
-            try:
-                self._render_active_buffer()
-            except NoMatches:
-                return
+            self._render_active_buffer()
 
     # ── Message recording ──────────────────────────────────────────────────
 
@@ -1115,11 +1096,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _thread_panel_is_open(self) -> bool:
         """Check if MessagesPanelWithThread is mounted (vs MessagesPanel)."""
-        try:
-            self.query_one(MessagesPanelWithThread)
-            return True
-        except Exception:
-            return False
+        return bool(self.query(MessagesPanelWithThread))
 
     def _open_thread(self, thread_root: str) -> None:
         """Open the thread panel - swap to MessagesPanelWithThread.
@@ -1152,26 +1129,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Find and remove existing panel - exactly one must exist
         body = self.query_one("#body", Horizontal)
         
-        # Count existing panels - should be exactly 1
-        old_panel = None
-        try:
-            old_panel = self.query_one(MessagesPanel)
-            _dbg(f"  removing MessagesPanel")
-        except Exception:
-            pass
+        # Find the existing panel - should be exactly one
+        panels = list(self.query(MessagesPanel)) + list(self.query(MessagesPanelWithThread))
+        if len(panels) != 1:
+            raise RuntimeError(f"Expected 1 panel, found {len(panels)} - corrupt state")
         
-        try:
-            existing_thread_panel = self.query_one(MessagesPanelWithThread)
-            if old_panel:
-                raise RuntimeError(f"Both MessagesPanel and MessagesPanelWithThread exist - corrupt state")
-            old_panel = existing_thread_panel
-            _dbg(f"  removing MessagesPanelWithThread")
-        except Exception:
-            pass
-        
-        if not old_panel:
-            raise RuntimeError("No MessagesPanel or MessagesPanelWithThread found - corrupt state")
-        
+        old_panel = panels[0]
+        _dbg(f"  removing {type(old_panel).__name__}")
         old_panel.remove()
         _dbg(f"  removed old panel")
         
@@ -1275,11 +1239,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         The component knows its actual rendered lines; app dict becomes stale on width change.
         """
         # Get the messages log widget directly
-        try:
-            log = self.query_one("#messages", ScrollableLog)
-        except NoMatches:
-            return
-            
+        log = self.query_one("#messages", ScrollableLog)
+        
         virtual_y = int(event.y + event.scroll_y)
         
         # Get thread_root from the COMPONENT, not from app dict
@@ -1336,11 +1297,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._history_loading_key = key
         # Remove any existing spinner from previous scroll request
         # (user might scroll multiple times before batch arrives)
-        try:
-            old = self.query_one("#history-spinner", InlineSpinner)
+        for old in self.query("#history-spinner"):
             old.remove()
-        except Exception:
-            pass
         # Mount inline spinner at top of messages panel
         body = self.query_one("#body")
         spinner = InlineSpinner("Loading older messages...", id="history-spinner")
@@ -1454,15 +1412,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _scroll_to_message(self, msgid: str) -> None:
         """Scroll to a specific message after rendering is complete."""
-        try:
-            log = self.query_one("#messages", ScrollableLog)
-            success = log.scroll_to_location(msgid)
-            _dbg(f"_scroll_to_message({msgid[:8]}): result={success}, lines={len(log.lines)}, virtual_size={log.virtual_size}")
-        except Exception as e:
-            _dbg(f"_scroll_to_message failed: {e}")
-        else:
-            # Preserve - do nothing
-            pass
+        log = self.query_one("#messages", ScrollableLog)
+        success = log.scroll_to_location(msgid)
+        _dbg(f"_scroll_to_message({msgid[:8]}): result={success}, lines={len(log.lines)}, virtual_size={log.virtual_size}")
         self._scroll_mode = "preserve"
         if self.active_buffer in self.buffers:
             self.buffers[self.active_buffer].unread = 0
@@ -1752,11 +1704,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 
                 # Remove the inline spinner if present (scroll-triggered history)
                 # For initial history on join, there's no spinner - the loading overlay handles that
-                try:
-                    spinner = self.query_one("#history-spinner", InlineSpinner)
+                for spinner in self.query("#history-spinner"):
                     spinner.remove()
-                except Exception:
-                    pass  # No spinner - initial load, not scroll-triggered
                 
                 self._check_loading_complete()
                 
@@ -2019,8 +1968,5 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg("App.on_unmount()")
         self._persist_session_channels()
         # Clear debug callback
-        try:
-            from .widgets import set_debug_callback
-            set_debug_callback(None)
-        except Exception:
-            pass
+        from .widgets.debug import set_debug_callback
+        set_debug_callback(None)
