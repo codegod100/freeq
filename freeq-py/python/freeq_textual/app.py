@@ -490,7 +490,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             block.append(": ")
             block.append_text(self._format_message_body(text))
             result.append(block)
-            roots.append(None)
+            # Message line also gets thread_root if it's a reply (larger click target)
+            roots.append(reply_thread_root)
             return result, roots
         
         
@@ -537,7 +538,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         cont = Text(indent, no_wrap=False, overflow="fold")
                         cont.append_text(self._format_message_body(current))
                         lines.append(cont)
-                    roots.append(None)
+                    # Message line gets thread_root for replies (larger click target)
+                    roots.append(reply_thread_root)
                 current = word
                 line_num += 1
         
@@ -550,7 +552,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 cont = Text(indent, no_wrap=False, overflow="fold")
                 cont.append_text(self._format_message_body(current))
                 lines.append(cont)
-            roots.append(None)
+            # Message line gets thread_root for replies (larger click target)
+            roots.append(reply_thread_root)
         
         
         # Ensure at least 2 lines for avatar display
@@ -1547,7 +1550,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 self.batches[batch_id].lines.append(
                     (tags.get("time", ""), self._format_message(sender, text))
                 )
-                self.batches[batch_id].thread_roots.append(None)
+                self.batches[batch_id].thread_roots.append(thread_root or None)
                 self.batches[batch_id].msgids.append(msgid or None)
                 self.batches[batch_id].line_metas.append((sender, text))
             else:
@@ -1569,6 +1572,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     self._format_message(sender, text),
                     msgid=msgid,
                     line_meta=(sender, text),
+                    thread_root=thread_root,
                 )
             return
         if event_type == "topic_changed":
