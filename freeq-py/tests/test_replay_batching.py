@@ -69,6 +69,16 @@ class FakeBroker:
 
 
 class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Disable avatars in tests for consistent output format
+        self._avatar_patcher = patch.object(
+            FreeqTextualApp, "_detect_avatar_support", return_value=False
+        )
+        self._avatar_patcher.start()
+
+    def tearDown(self) -> None:
+        self._avatar_patcher.stop()
+
     def _normalize_line(self, text: str) -> str:
         text = re.sub(r"^[▀█▄ ]+", "", text).strip()
         return text
@@ -133,12 +143,18 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(rendered, "alice: hello")
 
     def test_avatar_support_detects_wezterm_without_console_color_hint(self) -> None:
-        client = FakeClient()
-        app = FreeqTextualApp(client)
+        # Stop the setUp patcher to test actual detection
+        self._avatar_patcher.stop()
+        try:
+            client = FakeClient()
+            app = FreeqTextualApp(client)
 
-        with patch("rich.console.Console.color_system", new_callable=PropertyMock, return_value=None):
-            with patch.dict("os.environ", {"TERM_PROGRAM": "WezTerm"}, clear=False):
-                self.assertTrue(app._detect_avatar_support())
+            with patch("rich.console.Console.color_system", new_callable=PropertyMock, return_value=None):
+                with patch.dict("os.environ", {"TERM_PROGRAM": "WezTerm"}, clear=False):
+                    self.assertTrue(app._detect_avatar_support())
+        finally:
+            # Restart the patcher for other tests
+            self._avatar_patcher.start()
 
     async def test_long_urls_render_clickable_label_and_full_url(self) -> None:
         client = FakeClient()
@@ -168,8 +184,11 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(body.overflow, "fold")
         self.assertFalse(body.no_wrap)
-        self.assertEqual(block.overflow, "fold")
-        self.assertFalse(block.no_wrap)
+        # _format_chat_block returns list[Text]; first line is nick: message
+        self.assertIsInstance(block, list)
+        self.assertTrue(len(block) >= 1)
+        self.assertEqual(block[0].overflow, "fold")
+        self.assertFalse(block[0].no_wrap)
         self.assertEqual(reply.overflow, "fold")
         self.assertFalse(reply.no_wrap)
 
