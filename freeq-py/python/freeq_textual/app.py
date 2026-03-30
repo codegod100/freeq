@@ -857,26 +857,27 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self.client.history_latest(display_name, 50)
 
     def _format_timestamp(self, timestamp: str) -> str:
-        """Format IRCv3 server-time as 12hr with date (e.g., '2:30pm 1/15').
+        """Format IRCv3 server-time as 12hr with date in local timezone.
         
-        IRCv3 time format: '2024-01-15T14:30:00.000Z' (ISO 8601)
+        IRCv3 time format: '2024-01-15T14:30:00.000Z' (ISO 8601, UTC)
         """
         if not timestamp:
             return ""
         try:
             import datetime
-            # Parse ISO 8601 timestamp
-            # Handle both with and without milliseconds
+            # Parse ISO 8601 timestamp (UTC)
             if '.' in timestamp:
                 dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
             else:
                 dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+            # Convert to local timezone
+            local_dt = dt.astimezone()
             # Format as 12hr with date: "2:30pm 1/15"
-            hour = dt.hour % 12 or 12  # 0 -> 12
-            minute = dt.minute
-            ampm = 'am' if dt.hour < 12 else 'pm'
-            month = dt.month
-            day = dt.day
+            hour = local_dt.hour % 12 or 12
+            minute = local_dt.minute
+            ampm = 'am' if local_dt.hour < 12 else 'pm'
+            month = local_dt.month
+            day = local_dt.day
             return f"{hour}:{minute:02d}{ampm} {month}/{day}"
         except Exception:
             return ""

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import time
+os.environ['TZ'] = 'UTC'  # Set timezone for deterministic timestamp tests
+time.tzset()
+
 import sys
 import json
 import re
