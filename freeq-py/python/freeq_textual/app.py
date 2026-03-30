@@ -1100,19 +1100,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             raise RuntimeError("No MessagesPanel or MessagesPanelWithThread found - corrupt state")
         
         old_panel.remove()
+        _dbg(f"  removed old panel")
         
-        # Mount new panel
-        new_panel = MessagesPanelWithThread(
-            thread_root, thread_msgs, self._format_thread_message
-        )
-        body.mount(new_panel)
-        _dbg(f"  mounted MessagesPanelWithThread")
-        # Panel triggers render via on_mount -> trigger_app_render -> request_render
+        # Mount new panel after removal completes (remove is async)
+        def mount_new():
+            new_panel = MessagesPanelWithThread(
+                thread_root, thread_msgs, self._format_thread_message
+            )
+            body.mount(new_panel)
+            _dbg(f"  mounted MessagesPanelWithThread")
+            # Set scroll mode for when the scheduled render happens
+            self._scroll_mode = "message"
+            self._scroll_target_msgid = thread_root
         
-        # Set scroll mode for when the scheduled render happens
-        self._scroll_mode = "message"
-        self._scroll_target_msgid = thread_root
-        # Note: NOT calling _render_active_buffer() here - let the scheduled render handle it
+        self.call_later(mount_new)
 
     def _close_thread(self) -> None:
         """Close the thread panel - swap back to MessagesPanel.
@@ -1133,11 +1134,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"_close_thread: removing MessagesPanelWithThread")
         old.remove()
         
-        new_panel = MessagesPanel()
-        body.mount(new_panel)
-        _dbg(f"_close_thread: mounted new MessagesPanel")
-        # Panel triggers render via on_mount
-        self.call_later(lambda: self.query_one("#composer", Input).focus())
+        # Mount new panel after removal completes (remove is async)
+        def mount_new():
+            new_panel = MessagesPanel()
+            body.mount(new_panel)
+            _dbg(f"_close_thread: mounted new MessagesPanel")
+            self.query_one("#composer", Input).focus()
+        
+        self.call_later(mount_new)
 
     @on(ThreadPanel.Closed)
     def handle_thread_panel_closed(self, event: ThreadPanel.Closed) -> None:
@@ -1158,10 +1162,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         old = self.query_one(MessagesPanelWithThread)
         old.remove()
         
-        new_panel = MessagesPanel()
-        body.mount(new_panel)
-        # Panel triggers render via on_mount
-        self.query_one("#composer", Input).focus()
+        # Mount new panel after removal completes (remove is async)
+        def mount_new():
+            new_panel = MessagesPanel()
+            body.mount(new_panel)
+            self.query_one("#composer", Input).focus()
+        
+        
+        self.call_later(mount_new)
 
     @on(ThreadPanel.ReplySent)
     def handle_thread_panel_reply(self, event: ThreadPanel.ReplySent) -> None:
