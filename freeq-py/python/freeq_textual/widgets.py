@@ -110,6 +110,10 @@ class ThreadPanel(Vertical):
             messages: List of ThreadMessage objects to display
             formatter: Callable(sender, text) -> Text to format messages
         """
+        import datetime
+        with open("/tmp/freeq-tui.log", "a") as f:
+            f.write(f"{datetime.datetime.now().isoformat()} ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)\n")
+
         self.open_root = thread_root
         self.add_class("visible")
 
@@ -129,6 +133,8 @@ class ThreadPanel(Vertical):
             formatted = formatter(msg.sender, msg.text)
             log.write(formatted)
             log.write(Text(" "))
+        log.refresh()
+        self.refresh()
 
         # Focus the reply input
         reply_input.focus()

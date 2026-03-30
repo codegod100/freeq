@@ -944,6 +944,7 @@ class FreeqTextualApp(App[None]):
         self.open_thread_root = thread_root
         panel = self.query_one("#thread-panel", ThreadPanel)
         messages = self._collect_thread_messages(thread_root)
+        _dbg(f"_open_thread({thread_root!r}) -> {len(messages)} messages")
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         panel.open(thread_root, thread_msgs, self._format_message)
         self._refresh_layout_widths()
