@@ -1488,6 +1488,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Handle emoji selection - send reaction via TAGMSG."""
         _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
         if event.msgid:
+            # Check if message exists in buffer
+            buffer_key = self.active_buffer
+            line_msgids = self._line_msgids.get(buffer_key, [])
+            msgids_in_buffer = set(m for m in line_msgids if m)
+            _dbg(f"  msgid in buffer msgids? {event.msgid in msgids_in_buffer}")
+            _dbg(f"  msgid in message_index? {event.msgid in self.message_index}")
+            
             # Optimistically add reaction locally (server won't echo without echo-message cap)
             self._reactions[event.msgid].append((self.client.nick, event.emoji))
             _dbg(f"  added local reaction: {self.client.nick} reacted {event.emoji} on {event.msgid[:8]}")
