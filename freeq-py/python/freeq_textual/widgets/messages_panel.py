@@ -1,9 +1,14 @@
-"""Messages panel widgets - containers for message display with/without thread panel."""
+"""Messages panel widgets - containers for message display with/without thread panel.
+
+WE'RE ALL FRIENDS HERE! These widgets are registered in components/all.py
+"""
 
 from textual.containers import Horizontal
 from textual.widget import Widget
 
 from .layout_render import RenderablePanel
+
+# Import for type hints and compose() - friends can still import friends!
 from .scrollable_log import ScrollableLog
 from .thread_panel import ThreadMessage, ThreadPanel
 

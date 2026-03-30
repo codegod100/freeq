@@ -1,9 +1,13 @@
-"""BufferList widget - sidebar showing list of buffers (channels and DMs)."""
+"""BufferList widget - sidebar showing list of buffers (channels and DMs).
+
+WE'RE ALL FRIENDS HERE! This widget is registered in components/all.py
+"""
 
 from textual.widgets import ListView, ListItem, Static
+from ..components.builtins import AutoLogMixin
 
 
-class BufferList(ListView):
+class BufferList(AutoLogMixin, ListView):
     """Sidebar widget showing list of buffers (channels and DMs)."""
     
     DEFAULT_CSS = """

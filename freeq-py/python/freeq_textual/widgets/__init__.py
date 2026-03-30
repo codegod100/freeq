@@ -9,8 +9,9 @@ from .messages_panel import MessagesPanel, MessagesPanelWithThread
 from .scrollable_log import ScrollableLog
 from .thread_panel import ThreadMessage, ThreadPanel
 
-# Note: ReplyPanel and ContextMenu moved to components/ for swappability
-# Use get_component('reply_panel') or get_component('context_menu') instead
+# WE'RE ALL FRIENDS HERE!
+# Export get_component so everyone can get their friends!
+from ..components import get_component
 
 __all__ = [
     "BaseSpinner",
@@ -27,4 +28,5 @@ __all__ = [
     "ThreadPanel",
     "_dbg",
     "set_debug_callback",
+    "get_component",  # Export so everyone can get their friends!
 ]

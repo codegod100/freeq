@@ -11,7 +11,8 @@ from textual.widgets import Button, Input, Static
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 
-from ..widgets import _dbg
+# Import _dbg directly to avoid circular import with widgets/__init__.py
+from ..widgets.debug import _dbg
 from . import ComponentRegistry
 
 

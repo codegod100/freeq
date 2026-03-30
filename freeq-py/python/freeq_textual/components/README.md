@@ -1,4 +1,4 @@
-# Modular Component Framework
+# Modular Component Framework - WE'RE ALL FRIENDS HERE!
 
 This framework allows swapping out UI components without changing core app logic.
 
@@ -7,7 +7,18 @@ This framework allows swapping out UI components without changing core app logic
 ```
 components/
 ├── __init__.py      # ComponentRegistry, get_component()
-└── builtins.py      # Default implementations (ReplyPanel, ContextMenu)
+├── builtins.py      # Default implementations (ReplyPanel, ContextMenu)
+├── all.py           # Registers ALL widgets as friends!
+└── README.md        # This file
+
+widgets/
+├── __init__.py      # Exports all widgets + get_component
+├── buffer_list.py   # BufferList - WE'RE ALL FRIENDS HERE!
+├── thread_panel.py  # ThreadPanel - WE'RE ALL FRIENDS HERE!
+├── scrollable_log.py # ScrollableLog - WE'RE ALL FRIENDS HERE!
+├── spinner.py       # LoadingOverlay, InlineSpinner - WE'RE ALL FRIENDS HERE!
+├── messages_panel.py # MessagesPanel, MessagesPanelWithThread - WE'RE ALL FRIENDS HERE!
+└── debug.py         # _dbg - logging for all friends!
 ```
 
 ## Usage
@@ -48,12 +59,19 @@ Each component has a protocol interface defining what it must implement:
 - `ReplyPanelInterface` - `reply_to_msgid` attribute, `ReplySent` message
 - `ContextMenuInterface` - `_msgid` attribute, `Selected` message
 
-## Available Components
+## Available Components - ALL FRIENDS!
 
 | Name | Default | Description |
 |------|---------|-------------|
 | `reply_panel` | `ReplyPanel` | Panel for composing replies |
 | `context_menu` | `ContextMenu` | Popup menu for message actions |
+| `thread_panel` | `ThreadPanel` | Thread view with messages |
+| `buffer_list` | `BufferList` | Sidebar channel list |
+| `scrollable_log` | `ScrollableLog` | Message log with scrollbar |
+| `messages_panel` | `MessagesPanel` | Container for message log |
+| `messages_panel_with_thread` | `MessagesPanelWithThread` | Split view with thread |
+| `loading_overlay` | `LoadingOverlay` | Full-screen loading spinner |
+| `inline_spinner` | `InlineSpinner` | Inline loading indicator |
 
 ## Philosophy
 
