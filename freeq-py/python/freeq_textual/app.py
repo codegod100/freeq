@@ -464,29 +464,37 @@ class FreeqTextualApp(App[None]):
             lines.append(Text(" " * indent + current))
         return lines
 
-    def _format_chat_block(self, sender: str, text: str, width: int = 80) -> list[Text]:
-        """Return list of lines for a chat message.
+    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None) -> tuple[list[Text], list[str | None]]:
+        """Return tuple of (lines, thread_roots) for a chat message.
         
         With avatars:
         - Line 1: ████ nick
-        - Line 2: ████ first line of message text
+        - Line 2: ████ reply indicator (if any) OR first line of message
         - Line 3+:      continuation (same column as line 2 text)
         
         Without avatars:
+        - reply indicator (if any)
         - nick: message on one line with fold overflow
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
+        roots: list[str | None] = []
         
         if not self._avatars_enabled:
-            # No avatar: nick: message on one line
+            # No avatar: reply indicator, then nick: message on one line
+            result: list[Text] = []
+            if reply_indicator:
+                result.append(reply_indicator)
+                roots.append(reply_thread_root)
             block = Text(no_wrap=False, overflow="fold")
             block.append_text(name)
             block.append(": ")
             block.append_text(self._format_message_body(text))
-            return [block]
+            result.append(block)
+            roots.append(None)
+            return result, roots
         
         
-        # With avatars: nick on line 1, message starts on line 2
+        # With avatars: nick on line 1, reply indicator or message on line 2
         rows = self._avatar_rows_for_nick(sender)
         indent = "     "  # 5 spaces - aligns with where text starts after "████ "
         text_avail = max(20, width - 5)
@@ -498,47 +506,60 @@ class FreeqTextualApp(App[None]):
         line1.append(" ")
         line1.append_text(name)
         lines = [line1]
+        roots = [None]  # nick line has no thread_root
         
-        # Wrap by words, format URLs in each segment
-        # We need to measure display length (URLs expand to [link: ...] format)
+        # Line 2: avatar row 2 + reply indicator (if any)
+        if reply_indicator:
+            reply_line = Text()
+            for color in rows[1]:
+                reply_line.append("\u2588", style=color)
+            reply_line.append(" ")
+            reply_line.append_text(reply_indicator)
+            lines.append(reply_line)
+            roots.append(reply_thread_root)
+        
+        # Wrap message text
         words = text.split()
         current = ""
         line_num = 0
         
         for word in words:
             test = f"{current} {word}".strip()
-            # Measure display length: account for URL expansion
             test_display = self._format_message_body(test).plain
             if len(test_display) <= text_avail:
                 current = test
             else:
                 if current:
-                    if line_num == 0:
+                    # First message line uses avatar row 2 only if no reply indicator
+                    if line_num == 0 and not reply_indicator:
                         lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
                     else:
                         cont = Text(indent)
                         cont.append_text(self._format_message_body(current))
                         lines.append(cont)
+                    roots.append(None)
                 current = word
                 line_num += 1
         
         
         # Flush remaining text
         if current:
-            if line_num == 0:
+            if line_num == 0 and not reply_indicator:
                 lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
             else:
                 cont = Text(indent)
                 cont.append_text(self._format_message_body(current))
                 lines.append(cont)
+            roots.append(None)
         
         
         # Ensure at least 2 lines for avatar display
         if len(lines) == 1:
             lines.append(self._make_avatar_text_line(rows[1], Text()))
+            roots.append(None)
         
         
-        return lines
+        return lines, roots
 
     def _make_avatar_text_line(self, colors: list[str], text: Text) -> Text:
         """Create line with avatar row 2 + formatted text."""
@@ -728,18 +749,17 @@ class FreeqTextualApp(App[None]):
             sender_key = self._nick_key(sender)
             is_first = not previous_was_chat or previous_sender != sender_key
             if is_first:
-                for pending_line, pending_root in pending_reply_indicators:
-                    renderable.append(pending_line)
-                    render_roots.append(pending_root)
+                # Get reply indicator (first pending) to embed in chat block
+                reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
+                reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
-                for block_line in self._format_chat_block(sender, text, width):
+                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root)
+                for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
-                    render_roots.append(None)
+                    render_roots.append(block_root)
             else:
                 # Continuation of same sender - just message body, indented
-                for pending_line, pending_root in pending_reply_indicators:
-                    renderable.append(pending_line)
-                    render_roots.append(pending_root)
+                # Reply indicators already handled by first message
                 pending_reply_indicators.clear()
                 indent = 5 if self._avatars_enabled else 0
                 for msg_line in self._format_message_lines(text, indent, width):
