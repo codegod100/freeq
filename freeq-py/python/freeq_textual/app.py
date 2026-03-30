@@ -1949,6 +1949,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             notice.append(event["text"])
             self._append_line("status", notice, mark_unread=False)
             return
+        if event_type == "tagmsg":
+            # TAGMSG with tags - check for +react (emoji reaction)
+            tags = event.get("tags", {})
+            if "+react" in tags:
+                sender = event["from"]
+                target = event["target"]
+                emoji = tags["+react"]
+                buffer_name = self._message_buffer_name(target, sender)
+                # Show reaction as system message
+                self._append_line(
+                    buffer_name,
+                    Text(f"{sender} reacted with {emoji}", style="dim"),
+                    mark_unread=True,
+                )
+                self._render_active_buffer()
+            return
         if event_type == "disconnected":
             self.channel_members.clear()
             self.restore_history_targets.clear()
