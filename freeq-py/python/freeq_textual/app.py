@@ -347,13 +347,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             # Wrap text to width with indent
             lines = self._format_message_lines(text, indent, width)
             if lines:
-                # First line goes on same line as nick
+                # First line goes on same line as nick (no indent, it's after nick)
                 parts.append(self._format_message_body(lines[0].plain.lstrip()))
                 result = Text().assemble(*parts)
-                # Continuation lines
+                # Continuation lines need indent + URL processing
                 for cont_line in lines[1:]:
                     result.append(Text("\n"))
-                    result.append(cont_line)
+                    # cont_line has indent baked in, preserve it
+                    indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip())
+                    result.append(indented)
                 return result
         
         parts.append(self._format_message_body(text))
@@ -421,10 +423,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 current = test
             else:
                 if current:
-                    lines.append(Text(" " * indent + current))
+                    # Each line needs overflow="fold" so single long words wrap
+                    lines.append(Text(" " * indent + current, overflow="fold"))
                 current = word
         if current:
-            lines.append(Text(" " * indent + current))
+            lines.append(Text(" " * indent + current, overflow="fold"))
         return lines
 
     def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None) -> tuple[list[Text], list[str | None]]:
