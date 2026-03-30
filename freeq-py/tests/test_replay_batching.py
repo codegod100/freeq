@@ -578,6 +578,63 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertFalse(app._thread_panel_is_open())
 
+    async def test_click_reopens_thread_after_close(self) -> None:
+        """Test that clicking a reply indicator reopens thread after close."""
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+            app.active_buffer = "#freeq"
+            client.queue_events(
+                {
+                    "type": "message",
+                    "from": "alice",
+                    "target": "#freeq",
+                    "text": "root message",
+                    "tags": {"msgid": "root1"},
+                },
+                {
+                    "type": "message",
+                    "from": "bob",
+                    "target": "#freeq",
+                    "text": "reply in thread",
+                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                },
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            # Find the reply indicator line
+            log = app.query_one("#messages", RichLog)
+            thread_rows = app._rendered_line_threads["#freeq"]
+            reply_rows = [index for index, root in enumerate(thread_rows) if root == "root1"]
+            self.assertTrue(reply_rows, f"No reply indicator found. thread_rows={thread_rows}")
+
+            # First: click to open
+            click_row = reply_rows[0]
+            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row))
+            await pilot.pause()
+            self.assertTrue(app._thread_panel_is_open())
+            self.assertEqual(app.open_thread_root, "root1")
+
+            # Close the thread
+            app._close_thread()
+            await pilot.pause()
+            self.assertFalse(app._thread_panel_is_open())
+
+            # Second: click again to reopen
+            # Need to re-query the log after close (new panel mounted)
+            log = app.query_one("#messages", RichLog)
+            thread_rows = app._rendered_line_threads["#freeq"]
+            reply_rows = [index for index, root in enumerate(thread_rows) if root == "root1"]
+            self.assertTrue(reply_rows, f"No reply indicator after close. thread_rows={thread_rows}")
+
+            click_row = reply_rows[0]
+            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row))
+            await pilot.pause()
+            self.assertTrue(app._thread_panel_is_open(), "Thread panel should reopen after click")
+            self.assertEqual(app.open_thread_root, "root1")
+
     async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
         client = FakeClient()
         app = FreeqTextualApp(client)
