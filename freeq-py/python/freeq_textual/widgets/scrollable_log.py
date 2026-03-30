@@ -6,17 +6,27 @@ from textual.widgets import RichLog
 class ScrollableLog(RichLog):
     """A RichLog with thumb-only scrollbar (transparent track).
     
-    IMPORTANT: RichLog.wrap defaults to False, which OVERRIDES Text.overflow.
-    When wrap=False, RichLog forces no_wrap=True and overflow="ignore" on all Text objects.
-    This breaks our overflow="fold" wrapping for single long words.
+    WRAPPING FIXES:
     
-    Solution: Pass wrap=True to RichLog (done in compose() of MessagesPanel* widgets).
+    1. RichLog.wrap defaults to False, which OVERRIDES Text.overflow settings.
+       When wrap=False, RichLog forces no_wrap=True and overflow="ignore" on all Text objects.
+       This breaks our Text(no_wrap=False, overflow="fold") wrapping for single long words.
+       Solution: Pass wrap=True to RichLog (done in compose() of MessagesPanel* widgets).
+    
+    2. RichLog.write() needs explicit width parameter for correct wrapping.
+       Without width, it measures the renderable and uses its natural width, which can exceed
+       the container width and cause horizontal scrolling instead of wrapping.
+       Solution: Pass width=log.size.width to write() calls.
+    
+    NOTE: Terminal mouse selection works for copying text - hold and drag to select,
+    then use terminal's copy shortcut (usually Ctrl+Shift+C or Cmd+C).
     """
 
     DEFAULT_CSS = """
     ScrollableLog {
         border: none;
-        overflow-x: hidden;
+        overflow-x: auto;
+        overflow-y: auto;
         width: 1fr;
         min-width: 0;
         padding: 0 1;
