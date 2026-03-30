@@ -1260,11 +1260,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(ScrollableLog.ScrolledToTop)
     def _on_scrolled_to_top(self, event: ScrollableLog.ScrolledToTop) -> None:
         """Load more history when scrolled to top."""
+        _dbg(f"ScrolledToTop received: active_buffer={self.active_buffer}")
         if self.active_buffer == "status":
             return
         # Prevent duplicate requests
         key = self._buffer_key(self.active_buffer)
         if key in self._history_loading:
+            _dbg(f"  already loading history for {key}")
             return
         self._history_loading.add(key)
         _dbg(f"ScrolledToTop: requesting history for {key}")
