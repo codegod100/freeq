@@ -1884,9 +1884,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 
                 self._check_loading_complete()
                 
-                # Switch to the channel and scroll to top to show new messages
+                # Switch to the channel and scroll to bottom to show latest messages
                 self.active_buffer = key
-                self._scroll_mode = "home"
+                self._scroll_mode = "end"
                 self._render_active_buffer()
             return
         if event_type == "names_end":
