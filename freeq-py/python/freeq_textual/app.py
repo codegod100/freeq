@@ -476,22 +476,20 @@ class FreeqTextualApp(App[None]):
         - nick: message on one line with fold overflow
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
-        body = self._format_message_body(text)
         
         if not self._avatars_enabled:
             # No avatar: nick: message on one line
             block = Text(no_wrap=False, overflow="fold")
             block.append_text(name)
             block.append(": ")
-            block.append_text(body)
+            block.append_text(self._format_message_body(text))
             return [block]
+        
         
         # With avatars: nick on line 1, message starts on line 2
         rows = self._avatar_rows_for_nick(sender)
         indent = "     "  # 5 spaces - aligns with where text starts after "████ "
-        
-        # Calculate available width (same for all text lines)
-        text_avail = max(20, width - 5)  # after avatar prefix or indent
+        text_avail = max(20, width - 5)
         
         # Line 1: avatar row 1 + nick
         line1 = Text()
@@ -501,21 +499,26 @@ class FreeqTextualApp(App[None]):
         line1.append_text(name)
         lines = [line1]
         
-        # Wrap message text
+        # Wrap by words, format URLs in each segment
+        # We need to measure display length (URLs expand to [link: ...] format)
         words = text.split()
         current = ""
-        line_num = 0  # 0 = first message line (with avatar row 2), 1+ = continuation
+        line_num = 0
         
         for word in words:
             test = f"{current} {word}".strip()
-            if len(test) <= text_avail:
+            # Measure display length: account for URL expansion
+            test_display = self._format_message_body(test).plain
+            if len(test_display) <= text_avail:
                 current = test
             else:
                 if current:
                     if line_num == 0:
-                        lines.append(self._make_avatar_text_line(rows[1], current))
+                        lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
                     else:
-                        lines.append(Text(indent + current))
+                        cont = Text(indent)
+                        cont.append_text(self._format_message_body(current))
+                        lines.append(cont)
                 current = word
                 line_num += 1
         
@@ -523,26 +526,28 @@ class FreeqTextualApp(App[None]):
         # Flush remaining text
         if current:
             if line_num == 0:
-                lines.append(self._make_avatar_text_line(rows[1], current))
+                lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
             else:
-                lines.append(Text(indent + current))
-        
+                cont = Text(indent)
+                cont.append_text(self._format_message_body(current))
+                lines.append(cont)
         
         
         # Ensure at least 2 lines for avatar display
         if len(lines) == 1:
-            lines.append(self._make_avatar_text_line(rows[1], ""))
+            lines.append(self._make_avatar_text_line(rows[1], Text()))
+        
         
         return lines
 
-    def _make_avatar_text_line(self, colors: list[str], text: str) -> Text:
-        """Create line with avatar row 2 + text."""
+    def _make_avatar_text_line(self, colors: list[str], text: Text) -> Text:
+        """Create line with avatar row 2 + formatted text."""
         line = Text()
         for color in colors:
             line.append("\u2588", style=color)
-        if text:
+        if text.plain:
             line.append(" ")
-            line.append(text)
+            line.append_text(text)
         return line
 
     def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
