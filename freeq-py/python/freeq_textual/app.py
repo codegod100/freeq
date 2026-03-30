@@ -134,10 +134,6 @@ class ThreadState:
 
 class FreeqTextualApp(App[None]):
     DEFAULT_CSS = """
-    #sidebar {
-        width: 16;
-    }
-
     #messages {
         width: 1fr;
     }
@@ -587,15 +583,9 @@ class FreeqTextualApp(App[None]):
         return max(18, min(44, (available * 3) // 10))
 
     def _refresh_layout_widths(self) -> None:
+        """Refresh sidebar buffer list. Widths are handled by CSS percentages."""
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
-        sidebar_width = self._sidebar_width_cells(ordered)
         sidebar = self.query_one(BufferList)
-        sidebar.styles.width = sidebar_width
-        panel = self.query_one("#thread-panel", ThreadPanel)
-        if panel.is_open():
-            panel.styles.width = self._thread_panel_width_cells(self.size.width, sidebar_width)
-        else:
-            panel.styles.width = 0
         sidebar.update_buffers(ordered, self.active_buffer)
 
     def _buffer_key(self, buffer_name: str) -> str:
@@ -955,7 +945,6 @@ class FreeqTextualApp(App[None]):
         _dbg(f"  collected {len(messages)} messages")
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         panel.open(thread_root, thread_msgs, self._format_message)
-        self._refresh_layout_widths()
         # Defer re-render until after layout updates (CSS changes are async)
         self.call_later(self._render_active_buffer)
 
@@ -965,7 +954,6 @@ class FreeqTextualApp(App[None]):
         self.open_thread_root = ""
         panel = self.query_one("#thread-panel", ThreadPanel)
         panel.close()
-        self._refresh_layout_widths()
         # Defer re-render until after layout updates
         self.call_later(self._render_active_buffer)
         self.call_later(lambda: self.query_one("#composer", Input).focus())
@@ -996,7 +984,6 @@ class FreeqTextualApp(App[None]):
         messages = self._collect_thread_messages(self.open_thread_root)
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         panel.open(self.open_thread_root, thread_msgs, self._format_message)
-        self._write_render_lines(log, thread_lines, thread_roots=thread_roots)
 
         # Update placeholder with the root msgid for context
         reply_input = self.query_one("#thread-reply", Input)

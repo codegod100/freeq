@@ -5,6 +5,14 @@ from textual.widgets import ListView, ListItem, Static
 
 class BufferList(ListView):
     """Sidebar widget showing list of buffers (channels and DMs)."""
+    
+    DEFAULT_CSS = """
+    BufferList {
+        width: 15%;
+        min-width: 14;
+        max-width: 24;
+    }
+    """
 
     def update_buffers(self, buffers: list, active: str) -> None:
         """Update the buffer list with current buffers and mark active one."""
