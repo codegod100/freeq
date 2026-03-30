@@ -18,9 +18,72 @@ class ScrollableLog(RichLog):
        the container width and cause horizontal scrolling instead of wrapping.
        Solution: Pass width=log.size.width to write() calls.
     
+    LOCATION SCROLLING:
+    
+    Call scroll_to_location(location) where location is a string identifier (e.g., msgid).
+    The _location_lines dict maps location -> line index, populated during write().
+    
     NOTE: Terminal mouse selection works for copying text - hold and drag to select,
     then use terminal's copy shortcut (usually Ctrl+Shift+C or Cmd+C).
     """
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._location_lines: dict[str, int] = {}  # location -> line index
+    
+    def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
+        """Write content, optionally tracking location for later scrolling.
+        
+        Args:
+            content: Rich renderable or string
+            width: Width to render (passed to RichLog)
+            expand: Expand to widget width (passed to RichLog)
+            shrink: Shrink to fit width (passed to RichLog)
+            scroll_end: Auto-scroll to end (passed to RichLog)
+            location: Optional location identifier (e.g., msgid) to scroll to later
+        """
+        before = len(self.lines)
+        result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end)
+        added = len(self.lines) - before
+        
+        if location:
+            # Track first line where this location appears
+            if location not in self._location_lines:
+                self._location_lines[location] = before
+        
+        
+        return result
+    
+    def clear(self) -> None:
+        """Clear content and location tracking."""
+        super().clear()
+        self._location_lines.clear()
+    
+    
+    def scroll_to_location(self, location: str) -> bool:
+        """Scroll to make the line with given location visible.
+        
+        Called when opening a thread to scroll to the thread root message.
+        The location is the msgid of the message to scroll to.
+        
+        Args:
+            location: Location identifier (e.g., msgid)
+        
+        Returns:
+            True if location found and scrolled, False otherwise
+        """
+        line_index = self._location_lines.get(location)
+        if line_index is None:
+            return False
+        
+        # Scroll to the line (line_index is 0-based row in lines list)
+        # RichLog stores lines as Strip objects, we need to scroll to virtual y
+        self.scroll_to(y=line_index, animate=False)
+        return True
+    
+    def location_line(self, location: str) -> int | None:
+        """Get the line index for a location, or None if not found."""
+        return self._location_lines.get(location)
 
     DEFAULT_CSS = """
     ScrollableLog {

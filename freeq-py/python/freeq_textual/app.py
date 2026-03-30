@@ -113,6 +113,7 @@ class BatchState:
     batch_type: str
     lines: list[tuple[str, Text]]
     thread_roots: list[str | None]
+    msgids: list[str | None]
     line_metas: list[tuple[str, str] | None]
 
 
@@ -187,14 +188,19 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._thread_activity = 0
         self.restore_history_targets: set[str] = set()
         self._scroll_mode = "preserve"
+        self._scroll_target_msgid = ""
         self._theme_ready = False
         self._avatars_enabled = False
         # Maps buffer_key -> list of (thread_root | None) per logical appended line
         self._line_threads: dict[str, list[str | None]] = defaultdict(list)
         # Maps buffer_key -> list of (sender, raw_text) for normal messages, else None
         self._line_message_meta: dict[str, list[tuple[str, str] | None]] = defaultdict(list)
+        # Maps buffer_key -> list of msgid per logical line (for scroll-to-message)
+        self._line_msgids: dict[str, list[str | None]] = defaultdict(list)
         # Maps buffer_key -> list of (thread_root | None) per rendered RichLog row
         self._rendered_line_threads: dict[str, list[str | None]] = defaultdict(list)
+        # Maps buffer_key -> list of msgid per rendered RichLog row (for scroll-to-message)
+        self._rendered_line_msgids: dict[str, list[str | None]] = defaultdict(list)
         self._nick_handles: dict[str, str] = {}
         self._avatar_palettes: dict[str, list[str]] = {}
         self._avatar_images: dict[str, object] = {}
@@ -593,17 +599,26 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         lines: list[object],
         *,
         thread_roots: list[str | None] | None = None,
-    ) -> list[str | None]:
+        msgids: list[str | None] | None = None,
+    ) -> tuple[list[str | None], list[str | None]]:
+        """Write lines to log, tracking thread_roots and msgids per rendered line.
+        
+        Returns tuple of (rendered_thread_roots, rendered_msgids).
+        """
         rendered_threads: list[str | None] = []
+        rendered_msgids_result: list[str | None] = []
         roots = thread_roots or [None] * len(lines)
+        mids = msgids or [None] * len(lines)
         width = log.size.width
-        for line, thread_root in zip(lines, roots):
+        for line, thread_root, msgid in zip(lines, roots, mids):
             before = len(log.lines)
-            # Pass width explicitly to ensure wrapping at correct width
-            log.write(line, width=width, scroll_end=False)
+            # Pass location=msgid for scroll-to-message support
+            location = msgid if msgid else None
+            log.write(line, width=width, scroll_end=False, location=location or "")
             added = max(1, len(log.lines) - before)
             rendered_threads.extend([thread_root] * added)
-        return rendered_threads
+            rendered_msgids_result.extend([msgid] * added)
+        return rendered_threads, rendered_msgids_result
 
     # ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -685,6 +700,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         *,
         mark_unread: bool = True,
         thread_root: str = "",
+        msgid: str = "",
         line_meta: tuple[str, str] | None = None,
     ) -> None:
         key = self._ensure_buffer(buffer_name)
@@ -692,6 +708,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self.buffers[key].unread += 1
         self.messages[key].append(rich)
         self._line_threads[key].append(thread_root or None)
+        self._line_msgids[key].append(msgid or None)
         self._line_message_meta[key].append(line_meta)
 
     def _prepend_lines(
@@ -700,40 +717,49 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         lines: list[Text],
         *,
         thread_roots: list[str | None] | None = None,
+        msgids: list[str | None] | None = None,
         line_metas: list[tuple[str, str] | None] | None = None,
     ) -> None:
         key = self._ensure_buffer(buffer_name)
         self.messages[key] = list(lines) + self.messages[key]
         roots = thread_roots or [None] * len(lines)
         self._line_threads[key] = list(roots) + self._line_threads[key]
+        mids = msgids or [None] * len(lines)
+        self._line_msgids[key] = list(mids) + self._line_msgids[key]
         metas = line_metas or [None] * len(lines)
         self._line_message_meta[key] = list(metas) + self._line_message_meta[key]
 
-    def _renderable_lines(self, buffer_key: str, width: int = 80) -> tuple[list[object], list[str | None]]:
+    def _renderable_lines(self, buffer_key: str, width: int = 80) -> tuple[list[object], list[str | None], list[str | None]]:
+        """Return tuple of (lines, thread_roots, msgids) for rendering."""
         renderable: list[object] = []
         render_roots: list[str | None] = []
+        render_msgids: list[str | None] = []
         lines = self.messages[buffer_key]
         metas = self._line_message_meta[buffer_key]
         roots = self._line_threads[buffer_key]
+        msgids = self._line_msgids[buffer_key]
         previous_sender: str | None = None
         previous_was_chat = False
-        pending_reply_indicators: list[tuple[Text, str | None]] = []
+        pending_reply_indicators: list[tuple[Text, str | None, str | None]] = []  # (line, thread_root, msgid)
 
-        for index, (line, line_meta, thread_root) in enumerate(zip(lines, metas, roots)):
+        for index, (line, line_meta, thread_root, msgid) in enumerate(zip(lines, metas, roots, msgids)):
             if line_meta is None:
                 if self._is_reply_indicator(line):
-                    pending_reply_indicators.append((line, thread_root))
+                    pending_reply_indicators.append((line, thread_root, msgid))
                     continue
-                for pending_line, pending_root in pending_reply_indicators:
+                for pending_line, pending_root, pending_msgid in pending_reply_indicators:
                     renderable.append(pending_line)
                     render_roots.append(pending_root)
+                    render_msgids.append(pending_msgid)
                 pending_reply_indicators.clear()
                 renderable.append(line)
                 render_roots.append(thread_root)
+                render_msgids.append(msgid)
                 next_meta = metas[index + 1] if index + 1 < len(metas) else None
                 if next_meta is None:
                     renderable.append(Text(" "))
                     render_roots.append(None)
+                    render_msgids.append(None)
                 previous_sender = None
                 previous_was_chat = False
                 continue
@@ -750,6 +776,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
                     render_roots.append(block_root)
+                    render_msgids.append(msgid)  # All lines of same message share msgid
             else:
                 # Continuation of same sender - just message body, indented
                 # Reply indicators already handled by first message
@@ -758,21 +785,24 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 for msg_line in self._format_message_lines(text, indent, width):
                     renderable.append(msg_line)
                     render_roots.append(None)
+                    render_msgids.append(msgid)
 
             next_meta = metas[index + 1] if index + 1 < len(metas) else None
             next_sender = self._nick_key(next_meta[0]) if next_meta is not None else None
             if next_meta is None or next_sender != sender_key:
                 renderable.append(Text(" "))
                 render_roots.append(None)
+                render_msgids.append(None)
 
             previous_sender = sender_key
             previous_was_chat = True
 
-        for pending_line, pending_root in pending_reply_indicators:
+        for pending_line, pending_root, pending_msgid in pending_reply_indicators:
             renderable.append(pending_line)
             render_roots.append(pending_root)
+            render_msgids.append(pending_msgid)
 
-        return renderable, render_roots
+        return renderable, render_roots, render_msgids
 
     def _request_history(self, channel: str) -> None:
         self.client.history_latest(self._display_name(channel), 50)
@@ -1026,6 +1056,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         )
         body.mount(new_panel)
         # Panel triggers render via on_mount
+        
+        # Scroll main log to show the thread root message
+        self._scroll_mode = "message"
+        self._scroll_target_msgid = thread_root
+        self._render_active_buffer()
 
     def _close_thread(self) -> None:
         """Close the thread panel - swap back to MessagesPanel."""
@@ -1126,13 +1161,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         log = self.query_one("#messages", ScrollableLog)
         width = log.size.width
         log.clear()
-        render_lines, render_roots = self._renderable_lines(self.active_buffer, width)
-        rendered_threads = self._write_render_lines(
+        render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
+        rendered_threads, rendered_msgids = self._write_render_lines(
             log,
             render_lines,
             thread_roots=render_roots,
+            msgids=render_msgids,
         )
         self._rendered_line_threads[self.active_buffer] = rendered_threads
+        self._rendered_line_msgids[self.active_buffer] = rendered_msgids
         _dbg(
             f"render buffer={self.active_buffer} logical={len(self.messages[self.active_buffer])} "
             f"render_lines={len(render_lines)} rendered={len(rendered_threads)} roots={render_roots[:5]}"
@@ -1141,6 +1178,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             log.scroll_end(animate=False)
         elif self._scroll_mode == "home":
             log.scroll_home(animate=False)
+        elif self._scroll_mode == "message":
+            # Scroll to a specific message (used when opening thread)
+            if self._scroll_target_msgid:
+                log.scroll_to_location(self._scroll_target_msgid)
+                self._scroll_target_msgid = ""
+        else:
+            # Preserve - do nothing
+            pass
         self._scroll_mode = "preserve"
         if self.active_buffer in self.buffers:
             self.buffers[self.active_buffer].unread = 0
@@ -1383,6 +1428,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 batch_type=event.get("batch_type", ""),
                 lines=[],
                 thread_roots=[],
+                msgids=[],
                 line_metas=[],
             )
             return
@@ -1393,8 +1439,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
                 ordered = [line for _i, (_ts, line) in indexed]
                 roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
+                mids = [batch.msgids[i] for i, (_ts, _line) in indexed]
                 line_metas = [batch.line_metas[i] for i, (_ts, _line) in indexed]
-                self._prepend_lines(batch.target, ordered, thread_roots=roots, line_metas=line_metas)
+                self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
                 if batch.batch_type == "chathistory":
                     self.restore_history_targets.discard(self._buffer_key(batch.target))
                     self.active_buffer = self._buffer_key(batch.target)
@@ -1447,6 +1494,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 else:
                     thread_root = reply_to
             batch_id = tags.get("batch")
+            msgid = tags.get("msgid", "")
             if batch_id and batch_id in self.batches:
                 if reply_to and thread_root:
                     parent = self.message_index.get(reply_to)
@@ -1456,11 +1504,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         (tags.get("time", ""), self._format_reply_indicator(parent_sender, parent_snip, thread_root))
                     )
                     self.batches[batch_id].thread_roots.append(thread_root)
+                    self.batches[batch_id].msgids.append(None)
                     self.batches[batch_id].line_metas.append(None)
                 self.batches[batch_id].lines.append(
                     (tags.get("time", ""), self._format_message(sender, text))
                 )
                 self.batches[batch_id].thread_roots.append(None)
+                self.batches[batch_id].msgids.append(msgid or None)
                 self.batches[batch_id].line_metas.append((sender, text))
             else:
                 self._scroll_mode = "end" if self.active_buffer == buffer_key else "preserve"
@@ -1473,11 +1523,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         self._format_reply_indicator(parent_sender, parent_snip, thread_root),
                         mark_unread=False,
                         thread_root=thread_root,
+                        msgid="",
                         line_meta=None,
                     )
                 self._append_line(
                     buffer_name,
                     self._format_message(sender, text),
+                    msgid=msgid,
                     line_meta=(sender, text),
                 )
             return
