@@ -57,6 +57,10 @@ class FreeqClient:
     def history_latest(self, target: str, count: int = 50) -> None:
         self._inner.history_latest(target, count)
 
+    def history_before(self, target: str, msgid: str, count: int = 50) -> None:
+        """Request older messages before the given msgid."""
+        self._inner.history_before(target, msgid, count)
+
     def raw(self, line: str) -> None:
         self._inner.raw(line)
 
