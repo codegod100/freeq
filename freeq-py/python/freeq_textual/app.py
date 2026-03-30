@@ -159,6 +159,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit"),
         Binding("escape", "close_thread", "Close thread", show=False),
+        Binding("ctrl+shift+d", "toggle_debug", "Debug panel", show=True),
     ]
 
     active_buffer = reactive("status")
@@ -222,10 +223,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             id="composer",
             classes="-textual-compact",
         )
-        from .widgets import DebugPanel
-        yield DebugPanel(id="debug-panel")
         yield Footer(compact=True)
-        # LoadingOverlayVisible is mounted/remounted via lifecycle, NOT CSS class toggling
+        # DebugPanel is toggled via action_toggle_debug (ctrl+shift+d)
 
     def on_mount(self) -> None:
         _dbg("App.on_mount()")
@@ -233,19 +232,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._theme_ready = True
         self._avatars_enabled = self._detect_avatar_support()
         composer = self.query_one("#composer", Input)
-        
-        # Wire up debug panel callback (hide in headless/test mode)
-        try:
-            from .widgets import DebugPanel, set_debug_callback
-            debug_panel = self.query_one("#debug-panel", DebugPanel)
-            if self.is_headless:
-                debug_panel.remove()
-            else:
-                set_debug_callback(debug_panel.log)
-                debug_panel.log("debug panel initialized")
-        except Exception as e:
-            import sys
-            print(f"DebugPanel error: {e}", file=sys.stderr)  # Debug panel not found, ignore
         
         # Mount loading overlay only in non-headless mode (component lifecycle, not CSS toggle)
         if not self.is_headless:
@@ -1725,6 +1711,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._open_thread(thread_root)
             return
         self._open_thread_via_command()
+
+    def action_toggle_debug(self) -> None:
+        """Toggle the debug panel visibility."""
+        from .widgets import DebugPanel
+        try:
+            debug_panel = self.query_one("#debug-panel", DebugPanel)
+            debug_panel.remove()
+            from .widgets.debug import set_debug_callback
+            set_debug_callback(None)
+        except Exception:
+            # Not found, mount it
+            debug_panel = DebugPanel(id="debug-panel")
+            self.mount(debug_panel)
+            from .widgets.debug import set_debug_callback
+            set_debug_callback(debug_panel.log)
+            debug_panel.log("debug panel toggled on")
 
     def _open_thread_via_command(self) -> None:
         """Fallback: /thread with no args — find most recent reply indicator."""
