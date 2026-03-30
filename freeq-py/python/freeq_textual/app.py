@@ -832,14 +832,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             else:
                 # Continuation of same sender - just message body, indented
                 # BUT: if this is a reply, we need to show its reply indicator first
+                indent = 5 if self._avatars_enabled else 0
                 if pending_reply_indicators:
                     # Show pending reply indicator(s) before the continuation message
+                    # Indent them to match the continuation message
+                    indent_str = " " * indent
                     for pending_line, pending_root, pending_msgid in pending_reply_indicators:
-                        renderable.append(pending_line)
+                        indented_line = Text(indent_str) + pending_line
+                        renderable.append(indented_line)
                         render_roots.append(pending_root)
                         render_msgids.append(pending_msgid)
                     pending_reply_indicators.clear()
-                indent = 5 if self._avatars_enabled else 0
                 # Check for reactions on this message
                 reactions_text = Text()
                 if msgid and msgid in self._reactions:
