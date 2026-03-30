@@ -87,7 +87,7 @@ class LoadingOverlay(BaseSpinner):
         width: 100%;
         height: 100%;
         background: $surface;
-        z: 100;
+        layer: overlay;
     }
 
     LoadingOverlay .spinner {
@@ -121,7 +121,6 @@ class InlineSpinner(BaseSpinner):
         content-align: center middle;
         background: $surface;
         color: $primary;
-        z: 10;
     }
 
     InlineSpinner .spinner {
