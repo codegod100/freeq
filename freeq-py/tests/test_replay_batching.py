@@ -179,12 +179,12 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
         async with app.run_test():
             body = app._format_message_body("x" * 200)
-            block = app._format_chat_block("alice", "x" * 200)
+            block, roots = app._format_chat_block("alice", "x" * 200)
             reply = app._format_reply_indicator("alice", "x" * 120, "root1")
 
         self.assertEqual(body.overflow, "fold")
         self.assertFalse(body.no_wrap)
-        # _format_chat_block returns list[Text]; first line is nick: message
+        # _format_chat_block returns tuple[list[Text], list[str | None]]
         self.assertIsInstance(block, list)
         self.assertTrue(len(block) >= 1)
         self.assertEqual(block[0].overflow, "fold")
