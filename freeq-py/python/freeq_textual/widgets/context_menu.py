@@ -1,0 +1,102 @@
+"""Context menu for right-click actions."""
+
+from textual.widgets import Static, Button
+from textual.containers import Vertical
+from textual.message import Message
+from typing import Optional, Callable
+
+
+class ContextMenu(Vertical):
+    """A simple context menu that appears at cursor position.
+    
+    USAGE:
+        menu = ContextMenu(actions=[
+            ("Reply", callback_reply),
+            ("React", callback_react),
+        ])
+        menu.position = (x, y)
+        self.mount(menu)
+    """
+    
+    DEFAULT_CSS = """
+    ContextMenu {
+        dock: top;
+        layer: overlay;
+        background: $surface;
+        border: tall $primary;
+        padding: 0;
+        margin: 0;
+        min-width: 15;
+        height: auto;
+    }
+    
+    ContextMenu Button {
+        width: 100%;
+        min-width: 15;
+        background: $surface;
+        border: none;
+        padding: 1 2;
+    }
+    
+    ContextMenu Button:hover {
+        background: $primary 20%;
+    }
+    
+    ContextMenu Button:focus {
+        background: $primary 40%;
+    }
+    """
+    
+    class Action(Message):
+        """Emitted when a menu item is selected."""
+        def __init__(self, action: str, msgid: str | None) -> None:
+            self.action = action
+            self.msgid = msgid
+            super().__init__()
+    
+    def __init__(
+        self,
+        actions: list[tuple[str, Callable]],
+        msgid: str | None = None,
+        screen_x: int = 0,
+        screen_y: int = 0,
+        id: str | None = None,
+    ) -> None:
+        """Create context menu.
+        
+        Args:
+            actions: List of (label, callback) tuples
+            msgid: The message ID this menu applies to
+            screen_x, screen_y: Screen coordinates to position menu
+        """
+        super().__init__(id=id)
+        self._actions = actions
+        self._msgid = msgid
+        self._screen_x = screen_x
+        self._screen_y = screen_y
+        self._buttons: list[Button] = []
+    
+    def compose(self):
+        """Create buttons for each action."""
+        for label, callback in self._actions:
+            btn = Button(label, id=f"menu-{label.lower()}")
+            btn._callback = callback  # type: ignore
+            self._buttons.append(btn)
+            yield btn
+    
+    def on_mount(self) -> None:
+        """Position menu and focus first button."""
+        # Position using CSS offset
+        self.styles.offset = (self._screen_x, self._screen_y)
+    
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button press - call callback and close menu."""
+        callback = getattr(event.button, '_callback', None)
+        if callback:
+            callback(self._msgid)
+        self.remove()
+    
+    def on_click(self, event) -> None:
+        """Close menu when clicking outside."""
+        # Let button presses through, but close on any other click
+        pass

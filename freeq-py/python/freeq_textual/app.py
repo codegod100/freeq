@@ -1309,8 +1309,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def on_click(self, event: events.Click) -> None:
         """Catch ALL clicks at app level."""
+        from .widgets.context_menu import ContextMenu
+        
         widget_id = getattr(event.widget, 'id', '?')
         widget_class = type(event.widget).__name__
+        
+        # Close context menu on any click outside the menu
+        if not isinstance(event.widget, ContextMenu) and not isinstance(event.widget, Button):
+            for menu in self.query(ContextMenu):
+                menu.remove()
+        
         # Write directly to file (bypass debug panel in case it's broken)
         with open('/tmp/freeq-click.log', 'a') as f:
             f.write(f'CLICK: {widget_class}(id={widget_id}) y={event.y}\n')
@@ -1321,9 +1329,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Handle clicks on the message log to detect reply indicator clicks."""
         # events.Click has widget attribute (set in constructor)
         log = event.widget
-        _dbg(f"click y={event.y} widget={event.widget} scroll_y={log.scroll_y if log else '?'}")
-        _dbg(f"  thread_panel_open={self._thread_panel_is_open()}, open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
+        _dbg(f"click y={event.y} button={event.button} widget={event.widget} scroll_y={log.scroll_y if log else '?'}")
         if log is None:
+            return
+        
+        # Right click: show context menu
+        if event.button == 3:
+            self._show_context_menu(event, log)
+            return
+        
+        # Left click: handle thread indicators
+        if event.button != 1:
             return
 
         # Convert click y to virtual line index
@@ -1351,6 +1367,62 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 _dbg(f"  no thread_root at line {virtual_y}, ignoring click")
         else:
             _dbg(f"  virtual_y={virtual_y} out of range [0, {len(line_threads)})")
+    
+    def _show_context_menu(self, event: events.Click, log) -> None:
+        """Show context menu at click position."""
+        from .widgets.context_menu import ContextMenu
+        
+        # Close any existing menu
+        for menu in self.query(ContextMenu):
+            menu.remove()
+        
+        # Find which message is under cursor
+        virtual_y = int(event.y + log.scroll_y)
+        msgid = self._get_msgid_at_line(virtual_y)
+        
+        # Create menu at screen position
+        # Adjust position to not go off-screen (rough estimate)
+        menu = ContextMenu(
+            actions=[
+                ("Reply", self._on_menu_reply),
+                ("React", self._on_menu_react),
+            ],
+            msgid=msgid,
+            screen_x=event.screen_x,
+            screen_y=event.screen_y,
+        )
+        self.mount(menu)
+    
+    def _get_msgid_at_line(self, virtual_y: int) -> str | None:
+        """Get the message ID at a given line index."""
+        # Look up in message_locations: location -> msgid
+        # Line indices correspond to locations like "line:0", "line:1", etc.
+        location = f"line:{virtual_y}"
+        # But we need to find which message this line belongs to
+        # Check line_msgids if available
+        if hasattr(self, '_rendered_line_msgids'):
+            line_msgids = self._rendered_line_msgids.get(self.active_buffer, [])
+            if 0 <= virtual_y < len(line_msgids):
+                return line_msgids[virtual_y]
+        return None
+    
+    def _on_menu_reply(self, msgid: str | None) -> None:
+        """Handle Reply from context menu."""
+        _dbg(f"Context menu Reply: msgid={msgid}")
+        if msgid:
+            # Set reply target - composer will use this
+            self._reply_to_msgid = msgid
+            # Focus composer
+            composer = self.query_one("#composer")
+            composer.focus()
+    
+    def _on_menu_react(self, msgid: str | None) -> None:
+        """Handle React from context menu."""
+        _dbg(f"Context menu React: msgid={msgid}")
+        # TODO: Show emoji picker or send default reaction
+        if msgid:
+            # For now, send a default reaction (thumbs up)
+            self.client.raw(f"REACT {msgid} 👍")
 
     # ── Render active buffer ───────────────────────────────────────────────
 
