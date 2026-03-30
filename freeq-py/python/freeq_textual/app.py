@@ -1378,9 +1378,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             ],
             msgid=msgid,
         )
-        # Mount to screen, position via offset
+        # Mount to screen, position absolutely
         self.screen.mount(menu)
-        menu.styles.offset = (event.screen_x, event.screen_y)
+        menu.styles.left = event.screen_x
+        menu.styles.top = event.screen_y
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'  menu mounted, left={event.screen_x} top={event.screen_y}\n')
         _dbg(f"  mounted ContextMenu msgid={msgid}")
     
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
@@ -1399,6 +1402,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _on_menu_reply(self, msgid: str | None) -> None:
         """Handle Reply from context menu."""
         _dbg(f"Context menu Reply: msgid={msgid}")
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'_on_menu_reply called: msgid={msgid}\n')
         if msgid:
             # Set reply target - composer will use this
             self._reply_to_msgid = msgid
@@ -1409,7 +1414,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _on_menu_react(self, msgid: str | None) -> None:
         """Handle React from context menu."""
         _dbg(f"Context menu React: msgid={msgid}")
-        # TODO: Show emoji picker or send default reaction
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'_on_menu_react called: msgid={msgid}\n')
         if msgid:
             # For now, send a default reaction (thumbs up)
             self.client.raw(f"REACT {msgid} 👍")
