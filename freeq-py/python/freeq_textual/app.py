@@ -239,6 +239,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if not self.is_headless:
             overlay = LoadingOverlay(self._load_message, id="loading-overlay")
             self.mount(overlay)
+            # Mount debug panel by default
+            from .widgets import DebugPanel
+            from .widgets.debug import set_debug_callback
+            debug_panel = DebugPanel(id="debug-panel")
+            self.mount(debug_panel)
+            set_debug_callback(debug_panel.log)
         
         self._refresh_layout_widths()
         if self._avatars_enabled and Pixels is None:
