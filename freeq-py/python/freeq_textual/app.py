@@ -618,6 +618,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             added = max(1, len(log.lines) - before)
             rendered_threads.extend([thread_root] * added)
             rendered_msgids_result.extend([msgid] * added)
+        
+        _dbg(f"_write_render_lines: wrote {len(lines)} lines, {len(rendered_msgids_result)} rendered, locations={len(log._location_lines)}")
         return rendered_threads, rendered_msgids_result
 
     # ── Helpers ─────────────────────────────────────────────────────────────
@@ -1055,12 +1057,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             thread_root, thread_msgs, self._format_thread_message
         )
         body.mount(new_panel)
-        # Panel triggers render via on_mount
+        # Panel triggers render via on_mount -> trigger_app_render -> request_render
         
-        # Scroll main log to show the thread root message
+        # Set scroll mode for when the scheduled render happens
         self._scroll_mode = "message"
         self._scroll_target_msgid = thread_root
-        self._render_active_buffer()
+        # Note: NOT calling _render_active_buffer() here - let the scheduled render handle it
 
     def _close_thread(self) -> None:
         """Close the thread panel - swap back to MessagesPanel."""
@@ -1180,9 +1182,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             log.scroll_home(animate=False)
         elif self._scroll_mode == "message":
             # Scroll to a specific message (used when opening thread)
+            _dbg(f"scroll mode=message, target={self._scroll_target_msgid[:8] if self._scroll_target_msgid else 'empty'}")
             if self._scroll_target_msgid:
-                log.scroll_to_location(self._scroll_target_msgid)
+                # Use call_later to ensure lines are rendered before scrolling
+                # (RichLog defers rendering until size is known)
+                target = self._scroll_target_msgid
                 self._scroll_target_msgid = ""
+                self.call_later(lambda: self._scroll_to_message(target))
+
+    def _scroll_to_message(self, msgid: str) -> None:
+        """Scroll to a specific message after rendering is complete."""
+        try:
+            log = self.query_one("#messages", ScrollableLog)
+            success = log.scroll_to_location(msgid)
+            _dbg(f"_scroll_to_message({msgid[:8]}): result={success}, lines={len(log.lines)}, virtual_size={log.virtual_size}")
+        except Exception as e:
+            _dbg(f"_scroll_to_message failed: {e}")
         else:
             # Preserve - do nothing
             pass
