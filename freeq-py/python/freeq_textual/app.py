@@ -1418,6 +1418,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.screen.mount(menu)
         _dbg(f"  mounted ContextMenu msgid={msgid}")
     
+    def _get_log(self) -> ScrollableLog | None:
+        """Get the messages ScrollableLog widget."""
+        try:
+            return self.query_one("#messages", ScrollableLog)
+        except Exception:
+            return None
+
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
         """Get the message ID at a given line index.
         
