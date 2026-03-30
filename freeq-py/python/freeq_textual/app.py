@@ -1259,20 +1259,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if hasattr(log, 'lines') and 0 <= virtual_y < len(log.lines):
             line_text = str(log.lines[virtual_y])[:80]
         
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y} virtual_y={virtual_y}\n')
-            f.write(f'  line[{virtual_y}] = {line_text}\n')
-            f.write(f'  thread_root = {thread_root[:8] if thread_root else None}\n')
-            # Show nearby lines with thread_roots (from component)
-            for i in range(max(0, virtual_y-3), min(len(log._thread_roots), virtual_y+4)):
-                root = log._thread_roots[i] if i < len(log._thread_roots) else None
-                f.write(f'    [{i}] root={root[:8] if root else None!r}\n')
+        _dbg(f"ScrollableLog.Clicked: y={event.y} scroll_y={event.scroll_y} virtual_y={virtual_y}")
+        _dbg(f"  line[{virtual_y}] = {line_text}")
+        _dbg(f"  thread_root = {thread_root[:8] if thread_root else None}")
+        # Show nearby lines with thread_roots (from component)
+        for i in range(max(0, virtual_y-3), min(len(log._thread_roots), virtual_y+4)):
+            root = log._thread_roots[i] if i < len(log._thread_roots) else None
+            _dbg(f"    [{i}] root={root[:8] if root else None!r}")
         
         _dbg(f"ScrollableLog.Clicked: y={event.y} virtual_y={virtual_y} thread_root={thread_root[:8] if thread_root else 'None'}")
         if thread_root:
             _dbg(f"  opening thread: {thread_root[:8]}")
-            with open('/tmp/freeq-click.log', 'a') as f:
-                f.write(f'  OPENING THREAD: {thread_root[:8]}\n')
+            _dbg(f"  OPENING THREAD: {thread_root[:8]}")
             self._open_thread(thread_root)
         else:
             _dbg(f"  no thread at virtual_y={virtual_y}")
@@ -1320,10 +1318,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         widget_id = getattr(event.widget, 'id', '?')
         widget_class = type(event.widget).__name__
         
-        # Debug: log all clicks with button to /tmp/freeq-click.log
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'CLICK: {widget_class}(id={widget_id}) button={event.button} x={event.x} y={event.y}\n')
-        _dbg(f"CLICK: {widget_class}(id={widget_id}) button={event.button}")
+        # Log all clicks
+        _dbg(f"CLICK: {widget_class}(id={widget_id}) button={event.button} x={event.x} y={event.y}")
         
         # Only close context menu if clicking OUTSIDE of #messages
         # (Clicks on #messages are handled by _on_message_log_click which may open a menu)
@@ -1355,8 +1351,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._open_thread(thread_root)
             return
         
-        
         # Otherwise, show context menu
+        _dbg(f"  no thread indicator, showing context menu")
         if event.button == 1:
             self._show_context_menu(event, log)
     
@@ -1406,8 +1402,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         from .widgets.reply_panel import ReplyPanel
         
         _dbg(f"Context menu Reply: msgid={msgid}")
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'_on_menu_reply called: msgid={msgid}\n')
+        _dbg(f"_on_menu_reply called: msgid={msgid}")
         
         if not msgid:
             return
@@ -1437,8 +1432,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _on_menu_react(self, msgid: str | None) -> None:
         """Handle React from context menu."""
         _dbg(f"Context menu React: msgid={msgid}")
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'_on_menu_react called: msgid={msgid}\n')
+        _dbg(f"_on_menu_react called: msgid={msgid}")
         if msgid:
             # For now, send a default reaction (thumbs up)
             self.client.raw(f"REACT {msgid} 👍")
