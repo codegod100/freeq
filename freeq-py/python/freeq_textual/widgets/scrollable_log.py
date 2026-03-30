@@ -1,5 +1,6 @@
 """ScrollableLog widget - RichLog with thumb-only scrollbar."""
 
+from textual.message import Message
 from textual.widgets import RichLog
 
 from .debug import _dbg
@@ -43,6 +44,13 @@ class ScrollableLog(RichLog):
     then use terminal's copy shortcut (usually Ctrl+Shift+C or Cmd+C).
     """
 
+    class Clicked(Message):
+        """Emitted when the log is clicked."""
+        def __init__(self, y: int, scroll_y: float) -> None:
+            self.y = y
+            self.scroll_y = scroll_y
+            super().__init__()
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._location_lines: dict[str, int] = {}  # location -> line index
@@ -52,6 +60,11 @@ class ScrollableLog(RichLog):
         self._pending_locations: list[str | None] = []
         # Pending scroll target (set by scroll_to_location before on_resize fires)
         self._pending_scroll_target: str | None = None
+
+    def on_click(self, event) -> None:
+        """Handle click and emit Clicked message."""
+        _dbg(f"ScrollableLog.on_click: y={event.y} scroll_y={self.scroll_y}")
+        self.emit_message(self.Clicked(y=event.y, scroll_y=self.scroll_y))
 
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "") -> "ScrollableLog":
         """Write content, optionally tracking location for later scrolling.
