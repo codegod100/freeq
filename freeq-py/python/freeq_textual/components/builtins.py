@@ -56,6 +56,13 @@ class AutoLogMixin:
 # REPLY PANEL - Default implementation
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# REPLY PANEL - Default implementation
+# ─────────────────────────────────────────────────────────────────────────────
+
+# NOTE: _context is RESERVED by Textual! Use _reply_context or similar.
+# TypeError: 'str' object is not callable happens if you override it.
+
 @ComponentRegistry.register('reply_panel')
 class ReplyPanel(AutoLogMixin, Vertical):
     """Reply panel for composing replies to messages.
@@ -122,7 +129,7 @@ class ReplyPanel(AutoLogMixin, Vertical):
     ) -> None:
         super().__init__(**kwargs)
         self.reply_to_msgid = reply_to_msgid
-        self._context = context
+        self._reply_context = context  # NOT _context (reserved by Textual!)
         self._target = target
         self._sender = sender
 
@@ -130,7 +137,7 @@ class ReplyPanel(AutoLogMixin, Vertical):
         with Horizontal(id="reply-header-row"):
             yield Static(f"↩ {self._sender}" if self._sender else "↩ Reply", id="reply-header")
             yield Button("✕", id="reply-close")
-        yield Static(self._context[:80], id="reply-context")
+        yield Static(self._reply_context[:80], id="reply-context")
         yield Input(placeholder="Reply...", id="reply-input")
 
     def on_mount(self) -> None:
