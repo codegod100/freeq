@@ -1314,15 +1314,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         widget_id = getattr(event.widget, 'id', '?')
         widget_class = type(event.widget).__name__
         
+        # Debug: log all clicks with button to /tmp/freeq-click.log
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'CLICK: {widget_class}(id={widget_id}) button={event.button} x={event.x} y={event.y}\n')
+        _dbg(f"CLICK: {widget_class}(id={widget_id}) button={event.button}")
+        
         # Close context menu on any click outside the menu
         if not isinstance(event.widget, ContextMenu) and not isinstance(event.widget, Button):
             for menu in self.query(ContextMenu):
                 menu.remove()
-        
-        # Write directly to file (bypass debug panel in case it's broken)
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'CLICK: {widget_class}(id={widget_id}) y={event.y}\n')
-        _dbg(f"CLICK: {widget_class}(id={widget_id}) y={event.y}")
 
     @on(events.Click, "#messages")
     def _on_message_log_click(self, event: events.Click) -> None:
@@ -1333,40 +1333,25 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if log is None:
             return
         
-        # Right click: show context menu
+        # Right click: ignored (usually intercepted by terminal for paste)
         if event.button == 3:
-            self._show_context_menu(event, log)
             return
         
-        # Left click: handle thread indicators
-        if event.button != 1:
-            return
-
-        # Convert click y to virtual line index
+        # Left click: check for thread indicator first, then show context menu
         virtual_y = int(event.y + log.scroll_y)
         line_threads = self._rendered_line_threads.get(self.active_buffer, [])
-        _dbg(f"  virtual_y={virtual_y} rendered_rows={len(line_threads)} active={self.active_buffer}")
         
-        # Debug: show actual line content at clicked position
-        if hasattr(log, 'lines') and 0 <= virtual_y < len(log.lines):
-            line_text = str(log.lines[virtual_y])[:60]
-            _dbg(f"  line[{virtual_y}] content: {line_text!r}")
-        
-        if line_threads:
-            lo = max(0, virtual_y - 2)
-            hi = min(len(line_threads), virtual_y + 3)
-            _dbg(f"  threads[{lo}:{hi}]={line_threads[lo:hi]}")
-
-        if 0 <= virtual_y < len(line_threads):
+        # If clicked on a thread indicator, open thread
+        if 0 <= virtual_y < len(line_threads) and line_threads[virtual_y]:
             thread_root = line_threads[virtual_y]
-            _dbg(f"  thread_root={thread_root[:8] if thread_root else None!r}, open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
-            if thread_root:
-                _dbg(f"  calling _open_thread({thread_root[:8]})")
-                self._open_thread(thread_root)
-            else:
-                _dbg(f"  no thread_root at line {virtual_y}, ignoring click")
-        else:
-            _dbg(f"  virtual_y={virtual_y} out of range [0, {len(line_threads)})")
+            _dbg(f"  thread_root={thread_root[:8] if thread_root else None!r}")
+            self._open_thread(thread_root)
+            return
+        
+        
+        # Otherwise, show context menu
+        if event.button == 1:
+            self._show_context_menu(event, log)
     
     def _show_context_menu(self, event: events.Click, log) -> None:
         """Show context menu at click position."""
