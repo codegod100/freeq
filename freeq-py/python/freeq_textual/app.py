@@ -451,11 +451,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 current = test
             else:
                 if current:
-                    # Each line needs overflow="fold" so single long words wrap
-                    lines.append(Text(" " * indent + current, overflow="fold"))
+                    # Each line needs no_wrap=False + overflow="fold" so single long words wrap
+                    lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
                 current = word
         if current:
-            lines.append(Text(" " * indent + current, overflow="fold"))
+            lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
         return lines
 
     def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None) -> tuple[list[Text], list[str | None]]:
@@ -528,7 +528,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     if line_num == 0 and not reply_indicator:
                         lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
                     else:
-                        cont = Text(indent)
+                        cont = Text(indent, no_wrap=False, overflow="fold")
                         cont.append_text(self._format_message_body(current))
                         lines.append(cont)
                     roots.append(None)
@@ -541,7 +541,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if line_num == 0 and not reply_indicator:
                 lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
             else:
-                cont = Text(indent)
+                cont = Text(indent, no_wrap=False, overflow="fold")
                 cont.append_text(self._format_message_body(current))
                 lines.append(cont)
             roots.append(None)
@@ -557,7 +557,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _make_avatar_text_line(self, colors: list[str], text: Text) -> Text:
         """Create line with avatar row 2 + formatted text."""
-        line = Text()
+        line = Text(no_wrap=False, overflow="fold")
         for color in colors:
             line.append("\u2588", style=color)
         if text.plain:
