@@ -1194,10 +1194,32 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     # ── Click detection on message log ─────────────────────────────────────
 
-    @on(events.Click)
-    def _debug_all_clicks(self, event: events.Click) -> None:
-        """Debug: log all clicks to see what's being captured."""
-        _dbg(f"CLICK DEBUG: widget={event.widget} id={getattr(event.widget, 'id', '?')} y={event.y}")
+    @on(ScrollableLog.Clicked)
+    def _on_scrollable_log_clicked(self, event: ScrollableLog.Clicked) -> None:
+        """Handle clicks from ScrollableLog widget."""
+        widget_id = getattr(event.sender, 'id', '?')
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'ScrollableLog.Clicked: id={widget_id} y={event.y} scroll_y={event.scroll_y}\n')
+        _dbg(f"ScrollableLog.Clicked: id={widget_id} y={event.y}")
+        
+        # Only handle messages log clicks
+        if widget_id != "messages":
+            return
+            
+        virtual_y = int(event.y + event.scroll_y)
+        line_threads = self._rendered_line_threads.get(self.active_buffer, [])
+        _dbg(f"  virtual_y={virtual_y} threads_len={len(line_threads)}")
+        if 0 <= virtual_y < len(line_threads) and line_threads[virtual_y]:
+            self._open_thread(line_threads[virtual_y])
+
+    def on_click(self, event: events.Click) -> None:
+        """Catch ALL clicks at app level."""
+        widget_id = getattr(event.widget, 'id', '?')
+        widget_class = type(event.widget).__name__
+        # Write directly to file (bypass debug panel in case it's broken)
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'CLICK: {widget_class}(id={widget_id}) y={event.y}\n')
+        _dbg(f"CLICK: {widget_class}(id={widget_id}) y={event.y}")
 
     @on(events.Click, "#messages")
     def _on_message_log_click(self, event: events.Click) -> None:
