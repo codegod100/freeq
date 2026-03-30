@@ -806,6 +806,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         pending_reply_indicators: list[tuple[Text, str | None, str | None]] = []  # (line, thread_root, msgid)
 
         for index, (line, line_meta, thread_root, msgid) in enumerate(zip(lines, metas, roots, msgids)):
+            # Debug: log when processing the target msgid
+            if msgid and "01KMVA36" in msgid:
+                _dbg(f"_renderable_lines: PROCESSING TARGET msgid={msgid}")
             if line_meta is None:
                 if self._is_reply_indicator(line):
                     pending_reply_indicators.append((line, thread_root, msgid))
