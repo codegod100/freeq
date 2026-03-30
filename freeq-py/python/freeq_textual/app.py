@@ -287,7 +287,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
         self._load_message = message
         overlay = self.query_one("#loading-overlay", LoadingOverlay)
-        overlay.update_message(message)
+        overlay.message = message  # Reactive property updates display
 
     # ── Rich text builders ─────────────────────────────────────────────────
 
