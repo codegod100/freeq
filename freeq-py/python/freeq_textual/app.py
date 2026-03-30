@@ -469,8 +469,8 @@ class FreeqTextualApp(App[None]):
         
         With avatars:
         - Line 1: ████ nick
-        - Line 2: ████ first part of message
-        - Line 3+:      continuation (indented)
+        - Line 2: ████ first line of message text
+        - Line 3+:      continuation (same column as line 2 text)
         
         Without avatars:
         - nick: message on one line with fold overflow
@@ -488,11 +488,10 @@ class FreeqTextualApp(App[None]):
         
         # With avatars: nick on line 1, message starts on line 2
         rows = self._avatar_rows_for_nick(sender)
-        indent = "     "  # 5 spaces for continuation lines
+        indent = "     "  # 5 spaces - aligns with where text starts after "████ "
         
-        # Calculate available widths
-        line2_avail = max(20, width - 5)  # avatar prefix "████ "
-        cont_avail = max(20, width - 5)  # indent "     "
+        # Calculate available width (same for all text lines)
+        text_avail = max(20, width - 5)  # after avatar prefix or indent
         
         # Line 1: avatar row 1 + nick
         line1 = Text()
@@ -508,14 +507,13 @@ class FreeqTextualApp(App[None]):
         line_num = 0  # 0 = first message line (with avatar row 2), 1+ = continuation
         
         for word in words:
-            avail = line2_avail if line_num == 0 else cont_avail
             test = f"{current} {word}".strip()
-            if len(test) <= avail:
+            if len(test) <= text_avail:
                 current = test
             else:
                 if current:
                     if line_num == 0:
-                        lines.append(self._make_avatar_cont_line(rows[1], current))
+                        lines.append(self._make_avatar_text_line(rows[1], current))
                     else:
                         lines.append(Text(indent + current))
                 current = word
@@ -525,27 +523,19 @@ class FreeqTextualApp(App[None]):
         # Flush remaining text
         if current:
             if line_num == 0:
-                lines.append(self._make_avatar_cont_line(rows[1], current))
+                lines.append(self._make_avatar_text_line(rows[1], current))
             else:
                 lines.append(Text(indent + current))
         
         
+        
         # Ensure at least 2 lines for avatar display
         if len(lines) == 1:
-            lines.append(self._make_avatar_cont_line(rows[1], ""))
+            lines.append(self._make_avatar_text_line(rows[1], ""))
         
         return lines
 
-    def _make_avatar_line(self, colors: list[str], name: Text, text: str) -> Text:
-        """Create line with avatar row 1 + nick."""
-        line = Text()
-        for color in colors:
-            line.append("\u2588", style=color)
-        line.append(" ")
-        line.append_text(name)
-        return line
-
-    def _make_avatar_cont_line(self, colors: list[str], text: str) -> Text:
+    def _make_avatar_text_line(self, colors: list[str], text: str) -> Text:
         """Create line with avatar row 2 + text."""
         line = Text()
         for color in colors:
