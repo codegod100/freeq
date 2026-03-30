@@ -831,8 +831,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     render_msgids.append(msgid)  # All lines of same message share msgid
             else:
                 # Continuation of same sender - just message body, indented
-                # Reply indicators already handled by first message
-                pending_reply_indicators.clear()
+                # BUT: if this is a reply, we need to show its reply indicator first
+                if pending_reply_indicators:
+                    # Show pending reply indicator(s) before the continuation message
+                    for pending_line, pending_root, pending_msgid in pending_reply_indicators:
+                        renderable.append(pending_line)
+                        render_roots.append(pending_root)
+                        render_msgids.append(pending_msgid)
+                    pending_reply_indicators.clear()
                 indent = 5 if self._avatars_enabled else 0
                 # Check for reactions on this message
                 reactions_text = Text()
@@ -1112,6 +1118,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 is_reply=is_reply,
                 timestamp=timestamp,
             )
+            _dbg(f"Recorded msgid={msgid[:8]} reply_to={reply_to[:8] if reply_to else None} sender={sender}")
             thread = self.threads.get(msgid)
             if thread is not None:
                 thread.buffer_key = buffer_key
@@ -1502,9 +1509,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             # Optimistically add reaction locally (server won't echo without echo-message cap)
             self._reactions[event.msgid].append((self.client.nick, event.emoji))
             
-            # Send reaction via TAGMSG with +react tag and +draft/reply for target msgid
+            # Send reaction via client.send_reaction (uses correct TAGMSG format)
             target = self._display_name(self.active_buffer)
-            self.client.raw(f"@+draft/reply={event.msgid} +react={event.emoji} TAGMSG {target}")
+            self.client.send_reaction(target, event.emoji, event.msgid)
             
             # Re-render to show reaction immediately
             self._render_active_buffer()
@@ -1912,6 +1919,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             sender = event["from"]
             text = event["text"]
             tags = event.get("tags", {})
+            # Debug: log all tags for reply messages
+            reply_tag = tags.get("+draft/reply") or tags.get("+reply")
+            if reply_tag:
+                _dbg(f"RAW MESSAGE TAGS: {dict(tags)}")
             self._ensure_avatar_lookup(sender)
             buffer_name = self._message_buffer_name(target, sender)
             buffer_key = self._buffer_key(buffer_name)
@@ -1921,11 +1932,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             msgid = tags.get("msgid", "")
             if msgid and "+freeq.at/reactions" in tags:
                 reactions_str = tags["+freeq.at/reactions"]
+                _dbg(f"  parsing +freeq.at/reactions for {msgid[:8]}: {reactions_str[:50]}")
                 # Format: "sender:emoji,sender:emoji,..."
                 for reaction in reactions_str.split(","):
                     if ":" in reaction:
                         r_sender, r_emoji = reaction.split(":", 1)
                         self._reactions[msgid].append((r_sender, r_emoji))
+                        _dbg(f"    loaded reaction: {r_sender} -> {r_emoji}")
             
             reply_to = self._thread_reply_to(tags)
             thread_root = ""
@@ -1935,7 +1948,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     thread_root = parent.thread_root
                 else:
                     thread_root = reply_to
+            # Single debug log per message
             batch_id = tags.get("batch")
+            has_parent = reply_to in self.message_index if reply_to else False
+            in_batch = batch_id in self.batches if batch_id else False
+            _dbg(f"Message: from={sender} reply_to={reply_to[:8] if reply_to else None} parent_ok={has_parent} batch={in_batch}")
             if batch_id and batch_id in self.batches:
                 if reply_to and thread_root:
                     parent = self.message_index.get(reply_to)
@@ -1959,14 +1976,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     parent = self.message_index.get(reply_to)
                     parent_snip = self._snippet(parent.text, 50) if parent else "(original not loaded)"
                     parent_sender = parent.sender if parent else "?"
+                    indicator = self._format_reply_indicator(parent_sender, parent_snip, thread_root)
+                    _dbg(f"Adding reply stub for {msgid[:8] if msgid else None}: reply_to={reply_to[:8]}, indicator_len={len(indicator.plain)}")
                     self._append_line(
                         buffer_name,
-                        self._format_reply_indicator(parent_sender, parent_snip, thread_root),
+                        indicator,
                         mark_unread=False,
                         thread_root=thread_root,
                         msgid="",
                         line_meta=None,
                     )
+                else:
+                    _dbg(f"No reply stub for {msgid[:8] if msgid else None}: reply_to={reply_to[:8] if reply_to else None}, thread_root={thread_root[:8] if thread_root else None}")
                 self._append_line(
                     buffer_name,
                     self._format_message(sender, text),
@@ -1998,16 +2019,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "tagmsg":
             # TAGMSG with tags - check for +react (emoji reaction)
             tags = event.get("tags", {})
+            _dbg(f"TAGMSG received from={event.get('from')} target={event.get('target')} tags={list(tags.keys())}")
             if "+react" in tags:
                 sender = event["from"]
                 target = event["target"]
                 emoji = tags["+react"]
-                # Get the msgid being reacted to (from +draft/reply tag)
-                target_msgid = tags.get("+draft/reply")
+                # Get the msgid being reacted to (web client uses +reply)
+                target_msgid = tags.get("+reply") or tags.get("+draft/reply")
+                _dbg(f"  +react found: emoji={emoji} target_msgid={target_msgid[:8] if target_msgid else None}")
                 if target_msgid:
                     # Store reaction on the message
                     self._reactions[target_msgid].append((sender, emoji))
-                    _dbg(f"  reaction: {sender} reacted {emoji} on {target_msgid[:8]}")
+                    _dbg(f"  reaction stored: {sender} reacted {emoji} on {target_msgid[:8]}")
                     # Re-render to show reaction on message
                     self._render_active_buffer()
                 else:
@@ -2051,9 +2074,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 return
 
     def _send_reply(self, target: str, reply_to_msgid: str, text: str) -> None:
-        """Send a reply using @+draft/reply IRCv3 tag via raw IRC."""
+        """Send a reply using @+reply IRCv3 tag via raw IRC."""
         _dbg(f"_send_reply(target={target!r}, msgid={reply_to_msgid[:8]!r}, text={text[:20]!r})")
-        self.client.raw(f"@+draft/reply={reply_to_msgid} PRIVMSG {target} :{text}")
+        self.client.raw(f"@+reply={reply_to_msgid} PRIVMSG {target} :{text}")
 
     # ── Command input (main composer) ──────────────────────────────────────
 

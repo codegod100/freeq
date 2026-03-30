@@ -61,6 +61,18 @@ class FreeqClient:
         """Request older messages before the given msgid."""
         self._inner.history_before(target, msgid, count)
 
+    def send_reaction(self, target: str, emoji: str, msgid: str | None = None) -> None:
+        """Send an emoji reaction to a target (channel or user).
+        
+        Uses +reply tag to match web client convention.
+        Server broadcasts TAGMSG to all clients with message-tags cap.
+        """
+        # TAGMSG format: @+react=emoji;+reply=msgid TAGMSG target
+        tags = f"+react={emoji}"
+        if msgid:
+            tags += f";+reply={msgid}"
+        self._inner.raw(f"@{tags} TAGMSG {target}")
+
     def raw(self, line: str) -> None:
         self._inner.raw(line)
 
