@@ -237,3 +237,8 @@ class ContextMenu(AutoLogMixin, Vertical):
         if callback:
             callback(self._msgid)
         self.remove()
+
+    def on_key(self, event) -> None:
+        """Handle ESC key to close menu."""
+        if hasattr(event, 'key') and event.key == 'escape':
+            self.remove()
