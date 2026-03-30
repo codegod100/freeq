@@ -93,6 +93,7 @@ class ThreadPanel(Vertical):
         """Render messages when mounted."""
         messages = self._messages
         if not messages:
+            _dbg(f"ThreadPanel.on_mount({self.thread_root[:8]!r}, no messages)")
             return
 
         _dbg(f"ThreadPanel.on_mount({self.thread_root[:8]!r}, {len(messages)} msgs)")
@@ -122,14 +123,16 @@ class ThreadPanel(Vertical):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle close button press."""
         if event.button.id == "thread-close":
+            _dbg(f"ThreadPanel.on_button_pressed(close)")
             event.stop()
             self.post_message(self.Closed())
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle reply submission."""
         if event.input.id == "thread-reply":
-            event.stop()
             text = event.value.strip()
+            _dbg(f"ThreadPanel.on_input_submitted(text={text[:20]!r}...)")
+            event.stop()
             if text and self.thread_root:
                 event.input.value = ""
                 self.post_message(self.ReplySent(text, self.thread_root))
