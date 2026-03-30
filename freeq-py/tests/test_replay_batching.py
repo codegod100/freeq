@@ -158,7 +158,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             # Restart the patcher for other tests
             self._avatar_patcher.start()
 
-    async def test_long_urls_render_clickable_label_and_full_url(self) -> None:
+    async def test_long_urls_render_clickable_hyperlink(self) -> None:
         client = FakeClient()
         app = FreeqTextualApp(client)
 
@@ -170,10 +170,8 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         plain = self._normalize_text(rendered.plain)
-        self.assertIn(
-            "alice: see [link: example.com/really/long/path/that...] https://example.com/really/long/path/that/keeps/going?with=query",
-            plain,
-        )
+        # URL is wrapped in hyperlink (clickable), text has soft breaks for wrapping
+        self.assertIn("alice: see https://example.com/really/long/path/that", plain)
 
     async def test_message_body_uses_fold_overflow(self) -> None:
         client = FakeClient()
