@@ -66,6 +66,7 @@ class ScrollableLog(RichLog):
         # to keep indices in sync with _deferred_renders
         if not self._size_known:
             self._pending_locations.append(location or None)
+            _dbg(f"ScrollableLog.write: DEFERRED location={location[:8] if location else 'None'}, pending_count={len(self._pending_locations)}")
         
         before = len(self.lines)
         result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end)
@@ -75,6 +76,7 @@ class ScrollableLog(RichLog):
         if location and self._size_known:
             if location not in self._location_lines:
                 self._location_lines[location] = before
+                _dbg(f"ScrollableLog.write: TRACKED location={location[:8]} -> line {before}")
         
         
         return result
@@ -112,6 +114,7 @@ class ScrollableLog(RichLog):
         # Process any deferred renders first (happens when log hasn't been sized yet)
         if self._deferred_renders:
             _dbg(f"scroll_to_location: processing {len(self._deferred_renders)} deferred renders, {len(self._pending_locations)} pending locations")
+            _dbg(f"  pending_locations = {self._pending_locations[:5]}... (showing first 5)")
             # Force size to be known so deferred renders process
             if not self._size_known and self.size.width:
                 self._size_known = True
@@ -119,27 +122,34 @@ class ScrollableLog(RichLog):
             pending_idx = 0
             deferred = list(self._deferred_renders)
             self._deferred_renders.clear()
-            for dr in deferred:
+            for i, dr in enumerate(deferred):
                 before = len(self.lines)
+                _dbg(f"  deferred[{i}]: before={before}, dr has {len(dr)} elements")
                 self.write(*dr)  # This will add lines now that _size_known is True
+                after = len(self.lines)
                 # Apply pending location if present (None for writes without location)
                 if pending_idx < len(self._pending_locations):
                     loc = self._pending_locations[pending_idx]
+                    _dbg(f"  pending[{pending_idx}] = {loc!r}, lines went {before} -> {after}")
                     if loc and loc not in self._location_lines:
                         self._location_lines[loc] = before
+                        _dbg(f"    mapped {loc[:8]} -> line {before}")
                     pending_idx += 1
             self._pending_locations.clear()
         
         line_index = self._location_lines.get(location)
         if line_index is None:
             _dbg(f"scroll_to_location({location[:8]}): NOT FOUND in {len(self._location_lines)} locations")
+            _dbg(f"  available locations: {list(self._location_lines.keys())[:5]}...")
             return False
         
         _dbg(f"scroll_to_location({location[:8]}): found at line {line_index}, total lines={len(self.lines)}, virtual_size={self.virtual_size}")
+        _dbg(f"  scrolling to y={line_index}")
         
         # Scroll to the line (line_index is 0-based row in lines list)
         # RichLog stores lines as Strip objects, we need to scroll to virtual y
         self.scroll_to(y=line_index, animate=False)
+        _dbg(f"  after scroll: scroll_y={self.scroll_y}")
         return True
     
     def location_line(self, location: str) -> int | None:
