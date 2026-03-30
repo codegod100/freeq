@@ -1621,6 +1621,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     self.active_buffer = key
                     self._scroll_mode = "end"
                 self._persist_session_channels()
+                self._refresh_sidebar()  # Show new channel in sidebar
             elif not already_present:
                 self._scroll_mode = "end" if self.active_buffer == key else "preserve"
                 self._append_line(
