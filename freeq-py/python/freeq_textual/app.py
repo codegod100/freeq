@@ -137,6 +137,7 @@ class MessageState:
     msgid: str = ""
     reply_to: str = ""
     is_reply: bool = False
+    timestamp: str = ""
 
 
 @dataclass(slots=True)
@@ -835,23 +836,28 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _request_history(self, channel: str) -> None:
         """Request older history for a channel.
         
-        Uses CHATHISTORY BEFORE with the oldest msgid we have.
+        Uses CHATHISTORY BEFORE with the timestamp of the oldest message we have.
         Falls back to LATEST if we have no messages yet.
         """
         key = self._buffer_key(channel)
         msgids = self._line_msgids.get(key, [])
-        # Find the first (oldest) non-None msgid
+        # Find the first (oldest) non-None msgid and its timestamp
         oldest_msgid = None
+        oldest_timestamp = None
         for mid in msgids:
             if mid:
                 oldest_msgid = mid
+                msg_state = self.message_index.get(mid)
+                if msg_state:
+                    oldest_timestamp = msg_state.timestamp
                 break
         
         display_name = self._display_name(channel)
-        logger.debug(f"_request_history: channel={channel} oldest_msgid={oldest_msgid[:12] if oldest_msgid else 'None'}")
-        if oldest_msgid:
-            self.client.history_before(display_name, oldest_msgid, 50)
-            logger.debug(f"  sent history_before({display_name}, {oldest_msgid[:12]}, 50)")
+        logger.debug(f"_request_history: channel={channel} oldest_msgid={oldest_msgid[:12] if oldest_msgid else 'None'} timestamp={oldest_timestamp}")
+        if oldest_timestamp:
+            # Server expects: CHATHISTORY BEFORE #channel timestamp=2024-01-15T14:30:00.000Z 50
+            self.client.raw(f"CHATHISTORY BEFORE {display_name} timestamp={oldest_timestamp} 50")
+            logger.debug(f"  sent CHATHISTORY BEFORE {display_name} timestamp={oldest_timestamp} 50")
         else:
             self.client.history_latest(display_name, 50)
             logger.debug(f"  sent history_latest({display_name}, 50)")
@@ -1033,6 +1039,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         reply_to = self._thread_reply_to(tags) or ""
         thread_root = msgid or reply_to or ""
         is_reply = bool(reply_to)
+        timestamp = tags.get("time", "")
 
         if reply_to:
             parent = self.message_index.get(reply_to)
@@ -1067,6 +1074,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 msgid=msgid,
                 reply_to=reply_to,
                 is_reply=is_reply,
+                timestamp=timestamp,
             )
             thread = self.threads.get(msgid)
             if thread is not None:
