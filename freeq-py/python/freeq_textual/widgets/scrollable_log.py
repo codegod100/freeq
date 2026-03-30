@@ -20,8 +20,17 @@ class ScrollableLog(RichLog):
     
     LOCATION SCROLLING:
     
-    Call scroll_to_location(location) where location is a string identifier (e.g., msgid).
-    The _location_lines dict maps location -> line index, populated during write().
+    When opening a thread panel, we want the main log to scroll to show the thread root message.
+    This is done by tracking the msgid of each message and storing which line it appears on.
+    
+    Flow:
+    1. App calls log.write(line, width=w, location=msgid) for each rendered line
+    2. ScrollableLog stores _location_lines[msgid] = line_index
+    3. When thread opens, app sets _scroll_mode="message" and _scroll_target_msgid=thread_root
+    4. _render_active_buffer() calls log.scroll_to_location(msgid)
+    5. scroll_to_location() scrolls to make that line visible
+    
+    This allows clicking a reply indicator to open the thread AND scroll to the original message.
     
     NOTE: Terminal mouse selection works for copying text - hold and drag to select,
     then use terminal's copy shortcut (usually Ctrl+Shift+C or Cmd+C).
