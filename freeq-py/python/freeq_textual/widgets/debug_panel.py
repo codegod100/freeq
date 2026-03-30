@@ -1,11 +1,11 @@
 """Debug panel widget - shows recent events below chat input."""
 
-from textual.widgets import Static
-from textual.message import Message
+from textual.widgets import RichLog
+from rich.text import Text
 
 
-class DebugPanel(Static):
-    """A panel that shows recent debug events."""
+class DebugPanel(RichLog):
+    """A scrollable panel that shows recent debug events."""
     
     DEFAULT_CSS = """
     DebugPanel {
@@ -13,37 +13,28 @@ class DebugPanel(Static):
         background: $surface;
         color: yellow;
         padding: 0 1;
-        overflow-y: auto;
         dock: bottom;
     }
     """
     
-    MAX_LINES = 50
+    MAX_LINES = 100
     
     def __init__(self, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._lines: list[str] = []
+        super().__init__(**kwargs, wrap=True, highlight=True, markup=False)
         self._initialized = False
     
     def on_mount(self) -> None:
         self._initialized = True
-        self.update("[DEBUG PANEL]")
+        self.write(Text("[DEBUG PANEL]", style="bold yellow"))
     
     def log(self, msg: str) -> None:
         """Add a log message."""
         if not self._initialized:
             return
-        self._lines.append(msg)
-        if len(self._lines) > self.MAX_LINES:
-            self._lines = self._lines[-self.MAX_LINES:]
-        # Use call_later to ensure UI update happens on main loop
-        self.app.call_later(self._update_display)
+        self.write(Text(msg, style="yellow"))
+        # Auto-scroll to bottom
+        self.scroll_end(animate=False)
     
-    def _update_display(self) -> None:
-        """Update the display with current lines."""
-        self.update("\n".join(self._lines[-10:]))
-    
-    def clear(self) -> None:
+    def clear_log(self) -> None:
         """Clear the log."""
-        self._lines.clear()
-        self.update("")
+        super().clear()
