@@ -52,6 +52,13 @@ def _dbg(msg: str) -> None:
         f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# EVENT LIFECYCLE LOGGING
+# All event handlers below must log their lifecycle for debugging.
+# Keep this comment and all _dbg() calls in place.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
 # ── Nick colorization ──────────────────────────────────────────────────────
 
 _NICK_PALETTE = [
@@ -225,6 +232,7 @@ class FreeqTextualApp(App[None]):
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
+        _dbg("App.on_mount()")
         self.theme = self.ui_config.get("theme", self.theme)
         self._theme_ready = True
         self._avatars_enabled = self._detect_avatar_support()
@@ -246,6 +254,7 @@ class FreeqTextualApp(App[None]):
         elif self.auth_handle:
             self._begin_auth(self.auth_handle)
         self._seed_self_avatar_handle()
+        _dbg("App.on_mount() done")
 
     # ── Rich text builders ─────────────────────────────────────────────────
 
@@ -990,6 +999,7 @@ class FreeqTextualApp(App[None]):
     @on(ThreadPanel.ReplySent)
     def handle_thread_panel_reply(self, event: ThreadPanel.ReplySent) -> None:
         """Handle reply sent from thread panel."""
+        _dbg(f"handle_thread_panel_reply(root={event.thread_root[:8]!r}, text={event.text[:20]!r}...)")
         target = self._display_name(self.active_buffer)
         if self.active_buffer == "status":
             return
@@ -1061,6 +1071,7 @@ class FreeqTextualApp(App[None]):
         self._refresh_sidebar()
 
     def on_resize(self, event: events.Resize) -> None:
+        _dbg(f"App.on_resize(size={event.size})")
         del event
         self._refresh_layout_widths()
         self._render_active_buffer()
@@ -1449,6 +1460,7 @@ class FreeqTextualApp(App[None]):
 
     @on(Input.Submitted, "#composer")
     def handle_submit(self, event: Input.Submitted) -> None:
+        _dbg(f"handle_submit(text={event.value[:30]!r}...)")
         text = event.value.strip()
         event.input.value = ""
         if not text:
@@ -1532,6 +1544,7 @@ class FreeqTextualApp(App[None]):
 
     @on(ListView.Selected, "#sidebar")
     def handle_sidebar_select(self, event: ListView.Selected) -> None:
+        _dbg(f"handle_sidebar_select(item={event.item.name!r})")
         if event.item.name is None:
             return
         self.active_buffer = self._buffer_key(event.item.name)
@@ -1550,4 +1563,5 @@ class FreeqTextualApp(App[None]):
         )
 
     def on_unmount(self) -> None:
+        _dbg("App.on_unmount()")
         self._persist_session_channels()
