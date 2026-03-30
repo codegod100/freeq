@@ -1069,9 +1069,7 @@ class FreeqTextualApp(App[None]):
         topic = self.channel_topics.get(self.active_buffer, "").strip()
         self.title = f"freeq - {active_name}" if not topic else f"freeq - {active_name} | {topic}"
         log = self.query_one("#messages", ScrollableLog)
-        # More gap when thread panel is open (less space for channel text)
-        gap = 5 if self._thread_panel_is_open() else 3
-        width = log.size.width - gap
+        width = log.size.width
         log.clear()
         render_lines, render_roots = self._renderable_lines(self.active_buffer, width)
         rendered_threads = self._write_render_lines(
