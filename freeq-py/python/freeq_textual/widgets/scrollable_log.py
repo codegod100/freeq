@@ -90,7 +90,15 @@ class ScrollableLog(RichLog):
         _dbg(f"ScrollableLog.watch_scroll_y: {old_value} -> {new_value}")
         # When scroll_y crosses into threshold (<5), we're at the top
         if new_value < 5 and old_value >= 5:
-            _dbg("ScrollableLog: emitting ScrolledToTop")
+            _dbg("ScrollableLog: emitting ScrolledToTop via watch")
+            self.post_message(self.ScrolledToTop())
+
+    def on_mouse_scroll_up(self, event) -> None:
+        """Detect scroll-up gesture when already at top."""
+        _dbg(f"ScrollableLog.on_mouse_scroll_up: scroll_y={self.scroll_y}, max_scroll={self.max_scroll_y}")
+        # If we're at or near the top, emit ScrolledToTop
+        if self.scroll_y < 5:
+            _dbg("ScrollableLog: emitting ScrolledToTop via scroll-up gesture")
             self.post_message(self.ScrolledToTop())
 
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "", thread_root: str | None = None) -> "ScrollableLog":
