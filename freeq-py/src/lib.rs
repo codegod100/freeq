@@ -237,6 +237,13 @@ impl FreeqClient {
             .map_err(|err| runtime_err(err.to_string()))
     }
 
+    fn history_before(&self, target: &str, msgid: &str, count: usize) -> PyResult<()> {
+        let handle = require_handle(&self.handle)?;
+        self.runtime
+            .block_on(handle.history_before(target, msgid, count))
+            .map_err(|err| runtime_err(err.to_string()))
+    }
+
     fn raw(&self, line: &str) -> PyResult<()> {
         let handle = require_handle(&self.handle)?;
         self.runtime
