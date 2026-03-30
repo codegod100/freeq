@@ -1,10 +1,10 @@
-"""ScrollableLog widget - RichLog with padding between text and scrollbar."""
+"""ScrollableLog widget - RichLog with thumb-only scrollbar."""
 
 from textual.widgets import RichLog
 
 
 class ScrollableLog(RichLog):
-    """A RichLog with padding between text and scrollbar."""
+    """A RichLog with thumb-only scrollbar (transparent track)."""
 
     DEFAULT_CSS = """
     ScrollableLog {
@@ -14,17 +14,12 @@ class ScrollableLog(RichLog):
         min-width: 0;
         padding: 0 1;
         scrollbar-gutter: stable;
-        scrollbar-size: 2 1;
+        scrollbar-size: 1 1;
+        scrollbar-background: $surface;
+        scrollbar-background-hover: $surface;
+        scrollbar-background-active: $surface;
+        scrollbar-color: $panel-lighten-1;
+        scrollbar-color-hover: $primary;
+        scrollbar-color-active: $primary;
     }
     """
-
-    def write(self, *args, **kwargs) -> None:
-        """Override write to add trailing padding to Text content."""
-        from rich.text import Text
-        if args and isinstance(args[0], Text):
-            content = args[0]
-            # Add 2 spaces padding between text and scrollbar
-            if not content.plain.endswith("  "):
-                content = Text.assemble(content, "  ")
-            args = (content,) + args[1:]
-        super().write(*args, **kwargs)

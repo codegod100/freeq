@@ -338,8 +338,8 @@ class FreeqTextualApp(App[None]):
             body.append(text[last_end:])
         return body
 
-    def _format_message(self, sender: str, text: str) -> Text:
-        """A chat message: `<nick>: <text>` with colored nick."""
+    def _format_message(self, sender: str, text: str, width: int = 0) -> Text:
+        """A chat message: `<nick>: <text>` with colored nick, optionally wrapped to width."""
         parts: list[Text] = []
         if self._avatars_enabled:
             avatar = self._format_avatar(sender)
@@ -347,6 +347,27 @@ class FreeqTextualApp(App[None]):
                 parts.append(avatar)
         parts.append(self._format_nick(sender))
         parts.append(Text(": "))
+        
+        # Calculate indent after nick (with avatar space if present)
+        indent = 0
+        if self._avatars_enabled:
+            indent = 5  # avatar + space
+        nick_len = len(sender) + 2  # ": "
+        indent += nick_len
+        
+        if width > 0:
+            # Wrap text to width with indent
+            lines = self._format_message_lines(text, indent, width)
+            if lines:
+                # First line goes on same line as nick
+                parts.append(self._format_message_body(lines[0].plain.lstrip()))
+                result = Text().assemble(*parts)
+                # Continuation lines
+                for cont_line in lines[1:]:
+                    result.append(Text("\n"))
+                    result.append(cont_line)
+                return result
+        
         parts.append(self._format_message_body(text))
         return Text().assemble(*parts)
 
@@ -935,7 +956,8 @@ class FreeqTextualApp(App[None]):
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         panel.open(thread_root, thread_msgs, self._format_message)
         self._refresh_layout_widths()
-        self._render_active_buffer()
+        # Defer re-render until after layout updates (CSS changes are async)
+        self.call_later(self._render_active_buffer)
 
     def _close_thread(self) -> None:
         """Close the thread panel."""
@@ -944,8 +966,9 @@ class FreeqTextualApp(App[None]):
         panel = self.query_one("#thread-panel", ThreadPanel)
         panel.close()
         self._refresh_layout_widths()
-        self._render_active_buffer()
-        self.query_one("#composer", Input).focus()
+        # Defer re-render until after layout updates
+        self.call_later(self._render_active_buffer)
+        self.call_later(lambda: self.query_one("#composer", Input).focus())
 
     @on(ThreadPanel.Closed)
     def handle_thread_panel_closed(self, event: ThreadPanel.Closed) -> None:
