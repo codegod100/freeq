@@ -1440,6 +1440,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if event is None:
                 break
             saw_event = True
+            event_type = event.get("type", "?")
+            logger.debug(f"poll_event: type={event_type}")
             prev_active = self.active_buffer
             prev_lines = len(self.messages[self.active_buffer])
             prev_topic = self.channel_topics.get(self.active_buffer, "")
