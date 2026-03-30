@@ -20,22 +20,20 @@ class ContextMenu(Vertical):
     
     DEFAULT_CSS = """
     ContextMenu {
-        dock: top;
         layer: overlay;
         background: $surface;
-        border: tall $primary;
-        padding: 0 1;
+        border: round $primary;
+        padding: 0;
         margin: 0;
-        min-width: 10;
+        width: auto;
         height: auto;
     }
     
     ContextMenu Button {
         width: auto;
-        min-width: 8;
         background: transparent;
         border: none;
-        padding: 0 2;
+        padding: 0 1;
         height: 1;
     }
     
@@ -86,9 +84,11 @@ class ContextMenu(Vertical):
             yield btn
     
     def on_mount(self) -> None:
-        """Position menu and focus first button."""
-        # Position using CSS offset
-        self.styles.offset = (self._screen_x, self._screen_y)
+        """Position menu at click location."""
+        # Use absolute positioning via CSS
+        self.styles.position = "absolute"
+        self.styles.left = self._screen_x
+        self.styles.top = self._screen_y
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press - call callback and close menu."""

@@ -1371,17 +1371,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         msgid = self._get_msgid_at_line(virtual_y)
         
         # Create menu at screen position
-        # Adjust position to not go off-screen (rough estimate)
+        # Convert screen coords to local coords for the screen
         menu = ContextMenu(
             actions=[
                 ("Reply", self._on_menu_reply),
                 ("React", self._on_menu_react),
             ],
             msgid=msgid,
-            screen_x=event.screen_x,
-            screen_y=event.screen_y,
+            screen_x=event.x + 2,  # Adjust for widget offset
+            screen_y=event.y + 2,
         )
-        self.mount(menu)
+        # Mount to the messages panel, not the app
+        log.mount(menu)
         _dbg(f"  mounted ContextMenu msgid={msgid}")
     
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
