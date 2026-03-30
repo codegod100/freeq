@@ -144,7 +144,7 @@ class ScrollableLog(RichLog):
     DEFAULT_CSS = """
     ScrollableLog {
         border: none;
-        overflow-x: auto;
+        overflow-x: hidden;
         overflow-y: auto;
         width: 1fr;
         min-width: 0;
