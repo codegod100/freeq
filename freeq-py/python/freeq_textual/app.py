@@ -1308,7 +1308,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._request_history(self.active_buffer)
 
     def on_click(self, event: events.Click) -> None:
-        """Catch ALL clicks at app level."""
+        """Catch ALL clicks at app level - close context menu."""
         from .widgets.context_menu import ContextMenu
         
         widget_id = getattr(event.widget, 'id', '?')
@@ -1319,8 +1319,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             f.write(f'CLICK: {widget_class}(id={widget_id}) button={event.button} x={event.x} y={event.y}\n')
         _dbg(f"CLICK: {widget_class}(id={widget_id}) button={event.button}")
         
-        # Close context menu on any click outside the menu
-        if not isinstance(event.widget, ContextMenu) and not isinstance(event.widget, Button):
+        # Only close context menu if clicking OUTSIDE of #messages
+        # (Clicks on #messages are handled by _on_message_log_click which may open a menu)
+        if widget_id != 'messages':
             for menu in self.query(ContextMenu):
                 menu.remove()
 
@@ -1357,6 +1358,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Show context menu at click position."""
         from .widgets.context_menu import ContextMenu
         
+        _dbg(f"_show_context_menu: x={event.screen_x} y={event.screen_y}")
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'  _show_context_menu: screen_x={event.screen_x} screen_y={event.screen_y}\n')
+        
         # Close any existing menu
         for menu in self.query(ContextMenu):
             menu.remove()
@@ -1377,6 +1382,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             screen_y=event.screen_y,
         )
         self.mount(menu)
+        _dbg(f"  mounted ContextMenu msgid={msgid}")
     
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
         """Get the message ID at a given line index."""
