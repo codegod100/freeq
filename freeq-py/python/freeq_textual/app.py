@@ -982,6 +982,8 @@ class FreeqTextualApp(App[None]):
         del event
         _dbg(f"handle_thread_panel_closed() open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         self.open_thread_root = ""
+        if self._thread_panel_is_open():
+            self.query_one("#thread-panel", ThreadPanel).remove()
         self._render_active_buffer()
         self.query_one("#composer", Input).focus()
 
