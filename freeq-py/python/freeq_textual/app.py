@@ -1322,8 +1322,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def on_click(self, event: events.Click) -> None:
         """Catch ALL clicks at app level - close context menu."""
-        from .widgets.context_menu import ContextMenu
-        
         widget_id = getattr(event.widget, 'id', '?')
         widget_class = type(event.widget).__name__
         
@@ -1367,8 +1365,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     
     def _show_context_menu(self, event: events.Click, log) -> None:
         """Show context menu at click position."""
-        from .widgets.context_menu import ContextMenu
-        
         _dbg(f"_show_context_menu: x={event.x} y={event.y} screen_x={event.screen_x} screen_y={event.screen_y}")
         
         # Close any existing menu
@@ -1406,8 +1402,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     
     def _on_menu_reply(self, msgid: str | None) -> None:
         """Handle Reply from context menu - show reply panel."""
-        from .widgets.reply_panel import ReplyPanel
-        
         _dbg(f"Context menu Reply: msgid={msgid}")
         _dbg(f"_on_menu_reply called: msgid={msgid}")
         
