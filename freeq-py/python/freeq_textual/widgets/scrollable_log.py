@@ -6,7 +6,12 @@ from .debug import _dbg
 
 
 class ScrollableLog(RichLog):
-    """A RichLog with thumb-only scrollbar (transparent track).
+    """A RichLog with thumb-only scrollbar (transparent track) and no horizontal scroll.
+    
+    HORIZONTAL SCROLL:
+    We hide the horizontal scrollbar (overflow-x: hidden) because we handle line wrapping
+    explicitly via the width parameter in write(). All content should fit within the container
+    width, so there's no need for horizontal scrolling.
     
     WRAPPING FIXES:
     
