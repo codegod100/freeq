@@ -823,7 +823,27 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return renderable, render_roots, render_msgids
 
     def _request_history(self, channel: str) -> None:
-        self.client.history_latest(self._display_name(channel), 50)
+        """Request older history for a channel.
+        
+        Uses CHATHISTORY BEFORE with the oldest msgid we have.
+        Falls back to LATEST if we have no messages yet.
+        """
+        key = self._buffer_key(channel)
+        msgids = self._line_msgids.get(key, [])
+        # Find the first (oldest) non-None msgid
+        oldest_msgid = None
+        for mid in msgids:
+            if mid:
+                oldest_msgid = mid
+                break
+        
+        display_name = self._display_name(channel)
+        if oldest_msgid:
+            _dbg(f"_request_history: BEFORE {display_name} msgid={oldest_msgid[:8]}")
+            self.client.history_before(display_name, oldest_msgid, 50)
+        else:
+            _dbg(f"_request_history: LATEST {display_name} (no oldest msgid)")
+            self.client.history_latest(display_name, 50)
 
     def _format_timestamp(self, timestamp: str) -> str:
         """Format IRCv3 server-time as 12hr with date (e.g., '2:30pm 1/15').
@@ -1270,8 +1290,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg(f"  already loading history for {key}")
             return
         self._history_loading.add(key)
-        # Show loading indicator
-        self._append_line(self.active_buffer.lstrip("#"), Text("--- Loading older messages ---", style="dim italic"), mark_unread=False)
         _dbg(f"ScrolledToTop: requesting history for {key}")
         self._request_history(self.active_buffer)
 
