@@ -92,19 +92,13 @@ class ScrollableLog(RichLog):
         super().watch_scroll_y(old_value, new_value)
         # When scroll_y crosses into threshold (<5), we're at the top
         if new_value < 5 and old_value >= 5:
-            try:
-                self.app._request_history_from_scroll()
-            except Exception as e:
-                logger.error(f"scroll watch error: {e}")
+            self.app._request_history_from_scroll()
 
     def on_mouse_scroll_up(self, event) -> None:
         """Detect scroll-up gesture when already at top."""
         # If we're at or near the top, request history directly
         if self.scroll_y < 5:
-            try:
-                self.app._request_history_from_scroll()
-            except Exception as e:
-                logger.error(f"scroll error: {e}")
+            self.app._request_history_from_scroll()
 
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "", thread_root: str | None = None) -> "ScrollableLog":
         """Write content, tracking location and thread_root for later use.

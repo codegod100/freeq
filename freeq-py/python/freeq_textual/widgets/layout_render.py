@@ -61,13 +61,10 @@ class LayoutAwareRender:
         if self._render_callback:
             # Force layout refresh before rendering (NO TIMERS - event driven)
             from .debug import _dbg
-            try:
-                app = self  # type: ignore
-                app.screen._refresh_layout()  # type: ignore
-                log = self.query_one("#messages")  # type: ignore
-                _dbg(f"LayoutAwareRender: executing render (after layout), log.width={log.size.width}")
-            except Exception:
-                pass
+            app = self  # type: ignore
+            app.screen._refresh_layout()  # type: ignore
+            log = self.query_one("#messages")  # type: ignore
+            _dbg(f"LayoutAwareRender: executing render (after layout), log.width={log.size.width}")
             self._render_callback()
 
     def clear_render_queue(self) -> None:

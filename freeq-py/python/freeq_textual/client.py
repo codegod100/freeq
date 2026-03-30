@@ -141,11 +141,8 @@ class BrokerAuthFlow:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        try:
-            with urlopen(request, timeout=10) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            return None
+        with urlopen(request, timeout=10) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     def _make_handler(self) -> type[BaseHTTPRequestHandler]:
         class Handler(BaseHTTPRequestHandler):
@@ -171,13 +168,10 @@ class BrokerAuthFlow:
                 if oauth_payload is None:
                     result = {"error": "missing oauth payload"}
                 else:
-                    try:
-                        payload = oauth_payload.replace("-", "+").replace("_", "/")
-                        padding = "=" * ((4 - len(payload) % 4) % 4)
-                        decoded = base64.b64decode(payload + padding)
-                        result = json.loads(decoded.decode("utf-8"))
-                    except Exception as exc:  # noqa: BLE001
-                        result = {"error": f"invalid oauth payload: {exc}"}
+                    payload = oauth_payload.replace("-", "+").replace("_", "/")
+                    padding = "=" * ((4 - len(payload) % 4) % 4)
+                    decoded = base64.b64decode(payload + padding)
+                    result = json.loads(decoded.decode("utf-8"))
                 self.server.results[self.server.session_id] = result  # type: ignore[attr-defined]
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain; charset=utf-8")
