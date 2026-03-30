@@ -834,10 +834,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return renderable, render_roots, render_msgids
 
     def _request_history(self, channel: str) -> None:
-        """Request older history for a channel."""
+        """Request older history for a channel.
+        
+        Called when:
+        - Initial join (via names_end -> restore_history_targets)
+        - User scrolls to top (via _request_history_from_scroll)
+        
+        We use CHATHISTORY BEFORE with the timestamp of our oldest message.
+        Server responds with a batch of messages older than that timestamp.
+        
+        If we have no messages yet, use CHATHISTORY LATEST to get recent messages.
+        """
         key = self._buffer_key(channel)
         msgids = self._line_msgids.get(key, [])
+        
         # Find the first (oldest) non-None msgid and its timestamp
+        # _line_msgids is ordered oldest -> newest (prepend adds to front)
         oldest_msgid = None
         oldest_timestamp = None
         for mid in msgids:
@@ -849,10 +861,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 break
         
         display_name = self._display_name(channel)
+        
         if oldest_timestamp:
+            # Server expects: CHATHISTORY BEFORE #channel timestamp=2024-01-15T14:30:00.000Z 50
+            # Returns messages older than the timestamp
             logger.info(f"HISTORY BEFORE {display_name} {oldest_timestamp}")
             self.client.raw(f"CHATHISTORY BEFORE {display_name} timestamp={oldest_timestamp} 50")
         else:
+            # No messages yet - get the most recent ones
             logger.info(f"HISTORY LATEST {display_name}")
             self.client.history_latest(display_name, 50)
 
@@ -1302,7 +1318,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._request_history_from_scroll()
 
     def _request_history_from_scroll(self) -> None:
-        """Called when user scrolls to top - request older history."""
+        """Called when user scrolls to top - request older history.
+        
+        This is triggered by:
+        1. watch_scroll_y crossing below threshold (<5) from above
+        2. on_mouse_scroll_up when already at top (scroll_y < 5)
+        
+        We request CHATHISTORY BEFORE with the oldest timestamp we have.
+        Server responds with a batch of older messages.
+        """
         if self.active_buffer == "status":
             return
         key = self._buffer_key(self.active_buffer)
@@ -1310,13 +1334,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
         self._history_loading.add(key)
         self._history_loading_key = key
-        # Mount inline spinner at top of messages panel
+        # Remove any existing spinner from previous scroll request
+        # (user might scroll multiple times before batch arrives)
         try:
-            body = self.query_one("#body")
-            spinner = InlineSpinner("Loading older messages...", id="history-spinner")
-            body.mount(spinner)
+            old = self.query_one("#history-spinner", InlineSpinner)
+            old.remove()
         except Exception:
             pass
+        # Mount inline spinner at top of messages panel
+        body = self.query_one("#body")
+        spinner = InlineSpinner("Loading older messages...", id="history-spinner")
+        body.mount(spinner)
         self._request_history(self.active_buffer)
 
     def on_click(self, event: events.Click) -> None:
@@ -1366,6 +1394,21 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     # ── Render active buffer ───────────────────────────────────────────────
 
     def _render_active_buffer(self) -> None:
+        """Render the active buffer's messages to the RichLog.
+        
+        This is called when:
+        - New message arrives (live)
+        - Switching channels
+        - Batch history arrives (prepend)
+        - Thread panel opens/closes
+        
+        Flow:
+        1. Update window title with channel name and topic
+        2. Clear the RichLog widget
+        3. Get renderable lines from _renderable_lines (formats grouping, etc)
+        4. Write lines to RichLog, tracking thread roots and msgids per row
+        5. Scroll to appropriate position (end/home/message/preserve)
+        """
         active_name = self._display_name(self.active_buffer)
         topic = self.channel_topics.get(self.active_buffer, "").strip()
         self.title = f"freeq - {active_name}" if not topic else f"freeq - {active_name} | {topic}"
@@ -1389,6 +1432,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             f"render_lines={len(render_lines)} rendered={len(rendered_threads)} "
             f"thread_lines={thread_lines} roots_sample={render_roots[:5]}"
         )
+        # Handle scroll positioning
+        # - end: new live message, scroll to bottom
+        # - home: history loaded, scroll to top to show new old messages
+        # - message: open thread, scroll to the thread root message
+        # - preserve: switch channel, keep current scroll position
         if self._scroll_mode == "end":
             log.scroll_end(animate=False)
         elif self._scroll_mode == "home":
@@ -1402,6 +1450,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 target = self._scroll_target_msgid
                 self._scroll_target_msgid = ""
                 self.call_later(lambda: self._scroll_to_message(target))
+        # else: preserve - do nothing, keep current scroll
 
     def _scroll_to_message(self, msgid: str) -> None:
         """Scroll to a specific message after rendering is complete."""
@@ -1662,31 +1711,59 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             )
             return
         if event_type == "batch_end":
+            # Server finished sending a batch of messages.
+            # Batch types: 'chathistory' (history replay), 'labeled-response' (command response)
             batch_id = event["id"]
             batch = self.batches.pop(batch_id, None)
-            if batch is not None:
-                if batch.lines:
-                    logger.info(f"BATCH END {batch_id}: {len(batch.lines)} lines for {batch.target}")
-                    indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
-                    ordered = [line for _i, (_ts, line) in indexed]
-                    roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
-                    mids = [batch.msgids[i] for i, (_ts, _line) in indexed]
-                    line_metas = [batch.line_metas[i] for i, (_ts, _line) in indexed]
-                    self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
+            if batch is None:
+                # Orphan batch_end without matching batch_start - ignore
+                logger.error(f"BATCH END {batch_id}: no matching batch_start")
+                return
+            
+            if not batch.lines:
+                # Empty batch - server sent no messages (end of history or no matching messages)
+                # Still need to clean up loading state
                 if batch.batch_type == "chathistory":
                     key = self._buffer_key(batch.target)
                     self.restore_history_targets.discard(key)
                     self._history_loading.discard(key)
-                    try:
-                        spinner = self.query_one("#history-spinner", InlineSpinner)
-                        spinner.remove()
-                    except Exception:
-                        pass
                     self._check_loading_complete()
-                    if batch.lines:
-                        self.active_buffer = key
-                        self._scroll_mode = "home"
-                        self._render_active_buffer()
+                return
+            
+            logger.info(f"BATCH END {batch_id}: {len(batch.lines)} lines for {batch.target}")
+            
+            # Sort lines by timestamp (oldest first)
+            # batch.lines is list of (timestamp, Text) tuples
+            indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
+            ordered = [line for _i, (_ts, line) in indexed]
+            roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
+            mids = [batch.msgids[i] for i, (_ts, _line) in indexed]
+            line_metas = [batch.line_metas[i] for i, (_ts, _line) in indexed]
+            
+            # Prepend lines to in-memory message list
+            # This updates: self.messages, _line_threads, _line_msgids, _line_message_meta
+            self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
+            
+            if batch.batch_type == "chathistory":
+                # History batch complete - update loading state
+                key = self._buffer_key(batch.target)
+                self.restore_history_targets.discard(key)
+                self._history_loading.discard(key)
+                
+                # Remove the inline spinner if present (scroll-triggered history)
+                # For initial history on join, there's no spinner - the loading overlay handles that
+                try:
+                    spinner = self.query_one("#history-spinner", InlineSpinner)
+                    spinner.remove()
+                except Exception:
+                    pass  # No spinner - initial load, not scroll-triggered
+                
+                self._check_loading_complete()
+                
+                # Switch to the channel and scroll to top to show new messages
+                self.active_buffer = key
+                self._scroll_mode = "home"
+                self._render_active_buffer()
             return
         if event_type == "names_end":
             channel = event["channel"]
