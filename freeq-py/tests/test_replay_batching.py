@@ -612,8 +612,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             # First: click to open
             click_row = reply_rows[0]
-            # y is 1-indexed (screen coordinate), so add 1
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row + 1, scroll_y=0))
+            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row))
             await pilot.pause()
             self.assertTrue(app._thread_panel_is_open())
             self.assertEqual(app.open_thread_root, "root1")
@@ -631,7 +630,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(reply_rows, f"No reply indicator after close. thread_rows={thread_rows}")
 
             click_row = reply_rows[0]
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row + 1, scroll_y=0))
+            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row))
             await pilot.pause()
             self.assertTrue(app._thread_panel_is_open(), "Thread panel should reopen after click")
             self.assertEqual(app.open_thread_root, "root1")
@@ -679,8 +678,8 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             # Open the thread via click
             log = app.query_one("#messages", RichLog)
             click_row = reply_rows[0]
-            # y is 1-indexed screen coordinate, adjusted for scroll position
-            click_y = max(1, click_row - int(log.scroll_y) + 1)
+            # y is widget-relative (0-indexed), adjusted for scroll position
+            click_y = max(0, click_row - int(log.scroll_y))
             app._on_message_log_click(SimpleNamespace(widget=log, y=click_y))
             await pilot.pause()
             await pilot.pause()  # Extra pause for call_later scroll
@@ -728,7 +727,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(len(thread_rows), len(app._line_threads["#freeq"]))
 
             click_row = reply_rows[-1]
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row + 1))
+            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row))
             await pilot.pause()
 
             self.assertEqual(app.open_thread_root, "root1")
