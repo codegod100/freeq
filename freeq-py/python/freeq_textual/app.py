@@ -1663,25 +1663,29 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "batch_end":
             batch_id = event["id"]
             batch = self.batches.pop(batch_id, None)
-            if batch is not None and batch.lines:
-                logger.info(f"BATCH END {batch_id}: {len(batch.lines)} lines for {batch.target}")
-                indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
-                ordered = [line for _i, (_ts, line) in indexed]
-                roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
-                mids = [batch.msgids[i] for i, (_ts, _line) in indexed]
-                line_metas = [batch.line_metas[i] for i, (_ts, _line) in indexed]
-                self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
+            if batch is not None:
+                if batch.lines:
+                    logger.info(f"BATCH END {batch_id}: {len(batch.lines)} lines for {batch.target}")
+                    indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
+                    ordered = [line for _i, (_ts, line) in indexed]
+                    roots = [batch.thread_roots[i] for i, (_ts, _line) in indexed]
+                    mids = [batch.msgids[i] for i, (_ts, _line) in indexed]
+                    line_metas = [batch.line_metas[i] for i, (_ts, _line) in indexed]
+                    self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
                 if batch.batch_type == "chathistory":
                     key = self._buffer_key(batch.target)
+                    self.restore_history_targets.discard(key)
                     self._history_loading.discard(key)
                     try:
                         spinner = self.query_one("#history-spinner", InlineSpinner)
                         spinner.remove()
                     except Exception:
                         pass
-                    self.active_buffer = key
-                    self._scroll_mode = "home"
-                    self._render_active_buffer()
+                    self._check_loading_complete()
+                    if batch.lines:
+                        self.active_buffer = key
+                        self._scroll_mode = "home"
+                        self._render_active_buffer()
             return
         if event_type == "names_end":
             channel = event["channel"]
