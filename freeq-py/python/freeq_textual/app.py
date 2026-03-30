@@ -1299,11 +1299,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._history_loading_key = key
         # Remove any existing spinner from previous scroll request
         # (user might scroll multiple times before batch arrives)
-        for old in self.query("#history-spinner"):
+        for old in self.query(InlineSpinner):
             old.remove()
-        # Mount inline spinner at top of messages panel
+        # Mount inline spinner at top of messages panel (no fixed ID)
         body = self.query_one("#body")
-        spinner = InlineSpinner("Loading older messages...", id="history-spinner")
+        spinner = InlineSpinner("Loading older messages...")
         body.mount(spinner)
         self._request_history(self.active_buffer)
 
@@ -1707,7 +1707,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 
                 # Remove the inline spinner if present (scroll-triggered history)
                 # For initial history on join, there's no spinner - the loading overlay handles that
-                for spinner in self.query("#history-spinner"):
+                for spinner in self.query(InlineSpinner):
                     spinner.remove()
                 
                 self._check_loading_complete()
