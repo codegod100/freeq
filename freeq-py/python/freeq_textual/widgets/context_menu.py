@@ -20,7 +20,7 @@ class ContextMenu(Vertical):
     
     DEFAULT_CSS = """
     ContextMenu {
-        dock: top;
+        position: absolute;
         layer: overlay;
         background: $surface;
         border: round $primary;
@@ -31,11 +31,10 @@ class ContextMenu(Vertical):
     }
     
     ContextMenu Button {
-        width: auto;
         background: transparent;
         border: none;
-        padding: 0 1;
-        height: 1;
+        padding: 0 2;
+        height: auto;
     }
     
     ContextMenu Button:hover {
@@ -86,6 +85,8 @@ class ContextMenu(Vertical):
     
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press - call callback and close menu."""
+        with open('/tmp/freeq-click.log', 'a') as f:
+            f.write(f'ContextMenu button pressed: {event.button.label}\n')
         callback = getattr(event.button, '_callback', None)
         if callback:
             callback(self._msgid)
