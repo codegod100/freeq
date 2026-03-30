@@ -4,7 +4,14 @@ from textual.widgets import RichLog
 
 
 class ScrollableLog(RichLog):
-    """A RichLog with thumb-only scrollbar (transparent track)."""
+    """A RichLog with thumb-only scrollbar (transparent track).
+    
+    IMPORTANT: RichLog.wrap defaults to False, which OVERRIDES Text.overflow.
+    When wrap=False, RichLog forces no_wrap=True and overflow="ignore" on all Text objects.
+    This breaks our overflow="fold" wrapping for single long words.
+    
+    Solution: Pass wrap=True to RichLog (done in compose() of MessagesPanel* widgets).
+    """
 
     DEFAULT_CSS = """
     ScrollableLog {
