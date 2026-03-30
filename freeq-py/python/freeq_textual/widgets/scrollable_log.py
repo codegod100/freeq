@@ -79,6 +79,16 @@ class ScrollableLog(RichLog):
         _dbg(f"ScrollableLog.on_click: y={event.y} scroll_y={self.scroll_y}")
         self.post_message(self.Clicked(y=event.y, scroll_y=self.scroll_y))
 
+    class ScrolledToTop(Message):
+        """Emitted when user scrolls near the top (for infinite scroll)."""
+        pass
+
+    def on_scroll(self, event) -> None:
+        """Detect when scrolled to top and emit ScrolledToTop for infinite scroll."""
+        # When scroll_y is close to 0, we're at the top
+        if self.scroll_y < 5:
+            self.post_message(self.ScrolledToTop())
+
     def write(self, content, width: int | None = None, expand: bool = False, shrink: bool = True, scroll_end: bool | None = None, *, location: str = "", thread_root: str | None = None) -> "ScrollableLog":
         """Write content, tracking location and thread_root for later use.
 

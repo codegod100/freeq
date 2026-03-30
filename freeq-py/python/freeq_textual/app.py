@@ -187,6 +187,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.threads: dict[str, ThreadState] = {}
         self._thread_activity = 0
         self.restore_history_targets: set[str] = set()
+        self._history_loading: set[str] = set()  # Channels currently loading history (prevent duplicates)
         self._scroll_mode = "preserve"
         self._scroll_target_msgid = ""
         self._theme_ready = False
@@ -1225,6 +1226,19 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         else:
             _dbg(f"  no thread at virtual_y={virtual_y}")
 
+    @on(ScrollableLog.ScrolledToTop)
+    def _on_scrolled_to_top(self, event: ScrollableLog.ScrolledToTop) -> None:
+        """Load more history when scrolled to top."""
+        if self.active_buffer == "status":
+            return
+        # Prevent duplicate requests
+        key = self._buffer_key(self.active_buffer)
+        if key in self._history_loading:
+            return
+        self._history_loading.add(key)
+        _dbg(f"ScrolledToTop: requesting history for {key}")
+        self._request_history(self.active_buffer)
+
     def on_click(self, event: events.Click) -> None:
         """Catch ALL clicks at app level."""
         widget_id = getattr(event.widget, 'id', '?')
@@ -1577,8 +1591,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 line_metas = [batch.line_metas[i] for i, (_ts, _line) in indexed]
                 self._prepend_lines(batch.target, ordered, thread_roots=roots, msgids=mids, line_metas=line_metas)
                 if batch.batch_type == "chathistory":
-                    self.restore_history_targets.discard(self._buffer_key(batch.target))
-                    self.active_buffer = self._buffer_key(batch.target)
+                    key = self._buffer_key(batch.target)
+                    self.restore_history_targets.discard(key)
+                    self._history_loading.discard(key)  # Allow more history requests
+                    self.active_buffer = key
                     self._scroll_mode = "home"
                     self._check_loading_complete()
             return
