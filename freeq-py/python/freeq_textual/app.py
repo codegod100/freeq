@@ -506,20 +506,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Get reactions for this message
         reactions_text = Text()
-        if msgid:
-            # Debug: show exact key comparison (full values)
-            for key in self._reactions.keys():
-                if key == msgid:
-                    _dbg(f"  _format_chat_block: EXACT MATCH! key={key} msgid={msgid}")
-                elif key[:8] == msgid[:8]:
-                    _dbg(f"  _format_chat_block: PREFIX MATCH? key={key} msgid={msgid}")
         if msgid and msgid in self._reactions:
-            _dbg(f"  _format_chat_block: FOUND reactions for {msgid}")
             for r_sender, r_emoji in self._reactions[msgid]:
                 reactions_text.append(f" {r_emoji}")
-        elif msgid:
-            # Debug: why no match?
-            _dbg(f"  _format_chat_block: no reactions for {msgid}, keys={list(self._reactions.keys())}")
         
         
         # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
@@ -806,9 +795,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         pending_reply_indicators: list[tuple[Text, str | None, str | None]] = []  # (line, thread_root, msgid)
 
         for index, (line, line_meta, thread_root, msgid) in enumerate(zip(lines, metas, roots, msgids)):
-            # Debug: log when processing the target msgid
-            if msgid and "01KMVA36" in msgid:
-                _dbg(f"_renderable_lines: FOUND TARGET msgid={msgid}, line_meta={line_meta}, index={index}")
             if line_meta is None:
                 if self._is_reply_indicator(line):
                     pending_reply_indicators.append((line, thread_root, msgid))
@@ -848,10 +834,21 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 # Reply indicators already handled by first message
                 pending_reply_indicators.clear()
                 indent = 5 if self._avatars_enabled else 0
-                for msg_line in self._format_message_lines(text, indent, width):
+                # Check for reactions on this message
+                reactions_text = Text()
+                if msgid and msgid in self._reactions:
+                    for r_sender, r_emoji in self._reactions[msgid]:
+                        reactions_text.append(f" {r_emoji}")
+                msg_lines = self._format_message_lines(text, indent, width)
+                for i, msg_line in enumerate(msg_lines):
                     renderable.append(msg_line)
                     render_roots.append(None)
                     render_msgids.append(msgid)
+                # Append reactions to the last rendered line
+                if reactions_text and renderable:
+                    last_line = renderable[-1]
+                    if isinstance(last_line, Text):
+                        last_line.append_text(reactions_text)
 
             next_meta = metas[index + 1] if index + 1 < len(metas) else None
             next_sender = self._nick_key(next_meta[0]) if next_meta is not None else None
@@ -1500,28 +1497,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(EmojiPicker.EmojiSelected)
     def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:
         """Handle emoji selection - send reaction via TAGMSG."""
-        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None} (full: {event.msgid})")
+        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
         if event.msgid:
-            # Check if message exists in buffer
-            buffer_key = self.active_buffer
-            line_msgids = self._line_msgids.get(buffer_key, [])
-            msgids_in_buffer = set(m for m in line_msgids if m)
-            _dbg(f"  msgid in buffer msgids? {event.msgid in msgids_in_buffer}")
-            _dbg(f"  msgid in message_index? {event.msgid in self.message_index}")
-            
-            # Debug: show sample msgids from buffer
-            sample_msgids = [m for m in line_msgids if m][:5]
-            _dbg(f"  sample buffer msgids: {sample_msgids}")  # Full values!
-            
             # Optimistically add reaction locally (server won't echo without echo-message cap)
             self._reactions[event.msgid].append((self.client.nick, event.emoji))
-            _dbg(f"  added local reaction: {self.client.nick} reacted {event.emoji} on {event.msgid}")
-            _dbg(f"  _reactions keys after: {list(self._reactions.keys())}")
             
             # Send reaction via TAGMSG with +react tag and +draft/reply for target msgid
             target = self._display_name(self.active_buffer)
             self.client.raw(f"@+draft/reply={event.msgid} +react={event.emoji} TAGMSG {target}")
-            _dbg(f"  sent: @+draft/reply={event.msgid[:8]} +react={event.emoji} TAGMSG {target}")
             
             # Re-render to show reaction immediately
             self._render_active_buffer()
