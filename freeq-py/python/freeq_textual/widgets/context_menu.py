@@ -24,18 +24,19 @@ class ContextMenu(Vertical):
         layer: overlay;
         background: $surface;
         border: tall $primary;
-        padding: 0;
+        padding: 0 1;
         margin: 0;
-        min-width: 15;
+        min-width: 10;
         height: auto;
     }
     
     ContextMenu Button {
-        width: 100%;
-        min-width: 15;
-        background: $surface;
+        width: auto;
+        min-width: 8;
+        background: transparent;
         border: none;
-        padding: 1 2;
+        padding: 0 2;
+        height: 1;
     }
     
     ContextMenu Button:hover {
