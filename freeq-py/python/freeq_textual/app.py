@@ -222,6 +222,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             id="composer",
             classes="-textual-compact",
         )
+        from .widgets import DebugPanel
+        yield DebugPanel(id="debug-panel")
         yield Footer(compact=True)
         # LoadingOverlayVisible is mounted/remounted via lifecycle, NOT CSS class toggling
 
@@ -231,6 +233,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._theme_ready = True
         self._avatars_enabled = self._detect_avatar_support()
         composer = self.query_one("#composer", Input)
+        
+        # Wire up debug panel callback (hide in headless/test mode)
+        try:
+            from .widgets import DebugPanel, set_debug_callback
+            debug_panel = self.query_one("#debug-panel", DebugPanel)
+            if self.is_headless:
+                debug_panel.remove()
+            else:
+                set_debug_callback(debug_panel.log)
+        except Exception:
+            pass  # Debug panel not found, ignore
         
         # Mount loading overlay only in non-headless mode (component lifecycle, not CSS toggle)
         if not self.is_headless:
@@ -1748,3 +1761,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def on_unmount(self) -> None:
         _dbg("App.on_unmount()")
         self._persist_session_channels()
+        # Clear debug callback
+        try:
+            from .widgets import set_debug_callback
+            set_debug_callback(None)
+        except Exception:
+            pass
