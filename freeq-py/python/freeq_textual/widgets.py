@@ -119,6 +119,7 @@ class ThreadPanel(Vertical):
             formatter: Callable(sender, text) -> Text to format messages
         """
         _dbg(f"ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)")
+        _dbg(f"  messages: {[(m.sender, m.text[:30] if len(m.text) > 30 else m.text) for m in messages]}")
         self.open_root = thread_root
         self.add_class("visible")
 
@@ -132,11 +133,15 @@ class ThreadPanel(Vertical):
 
         # Render messages
         log = self.query_one("#thread-messages", RichLog)
+        _dbg(f"  RichLog before clear: {len(log.lines)} lines")
         log.clear()
-        for msg in messages:
+        _dbg(f"  RichLog after clear: {len(log.lines)} lines")
+        for i, msg in enumerate(messages):
             formatted = formatter(msg.sender, msg.text)
+            _dbg(f"  writing msg {i}: sender={msg.sender!r} text={msg.text[:30]!r} formatted.plain={formatted.plain[:50]!r}")
             log.write(formatted)
             log.write(Text(" "))
+        _dbg(f"  RichLog after writes: {len(log.lines)} lines")
 
         # Focus the reply input
         reply_input.focus()
@@ -146,6 +151,15 @@ class ThreadPanel(Vertical):
         _dbg(f"ThreadPanel.close() open_root was {self.open_root[:8] if self.open_root else 'empty'}")
         self.open_root = ""
         self.remove_class("visible")
+        
+        # Clear the message log
+        try:
+            log = self.query_one("#thread-messages", RichLog)
+            _dbg(f"  clearing RichLog, had {len(log.lines)} lines")
+            log.clear()
+        except Exception as e:
+            _dbg(f"  exception clearing RichLog: {e}")
+        
         self.post_message(self.Closed())
 
     @staticmethod

@@ -935,6 +935,9 @@ class FreeqTextualApp(App[None]):
         for msg in self.message_index.values():
             if msg.thread_root == thread_root and msg.is_reply:
                 result.append(msg)
+        _dbg(f"_collect_thread_messages({thread_root[:8]!r}) -> {len(result)} msgs, root={'found' if root else 'NOT FOUND'}")
+        if result:
+            _dbg(f"  message_index keys sample: {list(self.message_index.keys())[:5]}")
         return result
 
     # ── Thread panel ───────────────────────────────────────────────────────
