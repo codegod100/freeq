@@ -53,6 +53,11 @@ class ScrollableLog(RichLog):
             self.y = y
             self.scroll_y = scroll_y
             super().__init__()
+        
+        @property
+        def sender(self):
+            """Return the widget that emitted this message."""
+            return self._sender
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
