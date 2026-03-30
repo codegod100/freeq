@@ -232,7 +232,8 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
     def _thread_header(self, app: FreeqTextualApp) -> str:
         widget = app.query_one("#thread-header", Static)
-        content = getattr(widget, 'content', None)
+        # Textual mangles private attribute names
+        content = getattr(widget, '_Static__content', None)
         if content is None:
             return ""
         if isinstance(content, str):
@@ -467,6 +468,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             rendered_text = " ".join(rendered)
 
             self.assertIn("Thread", header)
+            self.assertIn("2 msg", header)
             self.assertIn("2 msg", header)
             self.assertIn("alice:", rendered_text)
             self.assertIn("bob:", rendered_text)
