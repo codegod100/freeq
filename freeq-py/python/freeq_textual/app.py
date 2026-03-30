@@ -1235,12 +1235,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _on_scrollable_log_clicked(self, event: ScrollableLog.Clicked) -> None:
         """Handle clicks from ScrollableLog widget.
         
-        DESIGN: Use the widget that emitted the event directly - never query by ID.
+        DESIGN: Use the message sender directly - never query by ID.
         The event sender IS the ScrollableLog that was clicked.
         """
-        # Get the ScrollableLog that emitted this event
-        # (could be #messages or #thread-messages depending on which was clicked)
-        log = event.widget
+        # Get the ScrollableLog that emitted this event via sender
+        log = event.sender
         if not isinstance(log, ScrollableLog):
             return
         
@@ -1320,8 +1319,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(events.Click, "#messages")
     def _on_message_log_click(self, event: events.Click) -> None:
         """Handle clicks on the message log to detect reply indicator clicks."""
-        log = event.widget
-        _dbg(f"click y={event.y} widget={event.widget} scroll_y={log.scroll_y if log else '?'}")
+        log = event.sender
+        _dbg(f"click y={event.y} widget={event.sender} scroll_y={log.scroll_y if log else '?'}")
         _dbg(f"  thread_panel_open={self._thread_panel_is_open()}, open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         if log is None:
             return
