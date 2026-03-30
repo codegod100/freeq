@@ -76,6 +76,7 @@ class ScrollableLog(AutoLogMixin, RichLog):
         # BUG: Currently app stores _rendered_line_threads dict, which gets out of sync when
         #      component changes or width changes. Fix: move thread_roots tracking here.
         self._thread_roots: list[str | None] = []  # thread_root per rendered line
+        self._line_msgids: list[str | None] = []  # msgid per rendered line
         self._location_lines: dict[str, int] = {}  # location -> line index
         # Pending locations: parallel to RichLog's _deferred_renders, one per write call
         # Each entry is the location string (or None for writes without location)
@@ -142,6 +143,12 @@ class ScrollableLog(AutoLogMixin, RichLog):
                 if location not in self._location_lines:
                     self._location_lines[location] = before
                     _dbg(f"ScrollableLog.write: TRACKED location={location[:8]} -> line {before}")
+            # Track msgid for each line added (handles wrapping)
+            # If location is the msgid, track it for each rendered line
+            for i in range(before, before + max(1, added)):
+                if i >= len(self._line_msgids):
+                    self._line_msgids.extend([None] * (i - len(self._line_msgids) + 1))
+                self._line_msgids[i] = location or None
             # Track thread_root for each line added (handles wrapping)
             if thread_root:
                 for i in range(before, before + max(1, added)):
@@ -155,6 +162,7 @@ class ScrollableLog(AutoLogMixin, RichLog):
         """Clear content and location tracking."""
         super().clear()
         self._thread_roots.clear()
+        self._line_msgids.clear()
         self._location_lines.clear()
         self._pending_locations.clear()
         self._pending_thread_roots.clear()
@@ -198,6 +206,11 @@ class ScrollableLog(AutoLogMixin, RichLog):
                     if loc not in self._location_lines:
                         self._location_lines[loc] = before
                         _dbg(f"  [{i}] location={loc[:8]} -> line {before} (added {added} lines)")
+                # Track msgid for ALL lines produced by this render
+                for line_idx in range(before, after):
+                    if line_idx >= len(self._line_msgids):
+                        self._line_msgids.extend([None] * (line_idx - len(self._line_msgids) + 1))
+                    self._line_msgids[line_idx] = loc or None
                 # Track thread_root for all lines produced by this render
                 if root:
                     for line_idx in range(before, after):
@@ -208,7 +221,7 @@ class ScrollableLog(AutoLogMixin, RichLog):
             # Clear pending
             self._pending_locations.clear()
             self._pending_thread_roots.clear()
-            _dbg(f"ScrollableLog.on_resize: done, {len(self._location_lines)} locations, {len(self._thread_roots)} thread_roots")
+            _dbg(f"ScrollableLog.on_resize: done, {len(self._location_lines)} locations, {len(self._thread_roots)} thread_roots, {len(self._line_msgids)} msgids")
             
             # Check for pending scroll target
             if self._pending_scroll_target:
@@ -230,6 +243,16 @@ class ScrollableLog(AutoLogMixin, RichLog):
         """
         if 0 <= line_index < len(self._thread_roots):
             return self._thread_roots[line_index]
+        return None
+
+    def msgid_at(self, line_index: int) -> str | None:
+        """Get msgid at a line index, or None if not a message line.
+        
+        This is the CORRECT way to get msgid - querying the component
+        directly instead of using stale data from an app dict.
+        """
+        if 0 <= line_index < len(self._line_msgids):
+            return self._line_msgids[line_index]
         return None
 
 

@@ -506,6 +506,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Get reactions for this message
         reactions_text = Text()
+        if msgid:
+            # Check if this msgid has reactions (debug)
+            matching_keys = [k for k in self._reactions.keys() if k == msgid]
+            _dbg(f"  _format_chat_block: msgid={msgid}, matching_keys={len(matching_keys)}, all_keys_count={len(self._reactions)}")
         if msgid and msgid in self._reactions:
             for r_sender, r_emoji in self._reactions[msgid]:
                 reactions_text.append(f" {r_emoji}")
@@ -790,6 +794,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         metas = self._line_message_meta[buffer_key]
         roots = self._line_threads[buffer_key]
         msgids = self._line_msgids[buffer_key]
+        _dbg(f"_renderable_lines: buffer={buffer_key}, lines={len(lines)}, msgids={len(msgids)}, unique_msgids={len(set(m for m in msgids if m))}")
+        # Log all msgids we're about to render
+        unique_msgids = set(m for m in msgids if m)
+        _dbg(f"_renderable_lines: msgids in buffer: {[m[:8] for m in list(unique_msgids)[:5]]}... ({len(unique_msgids)} total)")
+        _dbg(f"_renderable_lines: looking for reactions on: {list(self._reactions.keys())}")
         previous_sender: str | None = None
         previous_was_chat = False
         pending_reply_indicators: list[tuple[Text, str | None, str | None]] = []  # (line, thread_root, msgid)
@@ -824,6 +833,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
                 reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
+                _dbg(f"_renderable_lines: calling _format_chat_block with msgid={msgid[:8] if msgid else None}")
                 block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid)
                 for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
@@ -1397,6 +1407,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _show_context_menu(self, event: events.Click, log) -> None:
         """Show context menu at click position."""
         _dbg(f"_show_context_menu: x={event.x} y={event.y} screen_x={event.screen_x} screen_y={event.screen_y}")
+        _dbg(f"_show_context_menu: log={log}, active_buffer={self.active_buffer}")
         
         # Close any existing menu
         for menu in self.query(ContextMenu):
@@ -1404,7 +1415,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Find which message is under cursor
         virtual_y = int(event.y + log.scroll_y)
+        _dbg(f"_show_context_menu: y={event.y} scroll_y={log.scroll_y} virtual_y={virtual_y}")
         msgid = self._get_msgid_at_line(virtual_y)
+        _dbg(f"_show_context_menu: msgid={msgid}")
         
         # Create menu
         menu = ContextMenu(
@@ -1419,16 +1432,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"  mounted ContextMenu msgid={msgid}")
     
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
-        """Get the message ID at a given line index."""
-        # Look up in message_locations: location -> msgid
-        # Line indices correspond to locations like "line:0", "line:1", etc.
-        location = f"line:{virtual_y}"
-        # But we need to find which message this line belongs to
-        # Check line_msgids if available
-        if hasattr(self, '_rendered_line_msgids'):
-            line_msgids = self._rendered_line_msgids.get(self.active_buffer, [])
-            if 0 <= virtual_y < len(line_msgids):
-                return line_msgids[virtual_y]
+        """Get the message ID at a given line index.
+        
+        DESIGN: Query the ScrollableLog component directly - it tracks msgids
+        per rendered line. Do NOT use app's _rendered_line_msgids which can be stale.
+        """
+        log = self._get_log()
+        if log:
+            msgid = log.msgid_at(virtual_y)
+            _dbg(f"_get_msgid_at_line: virtual_y={virtual_y}, msgid={msgid[:8] if msgid else None}, log._line_msgids len={len(log._line_msgids)}")
+            return msgid
         return None
     
     def _on_menu_reply(self, msgid: str | None) -> None:
@@ -1481,11 +1494,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     @on(EmojiPicker.EmojiSelected)
     def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:
         """Handle emoji selection - send reaction via TAGMSG."""
-        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid[:8] if event.msgid else None}")
+        _dbg(f"Emoji selected: {event.emoji} for msgid={event.msgid}")
         if event.msgid:
             # Optimistically add reaction locally (server won't echo without echo-message cap)
             self._reactions[event.msgid].append((self.client.nick, event.emoji))
-            _dbg(f"  added local reaction: {self.client.nick} reacted {event.emoji} on {event.msgid[:8]}")
+            _dbg(f"  added local reaction: {self.client.nick} reacted {event.emoji} on {event.msgid}")
+            _dbg(f"  _reactions now has keys: {list(self._reactions.keys())}")
             
             # Send reaction via TAGMSG with +react tag and +draft/reply for target msgid
             target = self._display_name(self.active_buffer)
