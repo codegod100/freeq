@@ -1,7 +1,7 @@
 """Custom widgets for freeq-textual."""
 
 from .buffer_list import BufferList
-from .debug import _dbg
+from .debug import _dbg, set_debug_callback
 from .debug_panel import DebugPanel
 from .layout_render import LayoutAwareRender, RenderablePanel
 from .loading_overlay import LoadingOverlay
@@ -21,4 +21,5 @@ __all__ = [
     "ThreadMessage",
     "ThreadPanel",
     "_dbg",
+    "set_debug_callback",
 ]
