@@ -242,8 +242,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 debug_panel.remove()
             else:
                 set_debug_callback(debug_panel.log)
-        except Exception:
-            pass  # Debug panel not found, ignore
+                debug_panel.log("debug panel initialized")
+        except Exception as e:
+            import sys
+            print(f"DebugPanel error: {e}", file=sys.stderr)  # Debug panel not found, ignore
         
         # Mount loading overlay only in non-headless mode (component lifecycle, not CSS toggle)
         if not self.is_headless:
