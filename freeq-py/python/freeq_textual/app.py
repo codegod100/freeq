@@ -1238,8 +1238,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         DESIGN: Use the message sender directly - never query by ID.
         The event sender IS the ScrollableLog that was clicked.
         """
-        # Get the ScrollableLog that emitted this event via sender
-        log = event.sender
+        # Get the ScrollableLog that emitted this event
+        # Textual sets _sender when posting the message
+        log = event._sender
         if not isinstance(log, ScrollableLog):
             return
         
