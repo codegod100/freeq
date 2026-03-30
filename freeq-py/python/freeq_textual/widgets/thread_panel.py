@@ -1,54 +1,15 @@
-"""Custom widgets for freeq-textual."""
+"""ThreadPanel widget - panel showing thread messages with header, close button, and reply input."""
 
-import datetime
 from dataclasses import dataclass
 
 from rich.text import Text
-from textual import events
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widget import Widget
-from textual.widgets import Button, Input, ListItem, ListView, RichLog, Static
+from textual.widgets import Button, Input, Static
 
-
-# Debug logging - writes to /tmp/freeq-tui.log for troubleshooting thread panel issues
-# Can be disabled by commenting out the body or redirecting to null
-def _dbg(msg: str) -> None:
-    with open("/tmp/freeq-tui.log", "a") as f:
-        f.write(f"{datetime.datetime.now().isoformat()} {msg}\n")
-
-
-class ScrollableLog(RichLog):
-    """A RichLog with padding between text and scrollbar."""
-
-    DEFAULT_CSS = """
-    ScrollableLog {
-        border: none;
-        overflow-x: hidden;
-        width: 1fr;
-        min-width: 0;
-        padding: 0 1;
-        scrollbar-gutter: stable;
-        scrollbar-size: 1 1;
-    }
-    """
-
-
-class BufferList(ListView):
-    """Sidebar widget showing list of buffers (channels and DMs)."""
-
-    def update_buffers(self, buffers: list, active: str) -> None:
-        """Update the buffer list with current buffers and mark active one."""
-        self.clear()
-        for buffer in buffers:
-            label = buffer.name
-            if buffer.unread:
-                label = f"{label} ({buffer.unread})"
-            item = ListItem(Static(label), name=buffer.name)
-            if buffer.name == active:
-                item.add_class("active")
-            self.append(item)
+from .debug import _dbg
+from .scrollable_log import ScrollableLog
 
 
 @dataclass
@@ -106,6 +67,8 @@ class ThreadPanel(Vertical):
     """
 
     open_root: reactive[str] = reactive("")
+    _messages: reactive[list[ThreadMessage]] = reactive(list)
+    _formatter: reactive[object] = reactive(None)
 
     class Closed(Message):
         """Emitted when the thread panel is closed."""
@@ -135,24 +98,13 @@ class ThreadPanel(Vertical):
             formatter: Callable(sender, text) -> Text to format messages
         """
         _dbg(f"ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)")
-        _dbg(f"  messages: {[(m.sender, m.text[:30] if len(m.text) > 30 else m.text) for m in messages]}")
-        _dbg(f"  classes before: {self.classes}")
         self.open_root = thread_root
+        self._messages = messages
+        self._formatter = formatter
         self.add_class("visible")
-        _dbg(f"  classes after add_class: {self.classes}")
 
-        # Store for deferred rendering
-        self._pending_messages = messages
-        self._pending_formatter = formatter
-        
-        # Small delay to let CSS take effect and layout compute
-        self.set_timer(0.05, self._render_messages)
-
-    def _render_messages(self) -> None:
-        """Render messages after CSS has taken effect."""
-        messages = getattr(self, '_pending_messages', [])
-        formatter = getattr(self, '_pending_formatter', lambda s, t: Text(f"{s}: {t}"))
-        
+    def watch__messages(self, messages: list[ThreadMessage]) -> None:
+        """Reactive watcher - renders messages when _messages changes."""
         if not messages:
             return
 
@@ -166,15 +118,14 @@ class ThreadPanel(Vertical):
 
         # Render messages
         log = self.query_one("#thread-messages", ScrollableLog)
-        _dbg(f"  RichLog before clear: lines={len(log.lines)} virtual_size={log.virtual_size} has_focus={log.has_focus} display={log.styles.display}")
+        _dbg(f"  watch__messages: lines={len(log.lines)} msgs={len(messages)}")
         log.clear()
-        _dbg(f"  RichLog after clear: lines={len(log.lines)}")
-        for i, msg in enumerate(messages):
+        formatter = self._formatter or (lambda s, t: Text(f"{s}: {t}"))
+        for msg in messages:
             formatted = formatter(msg.sender, msg.text)
-            _dbg(f"  writing msg {i}: sender={msg.sender!r} text={msg.text[:30]!r} formatted.plain={formatted.plain[:50]!r}")
             log.write(formatted)
             log.write(Text(" "))
-        _dbg(f"  RichLog after writes: lines={len(log.lines)} virtual_size={log.virtual_size}")
+        _dbg(f"  after writes: lines={len(log.lines)}")
 
         # Focus the reply input
         reply_input.focus()
@@ -183,8 +134,9 @@ class ThreadPanel(Vertical):
         """Close the thread panel."""
         _dbg(f"ThreadPanel.close() open_root was {self.open_root[:8] if self.open_root else 'empty'}")
         self.open_root = ""
+        self._messages = []
         self.remove_class("visible")
-        
+
         # Clear the message log
         try:
             log = self.query_one("#thread-messages", ScrollableLog)
@@ -192,7 +144,7 @@ class ThreadPanel(Vertical):
             log.clear()
         except Exception as e:
             _dbg(f"  exception clearing ScrollableLog: {e}")
-        
+
         self.post_message(self.Closed())
 
     @staticmethod
