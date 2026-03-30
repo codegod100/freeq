@@ -163,28 +163,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     active_buffer = reactive("status")
     open_thread_root = reactive("")
 
-    def __init__(
-        self,
-        client: FreeqClient,
-        initial_channel: str | None = None,
-        auth_broker: FreeqAuthBroker | BrokerAuthFlow | None = None,
-        auth_handle: str | None = None,
-        session_path: Path | None = None,
-        cached_auth: dict | None = None,
-        config_path: Path | None = None,
-        ui_config: dict | None = None,
-        _for_test: bool = False,  # Skip loading overlay for tests
-    ) -> None:
-        super().__init__()
+    def __init__(self, client: FreeqClient, **kwargs) -> None:
+        # Extract known kwargs before super().__init__
+        self.initial_channel = kwargs.pop("initial_channel", None)
+        self.auth_broker = kwargs.pop("auth_broker", None)
+        self.auth_handle = kwargs.pop("auth_handle", None)
+        self.session_path = kwargs.pop("session_path", None)
+        self.cached_auth = kwargs.pop("cached_auth", None)
+        self.config_path = kwargs.pop("config_path", None)
+        self.ui_config = kwargs.pop("ui_config", {}) or {}
+        
+        super().__init__(**kwargs)
         self.client = client
-        self.initial_channel = initial_channel
-        self.auth_broker = auth_broker
-        self.auth_handle = auth_handle
-        self.session_path = session_path
-        self.cached_auth = cached_auth
-        self.config_path = config_path
-        self.ui_config = ui_config or {}
-        self._skip_loading_overlay = _for_test
         self.buffers: dict[str, BufferState] = {"status": BufferState("status")}
         self.messages: dict[str, list[Text]] = defaultdict(list)
         self.pending_auth_session: str | None = None
@@ -227,8 +217,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             classes="-textual-compact",
         )
         yield Footer(compact=True)
-        if not self._skip_loading_overlay:
-            yield LoadingOverlay(self._load_message, id="loading-overlay")
+        # LoadingOverlayVisible is mounted/remounted via lifecycle, NOT CSS class toggling
 
     def on_mount(self) -> None:
         _dbg("App.on_mount()")
@@ -236,6 +225,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._theme_ready = True
         self._avatars_enabled = self._detect_avatar_support()
         composer = self.query_one("#composer", Input)
+        
+        # Mount loading overlay only in non-headless mode (component lifecycle, not CSS toggle)
+        if not self.is_headless:
+            overlay = LoadingOverlay(self._load_message, id="loading-overlay")
+            self.mount(overlay)
+        
         self._refresh_layout_widths()
         if self._avatars_enabled and Pixels is None:
             self._append_status("avatars: rich-pixels unavailable, using tile fallback", "yellow")
@@ -268,7 +263,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 overlay = self.query_one("#loading-overlay", LoadingOverlay)
                 overlay.remove()
             except Exception:
-                pass  # Already removed or not found
+                pass  # Not found
 
     def _update_loading_message(self, message: str) -> None:
         """Update the loading overlay message."""
