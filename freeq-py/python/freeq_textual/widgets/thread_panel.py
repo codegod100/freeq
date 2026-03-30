@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from rich.text import Text
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
-from textual.reactive import reactive
 from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 
@@ -25,10 +24,12 @@ class ThreadPanelContent(Vertical):
 
     DEFAULT_CSS = """
     ThreadPanelContent {
+        width: 30%;
+        min-width: 24;
+        max-width: 50;
         border: round $success;
         padding: 0 1;
         background: $surface;
-        width: 1fr;
     }
 
     #thread-header-row {
@@ -133,7 +134,7 @@ class ThreadPanel(Widget):
 
     DEFAULT_CSS = """
     ThreadPanel {
-        width: auto;
+        width: 0;
     }
     """
 
