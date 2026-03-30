@@ -19,6 +19,8 @@ from textual.widgets import Static  # noqa: E402
 from textual.widgets import Input  # noqa: E402
 from textual.widgets import Button  # noqa: E402
 
+from freeq_textual.widgets import ScrollableLog  # noqa: E402
+
 from freeq_textual.app import BufferState, FreeqTextualApp  # noqa: E402
 
 
@@ -241,7 +243,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         return str(content)
 
     def _thread_rendered_lines(self, app: FreeqTextualApp) -> list[str]:
-        log = app.query_one("#thread-messages", RichLog)
+        log = app.query_one("#thread-messages", ScrollableLog)
         result: list[str] = []
         for renderable in log.lines:
             text = ""
@@ -462,6 +464,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             # Open the thread panel
             app._open_thread("root1")
             await pilot.pause()
+            await pilot.pause()  # Wait for timer-based rendering
 
             header = self._thread_header(app)
             rendered = self._thread_rendered_lines(app)
