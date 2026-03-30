@@ -19,11 +19,11 @@ class ThreadMessage:
     text: str
 
 
-class ThreadPanelContent(Vertical):
-    """The actual thread content - mounted when visible, unmounted when hidden."""
+class ThreadPanel(Vertical):
+    """Open thread panel with width 30%. Mounted when open, removed when closed."""
 
     DEFAULT_CSS = """
-    ThreadPanelContent {
+    ThreadPanel {
         width: 30%;
         min-width: 24;
         max-width: 50;
@@ -64,14 +64,25 @@ class ThreadPanelContent(Vertical):
     }
     """
 
-    def __init__(self, thread_root: str, messages: list[ThreadMessage], formatter) -> None:
-        super().__init__()
+    class Closed(Message):
+        """Emitted when the thread panel is closed."""
+        pass
+
+    class ReplySent(Message):
+        """Emitted when a reply is submitted."""
+        def __init__(self, text: str, thread_root: str) -> None:
+            self.text = text
+            self.thread_root = thread_root
+            super().__init__()
+
+    def __init__(self, thread_root: str, messages: list[ThreadMessage], formatter, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.thread_root = thread_root
         self._messages = messages
         self._formatter = formatter
 
-    def compose(self) -> None:
-        """Compose the thread panel's internal widgets."""
+    def compose(self):
+        """Compose header, messages, reply input."""
         with Horizontal(id="thread-header-row"):
             yield Static("", id="thread-header")
             yield Button("Close", id="thread-close")
@@ -79,12 +90,12 @@ class ThreadPanelContent(Vertical):
         yield Input(placeholder="Reply to thread...", id="thread-reply")
 
     def on_mount(self) -> None:
-        """Called when widget is mounted - render messages."""
+        """Render messages when mounted."""
         messages = self._messages
         if not messages:
             return
 
-        _dbg(f"ThreadPanelContent.on_mount({self.thread_root[:8]!r}, {len(messages)} msgs)")
+        _dbg(f"ThreadPanel.on_mount({self.thread_root[:8]!r}, {len(messages)} msgs)")
 
         # Update header
         header = self.query_one("#thread-header", Static)
@@ -99,22 +110,20 @@ class ThreadPanelContent(Vertical):
         _dbg(f"  on_mount: lines={len(log.lines)} msgs={len(messages)}")
         log.clear()
         formatter = self._formatter or (lambda s, t, w=0: Text(f"{s}: {t}"))
-        width = max(40, log.size.width - 3)  # account for scrollbar and padding
+        width = max(40, log.size.width - 3)
         for msg in messages:
             formatted = formatter(msg.sender, msg.text, width)
             log.write(formatted)
             log.write(Text(" "))
         _dbg(f"  after writes: lines={len(log.lines)}")
 
-        # Focus the reply input
         reply_input.focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle close button press."""
         if event.button.id == "thread-close":
             event.stop()
-            # Parent ThreadPanel handles removal
-            self.parent._request_close()
+            self.post_message(self.Closed())
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         """Handle reply submission."""
@@ -123,74 +132,24 @@ class ThreadPanelContent(Vertical):
             text = event.value.strip()
             if text and self.thread_root:
                 event.input.value = ""
-                # Parent ThreadPanel handles reply
-                self.parent._send_reply(text, self.thread_root)
-                # Re-focus for rapid replies
+                self.post_message(self.ReplySent(text, self.thread_root))
                 event.input.focus()
 
-
-class ThreadPanel(Widget):
-    """Container that mounts/unmounts ThreadPanelContent based on visibility."""
-
-    DEFAULT_CSS = """
-    ThreadPanel {
-        width: 0;
-    }
-    """
-
-    class Closed(Message):
-        """Emitted when the thread panel is closed."""
-        pass
-
-    class ReplySent(Message):
-        """Emitted when a reply is submitted."""
-        def __init__(self, text: str, thread_root: str) -> None:
-            self.text = text
-            self.thread_root = thread_root
-            super().__init__()
-
-    def compose(self):
-        """Start empty - content mounted on open()."""
-        yield from ()  # Empty - content mounted dynamically
-
     def is_open(self) -> bool:
-        """Check if panel is currently open."""
-        try:
-            self.query_one(ThreadPanelContent)
-            return True
-        except Exception:
-            return False
+        """Always True - panel is only mounted when open."""
+        return True
 
-    def open(self, thread_root: str, messages: list[ThreadMessage], formatter) -> None:
-        """Open the panel by mounting content."""
-        _dbg(f"ThreadPanel.open({thread_root[:8]!r}, {len(messages)} msgs)")
-
-        # Remove existing content if any
-        try:
-            old = self.query_one(ThreadPanelContent)
-            old.remove()
-        except Exception:
-            pass
-
-        # Mount new content - on_mount will fire
-        content = ThreadPanelContent(thread_root, messages, formatter)
-        self.mount(content)
-
-    def close(self) -> None:
-        """Close the panel by unmounting content."""
-        _dbg(f"ThreadPanel.close()")
-        try:
-            content = self.query_one(ThreadPanelContent)
-            _dbg(f"  removing content with {len(content.query_one('#thread-messages', ScrollableLog).lines)} lines")
-            content.remove()
-        except Exception as e:
-            _dbg(f"  exception removing content: {e}")
-        self.post_message(self.Closed())
-
-    def _request_close(self) -> None:
-        """Called by content when close button pressed."""
-        self.close()
-
-    def _send_reply(self, text: str, thread_root: str) -> None:
-        """Called by content when reply submitted."""
-        self.post_message(self.ReplySent(text, thread_root))
+    def refresh_messages(self, messages: list[ThreadMessage]) -> None:
+        """Refresh with new messages."""
+        self._messages = messages
+        # Re-render
+        log = self.query_one("#thread-messages", ScrollableLog)
+        log.clear()
+        width = max(40, log.size.width - 3)
+        for msg in messages:
+            formatted = self._formatter(msg.sender, msg.text, width)
+            log.write(formatted)
+            log.write(Text(" "))
+        
+        header = self.query_one("#thread-header", Static)
+        header.update(f"Thread ({len(messages)} msg{'s' if len(messages) != 1 else ''})")

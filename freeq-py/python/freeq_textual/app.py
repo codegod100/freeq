@@ -216,7 +216,7 @@ class FreeqTextualApp(App[None]):
                 wrap=True,
                 auto_scroll=False,
             )
-            yield ThreadPanel(id="thread-panel")
+            # ThreadPanel is mounted when open, removed when closed
         yield Input(
             placeholder="Type a message or /join #channel",
             id="composer",
@@ -934,26 +934,44 @@ class FreeqTextualApp(App[None]):
 
     # ── Thread panel ───────────────────────────────────────────────────────
 
+    def _thread_panel_is_open(self) -> bool:
+        """Check if thread panel is currently mounted."""
+        try:
+            self.query_one("#thread-panel", ThreadPanel)
+            return True
+        except Exception:
+            return False
+
     def _open_thread(self, thread_root: str) -> None:
         """Open the thread panel for a given root msgid."""
         if not thread_root:
             return
         _dbg(f"_open_thread({thread_root[:8]!r})")
         self.open_thread_root = thread_root
-        panel = self.query_one("#thread-panel", ThreadPanel)
+        
+        # Collect messages
         messages = self._collect_thread_messages(thread_root)
         _dbg(f"  collected {len(messages)} messages")
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
-        panel.open(thread_root, thread_msgs, self._format_message)
-        # Defer re-render until after layout updates (CSS changes are async)
+        
+        # Remove existing panel if any
+        if self._thread_panel_is_open():
+            self.query_one("#thread-panel", ThreadPanel).remove()
+        
+        # Mount new ThreadPanel
+        body = self.query_one("#body", Horizontal)
+        panel = ThreadPanel(thread_root, thread_msgs, self._format_message, id="thread-panel")
+        body.mount(panel)
+        
+        # Defer re-render until after layout updates
         self.call_later(self._render_active_buffer)
 
     def _close_thread(self) -> None:
         """Close the thread panel."""
         _dbg(f"_close_thread() open_thread_root was {self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         self.open_thread_root = ""
-        panel = self.query_one("#thread-panel", ThreadPanel)
-        panel.close()
+        if self._thread_panel_is_open():
+            self.query_one("#thread-panel", ThreadPanel).remove()
         # Defer re-render until after layout updates
         self.call_later(self._render_active_buffer)
         self.call_later(lambda: self.query_one("#composer", Input).focus())
@@ -964,7 +982,6 @@ class FreeqTextualApp(App[None]):
         del event
         _dbg(f"handle_thread_panel_closed() open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         self.open_thread_root = ""
-        self._refresh_layout_widths()
         self._render_active_buffer()
         self.query_one("#composer", Input).focus()
 
@@ -980,14 +997,12 @@ class FreeqTextualApp(App[None]):
         """Refresh the thread panel with current messages."""
         if not self.open_thread_root:
             return
+        if not self._thread_panel_is_open():
+            return
         panel = self.query_one("#thread-panel", ThreadPanel)
         messages = self._collect_thread_messages(self.open_thread_root)
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
-        panel.open(self.open_thread_root, thread_msgs, self._format_message)
-
-        # Update placeholder with the root msgid for context
-        reply_input = self.query_one("#thread-reply", Input)
-        reply_input.placeholder = f"Reply to thread ({self.open_thread_root[:8]}...)"
+        panel.refresh_messages(thread_msgs)
 
     # ── Click detection on message log ─────────────────────────────────────
 
@@ -1519,8 +1534,8 @@ class FreeqTextualApp(App[None]):
             return
         self.active_buffer = self._buffer_key(event.item.name)
         self.open_thread_root = ""
-        panel = self.query_one("#thread-panel", ThreadPanel)
-        panel.close()
+        if self._thread_panel_is_open():
+            self.query_one("#thread-panel", ThreadPanel).remove()
         self._scroll_mode = "end"
         self._render_active_buffer()
         self.query_one("#composer", Input).focus()

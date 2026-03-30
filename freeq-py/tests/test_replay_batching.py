@@ -480,7 +480,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             # Thread panel should be visible
             panel = app.query_one("#thread-panel")
-            self.assertTrue(panel.is_open())
+            self.assertTrue(app._thread_panel_is_open())
 
     async def test_reply_indicator_renders_between_name_and_message(self) -> None:
         client = FakeClient()
@@ -538,13 +538,12 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             app._poll_events()
             await pilot.pause()
 
-            panel = app.query_one("#thread-panel")
             visibility_during_render: list[bool] = []
 
             original_render = app._render_active_buffer
 
             def wrapped_render() -> None:
-                visibility_during_render.append(panel.is_open())
+                visibility_during_render.append(app._thread_panel_is_open())
                 original_render()
 
             with patch.object(app, "_render_active_buffer", side_effect=wrapped_render) as render_active:
@@ -574,12 +573,12 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             app._open_thread("root1")
             await pilot.pause()
-            self.assertTrue(app.query_one("#thread-panel").is_open())
+            self.assertTrue(app._thread_panel_is_open())
 
             app._close_thread()
             await pilot.pause()
 
-            self.assertFalse(app.query_one("#thread-panel").is_open())
+            self.assertFalse(app._thread_panel_is_open())
 
     async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
         client = FakeClient()
@@ -619,7 +618,7 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(app.open_thread_root, "root1")
             panel = app.query_one("#thread-panel")
-            self.assertTrue(panel.is_open())
+            self.assertTrue(app._thread_panel_is_open())
 
     async def test_cached_session_channels_are_rejoined_on_auth_restore(self) -> None:
         client = FakeClient()
