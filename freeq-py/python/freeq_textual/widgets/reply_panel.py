@@ -13,11 +13,14 @@ from textual.widgets import Button, Input, Static
 
 
 class ReplyPanel(Vertical):
-    """Compact reply panel docked at bottom."""
+    """Reply panel docked at bottom right, like thread panel on right side."""
 
     DEFAULT_CSS = """
     ReplyPanel {
-        dock: bottom;
+        dock: right;
+        width: 30%;
+        min-width: 24;
+        max-width: 50;
         height: auto;
         border: round $primary;
         padding: 0 1;
@@ -43,6 +46,7 @@ class ReplyPanel(Vertical):
         color: $text-muted;
         height: auto;
         max-height: 2;
+        overflow: hidden;
     }
 
     #reply-input {

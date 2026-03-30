@@ -1417,6 +1417,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg(f"  msgid {msgid} not found in index")
             return
         
+        # Store reply target for composer
+        self._reply_to_msgid = msgid
+        
         # Create and mount reply panel
         panel = ReplyPanel(
             reply_to_msgid=msgid,
@@ -1424,9 +1427,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             sender=msg.sender,
             target=self._display_name(self.active_buffer),
         )
-        # Mount to body
-        body = self.query_one("#body")
-        body.mount(panel)
+        # Mount to messages container - let it crash if not found
+        # DO NOT add try/except here. We want to know if the container is missing.
+        # MessagesPanel exists when thread closed, MessagesPanelWithThread when open.
+        messages_container = self.query(MessagesPanel) or self.query(MessagesPanelWithThread)
+        assert messages_container, "No MessagesPanel or MessagesPanelWithThread found"
+        messages_container[0].mount(panel)
         _dbg(f"  mounted ReplyPanel for {msgid[:8]}")
     
     def _on_menu_react(self, msgid: str | None) -> None:
