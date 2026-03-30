@@ -37,7 +37,7 @@ class EmojiPicker(AutoLogMixin, Vertical):
         dock: top;
         background: $surface;
         border: round $primary;
-        padding: 1;
+        padding: 0 1;
         width: auto;
         height: auto;
     }
@@ -49,9 +49,9 @@ class EmojiPicker(AutoLogMixin, Vertical):
     EmojiPicker Button {
         background: transparent;
         border: none;
-        padding: 0 1;
-        min-width: 3;
-        height: 3;
+        padding: 0;
+        min-width: 2;
+        height: 1;
     }
     
     EmojiPicker Button:hover {
@@ -65,7 +65,8 @@ class EmojiPicker(AutoLogMixin, Vertical):
     #emoji-header {
         color: $primary;
         text-align: center;
-        margin-bottom: 1;
+        margin-bottom: 0;
+        height: 1;
     }
     """
 

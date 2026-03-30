@@ -315,14 +315,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         Some emojis (heart, skull, etc.) default to text presentation in terminals,
         appearing smaller than full-color emojis. This forces emoji presentation.
         """
-        # Characters that need explicit emoji presentation
+        # Already has variant selector - don't add again
+        if '\ufe0f' in emoji:
+            return emoji
+        # Characters that need explicit emoji presentation  
         NEEDS_EMOJI_VS = {
             '♥', '♡', '☠', '☢', '☣', '⚠', '⚡', '✝', '✡', '☪',
             '☮', '☯', '☸', '♈', '♉', '♊', '♋', '♌', '♍', '♎',
-            '♏', '♐', '♑', '♒', '♓', '⛎', '❄', '☄', '⚜', '♻'
+            '♏', '♐', '♑', '♒', '♓', '⛎', '❄', '☄', '⚜', '♻',
+            '❤', '💀',  # Red heart and skull can be text too
         }
-        if emoji in NEEDS_EMOJI_VS:
-            return emoji + '\ufe0f'  # Add emoji variant selector
+        if any(c in NEEDS_EMOJI_VS for c in emoji):
+            return emoji + '\ufe0f'
         return emoji
 
     def _format_nick(self, nick: str) -> Text:
