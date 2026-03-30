@@ -7,6 +7,7 @@ from .debug_panel import DebugPanel
 from .layout_render import LayoutAwareRender, RenderablePanel
 from .spinner import BaseSpinner, InlineSpinner, LoadingOverlay
 from .messages_panel import MessagesPanel, MessagesPanelWithThread
+from .reply_panel import ReplyPanel
 from .scrollable_log import ScrollableLog
 from .thread_panel import ThreadMessage, ThreadPanel
 
@@ -21,6 +22,7 @@ __all__ = [
     "MessagesPanel",
     "MessagesPanelWithThread",
     "RenderablePanel",
+    "ReplyPanel",
     "ScrollableLog",
     "ThreadMessage",
     "ThreadPanel",

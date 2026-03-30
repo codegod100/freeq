@@ -34,7 +34,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
+from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ReplyPanel, ScrollableLog, ThreadMessage, ThreadPanel
 from .widgets.layout_render import LayoutAwareRender
 
 try:
@@ -1216,6 +1216,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if self.active_buffer == "status":
             return
         self._send_reply(target, event.thread_root, event.text)
+    
+    @on(ReplyPanel.ReplySent)
+    def handle_reply_panel_reply(self, event: ReplyPanel.ReplySent) -> None:
+        """Handle reply sent from reply panel."""
+        _dbg(f"handle_reply_panel_reply(msgid={event.reply_to_msgid[:8]!r}, text={event.text[:20]!r}...)")
+        self._send_reply(event.target, event.reply_to_msgid, event.text)
 
     def _refresh_thread_panel(self) -> None:
         """Refresh the thread panel with current messages.
@@ -1358,9 +1364,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Show context menu at click position."""
         from .widgets.context_menu import ContextMenu
         
-        _dbg(f"_show_context_menu: x={event.screen_x} y={event.screen_y}")
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'  _show_context_menu: screen_x={event.screen_x} screen_y={event.screen_y}\n')
+        _dbg(f"_show_context_menu: x={event.x} y={event.y}")
         
         # Close any existing menu
         for menu in self.query(ContextMenu):
@@ -1370,7 +1374,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         virtual_y = int(event.y + log.scroll_y)
         msgid = self._get_msgid_at_line(virtual_y)
         
-        # Create menu at click position
+        # Create menu - mount to log widget at click position
         menu = ContextMenu(
             actions=[
                 ("Reply", self._on_menu_reply),
@@ -1378,12 +1382,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             ],
             msgid=msgid,
         )
-        # Mount to screen, position absolutely
-        self.screen.mount(menu)
-        menu.styles.left = event.screen_x
-        menu.styles.top = event.screen_y
-        with open('/tmp/freeq-click.log', 'a') as f:
-            f.write(f'  menu mounted, left={event.screen_x} top={event.screen_y}\n')
+        log.mount(menu)
+        # Position relative to the log widget
+        menu.styles.left = event.x
+        menu.styles.top = event.y
         _dbg(f"  mounted ContextMenu msgid={msgid}")
     
     def _get_msgid_at_line(self, virtual_y: int) -> str | None:
@@ -1400,16 +1402,37 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return None
     
     def _on_menu_reply(self, msgid: str | None) -> None:
-        """Handle Reply from context menu."""
+        """Handle Reply from context menu - show reply panel."""
+        from .widgets.reply_panel import ReplyPanel
+        
         _dbg(f"Context menu Reply: msgid={msgid}")
         with open('/tmp/freeq-click.log', 'a') as f:
             f.write(f'_on_menu_reply called: msgid={msgid}\n')
-        if msgid:
-            # Set reply target - composer will use this
-            self._reply_to_msgid = msgid
-            # Focus composer
-            composer = self.query_one("#composer")
-            composer.focus()
+        
+        if not msgid:
+            return
+        
+        # Close any existing reply panel
+        for panel in self.query(ReplyPanel):
+            panel.remove()
+        
+        # Get message context
+        msg = self.message_index.get(msgid)
+        if not msg:
+            _dbg(f"  msgid {msgid} not found in index")
+            return
+        
+        # Create and mount reply panel
+        panel = ReplyPanel(
+            reply_to_msgid=msgid,
+            context=msg.text,
+            sender=msg.sender,
+            target=self._display_name(self.active_buffer),
+        )
+        # Mount to body
+        body = self.query_one("#body")
+        body.mount(panel)
+        _dbg(f"  mounted ReplyPanel for {msgid[:8]}")
     
     def _on_menu_react(self, msgid: str | None) -> None:
         """Handle React from context menu."""
