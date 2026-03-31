@@ -1071,8 +1071,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             roots.append(None)
         
         # Check for image URLs and add image previews
+        _dbg(f"Checking images: TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, current_text={bool(current_text)}, msgid={bool(msgid)}")
         if TEXTUAL_IMAGE_AVAILABLE and current_text and msgid:
             image_urls = self._extract_image_urls(current_text)
+            _dbg(f"Extracted URLs from text: {image_urls}")
             if image_urls:
                 _dbg(f"Found {len(image_urls)} image URLs in message {msgid[:8]}")
                 for i, img_url in enumerate(image_urls[:2]):  # Limit to first 2 images
@@ -1083,12 +1085,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         img_line.append_text(self._rendered_images[msgid])
                         lines.append(img_line)
                         roots.append(None)
+                        _dbg(f"Using cached image for {msgid[:8]}")
                     else:
                         # Start async image loading if not already pending
                         if msgid not in self._pending_images:
                             self._pending_images[msgid] = (img_url, buffer_key, len(lines))
                             _dbg(f"Starting async image load for {msgid[:8]}: {img_url[:50]}")
                             self._load_image_async(msgid, img_url, buffer_key)
+                        else:
+                            _dbg(f"Image already loading for {msgid[:8]}")
                         
                         # Show placeholder while loading
                         img_line = Text("     🖼️ ", style="dim")
@@ -1096,16 +1101,23 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         img_line.append(f"[Loading: {img_name}]", style=f"dim cyan link {img_url}")
                         lines.append(img_line)
                         roots.append(None)
+            else:
+                _dbg(f"No image URLs found in text: {current_text[:80]}")
+        else:
+            _dbg(f"Skipping image check: TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, has_text={bool(current_text)}, has_msgid={bool(msgid)}")
         
         return lines, roots
 
     def _load_image_async(self, msgid: str, url: str, buffer_key: str) -> None:
         """Load and render an image asynchronously using Textual workers."""
+        _dbg(f"_load_image_async starting for {msgid[:8]}: {url[:50]}")
+        
         async def download_and_render() -> Text | None:
             try:
                 import urllib.request
                 import urllib.error
                 
+                _dbg(f"Downloading image {url[:50]}...")
                 req = urllib.request.Request(
                     url,
                     headers={'User-Agent': 'Mozilla/5.0 (compatible; FreeQ-Chat/1.0)'}
@@ -1118,11 +1130,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     lambda: urllib.request.urlopen(req, timeout=10).read()
                 )
                 
+                _dbg(f"Downloaded {len(image_data)} bytes for {msgid[:8]}")
+                
                 # Open with PIL
                 if Image is None:
+                    _dbg(f"PIL Image not available!")
                     return None
                     
                 img = Image.open(BytesIO(image_data))
+                _dbg(f"Opened image: {img.size} {img.mode}")
                 
                 # Convert to RGB if necessary
                 if img.mode in ('RGBA', 'LA', 'P'):
@@ -1134,32 +1150,53 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 
                 # Resize maintaining aspect ratio
                 img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+                _dbg(f"Resized to {img.size}")
                 
                 # Render using textual-image
+                if render_image is None:
+                    _dbg(f"render_image is None, textual-image not available!")
+                    return None
+                    
                 renderable = render_image(img)
+                _dbg(f"Rendered image for {msgid[:8]}: type={type(renderable)}")
                 
                 return renderable
                 
             except Exception as e:
                 _dbg(f"Failed to render image {url[:50]}: {e}")
+                import traceback
+                _dbg(f"Traceback: {traceback.format_exc()}")
                 # Return error text
                 error_text = Text(f"[Image failed to load: {str(e)[:30]}]", style="red dim")
                 return error_text
         
         async def load_worker():
+            _dbg(f"load_worker starting for {msgid[:8]}")
             rendered = await download_and_render()
+            _dbg(f"load_worker got rendered image: {rendered is not None}")
             if rendered:
                 self._rendered_images[msgid] = rendered
                 self._pending_images.pop(msgid, None)
                 # Trigger re-render of the buffer
                 if self.active_buffer == buffer_key:
+                    _dbg(f"Triggering re-render for buffer {buffer_key}")
                     self._scroll_mode = "preserve"
                     self.call_later(self._render_active_buffer)
-                _dbg(f"Image rendered for {msgid[:8]}")
+                else:
+                    _dbg(f"Buffer {buffer_key} not active (current: {self.active_buffer}), skipping re-render")
+                _dbg(f"Image rendered successfully for {msgid[:8]}")
+            else:
+                _dbg(f"No rendered image for {msgid[:8]}")
         
         # Start the async worker
-        import asyncio
-        asyncio.create_task(load_worker())
+        _dbg(f"Creating asyncio task for image load {msgid[:8]}")
+        try:
+            asyncio.create_task(load_worker())
+            _dbg(f"Task created for {msgid[:8]}")
+        except Exception as e:
+            _dbg(f"Failed to create task: {e}")
+            import traceback
+            _dbg(f"Traceback: {traceback.format_exc()}")
 
     def _make_avatar_text_line(self, colors: list[str], text: Text) -> Text:
         """Create line with avatar row 2 + formatted text."""
