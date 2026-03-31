@@ -457,7 +457,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         result = capture.get()
         if is_streaming:
             result += "▍"
-        return Text.from_ansi(result)
+        
+        # Debug: log the raw ANSI output
+        _dbg(f"_render_markdown: input lines={text.count(chr(10))}")
+        _dbg(f"  ANSI output preview: {result[:100]!r}")
+        
+        text_obj = Text.from_ansi(result)
+        _dbg(f"  -> Text has {len(text_obj.spans)} spans")
+        for i, span in enumerate(text_obj.spans[:3]):
+            _dbg(f"     span[{i}]: {text_obj.plain[span.start:span.end]!r} style={span.style}")
+        
+        return text_obj
 
     def _render_plain(self, text: str) -> Text:
         """Render plain text with URL linking."""
