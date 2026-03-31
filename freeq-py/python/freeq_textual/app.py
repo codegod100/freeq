@@ -580,6 +580,60 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Deprecated: Use _format_message_pipeline."""
         return self._format_message_pipeline(text, mime_type, is_streaming)
 
+    def _format_message_with_diff(self, old_text: str, new_text: str, mime_type: str = "", is_streaming: bool = False) -> Text:
+        """Format message with inline diff showing removed (red/strike) and added (green) text."""
+        # Word-level diff
+        old_words = old_text.split()
+        new_words = new_text.split()
+        
+        # Find common prefix
+        prefix_len = 0
+        for o, n in zip(old_words, new_words):
+            if o == n:
+                prefix_len += 1
+            else:
+                break
+        
+        # Find common suffix
+        suffix_len = 0
+        for o, n in zip(reversed(old_words[prefix_len:]), reversed(new_words[prefix_len:])):
+            if o == n:
+                suffix_len += 1
+            else:
+                break
+        
+        removed = old_words[prefix_len:len(old_words) - suffix_len] if suffix_len > 0 else old_words[prefix_len:]
+        added = new_words[prefix_len:len(new_words) - suffix_len] if suffix_len > 0 else new_words[prefix_len:]
+        
+        # Build result with inline styling
+        result = Text()
+        
+        # Common prefix (normal)
+        if prefix_len > 0:
+            prefix = " ".join(old_words[:prefix_len])
+            result.append(prefix + " ")
+        
+        # Removed text (red strikethrough)
+        if removed:
+            removed_str = " ".join(removed)
+            result.append(removed_str + " ", style="red strike")
+        
+        # Added text (green)
+        if added:
+            added_str = " ".join(added)
+            result.append(added_str + " ", style="green")
+        
+        # Common suffix (normal)
+        if suffix_len > 0:
+            suffix = " ".join(old_words[len(old_words) - suffix_len:])
+            result.append(suffix)
+        
+        # Handle streaming indicator
+        if is_streaming:
+            result.append("▍")
+        
+        return result
+
     def _format_message(self, sender: str, text: str, width: int = 0, *, mime_type: str = "", is_streaming: bool = False) -> Text:
         """A chat message: `<nick>: <text>` with colored nick and avatar.
         
@@ -779,14 +833,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             for r_sender, r_emoji in self._reactions[msgid]:
                 reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
         
-        # Check if message has been edited and build edit diff
-        edit_diff_text = Text()
+        # Check if message has been edited - use diff formatting for the message itself
+        has_edit_history = False
+        old_text_for_diff = ""
         if msgid and msgid in self.message_index:
             msg_state = self.message_index[msgid]
             if msg_state.edit_history:
-                # Show diff from most recent edit
-                old_text = msg_state.edit_history[-1]
-                edit_diff_text = self._format_edit_diff(old_text, msg_state.text)
+                has_edit_history = True
+                old_text_for_diff = msg_state.edit_history[-1]
         
         
         # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
@@ -872,6 +926,27 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return lines, roots
         
         # Wrap message text (non-markdown)
+        # If message has edit history, render with inline diff colors (no wrapping)
+        if has_edit_history:
+            diff_body = self._format_message_with_diff(old_text_for_diff, text, mime_type, is_streaming)
+            # First message line uses avatar row 2 only if no reply indicator
+            if not reply_indicator:
+                line = self._make_avatar_text_line(rows[1], diff_body)
+                line.append_text(reactions_text)
+                lines.append(line)
+                roots.append(reply_thread_root)
+            else:
+                line = Text(indent)
+                line.append_text(diff_body)
+                line.append_text(reactions_text)
+                lines.append(line)
+                roots.append(reply_thread_root)
+            # Ensure at least 2 lines for avatar display
+            if len(lines) == 1:
+                lines.append(self._make_avatar_text_line(rows[1], Text()))
+                roots.append(None)
+            return lines, roots
+        
         words = text.split()
         current = ""
         line_num = 0
@@ -919,11 +994,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if len(lines) == 1:
             lines.append(self._make_avatar_text_line(rows[1], Text()))
             roots.append(None)
-        
-        # Add edit diff as separate line if present (after message content)
-        if edit_diff_text.plain:
-            lines.append(self._make_avatar_text_line(rows[1], edit_diff_text))
-            roots.append(None)  # Edit diff line has no thread_root
         
         return lines, roots
 
@@ -1551,60 +1621,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # If a thread is currently open and this message belongs to it, refresh
         if thread_root and thread_root == self.open_thread_root:
             self._refresh_thread_panel()
-
-    def _format_edit_diff(self, old_text: str, new_text: str) -> Text:
-        """Format an edit diff showing removed (red/strike) and added (green) text."""
-        old_words = old_text.split()
-        new_words = new_text.split()
-        
-        # Find common prefix
-        prefix_len = 0
-        for o, n in zip(old_words, new_words):
-            if o == n:
-                prefix_len += 1
-            else:
-                break
-        
-        # Find common suffix
-        suffix_len = 0
-        for o, n in zip(reversed(old_words[prefix_len:]), reversed(new_words[prefix_len:])):
-            if o == n:
-                suffix_len += 1
-            else:
-                break
-        
-        removed = old_words[prefix_len:len(old_words) - suffix_len] if suffix_len > 0 else old_words[prefix_len:]
-        added = new_words[prefix_len:len(new_words) - suffix_len] if suffix_len > 0 else new_words[prefix_len:]
-        
-        # Build diff - no "edited" label, the red/green implies it
-        parts: list[Text | str] = []
-        
-        if prefix_len > 0:
-            prefix = " ".join(old_words[:prefix_len])
-            if len(prefix) > 20:
-                prefix = "..." + prefix[-17:]
-            parts.append(Text(prefix + " ", style="dim"))
-        
-        if removed:
-            removed_str = " ".join(removed)
-            if len(removed_str) > 30:
-                removed_str = removed_str[:27] + "..."
-            parts.append(Text(removed_str, style="red strike"))
-            parts.append(" ")
-        
-        if added:
-            added_str = " ".join(added)
-            if len(added_str) > 30:
-                added_str = added_str[:27] + "..."
-            parts.append(Text(added_str, style="green"))
-        
-        if suffix_len > 0 and (removed or added):
-            suffix = " ".join(old_words[len(old_words) - suffix_len:])
-            if len(suffix) > 20:
-                suffix = suffix[:17] + "..."
-            parts.append(Text(" " + suffix, style="dim"))
-        
-        return Text().assemble(*parts)
 
     def _collect_thread_messages(self, thread_root: str) -> list[MessageState]:
         """Collect root + all replies for a thread, in order."""
