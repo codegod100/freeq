@@ -258,9 +258,9 @@ class UserList(AutoLogMixin, Vertical):
     
     DEFAULT_CSS = """
     UserList {
-        width: 15%;
-        min-width: 12;
-        max-width: 24;
+        width: auto;
+        min-width: 16;
+        max-width: 30;
         height: 1fr;
         border: solid $panel-lighten-2;
         background: $surface;
@@ -276,14 +276,6 @@ class UserList(AutoLogMixin, Vertical):
         text-align: center;
         padding: 1;
         border-bottom: solid $panel-lighten-2;
-    }
-    
-    UserList .user-item {
-        padding: 0 1;
-    }
-    
-    UserList .user-item:hover {
-        background: $primary 10%;
     }
     """
 
