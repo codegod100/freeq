@@ -1897,6 +1897,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 self.restore_history_targets.discard(key)
                 self._history_loading.discard(key)
                 
+                # Check if this was scroll-triggered (has spinner) vs initial join
+                had_spinner = bool(list(self.query(InlineSpinner)))
+                
                 # Remove the inline spinner if present (scroll-triggered history)
                 # For initial history on join, there's no spinner - the loading overlay handles that
                 for spinner in self.query(InlineSpinner):
@@ -1904,9 +1907,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 
                 self._check_loading_complete()
                 
-                # Switch to the channel and scroll to bottom to show latest messages
+                # Scroll behavior:
+                # - Initial join (no spinner): scroll to end (latest messages)
+                # - Scroll-triggered (had spinner): scroll to home (top) to show loaded history
                 self.active_buffer = key
-                self._scroll_mode = "end"
+                self._scroll_mode = "home" if had_spinner else "end"
                 self._render_active_buffer()
             return
         if event_type == "names_end":
