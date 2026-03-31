@@ -617,6 +617,48 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
         return lines
 
+    def _split_text_by_lines(self, text: Text) -> list[Text]:
+        """Split a Text object by newlines, preserving style spans in each line."""
+        if '\n' not in text.plain:
+            return [text]
+        
+        lines: list[Text] = []
+        current_start = 0
+        
+        for i, char in enumerate(text.plain):
+            if char == '\n':
+                # Create a new Text for this line
+                line_text = text.plain[current_start:i]
+                line = Text(line_text)
+                
+                # Copy spans that fall within this line's range
+                for span in text.spans:
+                    if span.end <= current_start:
+                        continue
+                    if span.start >= i:
+                        continue
+                    # Span overlaps with this line
+                    new_start = max(span.start, current_start) - current_start
+                    new_end = min(span.end, i) - current_start
+                    line.spans.append(type(span)(new_start, new_end, span.style))
+                
+                lines.append(line)
+                current_start = i + 1
+        
+        # Handle last line (after final newline)
+        if current_start < len(text.plain):
+            line_text = text.plain[current_start:]
+            line = Text(line_text)
+            for span in text.spans:
+                if span.end <= current_start:
+                    continue
+                new_start = max(span.start, current_start) - current_start
+                new_end = min(span.end, len(text.plain)) - current_start
+                line.spans.append(type(span)(new_start, new_end, span.style))
+            lines.append(line)
+        
+        return lines
+
     def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None]]:
         """Return tuple of (lines, thread_roots) for a chat message.
         
@@ -653,21 +695,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 if reply_indicator:
                     result.append(reply_indicator)
                     roots.append(reply_thread_root)
-                # First line: nick + first line of markdown
-                first_line = Text()
-                first_line.append_text(name)
-                first_line.append_text(time_text)
-                first_line.append(": ")
-                lines = body.plain.split('\n')
+                # Split body text into lines preserving spans
+                lines = self._split_text_by_lines(body)
                 if lines:
-                    first_line.append_text(Text.from_ansi(lines[0]) if '\x1b[' in lines[0] else Text(lines[0]))
+                    # First line: nick + first line of markdown
+                    first_line = Text()
+                    first_line.append_text(name)
+                    first_line.append_text(time_text)
+                    first_line.append(": ")
+                    first_line.append_text(lines[0])
                     result.append(first_line)
                     roots.append(reply_thread_root)
                     # Continuation lines indented
                     for cont in lines[1:]:
-                        if cont.strip():
+                        if cont.plain.strip():
                             cont_line = Text(" " * (len(sender) + 3))  # indent to align with text
-                            cont_line.append_text(Text.from_ansi(cont) if '\x1b[' in cont else Text(cont))
+                            cont_line.append_text(cont)
                             result.append(cont_line)
                             roots.append(reply_thread_root)
                 result[-1].append_text(reactions_text)
