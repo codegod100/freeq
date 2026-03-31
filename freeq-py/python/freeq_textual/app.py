@@ -1967,7 +1967,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "message":
             target = event["target"]
             sender = event["from"]
-            text = event["text"]
+            # Convert literal \\n to actual newlines in message text
+            text = event["text"].replace("\\n", "\n")
             tags = event.get("tags", {})
             # Debug: log all tags for reply messages
             reply_tag = tags.get("+draft/reply") or tags.get("+reply")
@@ -2048,7 +2049,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
         if event_type == "topic_changed":
             channel = event["channel"]
-            topic = event["topic"]
+            # Convert literal \\n to actual newlines in topic
+            topic = event["topic"].replace("\\n", "\n")
             set_by = event.get("set_by")
             key = self._ensure_buffer(channel)
             self.channel_topics[key] = topic
@@ -2061,9 +2063,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
         if event_type == "server_notice":
             self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
+            # Convert literal \\n to actual newlines in notice text
+            notice_text = event["text"].replace("\\n", "\n")
             notice = Text()
             notice.append("notice: ", style="magenta")
-            notice.append(event["text"])
+            notice.append(notice_text)
             self._append_line("status", notice, mark_unread=False)
             return
         if event_type == "tagmsg":
