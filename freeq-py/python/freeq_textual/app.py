@@ -833,11 +833,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             for r_sender, r_emoji in self._reactions[msgid]:
                 reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
         
-        # Check if message has been edited - use diff formatting for the message itself
+        # Check if message has been edited - use current text from message_index if available
         has_edit_history = False
         old_text_for_diff = ""
+        current_text = text
         if msgid and msgid in self.message_index:
             msg_state = self.message_index[msgid]
+            current_text = msg_state.text  # Use the current text from message_index
             if msg_state.edit_history:
                 has_edit_history = True
                 old_text_for_diff = msg_state.edit_history[-1]
@@ -873,9 +875,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             roots.append(reply_thread_root)
         
         # Check for markdown - handle multi-line formatted output
-        is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
+        is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(current_text)
         if is_markdown:
-            body = self._format_message_body(text, mime_type, is_streaming)
+            body = self._format_message_body(current_text, mime_type, is_streaming)
             _dbg(f"_format_chat_block: markdown body has {len(body.plain)} chars, {body.plain.count(chr(10))} newlines, {len(body.spans)} spans")
             # Split markdown by lines preserving formatting
             body_lines = self._split_text_by_lines(body)
@@ -928,7 +930,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Wrap message text (non-markdown)
         # If message has edit history, render with inline diff colors (no wrapping)
         if has_edit_history:
-            diff_body = self._format_message_with_diff(old_text_for_diff, text, mime_type, is_streaming)
+            diff_body = self._format_message_with_diff(old_text_for_diff, current_text, mime_type, is_streaming)
             # First message line uses avatar row 2 only if no reply indicator
             if not reply_indicator:
                 line = self._make_avatar_text_line(rows[1], diff_body)
@@ -947,7 +949,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 roots.append(None)
             return lines, roots
         
-        words = text.split()
+        words = current_text.split()
         current = ""
         line_num = 0
         
@@ -1260,6 +1262,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     render_msgids.append(msgid)  # All lines of same message share msgid
             else:
                 # Continuation of same sender - just message body, indented
+                # Get current text from message_index if available (for edited messages)
+                current_text = msg_info.text if msg_info else text
                 # BUT: if this is a reply, we need to show its reply indicator first
                 indent = 5  # Always use avatar indent
                 if pending_reply_indicators:
@@ -1278,11 +1282,24 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     for r_sender, r_emoji in self._reactions[msgid]:
                         reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
                 
+                # Determine content type
+                is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(current_text)
+                
+                # Check if message has edit history - render with inline diff
+                if msg_info and msg_info.edit_history:
+                    old_text = msg_info.edit_history[-1]
+                    diff_body = self._format_message_with_diff(old_text, current_text, mime_type, is_streaming)
+                    line = Text(" " * indent)
+                    line.append_text(diff_body)
+                    if reactions_text:
+                        line.append_text(reactions_text)
+                    renderable.append(line)
+                    render_roots.append(None)
+                    render_msgids.append(msgid)
                 # Check if this is markdown - handle it properly
-                is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
-                if is_markdown:
+                elif is_markdown:
                     # Render markdown and split into lines
-                    body = self._format_message_body(text, mime_type, is_streaming)
+                    body = self._format_message_body(current_text, mime_type, is_streaming)
                     body_lines = self._split_text_by_lines(body)
                     for i, body_line in enumerate(body_lines):
                         if not body_line.plain.strip():
@@ -1319,7 +1336,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                             render_msgids.append(msgid)
                 else:
                     # Plain text - word wrap as before
-                    msg_lines = self._format_message_lines(text, indent, width)
+                    msg_lines = self._format_message_lines(current_text, indent, width)
                     for i, msg_line in enumerate(msg_lines):
                         renderable.append(msg_line)
                         render_roots.append(None)
