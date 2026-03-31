@@ -451,24 +451,35 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return self._render_plain(text)
 
     def _render_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
-        """Render markdown to Rich Text."""
+        """Render markdown to Rich Text.
+        
+        Uses Rich's Markdown class but ensures proper line breaks are preserved.
+        """
+        # First, let Rich render the markdown
         console = Console(width=width, force_terminal=True, color_system="truecolor")
         with console.capture() as capture:
             console.print(Markdown(text))
         result = capture.get()
+        
+        # Split by newlines and create Text segments for each line
+        lines = result.split('\n')
+        if not lines:
+            return Text(text)
+        
+        # Convert each line from ANSI to Text and combine
+        combined = Text()
+        for i, line in enumerate(lines):
+            if i > 0:
+                combined.append('\n')
+            if line.strip():  # Only process non-empty lines
+                line_text = Text.from_ansi(line.rstrip())  # Remove trailing padding
+                combined.append_text(line_text)
+        
         if is_streaming:
-            result += "▍"
+            combined.append("▍")
         
-        # Debug: log the raw ANSI output
-        _dbg(f"_render_markdown: input lines={text.count(chr(10))}")
-        _dbg(f"  ANSI output preview: {result[:100]!r}")
-        
-        text_obj = Text.from_ansi(result)
-        _dbg(f"  -> Text has {len(text_obj.spans)} spans")
-        for i, span in enumerate(text_obj.spans[:3]):
-            _dbg(f"     span[{i}]: {text_obj.plain[span.start:span.end]!r} style={span.style}")
-        
-        return text_obj
+        _dbg(f"_render_markdown: input lines={text.count(chr(10))}, output lines={len(lines)}, spans={len(combined.spans)}")
+        return combined
 
     def _render_plain(self, text: str) -> Text:
         """Render plain text with URL linking."""
