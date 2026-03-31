@@ -67,6 +67,16 @@ try:
 except ImportError:  # pragma: no cover - dependency is optional outside the dev shell
     Pixels = None
 
+try:
+    from textual_image.render import render_image
+    TEXTUAL_IMAGE_AVAILABLE = True
+except ImportError:
+    TEXTUAL_IMAGE_AVAILABLE = False
+    render_image = None
+
+# Image URL pattern
+_IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s]*)?', re.IGNORECASE)
+
 
 # ── Debug logging ─────────────────────────────────────────────────────────
 # SINGLE LOG FILE: /tmp/freeq.log - ALL logging goes here!
@@ -542,7 +552,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return full_text
 
     def _render_plain(self, text: str) -> Text:
-        """Render plain text with URL linking."""
+        """Render plain text with URL linking. Detects and marks image URLs."""
         body = Text(no_wrap=False, overflow="fold")
         last_end = 0
         for match in _URL_RE.finditer(text):
@@ -550,12 +560,72 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if start > last_end:
                 body.append(text[last_end:start])
             url = match.group("url")
-            display_url = self._display_url(url)
-            body.append(display_url, style=f"underline cyan link {url}")
+            
+            # Check if this is an image URL
+            if _IMAGE_URL_RE.match(url):
+                # Show image indicator
+                body.append("🖼️ ", style="cyan")
+                display_name = os.path.basename(url.split("?")[0])[:30]  # Truncate long names
+                body.append(f"[{display_name}]", style=f"underline cyan link {url}")
+            else:
+                display_url = self._display_url(url)
+                body.append(display_url, style=f"underline cyan link {url}")
             last_end = end
         if last_end < len(text):
             body.append(text[last_end:])
         return body
+
+    def _extract_image_urls(self, text: str) -> list[str]:
+        """Extract all image URLs from text."""
+        return _IMAGE_URL_RE.findall(text)
+
+    def _render_image_preview(self, url: str, max_width: int = 40, max_height: int = 10) -> Text | None:
+        """Download and render an image preview using textual-image.
+        
+        Returns None if textual-image is not available or rendering fails.
+        """
+        if not TEXTUAL_IMAGE_AVAILABLE or render_image is None:
+            return None
+        
+        try:
+            # Download image
+            import urllib.request
+            import urllib.error
+            
+            # Set a timeout and user agent
+            req = urllib.request.Request(
+                url,
+                headers={'User-Agent': 'Mozilla/5.0 (compatible; FreeQ-Chat/1.0)'}
+            )
+            
+            with urllib.request.urlopen(req, timeout=5) as response:
+                image_data = response.read()
+            
+            # Open with PIL
+            if Image is None:
+                return None
+                
+            img = Image.open(io.BytesIO(image_data))
+            
+            # Convert to RGB if necessary
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            
+            # Resize to fit within max dimensions while maintaining aspect ratio
+            img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+            
+            # Render using textual-image
+            renderable = render_image(img, max_width=max_width, max_height=max_height)
+            
+            # Convert to Text for display
+            if renderable:
+                # The renderable should be compatible with Rich
+                return renderable
+            
+        except Exception as e:
+            _dbg(f"Failed to render image {url[:40]}: {e}")
+        
+        return None
 
     def _format_message_pipeline(self, raw_text: str, mime_type: str = "", is_streaming: bool = False, width: int = 80) -> Text:
         """Full pipeline: source -> preprocess -> detect -> render."""
@@ -996,6 +1066,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if len(lines) == 1:
             lines.append(self._make_avatar_text_line(rows[1], Text()))
             roots.append(None)
+        
+        # Check for image URLs and add image previews
+        if TEXTUAL_IMAGE_AVAILABLE and current_text:
+            image_urls = self._extract_image_urls(current_text)
+            if image_urls:
+                _dbg(f"Found {len(image_urls)} image URLs in message")
+                for img_url in image_urls[:2]:  # Limit to first 2 images
+                    # For now, just show a placeholder line indicating an image
+                    # Full rendering requires async download which would block the UI
+                    img_line = Text("     🖼️ ", style="dim")  # 5-space indent + icon
+                    img_name = os.path.basename(img_url.split("?")[0])[:25]
+                    img_line.append(f"[Image: {img_name}]", style=f"dim cyan link {img_url}")
+                    lines.append(img_line)
+                    roots.append(None)
         
         return lines, roots
 
