@@ -25,6 +25,8 @@ if not logger.handlers:
     logger.addHandler(handler)
 
 from rich.text import Text
+from rich.markdown import Markdown
+from rich.console import Console
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -410,45 +412,33 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 return True
         return False
 
-    def _format_markdown(self, text: str, is_streaming: bool = False) -> Text:
-        """Format text with markdown to Rich Text.
+    def _format_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
+        """Format markdown text using Rich's Markdown renderer.
         
-        Uses Rich's Text.from_markup for inline markdown rendering.
-        Explicit style definitions for better visibility.
+        Renders full markdown: headers, lists, code blocks, quotes, etc.
+        Returns a Text object with proper formatting.
         """
-        # Convert markdown to Rich markup format with explicit styles
-        result = text
-        # **bold** -> bold white
-        result = re.sub(r'\*\*([^*]+)\*\*', r'[bold]\1[/bold]', result)
-        # *italic* -> italic
-        result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'[italic]\1[/italic]', result)
-        # `code` -> reverse video (stand out)
-        result = re.sub(r'`([^`]+)`', r'[reverse]\1[/reverse]', result)
-        # __bold__ -> bold
-        result = re.sub(r'__([^_]+)__', r'[bold]\1[/bold]', result)
-        # _italic_ -> italic
-        result = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'[italic]\1[/italic]', result)
+        # Convert escaped newlines to actual newlines
+        text = text.replace('\\n', '\n')
         
-        # Convert newlines to actual newlines for display
-        result = result.replace('\\n', '\n')
+        # Create a console to capture the markdown output
+        console = Console(width=width, force_terminal=True, color_system="truecolor")
         
-        # Add streaming indicator if message is still being streamed
+        # Render markdown using Rich's Markdown class
+        with console.capture() as capture:
+            console.print(Markdown(text))
+        
+        result = capture.get()
+        
+        # Add streaming indicator if needed
         if is_streaming:
-            result += " [blink]▍[/blink]"
+            result += "▍"
         
-        _dbg(f"_format_markdown: input={text[:40]!r} output={result[:60]!r}")
+        # Convert ANSI output to Text object
+        text_obj = Text.from_ansi(result)
         
-        try:
-            rendered = Text.from_markup(result)
-            _dbg(f"  -> spans={len(rendered.spans)}")
-            return rendered
-        except Exception as e:
-            _dbg(f"  -> markup failed: {e}")
-            # Fallback to plain text if markup parsing fails
-            t = Text(result)
-            if is_streaming:
-                t.append(" ▍", style="blink green")
-            return t
+        _dbg(f"_format_markdown: input {len(text)} chars, output {len(result)} chars, {len(text_obj.plain)} plain")
+        return text_obj
 
     def _format_message_body(self, text: str, mime_type: str = "", is_streaming: bool = False) -> Text:
         """Format message body with markdown/lite support.
@@ -508,6 +498,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         nick_len = len(sender) + 2  # ": "
         indent += nick_len
         
+        # Check if this is markdown - if so, render first then handle wrapping
+        is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
+        
+        if is_markdown:
+            # Render markdown first (creates multi-line output with formatting)
+            body = self._format_message_body(text, mime_type, is_streaming)
+            # For markdown, we assemble without width-based wrapping
+            # The markdown renderer already handles line breaks
+            parts.append(body)
+            return Text().assemble(*parts)
+        
         if width > 0:
             # Wrap text to width with indent
             lines = self._format_message_lines(text, indent, width)
@@ -518,6 +519,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 # Continuation lines need indent + URL processing
                 for cont_line in lines[1:]:
                     result.append(Text("\n"))
+                    # cont_line has indent baked in, preserve it
+                    indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip(), mime_type, is_streaming)
+                    result.append(indented)
+                return result
                     # cont_line has indent baked in, preserve it
                     indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip(), mime_type, is_streaming)
                     result.append(indented)
@@ -622,8 +627,37 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         time_text = Text(f" {time_str}", style="dim") if time_str else Text()
         
         if not self._avatars_enabled:
+            # Check for markdown - render as block without word wrapping
+            is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
+            if is_markdown:
+                body = self._format_message_body(text, mime_type, is_streaming)
+                # Split markdown by lines and create formatted output
+                result: list[Text] = []
+                if reply_indicator:
+                    result.append(reply_indicator)
+                    roots.append(reply_thread_root)
+                # First line: nick + first line of markdown
+                first_line = Text()
+                first_line.append_text(name)
+                first_line.append_text(time_text)
+                first_line.append(": ")
+                lines = body.plain.split('\n')
+                if lines:
+                    first_line.append_text(Text.from_ansi(lines[0]) if '\x1b[' in lines[0] else Text(lines[0]))
+                    result.append(first_line)
+                    roots.append(reply_thread_root)
+                    # Continuation lines indented
+                    for cont in lines[1:]:
+                        if cont.strip():
+                            cont_line = Text(" " * (len(sender) + 3))  # indent to align with text
+                            cont_line.append_text(Text.from_ansi(cont) if '\x1b[' in cont else Text(cont))
+                            result.append(cont_line)
+                            roots.append(reply_thread_root)
+                result[-1].append_text(reactions_text)
+                return result, roots
+            
             # No avatar: reply indicator, then nick timestamp: message on one line
-            result: list[Text] = []
+            result = []
             if reply_indicator:
                 result.append(reply_indicator)
                 roots.append(reply_thread_root)
@@ -899,8 +933,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Debug: Check if lines have markdown spans
         for i, line in enumerate(lines):
             if isinstance(line, Text) and line.spans:
-                _dbg(f"_prepend_lines[{i}]: {len(line.spans)} spans, plain={line.plain[:40]!r}")
-                for j, span in enumerate(line.spans[:2]):
+                _dbg(f"_prepend_lines[{i}]: {len(line.spans)} spans, plain={line.plain[:50]!r}")
+                # Show all spans
+                for j, span in enumerate(line.spans):
                     _dbg(f"  span[{j}]: {span.start}-{span.end} style={span.style}")
         self.messages[key] = list(lines) + self.messages[key]
         roots = thread_roots or [None] * len(lines)
