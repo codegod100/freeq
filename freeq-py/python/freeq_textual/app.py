@@ -1073,11 +1073,30 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 if msgid and msgid in self._reactions:
                     for r_sender, r_emoji in self._reactions[msgid]:
                         reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
-                msg_lines = self._format_message_lines(text, indent, width)
-                for i, msg_line in enumerate(msg_lines):
-                    renderable.append(msg_line)
-                    render_roots.append(None)
-                    render_msgids.append(msgid)
+                
+                # Check if this is markdown - handle it properly
+                is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
+                if is_markdown:
+                    # Render markdown and split into lines
+                    body = self._format_message_body(text, mime_type, is_streaming)
+                    body_lines = self._split_text_by_lines(body)
+                    for i, body_line in enumerate(body_lines):
+                        if not body_line.plain.strip():
+                            continue
+                        # Add indent to continuation lines
+                        line = Text(indent, no_wrap=False, overflow="fold")
+                        line.append_text(body_line)
+                        renderable.append(line)
+                        render_roots.append(None)
+                        render_msgids.append(msgid)
+                else:
+                    # Plain text - word wrap as before
+                    msg_lines = self._format_message_lines(text, indent, width)
+                    for i, msg_line in enumerate(msg_lines):
+                        renderable.append(msg_line)
+                        render_roots.append(None)
+                        render_msgids.append(msgid)
+                
                 # Append reactions to the last rendered line
                 if reactions_text and renderable:
                     last_line = renderable[-1]
