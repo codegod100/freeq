@@ -544,10 +544,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip(), mime_type, is_streaming)
                     result.append(indented)
                 return result
-                    # cont_line has indent baked in, preserve it
-                    indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip(), mime_type, is_streaming)
-                    result.append(indented)
-                return result
         
         parts.append(self._format_message_body(text, mime_type, is_streaming))
         return Text().assemble(*parts)
