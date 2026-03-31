@@ -456,11 +456,47 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Render markdown to Rich Text.
         
         Uses Rich's Markdown class with a theme matching the TUI dark theme.
+        Avoids bright red colors, uses cyan/blue/green instead.
         """
-        # Let Rich render the markdown to ANSI with a theme that matches our TUI
-        console = Console(width=width, force_terminal=True, color_system="truecolor")
+        from rich.theme import Theme
+        
+        # Custom theme that matches the TUI dark aesthetic
+        # No bright reds - uses cyan, blue, green, yellow
+        custom_theme = Theme({
+            'markdown.h1': 'bold bright_cyan',
+            'markdown.h1.border': 'bright_cyan',
+            'markdown.h2': 'bold cyan',
+            'markdown.h2.border': 'cyan',
+            'markdown.h3': 'bold blue',
+            'markdown.h3.border': 'blue',
+            'markdown.h4': 'bold bright_blue',
+            'markdown.h4.border': 'bright_blue',
+            'markdown.h5': 'bold green',
+            'markdown.h5.border': 'green',
+            'markdown.h6': 'bold bright_green',
+            'markdown.h6.border': 'bright_green',
+            'markdown.strong': 'bold white',
+            'markdown.emph': 'italic white',
+            'markdown.code': 'bright_yellow on black',
+            'markdown.pre': 'bright_yellow on black',
+            'markdown.link': 'underline bright_cyan',
+            'markdown.link_url': 'underline dim cyan',
+            'markdown.blockquote': 'dim italic',
+            'markdown.blockquote.border': 'dim blue',
+            'markdown.list': 'white',
+            'markdown.item': 'white',
+            'markdown.item.bullet': 'bright_cyan',
+            'markdown.item.number': 'bright_cyan',
+            'markdown.hr': 'dim blue',
+            'markdown.table': 'white',
+            'markdown.table.header': 'bold cyan',
+            'markdown.table.border': 'dim blue',
+        }, inherit=True)  # Inherit other default styles
+        
+        # Let Rich render the markdown to ANSI with custom theme
+        console = Console(width=width, force_terminal=True, color_system="truecolor", theme=custom_theme)
         with console.capture() as capture:
-            # Use github-dark theme for code blocks (matches TUI dark aesthetic)
+            # Use github-dark theme for code blocks
             console.print(Markdown(text, code_theme="github-dark"))
         result = capture.get()
         
