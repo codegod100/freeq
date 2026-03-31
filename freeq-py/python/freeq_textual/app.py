@@ -629,7 +629,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _split_text_by_lines(self, text: Text) -> list[Text]:
         """Split a Text object by newlines, preserving style spans in each line."""
+        _dbg(f"_split_text_by_lines: input has {len(text.spans)} spans, {text.plain.count(chr(10))} newlines")
+        
         if '\n' not in text.plain:
+            _dbg(f"  -> no newlines, returning as-is")
             return [text]
         
         lines: list[Text] = []
@@ -653,6 +656,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     line.spans.append(type(span)(new_start, new_end, span.style))
                 
                 lines.append(line)
+                _dbg(f"  -> line[{len(lines)-1}]: '{line_text[:40]!r}' with {len(line.spans)} spans")
                 current_start = i + 1
         
         # Handle last line (after final newline)
@@ -666,7 +670,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 new_end = min(span.end, len(text.plain)) - current_start
                 line.spans.append(type(span)(new_start, new_end, span.style))
             lines.append(line)
+            _dbg(f"  -> line[{len(lines)-1}] (last): '{line_text[:40]!r}' with {len(line.spans)} spans")
         
+        _dbg(f"  -> total lines: {len(lines)}")
         return lines
 
     def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None]]:
