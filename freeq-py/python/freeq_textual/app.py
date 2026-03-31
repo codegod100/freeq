@@ -918,6 +918,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self.client.join(self.initial_channel)
 
     def _refresh_sidebar(self) -> None:
+        """Refresh sidebar buffer list."""
+        # Guard: Don't run before mount. No try/except - hard fail for real bugs.
+        if not self.is_mounted:
+            return
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
         sidebar = self.query_one(BufferList)
         sidebar.update_buffers(ordered, self.active_buffer)
@@ -941,6 +945,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _refresh_layout_widths(self) -> None:
         """Refresh sidebar buffer list. Widths are handled by CSS percentages."""
+        # Guard: Don't run before mount. No try/except - hard fail for real bugs.
+        if not self.is_mounted:
+            return
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
         sidebar = self.query_one(BufferList)
         sidebar.update_buffers(ordered, self.active_buffer)
@@ -948,6 +955,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _refresh_user_list(self) -> None:
         """Refresh user list panel with current channel members."""
+        # Guard: Don't run before mount. No try/except - hard fail for real bugs.
+        if not self.is_mounted:
+            return
         user_list = self.query_one("#user-list", UserList)
         if self.active_buffer == "status":
             user_list.update_users("status", set(), set(), set())
@@ -1837,6 +1847,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         4. Write lines to RichLog, tracking thread roots and msgids per row
         5. Scroll to appropriate position (end/home/message/preserve)
         """
+        # Guard against being called before compose finishes.
+        # NOTE: No try/except - we want hard failures after mount for debugging.
+        if not self.is_mounted:
+            return
+        
         active_name = self._display_name(self.active_buffer)
         topic = self.channel_topics.get(self.active_buffer, "").strip()
         self.title = f"freeq - {active_name}" if not topic else f"freeq - {active_name} | {topic}"

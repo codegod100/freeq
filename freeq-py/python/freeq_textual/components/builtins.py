@@ -313,16 +313,11 @@ class UserList(AutoLogMixin, Vertical):
 
     def _refresh_display(self) -> None:
         """Refresh the user list display."""
-        # Guard against being called before compose() finishes
+        # Guard: Don't run before mount. No try/except - hard fail for real bugs.
         if not self.is_mounted:
             return
         
-        try:
-            content = self.query_one("#user-list-content", Static)
-        except Exception:
-            # Widget not found yet (compose not complete)
-            return
-        
+        content = self.query_one("#user-list-content", Static)
         if not self._members:
             content.update("(no users)")
             return
