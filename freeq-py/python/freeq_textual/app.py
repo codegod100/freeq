@@ -283,6 +283,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Defer initial render until compose fully completes
         self.call_later(self._render_active_buffer)
         composer.focus()
+        
+        # Restore channels from UI config (works for both auth and guest users)
+        self._restore_session_channels()
+        
         self.set_timer(0.01, self._start_client)
         self.set_interval(0.1, self._poll_events)
         self.set_interval(0.1, self._poll_avatar_updates)
@@ -294,6 +298,30 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._begin_auth(self.auth_handle)
         self._seed_self_avatar_handle()
         _dbg("App.on_mount() done")
+
+    def _restore_session_channels(self) -> None:
+        """Restore channels from UI config for rejoin on connect.
+        
+        Called during startup to set up pending_rejoin from saved channels.
+        Works for both authenticated and guest users.
+        """
+        # Get channels from UI config (works for all users)
+        channels = self.ui_config.get("channels", [])
+        if not channels:
+            # Fall back to session if available (auth users)
+            if self.cached_auth:
+                channels = self.cached_auth.get("channels", [])
+        
+        if channels:
+            self.pending_rejoin = set(channels)
+            self.restore_history_targets = {
+                self._buffer_key(channel)
+                for channel in self.pending_rejoin
+                if channel.startswith("#") or channel.startswith("&")
+            }
+            for channel in sorted(self.pending_rejoin):
+                self._ensure_buffer(channel)
+            _dbg(f"Restored {len(channels)} channels for rejoin: {channels}")
 
     def _check_loading_complete(self) -> None:
         """Check if initial loading is complete and remove loading overlay."""
@@ -2031,12 +2059,25 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.cached_auth = payload
 
     def _persist_session_channels(self) -> None:
-        if not self.cached_auth:
-            return
-        self._write_session({
-            **self.cached_auth,
-            "channels": self._session_channels(),
-        })
+        """Persist joined channels to session and UI config.
+        
+        Channels are saved to both locations:
+        - Session: for auth restore (only if authenticated)
+        - UI config: always saved, works for guest users too
+        """
+        channels = self._session_channels()
+        
+        # Always save to UI config (works for guest users)
+        if self.config_path:
+            self.ui_config["channels"] = channels
+            self._save_ui_config()
+        
+        # Also save to session if authenticated
+        if self.cached_auth:
+            self._write_session({
+                **self.cached_auth,
+                "channels": channels,
+            })
 
     def _clear_saved_session(self) -> None:
         self.cached_auth = None
