@@ -2523,6 +2523,19 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             # Convert literal \\n to actual newlines in message text
             text = event["text"].replace("\\n", "\n")
             tags = event.get("tags", {})
+            
+            # Check if this is an edit of an existing message
+            edit_of = tags.get("+draft/edit")
+            if edit_of and edit_of in self.message_index:
+                # This is an edit - update the message and re-render, don't append new line
+                buffer_name = self._message_buffer_name(target, sender)
+                _dbg(f"Edit received for {edit_of[:8]}, updating and re-rendering")
+                self._record_message(buffer_name, sender, text, tags)
+                # Trigger re-render to show updated message with diff colors
+                self._scroll_mode = "end" if self.active_buffer == self._buffer_key(buffer_name) else "preserve"
+                self._render_active_buffer()
+                return
+            
             # Debug: log all tags for reply messages
             reply_tag = tags.get("+draft/reply") or tags.get("+reply")
             if reply_tag:
