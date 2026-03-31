@@ -303,6 +303,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg("Loading complete - removing overlay")
             overlay = self.query_one("#loading-overlay", LoadingOverlay)
             overlay.remove()
+            # Restore last visited buffer now that channels are loaded
+            self._restore_last_buffer()
 
     def _update_loading_message(self, message: str) -> None:
         """Update the loading overlay message."""
@@ -1964,7 +1966,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _save_ui_config(self) -> None:
         if self.config_path is None:
             return
-        payload = {"theme": self.theme}
+        payload = {
+            "theme": self.theme,
+            "last_buffer": self.active_buffer,
+        }
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
         self.config_path.write_text(json.dumps(payload))
         self.ui_config = payload
@@ -1976,6 +1981,23 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def watch_theme(self, theme: str) -> None:
         if self._theme_ready:
             self._save_ui_config()
+
+    def watch_active_buffer(self, buffer: str) -> None:
+        """Save config when active buffer changes."""
+        if self._theme_ready:  # App is fully initialized
+            self._save_ui_config()
+
+    def _restore_last_buffer(self) -> None:
+        """Restore the last visited buffer from config, if it exists."""
+        last_buffer = self.ui_config.get("last_buffer", "")
+        if not last_buffer or last_buffer == "status":
+            return
+        key = self._buffer_key(last_buffer)
+        if key in self.messages:
+            _dbg(f"Restoring last buffer: {last_buffer}")
+            self.active_buffer = key
+        else:
+            _dbg(f"Last buffer {last_buffer} not available, staying on status")
 
     # ── Event handling ─────────────────────────────────────────────────────
 
