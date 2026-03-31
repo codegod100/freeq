@@ -735,11 +735,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
         if is_markdown:
             body = self._format_message_body(text, mime_type, is_streaming)
+            _dbg(f"_format_chat_block: markdown body has {len(body.plain)} chars, {body.plain.count(chr(10))} newlines, {len(body.spans)} spans")
             # Split markdown by lines preserving formatting
             body_lines = self._split_text_by_lines(body)
+            _dbg(f"  -> split into {len(body_lines)} lines")
             for i, body_line in enumerate(body_lines):
                 if not body_line.plain.strip():
                     continue  # Skip empty lines
+                _dbg(f"  -> line[{i}]: {len(body_line.plain)} chars, {len(body_line.spans)} spans")
                 if i == 0 and not reply_indicator:
                     # First line with avatar row 2
                     line = Text()
