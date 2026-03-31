@@ -69,11 +69,11 @@ except ImportError:  # pragma: no cover - dependency is optional outside the dev
     Pixels = None
 
 try:
-    from textual_image.render import render_image
+    from textual_image.renderable import Image as TextualImageRenderable
     TEXTUAL_IMAGE_AVAILABLE = True
 except ImportError:
     TEXTUAL_IMAGE_AVAILABLE = False
-    render_image = None
+    TextualImageRenderable = None
 
 # Image URL pattern
 _IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s]*)?', re.IGNORECASE)
@@ -252,7 +252,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._avatar_images: dict[str, object] = {}
         self._avatar_rows: dict[str, list[list[str]]] = {}
         self._pending_images: dict[str, tuple[str, str, int]] = {}  # msgid -> (url, buffer_name, line_index)
-        self._rendered_images: dict[str, Text] = {}  # msgid -> rendered image Text
+        self._rendered_images: dict[str, object] = {}  # msgid -> rendered image renderable
         self._pending_whois: set[str] = set()
         self._pending_avatar_fetches: set[str] = set()
         self._avatar_updates: SimpleQueue[tuple[str, list[str] | None, object | None]] = SimpleQueue()
@@ -1080,12 +1080,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 for i, img_url in enumerate(image_urls[:2]):  # Limit to first 2 images
                     # Check if we already have this image rendered
                     if msgid in self._rendered_images:
-                        # Use the pre-rendered image
-                        img_line = Text("     ", style="dim")  # 5-space indent
-                        img_line.append_text(self._rendered_images[msgid])
+                        # Use the pre-rendered image directly (not wrapped in Text)
+                        # The renderable from textual-image is a special type, not Text
+                        img_line = self._rendered_images[msgid]
                         lines.append(img_line)
                         roots.append(None)
-                        _dbg(f"Using cached image for {msgid[:8]}")
+                        _dbg(f"Using cached image for {msgid[:8]}: {type(img_line)}")
                     else:
                         # Start async image loading if not already pending
                         if msgid not in self._pending_images:
@@ -1153,12 +1153,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 _dbg(f"Resized to {img.size}")
                 
                 # Render using textual-image
-                if render_image is None:
-                    _dbg(f"render_image is None, textual-image not available!")
+                if TextualImageRenderable is None:
+                    _dbg(f"TextualImageRenderable is None, textual-image not available!")
                     return None
-                    
-                renderable = render_image(img)
-                _dbg(f"Rendered image for {msgid[:8]}: type={type(renderable)}")
+                
+                # Create the Rich renderable image (this outputs terminal graphics protocol sequences)
+                # For RichLog/ScrollableLog compatibility, we need to wrap it properly
+                renderable = TextualImageRenderable(img, width=img.width, height=img.height)
+                _dbg(f"Rendered image for {msgid[:8]}: type={type(renderable)}, size={img.size}")
                 
                 return renderable
                 
@@ -1167,7 +1169,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 import traceback
                 _dbg(f"Traceback: {traceback.format_exc()}")
                 # Return error text
-                error_text = Text(f"[Image failed to load: {str(e)[:30]}]", style="red dim")
+                error_text = Text(f"[Image failed: {str(e)[:30]}]", style="red dim")
                 return error_text
         
         async def load_worker():
