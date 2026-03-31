@@ -68,14 +68,7 @@ try:
 except ImportError:  # pragma: no cover - dependency is optional outside the dev shell
     Pixels = None
 
-try:
-    from textual_image.renderable import Image as TextualImageRenderable
-    TEXTUAL_IMAGE_AVAILABLE = True
-except ImportError:
-    TEXTUAL_IMAGE_AVAILABLE = False
-    TextualImageRenderable = None
-
-# Image URL pattern
+# Image URL pattern (defined early for use in the app)
 _IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s]*)?', re.IGNORECASE)
 
 
@@ -87,6 +80,16 @@ _IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(
 
 # Import the ONE TRUE _dbg from widgets/debug.py
 from .widgets.debug import _dbg  # noqa: E402 - must import after module setup
+
+# Import textual-image after _dbg is available for logging
+try:
+    from textual_image.renderable import Image as TextualImageRenderable
+    TEXTUAL_IMAGE_AVAILABLE = True
+    _dbg("textual-image import successful")
+except ImportError as e:
+    TEXTUAL_IMAGE_AVAILABLE = False
+    TextualImageRenderable = None
+    _dbg(f"textual-image import failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
