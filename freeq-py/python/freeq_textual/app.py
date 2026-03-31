@@ -418,16 +418,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """
         # Convert markdown to Rich markup format with explicit styles
         result = text
-        # **bold** -> bright white bold
-        result = re.sub(r'\*\*([^*]+)\*\*', r'[bold bright_white]\1[/bold bright_white]', result)
-        # *italic* -> italic cyan
-        result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'[italic cyan]\1[/italic cyan]', result)
-        # `code` -> bright magenta on dark background
-        result = re.sub(r'`([^`]+)`', r'[bright_magenta on grey15]\1[/bright_magenta on grey15]', result)
-        # __bold__ -> bright white bold
-        result = re.sub(r'__([^_]+)__', r'[bold bright_white]\1[/bold bright_white]', result)
-        # _italic_ -> italic cyan
-        result = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'[italic cyan]\1[/italic cyan]', result)
+        # **bold** -> bold white
+        result = re.sub(r'\*\*([^*]+)\*\*', r'[bold]\1[/bold]', result)
+        # *italic* -> italic
+        result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'[italic]\1[/italic]', result)
+        # `code` -> reverse video (stand out)
+        result = re.sub(r'`([^`]+)`', r'[reverse]\1[/reverse]', result)
+        # __bold__ -> bold
+        result = re.sub(r'__([^_]+)__', r'[bold]\1[/bold]', result)
+        # _italic_ -> italic
+        result = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'[italic]\1[/italic]', result)
         
         # Convert newlines to actual newlines for display
         result = result.replace('\\n', '\n')
@@ -436,9 +436,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if is_streaming:
             result += " [blink]▍[/blink]"
         
+        _dbg(f"_format_markdown: input={text[:40]!r} output={result[:60]!r}")
+        
         try:
-            return Text.from_markup(result)
-        except Exception:
+            rendered = Text.from_markup(result)
+            _dbg(f"  -> spans={len(rendered.spans)}")
+            return rendered
+        except Exception as e:
+            _dbg(f"  -> markup failed: {e}")
             # Fallback to plain text if markup parsing fails
             t = Text(result)
             if is_streaming:
