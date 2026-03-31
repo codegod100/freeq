@@ -779,6 +779,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             for r_sender, r_emoji in self._reactions[msgid]:
                 reactions_text.append(f" {self._ensure_emoji_presentation(r_emoji)}")
         
+        # Check if message has been edited and build edit diff
+        edit_diff_text = Text()
+        if msgid and msgid in self.message_index:
+            msg_state = self.message_index[msgid]
+            if msg_state.edit_history:
+                # Show diff from most recent edit
+                old_text = msg_state.edit_history[-1]
+                edit_diff_text = self._format_edit_diff(old_text, msg_state.text)
+        
         
         # Format timestamp as 12hr with date (e.g., "2:30pm 1/15")
         time_str = self._format_timestamp(timestamp)
@@ -911,6 +920,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines.append(self._make_avatar_text_line(rows[1], Text()))
             roots.append(None)
         
+        # Add edit diff as separate line if present (after message content)
+        if edit_diff_text.plain:
+            lines.append(self._make_avatar_text_line(rows[1], edit_diff_text))
+            roots.append(None)  # Edit diff line has no thread_root
         
         return lines, roots
 
@@ -1510,14 +1523,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 existing = self.message_index[edit_of]
                 # Store previous version for diff
                 existing.edit_history.append(existing.text)
-                old_text = existing.text
                 existing.text = text
                 existing.is_streaming = is_streaming
                 existing.mime_type = mime_type  # Update mime type on edit too
                 _dbg(f"Updated message {edit_of[:8]}: streaming={is_streaming}, edits={len(existing.edit_history)}")
-                # For non-streaming edits, add a diff line to show what changed
-                if not is_streaming:
-                    self._add_edit_diff(buffer_name, sender, old_text, text, edit_of, tags.get("time", ""))
             else:
                 # New message
                 self.message_index[msgid] = MessageState(
@@ -1543,12 +1552,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if thread_root and thread_root == self.open_thread_root:
             self._refresh_thread_panel()
 
-    def _add_edit_diff(self, buffer_name: str, sender: str, old_text: str, new_text: str, msgid: str, timestamp: str) -> None:
-        """Add a diff line showing what changed in an edited message.
-        
-        Shows removed text in red (strikethrough) and added text in green.
-        """
-        # Simple word-level diff
+    def _format_edit_diff(self, old_text: str, new_text: str) -> Text:
+        """Format an edit diff showing removed (red/strike) and added (green) text."""
         old_words = old_text.split()
         new_words = new_text.split()
         
@@ -1571,53 +1576,35 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         removed = old_words[prefix_len:len(old_words) - suffix_len] if suffix_len > 0 else old_words[prefix_len:]
         added = new_words[prefix_len:len(new_words) - suffix_len] if suffix_len > 0 else new_words[prefix_len:]
         
-        # Build diff line
-        diff_parts: list[Text | str] = []
+        # Build diff - no "edited" label, the red/green implies it
+        parts: list[Text | str] = []
         
-        # Edited indicator
-        diff_parts.append(Text("(edited) ", style="dim"))
-        
-        # Common prefix (dim)
         if prefix_len > 0:
             prefix = " ".join(old_words[:prefix_len])
             if len(prefix) > 20:
                 prefix = "..." + prefix[-17:]
-            diff_parts.append(Text(prefix + " ", style="dim"))
+            parts.append(Text(prefix + " ", style="dim"))
         
-        # Removed text (red strikethrough)
         if removed:
             removed_str = " ".join(removed)
             if len(removed_str) > 30:
                 removed_str = removed_str[:27] + "..."
-            diff_parts.append(Text(removed_str, style="red strike"))
-            diff_parts.append(" ")
+            parts.append(Text(removed_str, style="red strike"))
+            parts.append(" ")
         
-        # Added text (green)
         if added:
             added_str = " ".join(added)
             if len(added_str) > 30:
                 added_str = added_str[:27] + "..."
-            diff_parts.append(Text(added_str, style="green"))
+            parts.append(Text(added_str, style="green"))
         
-        # Common suffix (dim)
         if suffix_len > 0 and (removed or added):
             suffix = " ".join(old_words[len(old_words) - suffix_len:])
             if len(suffix) > 20:
                 suffix = suffix[:17] + "..."
-            diff_parts.append(Text(" " + suffix, style="dim"))
+            parts.append(Text(" " + suffix, style="dim"))
         
-        diff_line = Text().assemble(*diff_parts)
-        
-        # Add the diff line to the buffer
-        self._scroll_mode = "end" if self.active_buffer == self._buffer_key(buffer_name) else "preserve"
-        self._append_line(
-            buffer_name,
-            diff_line,
-            msgid=msgid,  # Link to the edited message
-            line_meta=None,  # Render as system line, not chat message
-            thread_root=None,
-        )
-        _dbg(f"Added edit diff for {msgid[:8]}: -{len(removed)} +{len(added)} words")
+        return Text().assemble(*parts)
 
     def _collect_thread_messages(self, thread_root: str) -> list[MessageState]:
         """Collect root + all replies for a thread, in order."""
