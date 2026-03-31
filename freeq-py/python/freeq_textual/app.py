@@ -211,6 +211,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.pending_rejoin: set[str] = set()
         self.batches: dict[str, BatchState] = {}
         self.channel_members: dict[str, set[str]] = defaultdict(set)
+        self.channel_ops: dict[str, set[str]] = defaultdict(set)  # Channel operators (+o)
+        self.channel_voice: dict[str, set[str]] = defaultdict(set)  # Voiced users (+v)
         self.channel_topics: dict[str, str] = {}
         self.message_index: dict[str, MessageState] = {}
         self._reactions: dict[str, list[tuple[str, str]]] = defaultdict(list)  # msgid -> [(sender, emoji), ...]
@@ -948,13 +950,15 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Refresh user list panel with current channel members."""
         user_list = self.query_one("#user-list", UserList)
         if self.active_buffer == "status":
-            user_list.update_users("status", set())
+            user_list.update_users("status", set(), set(), set())
         elif self.active_buffer in self.channel_members:
             members = self.channel_members[self.active_buffer]
+            ops = self.channel_ops.get(self.active_buffer, set())
+            voice = self.channel_voice.get(self.active_buffer, set())
             display_name = self._display_name(self.active_buffer)
-            user_list.update_users(display_name, members)
+            user_list.update_users(display_name, members, ops, voice)
         else:
-            user_list.update_users(self.active_buffer, set())
+            user_list.update_users(self.active_buffer, set(), set(), set())
 
     def _buffer_key(self, buffer_name: str) -> str:
         if buffer_name == "status":
@@ -2253,6 +2257,32 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         Text(f" left {channel}"),
                     ),
                 )
+            return
+        if event_type == "mode_changed":
+            channel = event.get("channel", "")
+            mode = event.get("mode", "")
+            arg = event.get("arg", "")
+            set_by = event.get("set_by", "")
+            key = self._buffer_key(channel)
+            
+            if mode == "+o" and arg:
+                self.channel_ops[key].add(self._nick_key(arg))
+                self._append_line(channel, self._format_system(f"{set_by} gave operator status to {arg}", "green"))
+                if self.active_buffer == key:
+                    self._refresh_user_list()
+            elif mode == "-o" and arg:
+                self.channel_ops[key].discard(self._nick_key(arg))
+                self._append_line(channel, self._format_system(f"{set_by} removed operator status from {arg}", "yellow"))
+                if self.active_buffer == key:
+                    self._refresh_user_list()
+            elif mode == "+v" and arg:
+                self.channel_voice[key].add(self._nick_key(arg))
+                if self.active_buffer == key:
+                    self._refresh_user_list()
+            elif mode == "-v" and arg:
+                self.channel_voice[key].discard(self._nick_key(arg))
+                if self.active_buffer == key:
+                    self._refresh_user_list()
             return
         if event_type == "message":
             target = event["target"]

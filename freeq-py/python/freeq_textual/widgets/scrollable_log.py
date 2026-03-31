@@ -134,6 +134,12 @@ class ScrollableLog(AutoLogMixin, RichLog):
             _dbg(f"ScrollableLog.write: DEFERRED location={location[:8] if location else 'None'}, thread_root={thread_root[:8] if thread_root else 'None'}, pending={len(self._pending_locations)}")
 
         before = len(self.lines)
+        
+        # Adjust width to account for scrollbar (1 char) and padding (1 left + 2 right = 3 total)
+        # This prevents content from being covered by the scrollbar gutter
+        if width is not None and self._size_known:
+            width = max(10, width - 3)
+        
         result = super().write(content, width=width, expand=expand, shrink=shrink, scroll_end=scroll_end)
         added = len(self.lines) - before
 
@@ -314,7 +320,7 @@ class ScrollableLog(AutoLogMixin, RichLog):
         overflow-y: auto;
         width: 1fr;
         min-width: 0;
-        padding: 0 1;
+        padding: 0 2 0 1;  /* top right bottom left - extra padding on right for scrollbar */
         scrollbar-gutter: stable;
         scrollbar-size: 1 1;
         scrollbar-background: $surface;

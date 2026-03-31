@@ -277,21 +277,38 @@ class UserList(AutoLogMixin, Vertical):
         padding: 1;
         border-bottom: solid $panel-lighten-2;
     }
+    
+    UserList .user-op {
+        color: $success;
+        font-weight: bold;
+    }
+    
+    UserList .user-voice {
+        color: $warning;
+    }
+    
+    UserList .user-regular {
+        color: $text;
+    }
     """
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._members: set[str] = set()
+        self._ops: set[str] = set()
+        self._voice: set[str] = set()
         self._channel: str = ""
 
     def compose(self):
         yield Static("Users", classes="user-list-header")
         yield Static("", id="user-list-content")
 
-    def update_users(self, channel: str, members: set[str]) -> None:
+    def update_users(self, channel: str, members: set[str], ops: set[str] = None, voice: set[str] = None) -> None:
         """Update the user list for a channel."""
         self._channel = channel
         self._members = members
+        self._ops = ops or set()
+        self._voice = voice or set()
         self._refresh_display()
 
     def _refresh_display(self) -> None:
@@ -301,7 +318,26 @@ class UserList(AutoLogMixin, Vertical):
             content.update("(no users)")
             return
         
-        # Sort users: regular users first, then sorted alphabetically
-        sorted_users = sorted(self._members, key=lambda n: n.lower())
-        lines = [f"• {nick}" for nick in sorted_users]
+        # Sort users: ops first, then voice, then regular, each alphabetically
+        def sort_key(nick):
+            nick_key = nick.lstrip("@+").lower()
+            is_op = nick_key in self._ops
+            is_voice = nick_key in self._voice
+            # Sort: ops first (0), then voice (1), then regular (2)
+            priority = 0 if is_op else (1 if is_voice else 2)
+            return (priority, nick.lower())
+        
+        sorted_users = sorted(self._members, key=sort_key)
+        
+        # Format with prefix and color classes
+        lines = []
+        for nick in sorted_users:
+            nick_key = nick.lstrip("@+").lower()
+            if nick_key in self._ops:
+                lines.append(f"[@] {nick}")  # Operator
+            elif nick_key in self._voice:
+                lines.append(f"[+] {nick}")  # Voice
+            else:
+                lines.append(f"    {nick}")  # Regular (4 spaces to align)
+        
         content.update("\n".join(lines))
