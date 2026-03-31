@@ -45,6 +45,7 @@ ContextMenu = get_component('context_menu')
 EmojiPicker = get_component('emoji_picker')
 ThreadPanel = get_component('thread_panel')
 BufferList = get_component('buffer_list')
+UserList = get_component('user_list')
 ScrollableLog = get_component('scrollable_log')
 MessagesPanel = get_component('messages_panel')
 MessagesPanelWithThread = get_component('messages_panel_with_thread')
@@ -247,6 +248,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
             yield MessagesPanel()
+            yield UserList(id="user-list")
         yield Input(
             placeholder="Type a message or /join /channel",
             id="composer",
@@ -730,6 +732,19 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
         sidebar = self.query_one(BufferList)
         sidebar.update_buffers(ordered, self.active_buffer)
+        self._refresh_user_list()
+
+    def _refresh_user_list(self) -> None:
+        """Refresh user list panel with current channel members."""
+        user_list = self.query_one("#user-list", UserList)
+        if self.active_buffer == "status":
+            user_list.update_users("status", set())
+        elif self.active_buffer in self.channel_members:
+            members = self.channel_members[self.active_buffer]
+            display_name = self._display_name(self.active_buffer)
+            user_list.update_users(display_name, members)
+        else:
+            user_list.update_users(self.active_buffer, set())
 
     def _buffer_key(self, buffer_name: str) -> str:
         if buffer_name == "status":
@@ -1813,6 +1828,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             members = self.channel_members[key]
             members.clear()
             members.update(self._nick_key(nick) for nick in event.get("nicks", []))
+            self._refresh_user_list()
             return
         if event_type == "joined":
             channel = event["channel"]
@@ -1829,6 +1845,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     self._scroll_mode = "end"
                 self._persist_session_channels()
                 self._refresh_sidebar()  # Show new channel in sidebar
+                self._refresh_user_list()  # Show user list for new channel
             elif not already_present:
                 self._scroll_mode = "end" if self.active_buffer == key else "preserve"
                 self._append_line(
@@ -1839,6 +1856,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         Text(f" joined {channel}"),
                     ),
                 )
+                if self.active_buffer == key:
+                    self._refresh_user_list()  # Update user list for current channel
             return
         if event_type == "batch_start":
             batch_id = event["id"]
@@ -1925,10 +1944,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             channel = event["channel"]
             key = self._buffer_key(channel)
             self.channel_members[key].discard(self._nick_key(event["nick"]))
+            if self.active_buffer == key:
+                self._refresh_user_list()  # Update user list after part
             if event["nick"].casefold() == self.client.nick.casefold():
                 if self.active_buffer == key:
                     self.active_buffer = "status"
                     self._scroll_mode = "end"
+                    self._refresh_user_list()  # Clear user list when leaving channel
                 self.restore_history_targets.discard(key)
                 self._persist_session_channels()
             else:

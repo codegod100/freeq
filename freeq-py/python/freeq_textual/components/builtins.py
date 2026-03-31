@@ -242,3 +242,74 @@ class ContextMenu(AutoLogMixin, Vertical):
         """Handle ESC key to close menu."""
         if hasattr(event, 'key') and event.key == 'escape':
             self.remove()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USER LIST - Default implementation  
+# ─────────────────────────────────────────────────────────────────────────────
+
+@ComponentRegistry.register('user_list')
+class UserList(AutoLogMixin, Vertical):
+    """User list panel showing channel members.
+    
+    DO NOT DELETE. This is the default implementation.
+    If it looks broken, create a replacement and register it.
+    """
+    
+    DEFAULT_CSS = """
+    UserList {
+        width: 15%;
+        min-width: 12;
+        max-width: 24;
+        height: 1fr;
+        border: solid $panel-lighten-2;
+        background: $surface;
+    }
+    
+    UserList Static {
+        color: $text;
+        padding: 0 1;
+    }
+    
+    UserList .user-list-header {
+        color: $primary;
+        text-align: center;
+        padding: 1;
+        border-bottom: solid $panel-lighten-2;
+    }
+    
+    UserList .user-item {
+        padding: 0 1;
+    }
+    
+    UserList .user-item:hover {
+        background: $primary 10%;
+    }
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._members: set[str] = set()
+        self._channel: str = ""
+
+    def compose(self):
+        yield Static("Users", classes="user-list-header")
+        yield Static("", id="user-list-content")
+
+    def update_users(self, channel: str, members: set[str]) -> None:
+        """Update the user list for a channel."""
+        self._channel = channel
+        self._members = members
+        self._refresh_display()
+
+    def _refresh_display(self) -> None:
+        """Refresh the user list display."""
+        content = self.query_one("#user-list-content", Static)
+        if not self._members:
+            content.update("(no users)")
+            return
+        
+        # Sort users: regular users first, then sorted alphabetically
+        sorted_users = sorted(self._members, key=lambda n: n.lower())
+        lines = [f"• {nick}" for nick in sorted_users]
+        content.update("\n".join(lines))
