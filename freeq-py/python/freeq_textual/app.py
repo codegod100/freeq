@@ -1614,7 +1614,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             buffer_name,
             diff_line,
             msgid=msgid,  # Link to the edited message
-            line_meta=(sender, "(edit diff)", timestamp),
+            line_meta=None,  # Render as system line, not chat message
             thread_root=None,
         )
         _dbg(f"Added edit diff for {msgid[:8]}: -{len(removed)} +{len(added)} words")
