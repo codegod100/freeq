@@ -412,57 +412,55 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 return True
         return False
 
-    def _format_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
-        """Format markdown text using Rich's Markdown renderer.
-        
-        Renders full markdown: headers, lists, code blocks, quotes, etc.
-        Returns a Text object with proper formatting.
-        """
-        # Convert escaped newlines to actual newlines
+    # ==========================================================================
+    # TEXT RENDERING FRAMEWORK
+    # ==========================================================================
+    # Pipeline: source -> preprocess -> detect -> render
+    #
+    # 1. SOURCE: Extract raw text from IRC (with \n escapes, etc.)
+    # 2. PREPROCESS: Clean text (unescape newlines, normalize whitespace)
+    # 3. DETECT: Determine content type (markdown, plain, code, etc.)
+    # 4. RENDER: Format as Rich Text with appropriate styling
+    # ==========================================================================
+
+    def _source_text(self, raw: str) -> str:
+        """Stage 1: Source raw text from IRC."""
+        return raw
+
+    def _preprocess_text(self, text: str) -> str:
+        """Stage 2: Preprocess - unescape newlines, normalize."""
+        # Convert literal \n to actual newlines
         text = text.replace('\\n', '\n')
-        
-        # Create a console to capture the markdown output
+        # Strip trailing whitespace but preserve internal newlines
+        return text.rstrip()
+
+    def _detect_content_type(self, text: str, mime_type: str = "") -> str:
+        """Stage 3: Detect content type. Returns: 'markdown', 'plain', 'code'."""
+        if mime_type == "text/markdown":
+            return "markdown"
+        if self._looks_like_markdown(text):
+            return "markdown"
+        return "plain"
+
+    def _render_content(self, text: str, content_type: str, is_streaming: bool = False, width: int = 80) -> Text:
+        """Stage 4: Render content based on type."""
+        if content_type == "markdown":
+            return self._render_markdown(text, is_streaming, width)
+        # Plain text with URL linking
+        return self._render_plain(text)
+
+    def _render_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
+        """Render markdown to Rich Text."""
         console = Console(width=width, force_terminal=True, color_system="truecolor")
-        
-        # Render markdown using Rich's Markdown class
         with console.capture() as capture:
             console.print(Markdown(text))
-        
         result = capture.get()
-        
-        # Add streaming indicator if needed
         if is_streaming:
             result += "▍"
-        
-        # Convert ANSI output to Text object
-        text_obj = Text.from_ansi(result)
-        
-        _dbg(f"_format_markdown: input {len(text)} chars, output {len(result)} chars, {len(text_obj.plain)} plain")
-        return text_obj
+        return Text.from_ansi(result)
 
-    def _format_message_body(self, text: str, mime_type: str = "", is_streaming: bool = False) -> Text:
-        """Format message body with markdown/lite support.
-        
-        Args:
-            text: Message text
-            mime_type: If 'text/markdown', use full markdown rendering
-            is_streaming: If True, message is still being streamed (for visual indicator)
-        """
-        # Full markdown mode: explicit mime type from sender
-        if mime_type == "text/markdown":
-            return self._format_markdown(text, is_streaming)
-        
-        # Markdown-lite: auto-detect patterns
-        is_markdown = self._looks_like_markdown(text)
-        _dbg(f"_format_message_body: auto-markdown={is_markdown}, mime={mime_type}, text={text[:50]!r}")
-        if is_markdown:
-            result = self._format_markdown(text, is_streaming)
-            _dbg(f"  -> returning markdown with {len(result.spans)} spans")
-            for i, span in enumerate(result.spans):
-                _dbg(f"     span[{i}]: {span.start}-{span.end} style={span.style}")
-            return result
-        
-        # Original URL-linking logic for plain text
+    def _render_plain(self, text: str) -> Text:
+        """Render plain text with URL linking."""
         body = Text(no_wrap=False, overflow="fold")
         last_end = 0
         for match in _URL_RE.finditer(text):
@@ -476,6 +474,29 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if last_end < len(text):
             body.append(text[last_end:])
         return body
+
+    def _format_message_pipeline(self, raw_text: str, mime_type: str = "", is_streaming: bool = False, width: int = 80) -> Text:
+        """Full pipeline: source -> preprocess -> detect -> render."""
+        # Stage 1 & 2: Source and preprocess
+        text = self._preprocess_text(raw_text)
+        
+        # Stage 3: Detect
+        content_type = self._detect_content_type(text, mime_type)
+        _dbg(f"pipeline: raw={len(raw_text)} chars, preprocessed={len(text)} chars, type={content_type}")
+        
+        # Stage 4: Render
+        rendered = self._render_content(text, content_type, is_streaming, width)
+        _dbg(f"  -> rendered {len(rendered.plain)} chars, {len(rendered.spans)} spans")
+        return rendered
+
+    # Legacy methods (deprecated, use pipeline)
+    def _format_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
+        """Deprecated: Use _render_markdown."""
+        return self._render_markdown(text, is_streaming, width)
+
+    def _format_message_body(self, text: str, mime_type: str = "", is_streaming: bool = False) -> Text:
+        """Deprecated: Use _format_message_pipeline."""
+        return self._format_message_pipeline(text, mime_type, is_streaming)
 
     def _format_message(self, sender: str, text: str, width: int = 0, *, mime_type: str = "", is_streaming: bool = False) -> Text:
         """A chat message: `<nick>: <text>` with colored nick, optionally wrapped to width.
