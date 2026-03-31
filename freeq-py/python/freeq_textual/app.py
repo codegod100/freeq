@@ -455,12 +455,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _render_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
         """Render markdown to Rich Text.
         
-        Uses Rich's Markdown class and preserves formatting across line breaks.
+        Uses Rich's Markdown class with a theme matching the TUI dark theme.
         """
-        # Let Rich render the markdown to ANSI
+        # Let Rich render the markdown to ANSI with a theme that matches our TUI
         console = Console(width=width, force_terminal=True, color_system="truecolor")
         with console.capture() as capture:
-            console.print(Markdown(text))
+            # Use github-dark theme for code blocks (matches TUI dark aesthetic)
+            console.print(Markdown(text, code_theme="github-dark"))
         result = capture.get()
         
         # Convert full ANSI output to Text (this preserves all formatting)
