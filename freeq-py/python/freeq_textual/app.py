@@ -877,6 +877,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._line_threads[key].append(thread_root or None)
         self._line_msgids[key].append(msgid or None)
         self._line_message_meta[key].append(line_meta)
+        # Log the actual rendered output for debugging
+        _dbg(f"_append_line: plain={rich.plain[:60]!r} spans={len(rich.spans)}")
+        for i, span in enumerate(rich.spans[:3]):
+            _dbg(f"  span[{i}]: {span.start}-{span.end} style={span.style}")
 
     def _prepend_lines(
         self,
