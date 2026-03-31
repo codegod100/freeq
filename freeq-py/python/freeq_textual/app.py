@@ -453,33 +453,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _render_markdown(self, text: str, is_streaming: bool = False, width: int = 80) -> Text:
         """Render markdown to Rich Text.
         
-        Uses Rich's Markdown class but ensures proper line breaks are preserved.
+        Uses Rich's Markdown class and preserves formatting across line breaks.
         """
-        # First, let Rich render the markdown
+        # Let Rich render the markdown to ANSI
         console = Console(width=width, force_terminal=True, color_system="truecolor")
         with console.capture() as capture:
             console.print(Markdown(text))
         result = capture.get()
         
-        # Split by newlines and create Text segments for each line
-        lines = result.split('\n')
-        if not lines:
-            return Text(text)
-        
-        # Convert each line from ANSI to Text and combine
-        combined = Text()
-        for i, line in enumerate(lines):
-            if i > 0:
-                combined.append('\n')
-            if line.strip():  # Only process non-empty lines
-                line_text = Text.from_ansi(line.rstrip())  # Remove trailing padding
-                combined.append_text(line_text)
+        # Convert full ANSI output to Text (this preserves all formatting)
+        full_text = Text.from_ansi(result)
         
         if is_streaming:
-            combined.append("▍")
+            full_text.append("▍")
         
-        _dbg(f"_render_markdown: input lines={text.count(chr(10))}, output lines={len(lines)}, spans={len(combined.spans)}")
-        return combined
+        _dbg(f"_render_markdown: input lines={text.count(chr(10))}, output={len(full_text.plain)} chars, {len(full_text.spans)} spans")
+        return full_text
 
     def _render_plain(self, text: str) -> Text:
         """Render plain text with URL linking."""
