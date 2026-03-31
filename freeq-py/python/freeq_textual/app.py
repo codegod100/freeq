@@ -81,15 +81,24 @@ _IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(
 # Import the ONE TRUE _dbg from widgets/debug.py
 from .widgets.debug import _dbg  # noqa: E402 - must import after module setup
 
-# Import textual-image after _dbg is available for logging
-try:
-    from textual_image.renderable import Image as TextualImageRenderable
-    TEXTUAL_IMAGE_AVAILABLE = True
-    _dbg("textual-image import successful")
-except ImportError as e:
-    TEXTUAL_IMAGE_AVAILABLE = False
-    TextualImageRenderable = None
-    _dbg(f"textual-image import failed: {e}")
+# Import textual-image lazily at runtime to avoid module-level issues
+def _ensure_textual_image():
+    """Lazy import of textual-image to avoid build-time issues."""
+    global TEXTUAL_IMAGE_AVAILABLE, TextualImageRenderable
+    if TEXTUAL_IMAGE_AVAILABLE is None:
+        try:
+            from textual_image.renderable import Image as TextualImageRenderable
+            TEXTUAL_IMAGE_AVAILABLE = True
+            _dbg("textual-image lazy import successful")
+        except ImportError as e:
+            TEXTUAL_IMAGE_AVAILABLE = False
+            TextualImageRenderable = None
+            _dbg(f"textual-image lazy import failed: {e}")
+    return TEXTUAL_IMAGE_AVAILABLE
+
+# Initialize as None, will be set on first use
+TEXTUAL_IMAGE_AVAILABLE = None
+TextualImageRenderable = None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -281,6 +290,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def on_mount(self) -> None:
         _dbg("App.on_mount()")
+        # Check textual-image availability at runtime
+        _dbg(f"TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, TextualImageRenderable={TextualImageRenderable is not None}")
         self.theme = self.ui_config.get("theme", self.theme)
         self._theme_ready = True
         self._avatars_enabled = True  # Always use avatars (was: self._detect_avatar_support())
@@ -1074,6 +1085,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             roots.append(None)
         
         # Check for image URLs and add image previews
+        _ensure_textual_image()
         _dbg(f"Checking images: TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, current_text={bool(current_text)}, msgid={bool(msgid)}")
         if TEXTUAL_IMAGE_AVAILABLE and current_text and msgid:
             image_urls = self._extract_image_urls(current_text)
