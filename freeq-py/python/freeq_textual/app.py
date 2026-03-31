@@ -280,7 +280,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._append_status("avatars: rich-pixels unavailable, using tile fallback", "yellow")
         self._append_status(f"connecting to {self.client.server_addr}...", "dim")
         self._scroll_mode = "end"
-        self._render_active_buffer()
+        # Defer initial render until compose fully completes
+        self.call_later(self._render_active_buffer)
         composer.focus()
         self.set_timer(0.01, self._start_client)
         self.set_interval(0.1, self._poll_events)
@@ -1848,14 +1849,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         5. Scroll to appropriate position (end/home/message/preserve)
         """
         # Guard: Screen must exist and be mounted.
-        # NOTE: We use a specific existence check for #messages because of a known
-        # race condition during startup (called from on_mount before compose finishes).
-        # This is the ONLY place we catch widget query failures - real bugs elsewhere
-        # should still crash hard as requested.
         if not self.screen or not self.screen.is_mounted:
             return
         
-        # Check if #messages exists yet (race condition during startup)
+        # Guard: #messages must exist (compose must have finished for MessagesPanel).
+        # This is only needed during startup - once app is running, #messages always exists.
         if not self.screen.query("#messages"):
             return
         
