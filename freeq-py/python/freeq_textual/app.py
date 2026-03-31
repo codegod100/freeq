@@ -466,7 +466,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         is_markdown = self._looks_like_markdown(text)
         _dbg(f"_format_message_body: auto-markdown={is_markdown}, mime={mime_type}, text={text[:50]!r}")
         if is_markdown:
-            return self._format_markdown(text, is_streaming)
+            result = self._format_markdown(text, is_streaming)
+            _dbg(f"  -> returning markdown with {len(result.spans)} spans")
+            for i, span in enumerate(result.spans):
+                _dbg(f"     span[{i}]: {span.start}-{span.end} style={span.style}")
+            return result
         
         # Original URL-linking logic for plain text
         body = Text(no_wrap=False, overflow="fold")
@@ -892,6 +896,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         line_metas: list[tuple[str, str, str] | None] | None = None,
     ) -> None:
         key = self._ensure_buffer(buffer_name)
+        # Debug: Check if lines have markdown spans
+        for i, line in enumerate(lines):
+            if isinstance(line, Text) and line.spans:
+                _dbg(f"_prepend_lines[{i}]: {len(line.spans)} spans, plain={line.plain[:40]!r}")
+                for j, span in enumerate(line.spans[:2]):
+                    _dbg(f"  span[{j}]: {span.start}-{span.end} style={span.style}")
         self.messages[key] = list(lines) + self.messages[key]
         roots = thread_roots or [None] * len(lines)
         self._line_threads[key] = list(roots) + self._line_threads[key]
