@@ -277,19 +277,6 @@ class UserList(AutoLogMixin, Vertical):
         padding: 1;
         border-bottom: solid $panel-lighten-2;
     }
-    
-    UserList .user-op {
-        color: $success;
-        font-weight: bold;
-    }
-    
-    UserList .user-voice {
-        color: $warning;
-    }
-    
-    UserList .user-regular {
-        color: $text;
-    }
     """
 
     def __init__(self, **kwargs) -> None:
