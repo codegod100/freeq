@@ -2231,6 +2231,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         self._scroll_mode = "end"
         self._render_active_buffer()
+        self._refresh_user_list()  # Update user list for new channel
         self.query_one("#composer", Input).focus()
 
     def _session_channels(self) -> list[str]:
