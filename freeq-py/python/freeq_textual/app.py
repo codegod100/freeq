@@ -2016,6 +2016,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if key in self.messages:
             _dbg(f"Restoring last buffer: {last_buffer}")
             self.active_buffer = key
+            self._scroll_mode = "end"
+            self._render_active_buffer()
+            self._refresh_sidebar()
+            self._refresh_user_list()
         else:
             _dbg(f"Last buffer {last_buffer} not available, staying on status")
 
