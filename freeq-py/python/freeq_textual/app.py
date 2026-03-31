@@ -677,22 +677,40 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return lines
 
     def _format_message_lines(self, text: str, indent: int, width: int) -> list[Text]:
-        """Wrap message text to width, each line prefixed with indent spaces."""
+        """Wrap message text to width, each line prefixed with indent spaces.
+        
+        Handles word wrapping manually to ensure proper indentation on all lines,
+        including continuation lines when long words need to break.
+        """
         available = max(20, width - indent)
         words = text.split()
         lines: list[Text] = []
         current = ""
+        
         for word in words:
             test = f"{current} {word}".strip()
             if len(test) <= available:
                 current = test
             else:
                 if current:
-                    # Each line needs no_wrap=False + overflow="fold" so single long words wrap
-                    lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
-                current = word
+                    # Flush current line with proper indent
+                    lines.append(Text(" " * indent + current))
+                # Check if the word itself is too long for available space
+                if len(word) > available:
+                    # Break long word into chunks that fit
+                    chunk_start = 0
+                    while chunk_start < len(word):
+                        chunk = word[chunk_start:chunk_start + available]
+                        lines.append(Text(" " * indent + chunk))
+                        chunk_start += available
+                    current = ""
+                else:
+                    current = word
+        
+        # Flush remaining text
         if current:
-            lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
+            lines.append(Text(" " * indent + current))
+        
         return lines
 
     def _split_text_by_lines(self, text: Text) -> list[Text]:
@@ -812,10 +830,32 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     lines.append(line)
                 else:
                     # Continuation lines with indent
-                    line = Text(indent, no_wrap=False, overflow="fold")
-                    line.append_text(body_line)
-                    lines.append(line)
-                roots.append(reply_thread_root)
+                    # Use the raw text length for width check
+                    plain = body_line.plain
+                    if len(plain) > text_avail:
+                        # Break long line into chunks with proper indent
+                        chunk_start = 0
+                        while chunk_start < len(plain):
+                            chunk_text = plain[chunk_start:chunk_start + text_avail]
+                            line = Text(indent)
+                            chunk_line = Text(chunk_text)
+                            # Copy spans that overlap with this chunk
+                            chunk_len = len(chunk_text)
+                            for span in body_line.spans:
+                                span_start = max(span.start, chunk_start) - chunk_start
+                                span_end = min(span.end, chunk_start + chunk_len) - chunk_start
+                                if span_start < chunk_len and span_end > 0:
+                                    chunk_line.spans.append(type(span)(max(0, span_start), min(chunk_len, span_end), span.style))
+                            line.append_text(chunk_line)
+                            lines.append(line)
+                            roots.append(reply_thread_root)
+                            chunk_start += text_avail
+                    else:
+                        line = Text(indent)
+                        line.append_text(body_line)
+                        lines.append(line)
+                        roots.append(reply_thread_root)
+                    continue  # Skip the default roots.append below
             # Add reactions to last line
             if lines:
                 lines[-1].append_text(reactions_text)
@@ -837,7 +877,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     if line_num == 0 and not reply_indicator:
                         lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming)))
                     else:
-                        cont = Text(indent, no_wrap=False, overflow="fold")
+                        cont = Text(indent)
                         cont.append_text(self._format_message_body(current, mime_type, is_streaming))
                         lines.append(cont)
                     # Message line gets thread_root for replies (larger click target)
@@ -853,7 +893,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 last_line.append_text(reactions_text)  # Add reactions to last line
                 lines.append(last_line)
             else:
-                cont = Text(indent, no_wrap=False, overflow="fold")
+                cont = Text(indent)
                 cont.append_text(self._format_message_body(current, mime_type, is_streaming))
                 cont.append_text(reactions_text)  # Add reactions to last line
                 lines.append(cont)
@@ -1163,12 +1203,36 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     for i, body_line in enumerate(body_lines):
                         if not body_line.plain.strip():
                             continue
-                        # Add indent to continuation lines
-                        line = Text(" " * indent, no_wrap=False, overflow="fold")
-                        line.append_text(body_line)
-                        renderable.append(line)
-                        render_roots.append(None)
-                        render_msgids.append(msgid)
+                        # Add indent and handle long lines that need wrapping
+                        plain = body_line.plain
+                        available = max(20, width - indent)
+                        if len(plain) > available:
+                            # Break long line into chunks with proper indent
+                            chunk_start = 0
+                            while chunk_start < len(plain):
+                                chunk_text = plain[chunk_start:chunk_start + available]
+                                # Create new Text with chunk, preserving original styling
+                                chunk_len = len(chunk_text)
+                                line = Text(" " * indent)
+                                chunk_line = Text(chunk_text)
+                                # Copy spans that overlap with this chunk
+                                for span in body_line.spans:
+                                    span_start = max(span.start, chunk_start) - chunk_start
+                                    span_end = min(span.end, chunk_start + chunk_len) - chunk_start
+                                    if span_start < chunk_len and span_end > 0:
+                                        chunk_line.spans.append(type(span)(max(0, span_start), min(chunk_len, span_end), span.style))
+                                line.append_text(chunk_line)
+                                renderable.append(line)
+                                render_roots.append(None)
+                                render_msgids.append(msgid)
+                                chunk_start += available
+                        else:
+                            # Short line - just add indent
+                            line = Text(" " * indent)
+                            line.append_text(body_line)
+                            renderable.append(line)
+                            render_roots.append(None)
+                            render_msgids.append(msgid)
                 else:
                     # Plain text - word wrap as before
                     msg_lines = self._format_message_lines(text, indent, width)
