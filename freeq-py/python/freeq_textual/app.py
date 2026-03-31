@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -250,6 +251,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._avatar_palettes: dict[str, list[str]] = {}
         self._avatar_images: dict[str, object] = {}
         self._avatar_rows: dict[str, list[list[str]]] = {}
+        self._pending_images: dict[str, tuple[str, str, int]] = {}  # msgid -> (url, buffer_name, line_index)
+        self._rendered_images: dict[str, Text] = {}  # msgid -> rendered image Text
         self._pending_whois: set[str] = set()
         self._pending_avatar_fetches: set[str] = set()
         self._avatar_updates: SimpleQueue[tuple[str, list[str] | None, object | None]] = SimpleQueue()
@@ -1068,20 +1071,95 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             roots.append(None)
         
         # Check for image URLs and add image previews
-        if TEXTUAL_IMAGE_AVAILABLE and current_text:
+        if TEXTUAL_IMAGE_AVAILABLE and current_text and msgid:
             image_urls = self._extract_image_urls(current_text)
             if image_urls:
-                _dbg(f"Found {len(image_urls)} image URLs in message")
-                for img_url in image_urls[:2]:  # Limit to first 2 images
-                    # For now, just show a placeholder line indicating an image
-                    # Full rendering requires async download which would block the UI
-                    img_line = Text("     🖼️ ", style="dim")  # 5-space indent + icon
-                    img_name = os.path.basename(img_url.split("?")[0])[:25]
-                    img_line.append(f"[Image: {img_name}]", style=f"dim cyan link {img_url}")
-                    lines.append(img_line)
-                    roots.append(None)
+                _dbg(f"Found {len(image_urls)} image URLs in message {msgid[:8]}")
+                for i, img_url in enumerate(image_urls[:2]):  # Limit to first 2 images
+                    # Check if we already have this image rendered
+                    if msgid in self._rendered_images:
+                        # Use the pre-rendered image
+                        img_line = Text("     ", style="dim")  # 5-space indent
+                        img_line.append_text(self._rendered_images[msgid])
+                        lines.append(img_line)
+                        roots.append(None)
+                    else:
+                        # Start async image loading if not already pending
+                        if msgid not in self._pending_images:
+                            self._pending_images[msgid] = (img_url, buffer_key, len(lines))
+                            _dbg(f"Starting async image load for {msgid[:8]}: {img_url[:50]}")
+                            self._load_image_async(msgid, img_url, buffer_key)
+                        
+                        # Show placeholder while loading
+                        img_line = Text("     🖼️ ", style="dim")
+                        img_name = os.path.basename(img_url.split("?")[0])[:25]
+                        img_line.append(f"[Loading: {img_name}]", style=f"dim cyan link {img_url}")
+                        lines.append(img_line)
+                        roots.append(None)
         
         return lines, roots
+
+    def _load_image_async(self, msgid: str, url: str, buffer_key: str) -> None:
+        """Load and render an image asynchronously using Textual workers."""
+        async def download_and_render() -> Text | None:
+            try:
+                import urllib.request
+                import urllib.error
+                
+                req = urllib.request.Request(
+                    url,
+                    headers={'User-Agent': 'Mozilla/5.0 (compatible; FreeQ-Chat/1.0)'}
+                )
+                
+                # Run the download in a thread to not block
+                loop = asyncio.get_event_loop()
+                image_data = await loop.run_in_executor(
+                    None,  # Default executor
+                    lambda: urllib.request.urlopen(req, timeout=10).read()
+                )
+                
+                # Open with PIL
+                if Image is None:
+                    return None
+                    
+                img = Image.open(BytesIO(image_data))
+                
+                # Convert to RGB if necessary
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB')
+                
+                # Calculate dimensions (max 60 chars wide, 15 lines tall)
+                max_width = 60
+                max_height = 15
+                
+                # Resize maintaining aspect ratio
+                img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+                
+                # Render using textual-image
+                renderable = render_image(img)
+                
+                return renderable
+                
+            except Exception as e:
+                _dbg(f"Failed to render image {url[:50]}: {e}")
+                # Return error text
+                error_text = Text(f"[Image failed to load: {str(e)[:30]}]", style="red dim")
+                return error_text
+        
+        async def load_worker():
+            rendered = await download_and_render()
+            if rendered:
+                self._rendered_images[msgid] = rendered
+                self._pending_images.pop(msgid, None)
+                # Trigger re-render of the buffer
+                if self.active_buffer == buffer_key:
+                    self._scroll_mode = "preserve"
+                    self.call_later(self._render_active_buffer)
+                _dbg(f"Image rendered for {msgid[:8]}")
+        
+        # Start the async worker
+        import asyncio
+        asyncio.create_task(load_worker())
 
     def _make_avatar_text_line(self, colors: list[str], text: Text) -> Text:
         """Create line with avatar row 2 + formatted text."""
