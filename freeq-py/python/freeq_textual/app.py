@@ -222,7 +222,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self._scroll_mode = "preserve"
         self._scroll_target_msgid = ""
         self._theme_ready = False
-        self._avatars_enabled = False
+        self._avatars_enabled = True  # Always use avatars
         # Maps buffer_key -> list of (thread_root | None) per logical appended line
         self._line_threads: dict[str, list[str | None]] = defaultdict(list)
         # Maps buffer_key -> list of (sender, raw_text, timestamp) for normal messages, else None
@@ -264,7 +264,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg("App.on_mount()")
         self.theme = self.ui_config.get("theme", self.theme)
         self._theme_ready = True
-        self._avatars_enabled = self._detect_avatar_support()
+        self._avatars_enabled = True  # Always use avatars (was: self._detect_avatar_support())
         composer = self.query_one("#composer", Input)
         
         # Mount loading overlay only in non-headless mode (component lifecycle, not CSS toggle)
@@ -273,7 +273,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self.mount(overlay)
         
         self._refresh_layout_widths()
-        if self._avatars_enabled and Pixels is None:
+        # Avatars always enabled, use tile fallback if rich-pixels unavailable
+        if Pixels is None:
             self._append_status("avatars: rich-pixels unavailable, using tile fallback", "yellow")
         self._append_status(f"connecting to {self.client.server_addr}...", "dim")
         self._scroll_mode = "end"
@@ -509,23 +510,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return self._format_message_pipeline(text, mime_type, is_streaming)
 
     def _format_message(self, sender: str, text: str, width: int = 0, *, mime_type: str = "", is_streaming: bool = False) -> Text:
-        """A chat message: `<nick>: <text>` with colored nick, optionally wrapped to width.
+        """A chat message: `<nick>: <text>` with colored nick and avatar.
         
-        Note: This is for channel messages with indent-based wrapping.
-        For thread panel, use _format_thread_message instead.
+        Always uses avatars. Markdown is detected and rendered with proper formatting.
         """
         parts: list[Text] = []
-        if self._avatars_enabled:
-            avatar = self._format_avatar(sender)
-            if avatar.plain:
-                parts.append(avatar)
+        # Always use avatars
+        avatar = self._format_avatar(sender)
+        if avatar.plain:
+            parts.append(avatar)
         parts.append(self._format_nick(sender))
         parts.append(Text(": "))
         
-        # Calculate indent after nick (with avatar space if present)
-        indent = 0
-        if self._avatars_enabled:
-            indent = 5  # avatar + space
+        # Always use avatar indent (5 spaces for avatar + space)
+        indent = 5
         nick_len = len(sender) + 2  # ": "
         indent += nick_len
         
@@ -682,10 +680,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         - Line 1: ████ nick HH:MMpm MM/DD
         - Line 2: ████ reply indicator (if any) OR first line of message
         - Line 3+:      continuation (same column as line 2 text)
-        
-        Without avatars:
-        - reply indicator (if any)
-        - nick HH:MMpm MM/DD: message on one line with fold overflow
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         roots: list[str | None] = []
@@ -701,55 +695,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         time_str = self._format_timestamp(timestamp)
         time_text = Text(f" {time_str}", style="dim") if time_str else Text()
         
-        if not self._avatars_enabled:
-            # Check for markdown - render as block without word wrapping
-            is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
-            if is_markdown:
-                body = self._format_message_body(text, mime_type, is_streaming)
-                # Split markdown by lines and create formatted output
-                result: list[Text] = []
-                if reply_indicator:
-                    result.append(reply_indicator)
-                    roots.append(reply_thread_root)
-                # Split body text into lines preserving spans
-                lines = self._split_text_by_lines(body)
-                if lines:
-                    # First line: nick + first line of markdown
-                    first_line = Text()
-                    first_line.append_text(name)
-                    first_line.append_text(time_text)
-                    first_line.append(": ")
-                    first_line.append_text(lines[0])
-                    result.append(first_line)
-                    roots.append(reply_thread_root)
-                    # Continuation lines indented
-                    for cont in lines[1:]:
-                        if cont.plain.strip():
-                            cont_line = Text(" " * (len(sender) + 3))  # indent to align with text
-                            cont_line.append_text(cont)
-                            result.append(cont_line)
-                            roots.append(reply_thread_root)
-                result[-1].append_text(reactions_text)
-                return result, roots
-            
-            # No avatar: reply indicator, then nick timestamp: message on one line
-            result = []
-            if reply_indicator:
-                result.append(reply_indicator)
-                roots.append(reply_thread_root)
-            block = Text(no_wrap=False, overflow="fold")
-            block.append_text(name)
-            block.append_text(time_text)
-            block.append(": ")
-            block.append_text(self._format_message_body(text, mime_type, is_streaming))
-            block.append_text(reactions_text)  # Add reactions!
-            result.append(block)
-            # Message line also gets thread_root if it's a reply (larger click target)
-            roots.append(reply_thread_root)
-            return result, roots
-        
-        
-        # With avatars: nick on line 1, reply indicator or message on line 2
+        # Always use avatars: nick on line 1, reply indicator or message on line 2
         rows = self._avatar_rows_for_nick(sender)
         indent = "     "  # 5 spaces - aligns with where text starts after "████ "
         text_avail = max(20, width - 5)
@@ -1106,7 +1052,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             else:
                 # Continuation of same sender - just message body, indented
                 # BUT: if this is a reply, we need to show its reply indicator first
-                indent = 5 if self._avatars_enabled else 0
+                indent = 5  # Always use avatar indent
                 if pending_reply_indicators:
                     # Show pending reply indicator(s) before the continuation message
                     # Indent them to match the continuation message
@@ -1255,8 +1201,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return None
 
     def _ensure_avatar_lookup(self, nick: str) -> None:
-        if not self._avatars_enabled:
-            return
+        # Always look up avatars
         nick_key = self._nick_key(nick)
         if nick_key in self._avatar_palettes or nick_key in self._nick_handles or nick_key in self._pending_whois:
             return
