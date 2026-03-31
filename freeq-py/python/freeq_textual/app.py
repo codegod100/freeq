@@ -151,6 +151,8 @@ class MessageState:
     reply_to: str = ""
     is_reply: bool = False
     timestamp: str = ""
+    is_streaming: bool = False  # True while message is being streamed (e.g., LLM output)
+    mime_type: str = ""  # e.g., "text/markdown" for full markdown rendering
 
 
 @dataclass(slots=True)
@@ -408,7 +410,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 return True
         return False
 
-    def _format_markdown(self, text: str) -> Text:
+    def _format_markdown(self, text: str, is_streaming: bool = False) -> Text:
         """Format text with markdown to Rich Text.
         
         Uses Rich's Text.from_markup for inline markdown rendering.
@@ -430,20 +432,38 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Convert newlines to actual newlines for display
         result = result.replace('\\n', '\n')
         
+        # Add streaming indicator if message is still being streamed
+        if is_streaming:
+            result += " [blink]▍[/blink]"
+        
         try:
             return Text.from_markup(result)
         except Exception:
             # Fallback to plain text if markup parsing fails
-            return Text(result)
+            t = Text(result)
+            if is_streaming:
+                t.append(" ▍", style="blink green")
+            return t
 
-    def _format_message_body(self, text: str) -> Text:
-        # Check if text looks like markdown
-        is_markdown = self._looks_like_markdown(text)
-        _dbg(f"_format_message_body: markdown={is_markdown}, text={text[:50]!r}")
-        if is_markdown:
-            return self._format_markdown(text)
+    def _format_message_body(self, text: str, mime_type: str = "", is_streaming: bool = False) -> Text:
+        """Format message body with markdown/lite support.
         
-        # Original URL-linking logic for non-markdown
+        Args:
+            text: Message text
+            mime_type: If 'text/markdown', use full markdown rendering
+            is_streaming: If True, message is still being streamed (for visual indicator)
+        """
+        # Full markdown mode: explicit mime type from sender
+        if mime_type == "text/markdown":
+            return self._format_markdown(text, is_streaming)
+        
+        # Markdown-lite: auto-detect patterns
+        is_markdown = self._looks_like_markdown(text)
+        _dbg(f"_format_message_body: auto-markdown={is_markdown}, mime={mime_type}, text={text[:50]!r}")
+        if is_markdown:
+            return self._format_markdown(text, is_streaming)
+        
+        # Original URL-linking logic for plain text
         body = Text(no_wrap=False, overflow="fold")
         last_end = 0
         for match in _URL_RE.finditer(text):
@@ -451,7 +471,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if start > last_end:
                 body.append(text[last_end:start])
             url = match.group("url")
-            # Wrap URL text itself in hyperlink (works across line wraps)
             display_url = self._display_url(url)
             body.append(display_url, style=f"underline cyan link {url}")
             last_end = end
@@ -459,7 +478,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             body.append(text[last_end:])
         return body
 
-    def _format_message(self, sender: str, text: str, width: int = 0) -> Text:
+    def _format_message(self, sender: str, text: str, width: int = 0, *, mime_type: str = "", is_streaming: bool = False) -> Text:
         """A chat message: `<nick>: <text>` with colored nick, optionally wrapped to width.
         
         Note: This is for channel messages with indent-based wrapping.
@@ -485,20 +504,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines = self._format_message_lines(text, indent, width)
             if lines:
                 # First line goes on same line as nick (no indent, it's after nick)
-                parts.append(self._format_message_body(lines[0].plain.lstrip()))
+                parts.append(self._format_message_body(lines[0].plain.lstrip(), mime_type, is_streaming))
                 result = Text().assemble(*parts)
                 # Continuation lines need indent + URL processing
                 for cont_line in lines[1:]:
                     result.append(Text("\n"))
                     # cont_line has indent baked in, preserve it
-                    indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip())
+                    indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip(), mime_type, is_streaming)
                     result.append(indented)
                 return result
         
-        parts.append(self._format_message_body(text))
+        parts.append(self._format_message_body(text, mime_type, is_streaming))
         return Text().assemble(*parts)
 
-    def _format_thread_message(self, sender: str, text: str, width: int = 0) -> Text:
+    def _format_thread_message(self, sender: str, text: str, width: int = 0, *, mime_type: str = "", is_streaming: bool = False) -> Text:
         """Simple thread message: `<nick>: <text>` with colored nick, no indent alignment."""
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         
@@ -520,14 +539,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 lines.append(current)
             
             if lines:
-                result = Text().assemble(name, ": ", self._format_message_body(lines[0]))
+                result = Text().assemble(name, ": ", self._format_message_body(lines[0], mime_type, is_streaming))
                 for cont_line in lines[1:]:
                     result.append(Text("\n"))
-                    result.append(self._format_message_body(cont_line))
+                    result.append(self._format_message_body(cont_line, mime_type, is_streaming))
                 return result
         
         
-        return Text().assemble(name, ": ", self._format_message_body(text))
+        return Text().assemble(name, ": ", self._format_message_body(text, mime_type, is_streaming))
 
     def _format_header_lines(self, sender: str) -> list[Text]:
         """Return header line(s): avatar + nick. Only called when avatars enabled."""
@@ -567,7 +586,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines.append(Text(" " * indent + current, no_wrap=False, overflow="fold"))
         return lines
 
-    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None) -> tuple[list[Text], list[str | None]]:
+    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None]]:
         """Return tuple of (lines, thread_roots) for a chat message.
         
         With avatars:
@@ -603,7 +622,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             block.append_text(name)
             block.append_text(time_text)
             block.append(": ")
-            block.append_text(self._format_message_body(text))
+            block.append_text(self._format_message_body(text, mime_type, is_streaming))
             block.append_text(reactions_text)  # Add reactions!
             result.append(block)
             # Message line also gets thread_root if it's a reply (larger click target)
@@ -643,17 +662,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         for word in words:
             test = f"{current} {word}".strip()
-            test_display = self._format_message_body(test).plain
+            test_display = self._format_message_body(test, mime_type, is_streaming).plain
             if len(test_display) <= text_avail:
                 current = test
             else:
                 if current:
                     # First message line uses avatar row 2 only if no reply indicator
                     if line_num == 0 and not reply_indicator:
-                        lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current)))
+                        lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming)))
                     else:
                         cont = Text(indent, no_wrap=False, overflow="fold")
-                        cont.append_text(self._format_message_body(current))
+                        cont.append_text(self._format_message_body(current, mime_type, is_streaming))
                         lines.append(cont)
                     # Message line gets thread_root for replies (larger click target)
                     roots.append(reply_thread_root)
@@ -664,12 +683,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Flush remaining text
         if current:
             if line_num == 0 and not reply_indicator:
-                last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current))
+                last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
                 last_line.append_text(reactions_text)  # Add reactions to last line
                 lines.append(last_line)
             else:
                 cont = Text(indent, no_wrap=False, overflow="fold")
-                cont.append_text(self._format_message_body(current))
+                cont.append_text(self._format_message_body(current, mime_type, is_streaming))
                 cont.append_text(reactions_text)  # Add reactions to last line
                 lines.append(cont)
             # Message line gets thread_root for replies (larger click target)
@@ -910,12 +929,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             sender, text, timestamp = line_meta
             sender_key = self._nick_key(sender)
             is_first = not previous_was_chat or previous_sender != sender_key
+            
+            # Look up message metadata from message_index if available
+            msg_info = self.message_index.get(msgid) if msgid else None
+            mime_type = msg_info.mime_type if msg_info else ""
+            is_streaming = msg_info.is_streaming if msg_info else False
+            
             if is_first:
                 # Get reply indicator (first pending) to embed in chat block
                 reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
                 reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
-                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid)
+                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid, mime_type=mime_type, is_streaming=is_streaming)
                 for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
                     render_roots.append(block_root)
@@ -1202,17 +1227,33 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._touch_thread(thread)
 
         if msgid:
-            self.message_index[msgid] = MessageState(
-                buffer_key=buffer_key,
-                sender=sender,
-                text=text,
-                thread_root=thread_root or msgid,
-                msgid=msgid,
-                reply_to=reply_to,
-                is_reply=is_reply,
-                timestamp=timestamp,
-            )
-            _dbg(f"Recorded msgid={msgid[:8]} reply_to={reply_to[:8] if reply_to else None} sender={sender}")
+            # Check for streaming flag and mime type from tags
+            is_streaming = tags.get("+freeq.at/streaming") == "1"
+            mime_type = tags.get("+freeq.at/mime", "")
+            
+            # If this is an edit of an existing message (streaming update)
+            edit_of = tags.get("+draft/edit")
+            if edit_of and edit_of in self.message_index:
+                # Update existing message (streaming continuation)
+                existing = self.message_index[edit_of]
+                existing.text = text
+                existing.is_streaming = is_streaming
+                _dbg(f"Updated streaming message {edit_of[:8]}: streaming={is_streaming}")
+            else:
+                # New message
+                self.message_index[msgid] = MessageState(
+                    buffer_key=buffer_key,
+                    sender=sender,
+                    text=text,
+                    thread_root=thread_root or msgid,
+                    msgid=msgid,
+                    reply_to=reply_to,
+                    is_reply=is_reply,
+                    timestamp=timestamp,
+                    is_streaming=is_streaming,
+                    mime_type=mime_type,
+                )
+                _dbg(f"Recorded msgid={msgid[:8]} reply_to={reply_to[:8] if reply_to else None} sender={sender} streaming={is_streaming} mime={mime_type}")
             thread = self.threads.get(msgid)
             if thread is not None:
                 thread.buffer_key = buffer_key
@@ -2071,8 +2112,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     self.batches[batch_id].thread_roots.append(thread_root)
                     self.batches[batch_id].msgids.append(None)
                     self.batches[batch_id].line_metas.append(None)
+                # Extract mime type and streaming flag for proper rendering
+                mime_type = tags.get("+freeq.at/mime", "")
+                is_streaming = tags.get("+freeq.at/streaming") == "1"
+                
                 self.batches[batch_id].lines.append(
-                    (tags.get("time", ""), self._format_message(sender, text))
+                    (tags.get("time", ""), self._format_message(sender, text, mime_type=mime_type, is_streaming=is_streaming))
                 )
                 self.batches[batch_id].thread_roots.append(thread_root or None)
                 self.batches[batch_id].msgids.append(msgid or None)
@@ -2095,9 +2140,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     )
                 else:
                     _dbg(f"No reply stub for {msgid[:8] if msgid else None}: reply_to={reply_to[:8] if reply_to else None}, thread_root={thread_root[:8] if thread_root else None}")
+                
+                # Extract mime type and streaming flag for proper rendering
+                mime_type = tags.get("+freeq.at/mime", "")
+                is_streaming = tags.get("+freeq.at/streaming") == "1"
+                
                 self._append_line(
                     buffer_name,
-                    self._format_message(sender, text),
+                    self._format_message(sender, text, mime_type=mime_type, is_streaming=is_streaming),
                     msgid=msgid,
                     line_meta=(sender, text, tags.get("time", "")),
                     thread_root=thread_root,
