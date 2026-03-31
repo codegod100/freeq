@@ -432,7 +432,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _format_message_body(self, text: str) -> Text:
         # Check if text looks like markdown
-        if self._looks_like_markdown(text):
+        is_markdown = self._looks_like_markdown(text)
+        _dbg(f"_format_message_body: markdown={is_markdown}, text={text[:50]!r}")
+        if is_markdown:
             return self._format_markdown(text)
         
         # Original URL-linking logic for non-markdown
