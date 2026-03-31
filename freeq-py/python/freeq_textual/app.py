@@ -407,19 +407,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Format text with markdown to Rich Text.
         
         Uses Rich's Text.from_markup for inline markdown rendering.
+        Explicit style definitions for better visibility.
         """
-        # Convert markdown to Rich markup format
+        # Convert markdown to Rich markup format with explicit styles
         result = text
-        # **bold** -> [bold]...[/bold]
-        result = re.sub(r'\*\*([^*]+)\*\*', r'[bold]\1[/bold]', result)
-        # *italic* -> [italic]...[/italic] (but not **)
-        result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'[italic]\1[/italic]', result)
-        # `code` -> [code]...[/code]
-        result = re.sub(r'`([^`]+)`', r'[code]\1[/code]', result)
-        # __bold__ -> [bold]...[/bold]
-        result = re.sub(r'__([^_]+)__', r'[bold]\1[/bold]', result)
-        # _italic_ -> [italic]...[/italic] (but not __)
-        result = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'[italic]\1[/italic]', result)
+        # **bold** -> bright white bold
+        result = re.sub(r'\*\*([^*]+)\*\*', r'[bold bright_white]\1[/bold bright_white]', result)
+        # *italic* -> italic cyan
+        result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'[italic cyan]\1[/italic cyan]', result)
+        # `code` -> bright magenta on dark background
+        result = re.sub(r'`([^`]+)`', r'[bright_magenta on grey15]\1[/bright_magenta on grey15]', result)
+        # __bold__ -> bright white bold
+        result = re.sub(r'__([^_]+)__', r'[bold bright_white]\1[/bold bright_white]', result)
+        # _italic_ -> italic cyan
+        result = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'[italic cyan]\1[/italic cyan]', result)
         
         # Convert newlines to actual newlines for display
         result = result.replace('\\n', '\n')

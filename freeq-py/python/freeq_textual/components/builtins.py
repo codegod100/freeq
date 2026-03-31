@@ -258,9 +258,9 @@ class UserList(AutoLogMixin, Vertical):
     
     DEFAULT_CSS = """
     UserList {
-        width: auto;
+        width: 25;
         min-width: 25;
-        max-width: 50;
+        max-width: 35;
         height: 1fr;
         border: solid $panel-lighten-2;
         background: $surface;
