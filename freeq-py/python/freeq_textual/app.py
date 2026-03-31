@@ -2125,6 +2125,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             
             logger.info(f"BATCH END {batch_id}: {len(batch.lines)} lines for {batch.target}")
             
+            # Debug: Check spans in batch lines
+            for i, (ts, line) in enumerate(batch.lines[:5]):
+                if isinstance(line, Text):
+                    _dbg(f"batch.line[{i}]: {len(line.spans)} spans, plain={line.plain[:50]!r}")
+            
             # Sort lines by timestamp (oldest first)
             # batch.lines is list of (timestamp, Text) tuples
             indexed = sorted(enumerate(batch.lines), key=lambda item: item[1][0])
