@@ -387,7 +387,55 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             url = url.replace(token, f"{token}\u200b")
         return url
 
+    def _looks_like_markdown(self, text: str) -> bool:
+        """Detect common markdown patterns in text."""
+        patterns = [
+            r'\*\*[^*]+\*\*',      # **bold**
+            r'\*[^*]+\*',          # *italic* (not counting **)
+            r'`[^`]+`',            # `code`
+            r'\[[^\]]+\]\([^)]+\)', # [link](url)
+            r'^#{1,6}\s',          # # headers (line start)
+            r'(?:^|\n)[-*]\s',    # - lists (line start)
+            r'(?:^|\n)>\s',       # > blockquote (line start)
+            r'_{1,2}[^_]+_{1,2}',  # _italic_ or __bold__
+            r'!\[[^\]]*\]\([^)]+\)', # ![alt](image)
+            r'```',                # ``` code blocks
+        ]
+        return any(re.search(p, text, re.MULTILINE) for p in patterns)
+
+    def _format_markdown(self, text: str) -> Text:
+        """Format text with markdown to Rich Text.
+        
+        Uses Rich's Text.from_markup for inline markdown rendering.
+        """
+        # Convert markdown to Rich markup format
+        result = text
+        # **bold** -> [bold]...[/bold]
+        result = re.sub(r'\*\*([^*]+)\*\*', r'[bold]\1[/bold]', result)
+        # *italic* -> [italic]...[/italic] (but not **)
+        result = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'[italic]\1[/italic]', result)
+        # `code` -> [code]...[/code]
+        result = re.sub(r'`([^`]+)`', r'[code]\1[/code]', result)
+        # __bold__ -> [bold]...[/bold]
+        result = re.sub(r'__([^_]+)__', r'[bold]\1[/bold]', result)
+        # _italic_ -> [italic]...[/italic] (but not __)
+        result = re.sub(r'(?<!_)_([^_]+)_(?!_)', r'[italic]\1[/italic]', result)
+        
+        # Convert newlines to actual newlines for display
+        result = result.replace('\\n', '\n')
+        
+        try:
+            return Text.from_markup(result)
+        except Exception:
+            # Fallback to plain text if markup parsing fails
+            return Text(result)
+
     def _format_message_body(self, text: str) -> Text:
+        # Check if text looks like markdown
+        if self._looks_like_markdown(text):
+            return self._format_markdown(text)
+        
+        # Original URL-linking logic for non-markdown
         body = Text(no_wrap=False, overflow="fold")
         last_end = 0
         for match in _URL_RE.finditer(text):
