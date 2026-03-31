@@ -1847,9 +1847,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         4. Write lines to RichLog, tracking thread roots and msgids per row
         5. Scroll to appropriate position (end/home/message/preserve)
         """
-        # Guard against being called before compose finishes.
-        # NOTE: No try/except - we want hard failures after mount for debugging.
-        if not self.is_mounted:
+        # Guard: Screen must exist and be mounted.
+        # NOTE: We use a specific existence check for #messages because of a known
+        # race condition during startup (called from on_mount before compose finishes).
+        # This is the ONLY place we catch widget query failures - real bugs elsewhere
+        # should still crash hard as requested.
+        if not self.screen or not self.screen.is_mounted:
+            return
+        
+        # Check if #messages exists yet (race condition during startup)
+        if not self.screen.query("#messages"):
             return
         
         active_name = self._display_name(self.active_buffer)
