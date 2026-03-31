@@ -2237,10 +2237,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         if event_type == "parted":
             channel = event["channel"]
             key = self._buffer_key(channel)
-            self.channel_members[key].discard(self._nick_key(event["nick"]))
+            nick_key = self._nick_key(event["nick"])
+            self.channel_members[key].discard(nick_key)
+            self.channel_ops[key].discard(nick_key)
+            self.channel_voice[key].discard(nick_key)
             if self.active_buffer == key:
                 self._refresh_user_list()  # Update user list after part
             if event["nick"].casefold() == self.client.nick.casefold():
+                # We left the channel - clear all state for it
                 if self.active_buffer == key:
                     self.active_buffer = "status"
                     self._scroll_mode = "end"
@@ -2427,6 +2431,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return
         if event_type == "disconnected":
             self.channel_members.clear()
+            self.channel_ops.clear()
+            self.channel_voice.clear()
             self.restore_history_targets.clear()
             self._scroll_mode = "end" if self.active_buffer == "status" else "preserve"
             self._append_status(f"disconnected: {event['reason']}", "red")
