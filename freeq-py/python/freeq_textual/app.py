@@ -1084,7 +1084,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         if not body_line.plain.strip():
                             continue
                         # Add indent to continuation lines
-                        line = Text(indent, no_wrap=False, overflow="fold")
+                        line = Text(" " * indent, no_wrap=False, overflow="fold")
                         line.append_text(body_line)
                         renderable.append(line)
                         render_roots.append(None)
