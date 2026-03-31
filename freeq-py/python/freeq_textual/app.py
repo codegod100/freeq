@@ -390,18 +390,23 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _looks_like_markdown(self, text: str) -> bool:
         """Detect common markdown patterns in text."""
         patterns = [
-            r'\*\*[^*]+\*\*',      # **bold**
-            r'\*[^*]+\*',          # *italic* (not counting **)
-            r'`[^`]+`',            # `code`
-            r'\[[^\]]+\]\([^)]+\)', # [link](url)
-            r'^#{1,6}\s',          # # headers (line start)
-            r'(?:^|\n)[-*]\s',    # - lists (line start)
-            r'(?:^|\n)>\s',       # > blockquote (line start)
-            r'_{1,2}[^_]+_{1,2}',  # _italic_ or __bold__
-            r'!\[[^\]]*\]\([^)]+\)', # ![alt](image)
-            r'```',                # ``` code blocks
+            (r'\*\*[^*]+\*\*', 'bold'),
+            (r'(?<![*\*])\*[^*]+\*(?!\*)', 'italic'),  # *italic* not **
+            (r'`[^`]+`', 'code'),
+            (r'\[[^\]]+\]\([^)]+\)', 'link'),
+            (r'#{1,6}\s+\S', 'header'),  # # Header (anywhere, not just start)
+            (r'(?:^|\n)[-*]\s+\S', 'list'),
+            (r'(?:^|\n)>\s+\S', 'blockquote'),
+            (r'(?<!_)_([^_]+)_(?!_)', 'italic_underscore'),
+            (r'__[^_]+__', 'bold_underscore'),
+            (r'!\[[^\]]*\]\([^)]+\)', 'image'),
+            (r'```', 'codeblock'),
         ]
-        return any(re.search(p, text, re.MULTILINE) for p in patterns)
+        for pattern, name in patterns:
+            if re.search(pattern, text, re.MULTILINE):
+                _dbg(f"  markdown pattern '{name}' matched in: {text[:60]!r}")
+                return True
+        return False
 
     def _format_markdown(self, text: str) -> Text:
         """Format text with markdown to Rich Text.
