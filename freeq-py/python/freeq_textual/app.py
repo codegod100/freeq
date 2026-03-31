@@ -774,7 +774,35 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             lines.append(reply_line)
             roots.append(reply_thread_root)
         
-        # Wrap message text
+        # Check for markdown - handle multi-line formatted output
+        is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
+        if is_markdown:
+            body = self._format_message_body(text, mime_type, is_streaming)
+            # Split markdown by lines preserving formatting
+            body_lines = self._split_text_by_lines(body)
+            for i, body_line in enumerate(body_lines):
+                if not body_line.plain.strip():
+                    continue  # Skip empty lines
+                if i == 0 and not reply_indicator:
+                    # First line with avatar row 2
+                    line = Text()
+                    for color in rows[1]:
+                        line.append("\u2588", style=color)
+                    line.append(" ")
+                    line.append_text(body_line)
+                    lines.append(line)
+                else:
+                    # Continuation lines with indent
+                    line = Text(indent, no_wrap=False, overflow="fold")
+                    line.append_text(body_line)
+                    lines.append(line)
+                roots.append(reply_thread_root)
+            # Add reactions to last line
+            if lines:
+                lines[-1].append_text(reactions_text)
+            return lines, roots
+        
+        # Wrap message text (non-markdown)
         words = text.split()
         current = ""
         line_num = 0
