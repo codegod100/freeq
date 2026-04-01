@@ -1104,7 +1104,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return lines, roots
         
         # Wrap message text (non-markdown)
-        _dbg(f"CHAT_BLOCK: wrapping {len(words)} words, width={width}, text_avail={text_avail}")
         
         # If message has edit history, render with inline diff colors (no wrapping)
         if has_edit_history:
@@ -1128,6 +1127,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return lines, roots
         
         words = current_text.split()
+        _dbg(f"CHAT_BLOCK: wrapping {len(words)} words, width={width}, text_avail={text_avail}")
         current = ""
         line_num = 0
         
