@@ -40,9 +40,18 @@ class BufferList(AutoLogMixin, ListView):
     def update_buffers(self, buffers: list, active: str) -> None:
         """Update the buffer list with current buffers and mark active one."""
         from .debug import _dbg
-        _dbg(f"BufferList.update_buffers: clearing {len(list(self.children))} items, adding {len(buffers)} new items")
         
-        self.clear()
+        pre_clear_count = len(list(self.children))
+        _dbg(f"BufferList.update_buffers: clearing {pre_clear_count} items, adding {len(buffers)} new items")
+        
+        # BUG FIX: self.clear() doesn't actually remove children in Textual ListView
+        # Need to explicitly remove all children
+        for child in list(self.children):
+            child.remove()
+        
+        post_clear_count = len(list(self.children))
+        _dbg(f"BufferList.update_buffers: after clear, have {post_clear_count} items (expected 0)")
+        
         for buffer in buffers:
             label = buffer.name
             if buffer.unread:
@@ -53,4 +62,5 @@ class BufferList(AutoLogMixin, ListView):
             self.append(item)
             _dbg(f"BufferList.update_buffers: added item '{label}' (active={buffer.name == active})")
         
-        _dbg(f"BufferList.update_buffers: done, total children={len(list(self.children))}")
+        final_count = len(list(self.children))
+        _dbg(f"BufferList.update_buffers: done, total children={final_count}")
