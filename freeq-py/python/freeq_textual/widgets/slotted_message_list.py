@@ -34,10 +34,13 @@ class SlottedMessageList(Vertical):
         overflow-y: auto;
         border: solid $panel-lighten-2;
         background: $surface;
+        display: block;
     }
 
     SlottedMessageList MessageItem {
         width: 1fr;
+        height: auto;
+        display: block;
     }
     """
 

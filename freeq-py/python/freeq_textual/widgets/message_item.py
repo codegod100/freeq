@@ -30,11 +30,13 @@ class MessageItem(Vertical):
     MessageItem {
         height: auto;
         width: 1fr;
+        display: block;
     }
     
     MessageItem Static.message-area {
         height: auto;
         width: 1fr;
+        display: block;
     }
     
     MessageItem #slot {
@@ -78,8 +80,14 @@ class MessageItem(Vertical):
     
     def compose(self):
         """Compose message area and empty slot."""
-        yield Static(str(self._content) if isinstance(self._content, Text) else self._content, 
-                     classes="message-area")
+        # Render Rich Text properly - Static can take Text objects directly
+        content = self._content
+        if isinstance(content, Text):
+            # Keep as Text object for rich rendering
+            pass
+        else:
+            content = str(content)
+        yield Static(content, classes="message-area")
         yield Vertical(id="slot")
     
     def on_mount(self) -> None:
