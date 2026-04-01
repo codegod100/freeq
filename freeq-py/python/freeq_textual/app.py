@@ -1104,6 +1104,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return lines, roots
         
         # Wrap message text (non-markdown)
+        _dbg(f"CHAT_BLOCK: wrapping {len(words)} words, width={width}, text_avail={text_avail}")
+        
         # If message has edit history, render with inline diff colors (no wrapping)
         if has_edit_history:
             diff_body = self._format_message_with_diff(old_text_for_diff, current_text, mime_type, is_streaming)
@@ -1132,11 +1134,21 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         for word in words:
             test = f"{current} {word}".strip()
             test_display = self._format_message_body(test, mime_type, is_streaming).plain
-            if len(test_display) <= text_avail:
+            test_len = len(test_display)
+            
+            if test_len <= text_avail:
                 current = test
             else:
                 if current:
                     # First message line uses avatar row 2 only if no reply indicator
+                    display_current = self._format_message_body(current, mime_type, is_streaming).plain
+                    display_len = len(display_current)
+                    _dbg(f"  WRAP line {line_num}: len={display_len}, text='{current[:40]}...'")
+                    
+                    # DETECT: Line longer than available
+                    if display_len > text_avail:
+                        _dbg(f"    [SUSPECTED BUG] Line {line_num} len ({display_len}) > text_avail ({text_avail})")
+                    
                     if line_num == 0 and not reply_indicator:
                         lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming)))
                     else:
@@ -1151,6 +1163,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Flush remaining text
         if current:
+            display_current = self._format_message_body(current, mime_type, is_streaming).plain
+            display_len = len(display_current)
+            _dbg(f"  FLUSH line {line_num}: len={display_len}, text='{current[:40]}...'")
+            
+            # DETECT: Last line issues
+            if display_len > text_avail:
+                _dbg(f"    [SUSPECTED BUG] Final line {line_num} len ({display_len}) > text_avail ({text_avail})")
+            
+            # DETECT: Could last word have fit on previous line?
+            if line_num > 0 and lines:
+                prev_line_text = lines[-1].plain.lstrip() if hasattr(lines[-1], 'plain') else str(lines[-1])
+                prev_len = len(prev_line_text)
+                # Approximate: could we have added this word to previous line?
+                if prev_len + 1 + display_len <= text_avail + len(indent):
+                    _dbg(f"    [SUSPECTED BUG] Final word could fit on previous line ({prev_len}+1+{display_len}={prev_len+1+display_len} <= available)")
+            
             if line_num == 0 and not reply_indicator:
                 last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
                 last_line.append_text(reactions_text)  # Add reactions to last line
@@ -1167,6 +1195,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if reactions_text and lines:
                 lines[-1].append_text(reactions_text)
         
+        _dbg(f"CHAT_BLOCK: done, produced {len(lines)} lines")
         
         # Ensure at least 2 lines for avatar display
         if len(lines) == 1:
