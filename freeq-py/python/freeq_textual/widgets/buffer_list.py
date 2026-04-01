@@ -26,7 +26,7 @@ class BufferList(AutoLogMixin, ListView):
     - Mixing percentages with 1fr in Horizontal caused layout conflicts
     - When MessagesPanel uses 1fr, percentage-based siblings can cause 1fr to calc as 0
     - Fixed width allows proper fractional space calculation
-    """"
+    """
     
     DEFAULT_CSS = """
     BufferList {
