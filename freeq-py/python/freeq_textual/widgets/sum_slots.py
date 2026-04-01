@@ -131,8 +131,13 @@ class OverlaySlotType(SlotType):
     container_class = Vertical
     
     def __init__(self) -> None:
-        # Overlays can hold modals, dialogs, etc.
-        self.allowed_variants = []  # Populated dynamically
+        # Overlays can hold modals, dialogs, and fallback components
+        from ..components.builtins import ContextMenu, ReplyPanel
+        from ..widgets.thread_panel import ThreadPanel
+        from .emoji_picker import EmojiPicker
+        
+        # Allow components that might need global/fallback positioning
+        self.allowed_variants = [ContextMenu, EmojiPicker, ReplyPanel, ThreadPanel]
 
 
 class ContentSlotType(SlotType):
