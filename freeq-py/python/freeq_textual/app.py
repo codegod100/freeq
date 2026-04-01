@@ -1050,7 +1050,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if reply_len > text_avail:
                 _dbg(f"  [SUSPECTED BUG] Reply indicator too long ({reply_len} > {text_avail}), needs wrapping")
                 # Truncate with ellipsis for now
-                reply_indicator = Text(reply_plain[:text_avail-3] + "...", style="dim")
+                truncated_text = reply_plain[:text_avail-3] + "..."
+                reply_indicator = Text(truncated_text, style="dim")
+                _dbg(f"  -> truncated to {len(truncated_text)} chars")
             
             reply_line = Text()
             for color in rows[1]:
