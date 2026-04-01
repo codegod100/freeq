@@ -39,6 +39,9 @@ class BufferList(AutoLogMixin, ListView):
 
     def update_buffers(self, buffers: list, active: str) -> None:
         """Update the buffer list with current buffers and mark active one."""
+        from .debug import _dbg
+        _dbg(f"BufferList.update_buffers: clearing {len(list(self.children))} items, adding {len(buffers)} new items")
+        
         self.clear()
         for buffer in buffers:
             label = buffer.name
@@ -48,3 +51,6 @@ class BufferList(AutoLogMixin, ListView):
             if buffer.name == active:
                 item.add_class("active")
             self.append(item)
+            _dbg(f"BufferList.update_buffers: added item '{label}' (active={buffer.name == active})")
+        
+        _dbg(f"BufferList.update_buffers: done, total children={len(list(self.children))}")

@@ -1313,12 +1313,39 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _refresh_sidebar(self) -> None:
         """Refresh sidebar buffer list."""
+        from .widgets import _dbg, validate_invariant
+        
         # Guard: Don't run before mount. No try/except - hard fail for real bugs.
         if not self.is_mounted:
+            _dbg("SIDEBAR: skipped refresh - app not mounted")
             return
+        
+        buffer_count = len(self.buffers)
+        _dbg(f"SIDEBAR: refreshing with {buffer_count} buffers: {list(self.buffers.keys())}")
+        
         ordered = sorted(self.buffers.values(), key=lambda b: (b.name != "status", b.name))
-        sidebar = self.query_one(BufferList)
-        sidebar.update_buffers(ordered, self.active_buffer)
+        
+        # PROVABLE DIAGNOSTIC: This will throw if BufferList not found
+        # Log shows exactly what's happening
+        try:
+            sidebar = self.query_one(BufferList)
+            _dbg(f"SIDEBAR: found BufferList widget, updating with {len(ordered)} items")
+            sidebar.update_buffers(ordered, self.active_buffer)
+            
+            # Verify the update actually created children
+            child_count = len(list(sidebar.children))
+            _dbg(f"SIDEBAR: BufferList now has {child_count} children")
+            
+            validate_invariant(
+                len(ordered) == child_count,
+                f"BufferList child count mismatch: expected {len(ordered)}, got {child_count}",
+                expected=len(ordered),
+                actual=child_count,
+                buffers=list(self.buffers.keys())
+            )
+        except Exception as e:
+            _dbg(f"SIDEBAR_ERROR: failed to refresh - {type(e).__name__}: {e}")
+            raise  # Hard fail - we want to know if this breaks
 
     @staticmethod
     def _buffer_label(buffer: BufferState) -> str:
