@@ -749,7 +749,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         Always uses avatars. Markdown is detected and rendered with proper formatting.
         """
-        from .debug import _dbg
+        from .widgets.debug import _dbg
         
         parts: list[Text] = []
         # Always use avatars
@@ -878,7 +878,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         Handles word wrapping manually to ensure proper indentation on all lines,
         including continuation lines when long words need to break.
         """
-        from .debug import _dbg
+        from .widgets.debug import _dbg
         
         available = max(20, width - indent)
         words = text.split()
