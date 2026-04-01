@@ -97,14 +97,16 @@ class MessageItem(Vertical):
         # Render Rich Text properly
         content = self._content
         content_type = type(content).__name__
+        use_markup = True
         if isinstance(content, Text):
             content_str = str(content)[:50] + "..." if len(str(content)) > 50 else str(content)
             _dbg(f"MessageItem.compose msgid={self._msgid[:8] if self._msgid else None} type={content_type} content={content_str!r}")
+            use_markup = False  # Text objects are pre-styled, don't need markup processing
         else:
             content = str(content)
             _dbg(f"MessageItem.compose msgid={self._msgid[:8] if self._msgid else None} type={content_type} content={content[:50]!r}")
         
-        yield Static(content, classes="message-area", markup=True)
+        yield Static(content, classes="message-area", markup=use_markup)
         yield Vertical(id="slot")
     
     def on_mount(self) -> None:
