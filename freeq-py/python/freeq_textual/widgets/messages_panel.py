@@ -23,6 +23,7 @@ class MessagesPanel(Widget, RenderablePanel):
     DEFAULT_CSS = """
     MessagesPanel {
         width: 1fr;
+        height: 1fr;
     }
     """
 
@@ -57,10 +58,12 @@ class MessagesPanelWithThread(Widget, RenderablePanel):
     DEFAULT_CSS = """
     MessagesPanelWithThread {
         width: 1fr;
+        height: 1fr;
     }
 
     #messages-and-thread {
         width: 1fr;
+        height: 1fr;
     }
     """
 
