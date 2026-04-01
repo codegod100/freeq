@@ -914,6 +914,121 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             # Should NOT add to _history_loading
             self.assertNotIn("#test", app._history_loading)
 
+    async def test_context_menu_shows_in_slot(self) -> None:
+        """Right-click on message should mount ContextMenu in slot."""
+        from freeq_textual.widgets import SlottedMessageList, MessageItem
+        from freeq_textual.components.builtins import ContextMenu
+        
+        client = FakeClient()
+        app = FreeqTextualApp(client, initial_channel="#test")
+        app._is_loading = False
+        async with app.run_test() as pilot:
+            # Join channel and add message
+            client.queue_events(
+                {"type": "connected"},
+                {"type": "join", "channel": "#test", "members": []},
+                {"type": "names_end", "channel": "#test"},
+                {
+                    "type": "privmsg",
+                    "sender": "alice",
+                    "target": "#test",
+                    "text": "hello world",
+                    "tags": {"msgid": "abc123"},
+                },
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            # Get the slotted message list
+            try:
+                slotted = app.query_one("#messages", SlottedMessageList)
+            except Exception:
+                self.skipTest("SlottedMessageList not available")
+                return
+
+            # Check message was written
+            self.assertGreater(len(slotted.children), 0, "No messages rendered")
+
+            # Click on message to show context menu
+            # Find the message with msgid="abc123"
+            print(f"DEBUG: slotted.children count={len(slotted.children)}")
+            for i, child in enumerate(slotted.children):
+                if isinstance(child, MessageItem):
+                    print(f"DEBUG: child[{i}] msgid={child.msgid!r}")
+            
+            target_msg = None
+            for child in slotted.children:
+                if isinstance(child, MessageItem) and child.msgid == "abc123":
+                    target_msg = child
+                    break
+            
+            print(f"DEBUG: target_msg found={target_msg is not None}")
+            if target_msg:
+                print(f"DEBUG: target_msg.msgid={target_msg.msgid}")
+                # Post MessageClicked from SlottedMessageList (this is what the app listens for)
+                slotted.post_message(SlottedMessageList.MessageClicked("abc123", target_msg))
+                await pilot.pause()
+                print(f"DEBUG: after pause, children count={len(slotted.children)}")
+                for i, child in enumerate(slotted.children):
+                    if isinstance(child, MessageItem):
+                        print(f"DEBUG: child[{i}] msgid={child.msgid} has_slot={child.has_slot_content()}")
+
+            # Check slot has content (ContextMenu should be mounted)
+            has_menu = False
+            for child in slotted.children:
+                if isinstance(child, MessageItem):
+                    if child.has_slot_content():
+                        has_menu = True
+                        break
+
+            self.assertTrue(has_menu, "ContextMenu not mounted in any slot after click")
+
+    async def test_slotted_message_list_scroll_to_top_loads_history(self) -> None:
+        """SlottedMessageList scrolled to top should trigger history loading."""
+        from freeq_textual.widgets import SlottedMessageList
+        
+        client = FakeClient()
+        app = FreeqTextualApp(client, initial_channel="#test")
+        app._is_loading = False
+        async with app.run_test() as pilot:
+            # Join channel
+            client.queue_events(
+                {"type": "connected"},
+                {"type": "join", "channel": "#test", "members": []},
+                {"type": "names_end", "channel": "#test"},
+            )
+            app._poll_events()
+            await pilot.pause()
+
+            # Add some messages
+            for i in range(10):
+                client.queue_events(
+                    {
+                        "type": "privmsg",
+                        "sender": "bob",
+                        "target": "#test",
+                        "text": f"message {i}",
+                        "tags": {"msgid": f"msg{i}"},
+                    }
+                )
+            app._poll_events()
+            await pilot.pause()
+
+            # Simulate scroll to top
+            try:
+                slotted = app.query_one("#messages", SlottedMessageList)
+                slotted.post_message(SlottedMessageList.ScrolledToTop())
+                await pilot.pause()
+            except Exception as e:
+                self.skipTest(f"SlottedMessageList not available: {e}")
+                return
+
+            # Check history was requested
+            self.assertTrue(
+                len(client.history_calls) > 0,
+                f"History not requested after scroll to top, calls: {client.history_calls}"
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

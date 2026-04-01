@@ -130,6 +130,20 @@ class SlottedMessageList(Vertical):
             self._active_slot_item.clear_slot()
             self._active_slot_item = None
 
+    def watch_scroll_y(self, old_value: float, new_value: float) -> None:
+        """Detect when scrolled to top and emit ScrolledToTop for infinite scroll."""
+        # Call parent's watcher to update scrollbar
+        super().watch_scroll_y(old_value, new_value)
+        # When scroll_y crosses into threshold (<5), we're at the top
+        if new_value < 5 and old_value >= 5:
+            self.post_message(self.ScrolledToTop())
+
+    def on_mouse_scroll_up(self, event) -> None:
+        """Detect scroll-up gesture when already at top."""
+        # If we're at or near the top, request history directly
+        if self.scroll_y < 5:
+            self.post_message(self.ScrolledToTop())
+
     def msgid_at(self, y: int) -> str | None:
         """Get msgid at given y coordinate.
 

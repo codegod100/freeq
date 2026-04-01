@@ -37,7 +37,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, SlottedMessageList, ThreadMessage, ThreadPanel
+from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessageItem, MessagesPanel, MessagesPanelWithThread, ScrollableLog, SlottedMessageList, ThreadMessage, ThreadPanel
 from .components import get_component
 from .components.all import *  # noqa: F401 - registers all widgets as friends!
 
@@ -2062,11 +2062,44 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         Slot-based architecture - each message is a widget with a slot.
         """
         _dbg(f"SlottedMessageList.MessageClicked: msgid={event.msgid[:8] if event.msgid else None}")
-        # Thread handling can be added here if needed
-        # For now, just log - context menu is shown via on_click -> _show_context_menu
+        
+        # Get the slotted list and show context menu
+        try:
+            slotted = self.query_one("#messages", SlottedMessageList)
+        except Exception:
+            return
+        
+        # Show context menu in slot for this message
+        if event.msgid and event.widget:
+            self._show_context_menu_in_slot(slotted, event.msgid)
+
+    def _show_context_menu_in_slot(self, slotted: SlottedMessageList, msgid: str) -> None:
+        """Show context menu in the slot of a specific message."""
+        _dbg(f"_show_context_menu_in_slot: msgid={msgid[:8]}")
+        
+        # Clear any existing slot first (exclusive slots)
+        slotted.clear_active_slot()
+        
+        # Create menu with on_close callback to clear slot
+        def clear_slot():
+            slotted.clear_active_slot()
+        
+        menu = ContextMenu(
+            actions=[
+                ("Reply", self._on_menu_reply),
+                ("React", self._on_menu_react),
+            ],
+            msgid=msgid,
+            on_close=clear_slot,
+        )
+        
+        # Mount into the slot - the slot is part of the message layout
+        slotted.mount_in_slot(msgid, menu)
+        _dbg(f"  mounted ContextMenu in slot for msgid={msgid[:8]}")
 
     @on(ScrollableLog.ScrolledToTop)
-    def _on_scrolled_to_top(self, event: ScrollableLog.ScrolledToTop) -> None:
+    @on(SlottedMessageList.ScrolledToTop)
+    def _on_scrolled_to_top(self, event) -> None:
         """Load more history when scrolled to top."""
         import sys
         sys.stderr.write(f"APP: ScrolledToTop received! active_buffer={self.active_buffer}\n")
@@ -2169,28 +2202,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Find which message is under cursor
         if isinstance(log, SlottedMessageList):
             # Slotted architecture - mount into message's slot
-            virtual_y = int(event.y + log.scroll_y)
-            msgid = log.msgid_at(virtual_y)
+            # Each MessageItem is a separate widget, so we need to find
+            # which MessageItem contains the click
+            msgid = None
+            for child in log.children:
+                if isinstance(child, MessageItem):
+                    # Check if click is within this item's region
+                    if child.region.contains(event.x, event.y):
+                        msgid = child.msgid
+                        _dbg(f"  found MessageItem at click position, msgid={msgid[:8] if msgid else None}")
+                        break
             
-            # Clear any existing slot first (exclusive slots)
-            log.clear_active_slot()
-            
-            # Create menu with on_close callback to clear slot
-            def clear_slot():
-                log.clear_active_slot()
-            
-            menu = ContextMenu(
-                actions=[
-                    ("Reply", self._on_menu_reply),
-                    ("React", self._on_menu_react),
-                ],
-                msgid=msgid,
-                on_close=clear_slot,
-            )
-            
-            # Mount into the slot - the slot is part of the message layout
-            log.mount_in_slot(msgid, menu)
-            _dbg(f"  mounted ContextMenu in slot for msgid={msgid[:8] if msgid else None}")
+            # Show context menu in slot
+            if msgid:
+                self._show_context_menu_in_slot(log, msgid)
         else:
             # Legacy ScrollableLog - use absolute positioning
             # Close any existing menu
