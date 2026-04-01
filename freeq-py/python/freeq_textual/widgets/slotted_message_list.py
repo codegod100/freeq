@@ -82,8 +82,8 @@ class SlottedMessageList(Vertical):
         # Mount the item
         self.mount(item)
 
-        # Auto-scroll to bottom
-        self.scroll_end(animate=False)
+        # Auto-scroll to bottom (deferred to allow mount to complete)
+        self.call_after_refresh(self.scroll_end, animate=False)
 
         return self
 
