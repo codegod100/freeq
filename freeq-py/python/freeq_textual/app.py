@@ -2997,8 +2997,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 for reaction in reactions_str.split(","):
                     if ":" in reaction:
                         r_sender, r_emoji = reaction.split(":", 1)
-                        self._reactions[msgid].append((r_sender, r_emoji))
-                        _dbg(f"    loaded reaction: {r_sender} -> {r_emoji}")
+                        # Avoid duplicates
+                        if (r_sender, r_emoji) not in self._reactions[msgid]:
+                            self._reactions[msgid].append((r_sender, r_emoji))
+                            _dbg(f"    loaded reaction: {r_sender} -> {r_emoji}")
+                        else:
+                            _dbg(f"    skipped duplicate reaction: {r_sender} -> {r_emoji}")
             
             reply_to = self._thread_reply_to(tags)
             thread_root = ""
@@ -3100,9 +3104,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 target_msgid = tags.get("+reply") or tags.get("+draft/reply")
                 _dbg(f"  +react found: emoji={emoji} target_msgid={target_msgid[:8] if target_msgid else None}")
                 if target_msgid:
-                    # Store reaction on the message
-                    self._reactions[target_msgid].append((sender, emoji))
-                    _dbg(f"  reaction stored: {sender} reacted {emoji} on {target_msgid[:8]}")
+                    # Store reaction on the message (avoid duplicates)
+                    reaction_key = (sender, emoji)
+                    existing = self._reactions[target_msgid]
+                    if reaction_key not in existing:
+                        self._reactions[target_msgid].append((sender, emoji))
+                        _dbg(f"  reaction stored: {sender} reacted {emoji} on {target_msgid[:8]}")
+                    else:
+                        _dbg(f"  reaction already exists, skipping duplicate")
                     # Re-render to show reaction on message
                     self._render_active_buffer()
                 else:
