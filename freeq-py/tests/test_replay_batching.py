@@ -24,7 +24,7 @@ from textual.widgets import Static  # noqa: E402
 from textual.widgets import Input  # noqa: E402
 from textual.widgets import Button  # noqa: E402
 
-from freeq_textual.widgets import ScrollableLog  # noqa: E402
+from freeq_textual.widgets import ScrollableLog, SlottedMessageList  # noqa: E402
 
 from freeq_textual.app import BufferState, FreeqTextualApp  # noqa: E402
 
@@ -609,15 +609,14 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             app._poll_events()
             await pilot.pause()
 
-            # Find the reply indicator line
-            log = app.query_one("#messages", RichLog)
-            thread_rows = app._rendered_line_threads["#freeq"]
-            reply_rows = [index for index, root in enumerate(thread_rows) if root == "root1"]
-            self.assertTrue(reply_rows, f"No reply indicator found. thread_rows={thread_rows}")
-
-            # First: click to open
-            click_row = reply_rows[0]
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row, button=1))
+            # Find the reply indicator - look for reply message in message_index
+            reply_msg = app.message_index.get("reply1")
+            self.assertIsNotNone(reply_msg, "Reply message should be in index")
+            
+            # First: click to open using the new message-based click system
+            from freeq_textual.widgets import SlottedMessageList
+            slotted = app.query_one("#messages", SlottedMessageList)
+            slotted.post_message(SlottedMessageList.MessageClicked("reply1", None))
             await pilot.pause()
             self.assertTrue(app._thread_panel_is_open())
             self.assertEqual(app.open_thread_root, "root1")
@@ -628,14 +627,8 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(app._thread_panel_is_open())
 
             # Second: click again to reopen
-            # Need to re-query the log after close (new panel mounted)
-            log = app.query_one("#messages", RichLog)
-            thread_rows = app._rendered_line_threads["#freeq"]
-            reply_rows = [index for index, root in enumerate(thread_rows) if root == "root1"]
-            self.assertTrue(reply_rows, f"No reply indicator after close. thread_rows={thread_rows}")
-
-            click_row = reply_rows[0]
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row, button=1))
+            slotted = app.query_one("#messages", SlottedMessageList)
+            slotted.post_message(SlottedMessageList.MessageClicked("reply1", None))
             await pilot.pause()
             self.assertTrue(app._thread_panel_is_open(), "Thread panel should reopen after click")
             self.assertEqual(app.open_thread_root, "root1")
@@ -680,24 +673,18 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             reply_rows = [index for index, root in enumerate(thread_rows) if root == "thread_root"]
             self.assertTrue(reply_rows, f"No reply indicator found")
 
-            # Open the thread via click
-            log = app.query_one("#messages", RichLog)
-            click_row = reply_rows[0]
-            # y is widget-relative (0-indexed), adjusted for scroll position
-            click_y = max(0, click_row - int(log.scroll_y))
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_y, button=1))
+            # Open the thread via message click (new widget-based system)
+            from freeq_textual.widgets import SlottedMessageList
+            slotted = app.query_one("#messages", SlottedMessageList)
+            slotted.post_message(SlottedMessageList.MessageClicked("reply1", None))
             await pilot.pause()
             await pilot.pause()  # Extra pause for call_later scroll
 
             # Thread should be open
             self.assertTrue(app._thread_panel_is_open())
             
-            # The thread root should be tracked in the log's location map
-            # This verifies scroll_to_location would work
-            log = app.query_one("#messages", ScrollableLog)
-            # Location tracking should have the thread_root
-            # Note: In test mode, the log may have been replaced, so we just check the panel is open
-            # Real app would scroll to show the thread root message
+            # The thread root msgid should be set
+            self.assertEqual(app.open_thread_root, "thread_root")
 
     async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
         client = FakeClient()
@@ -724,19 +711,15 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             app._poll_events()
             await pilot.pause()
 
-            log = app.query_one("#messages", RichLog)
-            thread_rows = app._rendered_line_threads["#freeq"]
-            reply_rows = [index for index, root in enumerate(thread_rows) if root == "root1"]
-
-            self.assertTrue(reply_rows)
-            self.assertGreater(len(thread_rows), len(app._line_threads["#freeq"]))
-
-            click_row = reply_rows[-1]
-            app._on_message_log_click(SimpleNamespace(widget=log, y=click_row, button=1))
+            # Use message-based click system instead of coordinate-based
+            from freeq_textual.widgets import SlottedMessageList
+            slotted = app.query_one("#messages", SlottedMessageList)
+            
+            # Click on the reply message by msgid
+            slotted.post_message(SlottedMessageList.MessageClicked("reply1", None))
             await pilot.pause()
 
             self.assertEqual(app.open_thread_root, "root1")
-            panel = app.query_one("#thread-panel")
             self.assertTrue(app._thread_panel_is_open())
 
     async def test_cached_session_channels_are_rejoined_on_auth_restore(self) -> None:
