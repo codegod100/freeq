@@ -20,6 +20,13 @@ class MessagesPanel(Widget, RenderablePanel):
     Supports both ScrollableLog (text-based) and SlottedMessageList (widget-based with slots).
     """
 
+    # REGRESSION FIX: height: 1fr is REQUIRED
+    # Without explicit height, the panel collapses to 0 width during render
+    # even though width: 1fr is set. This caused "black rectangle" bug where
+    # messages were created but invisible due to zero-width parent.
+    # See: proactive logging check "WIDGET: messages has zero size (0x25)"
+    # TESTS REQUIRED: Any CSS changes to width/height must verify widget
+    # renders with non-zero size. See tests/test_messages_panel_regression.py
     DEFAULT_CSS = """
     MessagesPanel {
         width: 1fr;
@@ -55,6 +62,10 @@ class MessagesPanelWithThread(Widget, RenderablePanel):
     Supports both ScrollableLog (text-based) and SlottedMessageList (widget-based with slots).
     """
 
+    # REGRESSION FIX: height: 1fr is REQUIRED for both container and inner layout
+    # Without explicit height, the panel collapses causing zero-width renders.
+    # This mirrors the MessagesPanel regression - both need explicit height.
+    # TESTS REQUIRED: See tests/test_messages_panel_regression.py
     DEFAULT_CSS = """
     MessagesPanelWithThread {
         width: 1fr;
