@@ -196,12 +196,14 @@ class ThreadState:
 
 class FreeqTextualApp(App[None], LayoutAwareRender):
     DEFAULT_CSS = """
+    #body {
+        width: 1fr;
+        height: 1fr;
+    }
+    
     #messages {
         width: 1fr;
     }
-
-    # Thread panel CSS is now in ThreadPanel widget
-    # ScrollableLog has its own CSS with padding
 
     #composer {
         border: solid $panel-lighten-2;
