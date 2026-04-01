@@ -212,7 +212,10 @@ class TypedSlot(Widget, Generic[T]):
     
     def watch_has_content(self, has_content: bool) -> None:
         """Update CSS when content changes."""
-        self.toggle_class(has_content, "occupied")
+        if has_content:
+            self.add_class("occupied")
+        else:
+            self.remove_class("occupied")
         if not has_content:
             self.styles.height = self._empty_height
             if self._current_variant_name:
