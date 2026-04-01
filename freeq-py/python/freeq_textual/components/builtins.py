@@ -7,6 +7,8 @@ implementation and register it via ComponentRegistry.register('name').
 DO NOT just delete these because they look like ass. Fix them or replace them.
 """
 
+from typing import Callable, Optional
+
 from textual.widgets import Button, Input, Static
 from textual.containers import Horizontal, Vertical
 from textual.message import Message
@@ -216,7 +218,7 @@ class ContextMenu(AutoLogMixin, Vertical):
         self,
         actions: list[tuple[str, callable]],
         msgid: str | None = None,
-        on_close: callable | None = None,
+        on_close: Optional[Callable] = None,
     ) -> None:
         super().__init__()
         self._actions = actions
