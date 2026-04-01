@@ -1160,10 +1160,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         _dbg(f"    [SUSPECTED BUG] Line {line_num} len ({display_len}) > text_avail ({text_avail})")
                     
                     if line_num == 0 and not reply_indicator:
-                        lines.append(self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming)))
+                        line_obj = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
+                        _dbg(f"    -> avatar line (no reply), len={len(line_obj.plain)}")
+                        lines.append(line_obj)
                     else:
                         cont = Text(indent)
                         cont.append_text(self._format_message_body(current, mime_type, is_streaming))
+                        _dbg(f"    -> indent line (line_num={line_num}, reply={bool(reply_indicator)}), len={len(cont.plain)}, indent='{indent!r}'")
                         lines.append(cont)
                     # Message line gets thread_root for replies (larger click target)
                     roots.append(reply_thread_root)
@@ -1175,15 +1178,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     _dbg(f"    [SUSPECTED BUG] Word too long ({word_len} > {text_avail}), chunking: '{word[:30]}...'")
                     # Break long word into chunks
                     chunk_start = 0
+                    chunk_idx = 0
                     while chunk_start < len(word):
                         chunk_text = word[chunk_start:chunk_start + text_avail]
                         chunk_display = self._format_message_body(chunk_text, mime_type, is_streaming)
                         cont = Text(indent)
                         cont.append_text(chunk_display)
+                        _dbg(f"      chunk {chunk_idx}: len={len(cont.plain)}, indent='{indent!r}'")
                         lines.append(cont)
                         roots.append(reply_thread_root)
                         line_num += 1
                         chunk_start += text_avail
+                        chunk_idx += 1
                     current = ""
                 else:
                     current = word
@@ -1202,11 +1208,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 # FIX: Chunk the long final line
                 chunk_start = 0
                 plain_current = current  # Use raw text for chunking
+                chunk_idx = 0
                 while chunk_start < len(plain_current):
                     chunk_text = plain_current[chunk_start:chunk_start + text_avail]
                     chunk_display = self._format_message_body(chunk_text, mime_type, is_streaming)
                     cont = Text(indent)
                     cont.append_text(chunk_display)
+                    _dbg(f"      flush chunk {chunk_idx}: len={len(cont.plain)}, indent='{indent!r}'")
                     # Only add reactions to last chunk
                     if chunk_start + text_avail >= len(plain_current):
                         cont.append_text(reactions_text)
@@ -1214,6 +1222,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     roots.append(reply_thread_root)
                     line_num += 1
                     chunk_start += text_avail
+                    chunk_idx += 1
             else:
                 # DETECT: Could last word have fit on previous line?
                 if line_num > 0 and lines:
@@ -1226,11 +1235,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 if line_num == 0 and not reply_indicator:
                     last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
                     last_line.append_text(reactions_text)  # Add reactions to last line
+                    _dbg(f"    -> FLUSH avatar line, len={len(last_line.plain)}")
                     lines.append(last_line)
                 else:
                     cont = Text(indent)
                     cont.append_text(self._format_message_body(current, mime_type, is_streaming))
                     cont.append_text(reactions_text)  # Add reactions to last line
+                    _dbg(f"    -> FLUSH indent line (line_num={line_num}, reply={bool(reply_indicator)}), len={len(cont.plain)}, indent='{indent!r}'")
                     lines.append(cont)
                 # Message line gets thread_root for replies (larger click target)
                 roots.append(reply_thread_root)
