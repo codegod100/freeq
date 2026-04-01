@@ -2452,8 +2452,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             # Convert line to Text if needed
             if isinstance(line, str):
                 content = Text(line)
+                _dbg(f"  line {count}: str -> Text, len={len(line)}")
             else:
                 content = line
+                _dbg(f"  line {count}: {type(line).__name__}, len={len(str(line))}")
             log.write(content, msgid=msgid, thread_root=thread_root)
             count += 1
         

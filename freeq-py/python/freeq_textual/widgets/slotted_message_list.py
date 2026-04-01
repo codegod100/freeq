@@ -72,6 +72,7 @@ class SlottedMessageList(Vertical):
 
         Creates a MessageItem with empty slot below the message.
         """
+        _dbg(f"SlottedMessageList.write: msgid={msgid[:8] if msgid else None} content_type={type(content).__name__} content_len={len(str(content))}")
         item = MessageItem(
             content=content,
             msgid=msgid,

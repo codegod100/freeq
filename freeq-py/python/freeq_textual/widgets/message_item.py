@@ -82,11 +82,14 @@ class MessageItem(Vertical):
         """Compose message area and empty slot."""
         # Render Rich Text properly - Static can take Text objects directly
         content = self._content
+        content_type = type(content).__name__
         if isinstance(content, Text):
             # Keep as Text object for rich rendering
-            pass
+            content_str = str(content)[:50] + "..." if len(str(content)) > 50 else str(content)
+            _dbg(f"MessageItem.compose msgid={self._msgid[:8] if self._msgid else None} type={content_type} content={content_str!r}")
         else:
             content = str(content)
+            _dbg(f"MessageItem.compose msgid={self._msgid[:8] if self._msgid else None} type={content_type} content={content[:50]!r}")
         yield Static(content, classes="message-area")
         yield Vertical(id="slot")
     
