@@ -2048,15 +2048,22 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     # If it's broken, fix it. Don't just delete it.
     @on(ReplyPanel.ReplySent)
     def handle_reply_panel_reply(self, event: ReplyPanel.ReplySent) -> None:
-        """Handle reply sent from reply panel."""
-        _dbg(f"handle_reply_panel_reply(msgid={event.reply_to_msgid[:8]!r}, text={event.text[:20]!r}...)")
-        self._send_reply(event.target, event.reply_to_msgid, event.text)
+        """Handle reply/edit sent from reply panel."""
+        action = "edit" if event.is_edit else "reply"
+        _dbg(f"handle_reply_panel_{action}(msgid={event.reply_to_msgid[:8]!r}, text={event.text[:20]!r}...)")
         
-        # Close the side panel slot after sending reply
+        if event.is_edit:
+            # Send edit via client
+            self.client.edit_message(event.target, event.text, event.reply_to_msgid)
+        else:
+            # Send reply
+            self._send_reply(event.target, event.reply_to_msgid, event.text)
+        
+        # Close the side panel slot after sending
         side_slot = self.query_one("#side-panel", SidePanelSlot)
         if side_slot:
             side_slot.clear()
-            _dbg("  cleared side-panel slot after reply")
+            _dbg(f"  cleared side-panel slot after {action}")
 
     def _refresh_thread_panel(self) -> None:
         """Refresh the thread panel with current messages.
@@ -2142,6 +2149,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         menu = ContextMenu(
             actions=[
                 ("Reply", self._on_menu_reply),
+                ("Edit", self._on_menu_edit),
                 ("React", self._on_menu_react),
             ],
             msgid=msgid,
@@ -2284,6 +2292,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             menu = ContextMenu(
                 actions=[
                     ("Reply", self._on_menu_reply),
+                    ("Edit", self._on_menu_edit),
                     ("React", self._on_menu_react),
                 ],
                 msgid=msgid,
@@ -2380,6 +2389,58 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 on_close=lambda: _dbg(f"EmojiPicker closed for {msgid[:8]}")
             )
             _dbg(f"  loaded EmojiPicker into overlay slot for {msgid[:8]}")
+    
+    def _on_menu_edit(self, msgid: str | None) -> None:
+        """Handle Edit from context menu - prompt for new text and send edit."""
+        _dbg(f"_on_menu_edit(msgid={msgid[:8] if msgid else None})")
+        
+        if not msgid:
+            return
+        
+        # Get message to edit
+        msg = self.message_index.get(msgid)
+        if not msg:
+            _dbg(f"  msgid {msgid} not found in index")
+            return
+        
+        # Check if user is the author (can only edit own messages)
+        if msg.sender.casefold() != self.client.nick.casefold():
+            _dbg(f"  cannot edit - not author (sender={msg.sender}, me={self.client.nick})")
+            self._append_status("Can only edit your own messages")
+            return
+        
+        # Use inline actions slot for edit input
+        messages_list = self.query_one("#messages", (SlottedMessageList, ScrollableLog))
+        if isinstance(messages_list, SlottedMessageList):
+            for item in messages_list.children:
+                if hasattr(item, 'msgid') and item.msgid == msgid:
+                    if hasattr(item, 'actions_slot') and item.actions_slot:
+                        # Load ReplyPanel in edit mode (reused for editing)
+                        item.actions_slot.load_variant(
+                            ReplyPanel,
+                            reply_to_msgid=msgid,
+                            context=msg.text,
+                            sender=msg.sender,
+                            target=self._display_name(self.active_buffer),
+                            is_edit=True,  # New parameter to indicate edit mode
+                            on_close=lambda: _dbg(f"Edit panel closed for {msgid[:8]}")
+                        )
+                        _dbg(f"  loaded Edit panel in message slot for {msgid[:8]}")
+                        return
+        
+        # Fallback: show in side panel
+        side_slot = self.query_one("#side-panel", SidePanelSlot)
+        if side_slot:
+            side_slot.load_variant(
+                ReplyPanel,
+                reply_to_msgid=msgid,
+                context=msg.text,
+                sender=msg.sender,
+                target=self._display_name(self.active_buffer),
+                is_edit=True,
+                on_close=lambda: _dbg(f"Edit panel closed for {msgid[:8]}")
+            )
+            _dbg(f"  loaded Edit panel in side-panel slot for {msgid[:8]}")
     
     @on(EmojiPicker.EmojiSelected)
     def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:

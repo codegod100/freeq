@@ -73,6 +73,16 @@ class FreeqClient:
             tags += f";+reply={msgid}"
         self._inner.raw(f"@{tags} TAGMSG {target}")
 
+    def edit_message(self, target: str, new_text: str, msgid: str) -> None:
+        """Edit an existing message.
+        
+        Uses +draft/edit tag per IRCv3 draft/edit specification.
+        Server broadcasts the edited message to all clients.
+        """
+        # PRIVMSG format: @+draft/edit=msgid PRIVMSG target :new_text
+        tags = f"+draft/edit={msgid}"
+        self._inner.raw(f"@{tags} PRIVMSG {target} :{new_text}")
+
     def raw(self, line: str) -> None:
         self._inner.raw(line)
 

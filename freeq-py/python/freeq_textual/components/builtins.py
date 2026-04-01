@@ -123,10 +123,11 @@ class ReplyPanel(AutoLogMixin, Vertical):
 
     class ReplySent(Message):
         """Emitted when reply is submitted."""
-        def __init__(self, text: str, reply_to_msgid: str, target: str) -> None:
+        def __init__(self, text: str, reply_to_msgid: str, target: str, is_edit: bool = False) -> None:
             self.text = text
             self.reply_to_msgid = reply_to_msgid
             self.target = target
+            self.is_edit = is_edit
             super().__init__()
 
     def __init__(
@@ -135,6 +136,7 @@ class ReplyPanel(AutoLogMixin, Vertical):
         context: str, 
         target: str, 
         sender: str = "",
+        is_edit: bool = False,
         **kwargs
     ) -> None:
         super().__init__(**kwargs)
@@ -142,13 +144,17 @@ class ReplyPanel(AutoLogMixin, Vertical):
         self._reply_context = context  # NOT _context (reserved by Textual!)
         self._target = target
         self._sender = sender
+        self._is_edit = is_edit
 
     def compose(self):
         with Horizontal(id="reply-header-row"):
-            yield Static(f"↩ {self._sender}" if self._sender else "↩ Reply", id="reply-header")
+            header_text = "✎ Edit" if self._is_edit else (f"↩ {self._sender}" if self._sender else "↩ Reply")
+            yield Static(header_text, id="reply-header")
             yield Button("✕", id="reply-close")
         yield Static(self._reply_context[:80], id="reply-context")
-        yield Input(placeholder="Reply...", id="reply-input")
+        placeholder = "Edit message..." if self._is_edit else "Reply..."
+        value = self._reply_context if self._is_edit else ""
+        yield Input(placeholder=placeholder, id="reply-input", value=value)
 
     def on_mount(self) -> None:
         super().on_mount()  # AutoLogMixin logs mount
@@ -163,8 +169,9 @@ class ReplyPanel(AutoLogMixin, Vertical):
         super().on_input_submitted(event)  # AutoLogMixin logs input
         text = event.value.strip()
         if text:
-            self._log(f"posting ReplySent(msgid={self.reply_to_msgid[:8]}, target={self._target})")
-            self.post_message(self.ReplySent(text, self.reply_to_msgid, self._target))
+            action = "Edit" if self._is_edit else "Reply"
+            self._log(f"posting {action}Sent(msgid={self.reply_to_msgid[:8]}, target={self._target})")
+            self.post_message(self.ReplySent(text, self.reply_to_msgid, self._target, self._is_edit))
         self.remove()
 
 
