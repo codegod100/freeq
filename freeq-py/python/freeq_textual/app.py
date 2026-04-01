@@ -195,19 +195,18 @@ class ThreadState:
 
 
 class FreeqTextualApp(App[None], LayoutAwareRender):
-    # LAYOUT ARCHITECTURE WARNING:
-    # The Horizontal(#body) contains 4 children with mixed sizing strategies:
-    # - BufferList: fixed width (20) - REGRESSION: was 15%, caused 1fr calc issues
-    # - MessagesPanel: 1fr (takes remaining space) - MUST have non-zero width
-    # - SidePanelSlot: fixed width (30, display:none when empty) - REGRESSION: was 30%
-    # - UserList: fixed width (25)
-    # 
-    # CRITICAL: Do NOT use percentage widths with 1fr in the same Horizontal.
-    # Mixing percentage + fractional sizing causes Textual to give 1fr zero space
-    # when calculating percentage widths first. Result: invisible messages.
-    # 
-    # TESTS REQUIRED: See tests/test_messages_panel_regression.py
-    # If messages disappear, check /tmp/freeq.log for "zero size" warnings.
+    # LAYOUT ARCHITECTURE:
+    # Horizontal(#body) contains 3 children that participate in layout:
+    # - BufferList: fixed width 20
+    # - MessagesPanel: 1fr (takes remaining space) 
+    # - UserList: fixed width 25
+    # Total fixed: 45 columns, leaving rest for messages
+    #
+    # SidePanelSlot is DOCKED to right (overlays, doesn't participate in flow)
+    # It appears/disappears without affecting MessagesPanel width
+    #
+    # CRITICAL: Do NOT add width-based siblings to Horizontal without
+    # adjusting the 1fr calculation. See tests/test_messages_panel_regression.py
     DEFAULT_CSS = """
     #body {
         width: 1fr;
@@ -296,8 +295,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
             yield MessagesPanel(use_slots=True)
-            yield SidePanelSlot(id="side-panel", empty_height=0)
+            # NOTE: SidePanelSlot is DOCKED (see sum_slots.py), so it overlays
+            # rather than participating in Horizontal layout. This prevents it
+            # from squeezing MessagesPanel when hidden (display:none still takes space)
             yield UserList(id="user-list")
+        # Docked overlay - appears above content without affecting layout
+        yield SidePanelSlot(id="side-panel", empty_height=0)
         yield Input(
             placeholder="Type a message or /join /channel",
             id="composer",

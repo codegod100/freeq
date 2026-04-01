@@ -75,17 +75,19 @@ class SidePanelSlotType(SlotType):
     
     default_css = """
     SidePanelSlot {
+        dock: right;
         width: 30;
         min-width: 24;
         max-width: 50;
         height: 1fr;
         display: none;
+        layer: overlay;
+        background: $surface;
     }
     
     SidePanelSlot.occupied {
         display: block;
         border: round $primary;
-        background: $surface;
         padding: 0 1;
     }
     
