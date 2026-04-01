@@ -60,4 +60,4 @@ __all__ = [
     'ThreadPanelSlot',
     'SumSlotManager',
     'EmojiPicker',
-]"
+]
