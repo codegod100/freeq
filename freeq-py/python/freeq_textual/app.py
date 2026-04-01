@@ -1034,16 +1034,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"  -> total lines: {len(lines)}")
         return lines
 
-    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None], int]:
-        """Return tuple of (lines, thread_roots, reply_indicator_index) for a chat message.
+    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None]]:
+        """Return tuple of (lines, thread_roots) for a chat message.
         
         With avatars:
         - Line 1: ████ nick HH:MMpm MM/DD
-        - Line 2: ████ reply indicator (if any) OR first line of message
+        - Line 2: ████ first line of message
         - Line 3+:      continuation (same column as line 2 text)
-        
-        Returns:
-            reply_indicator_index: Index of reply indicator line in lines, or -1 if none
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         roots: list[str | None] = []
@@ -1070,7 +1067,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         time_str = self._format_timestamp(timestamp)
         time_text = Text(f" {time_str}", style="dim") if time_str else Text()
         
-        # Always use avatars: nick on line 1, reply indicator or message on line 2
+        # Always use avatars: nick on line 1, message on line 2
         rows = self._avatar_rows_for_nick(sender)
         indent = "     "  # 5 spaces - aligns with where text starts after "████ "
         text_avail = max(20, width - 5)
@@ -1084,22 +1081,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         line1.append_text(time_text)
         lines = [line1]
         roots = [None]  # nick line has no thread_root
-        reply_indicator_index = -1  # Track which line is the reply indicator (for click handling)
         
         # Line 2: avatar row 2 + reply indicator (if any)
         if reply_indicator:
-            # DETECT: Reply indicator may be too long
-            reply_plain = reply_indicator.plain if hasattr(reply_indicator, 'plain') else str(reply_indicator)
-            reply_len = len(reply_plain)
-            _dbg(f"CHAT_BLOCK: reply_indicator len={reply_len}, text_avail={text_avail}")
-            
-            if reply_len > text_avail:
-                _dbg(f"  [SUSPECTED BUG] Reply indicator too long ({reply_len} > {text_avail}), needs wrapping")
-                # Truncate with ellipsis for now
-                truncated_text = reply_plain[:text_avail-3] + "..."
-                reply_indicator = Text(truncated_text, style="dim")
-                _dbg(f"  -> truncated to {len(truncated_text)} chars")
-            
             reply_line = Text()
             for color in rows[1]:
                 reply_line.append("\u2588", style=color)
@@ -1107,7 +1091,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             reply_line.append_text(reply_indicator)
             lines.append(reply_line)
             roots.append(reply_thread_root)
-            reply_indicator_index = len(lines) - 1  # Mark this line as the reply indicator
         
         # Check for markdown - handle multi-line formatted output
         is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(current_text)
@@ -1121,7 +1104,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 if not body_line.plain.strip():
                     continue  # Skip empty lines
                 _dbg(f"  -> line[{i}]: {len(body_line.plain)} chars, {len(body_line.spans)} spans")
-                if i == 0 and not reply_indicator:
+                if i == 0 :
                     # First line with avatar row 2
                     line = Text()
                     for color in rows[1]:
@@ -1149,18 +1132,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                                     chunk_line.spans.append(type(span)(max(0, span_start), min(chunk_len, span_end), span.style))
                             line.append_text(chunk_line)
                             lines.append(line)
-                            roots.append(reply_thread_root)
+                            roots.append(None)
                             chunk_start += text_avail
                     else:
                         line = Text(indent)
                         line.append_text(body_line)
                         lines.append(line)
-                        roots.append(reply_thread_root)
+                        roots.append(None)
                     continue  # Skip the default roots.append below
             # Add reactions to last line
             if lines:
                 lines[-1].append_text(reactions_text)
-            return lines, roots, reply_indicator_index
+            return lines, roots
         
         # Wrap message text (non-markdown)
         
@@ -1172,18 +1155,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 line = self._make_avatar_text_line(rows[1], diff_body)
                 line.append_text(reactions_text)
                 lines.append(line)
-                roots.append(reply_thread_root)
+                roots.append(None)
             else:
                 line = Text(indent)
                 line.append_text(diff_body)
                 line.append_text(reactions_text)
                 lines.append(line)
-                roots.append(reply_thread_root)
+                roots.append(None)
             # Ensure at least 2 lines for avatar display
             if len(lines) == 1:
                 lines.append(self._make_avatar_text_line(rows[1], Text()))
                 roots.append(None)
-            return lines, roots, reply_indicator_index
+            return lines, roots
         
         words = current_text.split()
         _dbg(f"CHAT_BLOCK: wrapping {len(words)} words, width={width}, text_avail={text_avail}")
@@ -1208,17 +1191,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     if display_len > text_avail:
                         _dbg(f"    [SUSPECTED BUG] Line {line_num} len ({display_len}) > text_avail ({text_avail})")
                     
-                    if line_num == 0 and not reply_indicator:
+                    if line_num == 0 :
                         line_obj = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
                         _dbg(f"    -> avatar line (no reply), len={len(line_obj.plain)}")
                         lines.append(line_obj)
                     else:
                         cont = Text(indent)
                         cont.append_text(self._format_message_body(current, mime_type, is_streaming))
-                        _dbg(f"    -> indent line (line_num={line_num}, reply={bool(reply_indicator)}), len={len(cont.plain)}, indent='{indent!r}'")
+                        _dbg(f"    -> indent line (line_num={line_num}), len={len(cont.plain)}, indent='{indent!r}'")
                         lines.append(cont)
                     # Message line gets thread_root for replies (larger click target)
-                    roots.append(reply_thread_root)
+                    roots.append(None)
                 
                 # Check if word itself is too long and needs chunking
                 word_display = self._format_message_body(word, mime_type, is_streaming).plain
@@ -1235,7 +1218,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         cont.append_text(chunk_display)
                         _dbg(f"      chunk {chunk_idx}: len={len(cont.plain)}, indent='{indent!r}'")
                         lines.append(cont)
-                        roots.append(reply_thread_root)
+                        roots.append(None)
                         line_num += 1
                         chunk_start += text_avail
                         chunk_idx += 1
@@ -1268,7 +1251,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     if chunk_start + text_avail >= len(plain_current):
                         cont.append_text(reactions_text)
                     lines.append(cont)
-                    roots.append(reply_thread_root)
+                    roots.append(None)
                     line_num += 1
                     chunk_start += text_avail
                     chunk_idx += 1
@@ -1281,7 +1264,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     if prev_len + 1 + display_len <= text_avail + len(indent):
                         _dbg(f"    [SUSPECTED BUG] Final word could fit on previous line ({prev_len}+1+{display_len}={prev_len+1+display_len} <= available)")
                 
-                if line_num == 0 and not reply_indicator:
+                if line_num == 0 :
                     last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
                     last_line.append_text(reactions_text)  # Add reactions to last line
                     _dbg(f"    -> FLUSH avatar line, len={len(last_line.plain)}")
@@ -1290,10 +1273,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     cont = Text(indent)
                     cont.append_text(self._format_message_body(current, mime_type, is_streaming))
                     cont.append_text(reactions_text)  # Add reactions to last line
-                    _dbg(f"    -> FLUSH indent line (line_num={line_num}, reply={bool(reply_indicator)}), len={len(cont.plain)}, indent='{indent!r}'")
+                    _dbg(f"    -> FLUSH indent line (line_num={line_num}), len={len(cont.plain)}, indent='{indent!r}'")
                     lines.append(cont)
                 # Message line gets thread_root for replies (larger click target)
-                roots.append(reply_thread_root)
+                roots.append(None)
         else:
             # No message text, just add reactions to last line if any
             if reactions_text and lines:
@@ -1343,7 +1326,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         else:
             _dbg(f"Skipping image check: TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, has_text={bool(current_text)}, has_msgid={bool(msgid)}")
         
-        return lines, roots, reply_indicator_index
+        return lines, roots
 
     def _load_image_async(self, msgid: str, url: str, buffer_key: str) -> None:
         """Load and render an image asynchronously using Textual workers."""
@@ -1739,20 +1722,34 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             is_streaming = msg_info.is_streaming if msg_info else False
             
             if is_first:
-                # Get reply indicator (first pending) to embed in chat block
-                reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
-                reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
-                pending_reply_indicators.clear()
-                block_lines, block_roots, reply_indicator_index = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid, mime_type=mime_type, is_streaming=is_streaming)
-                for i, (block_line, block_root) in enumerate(zip(block_lines, block_roots)):
+                # Handle reply indicators: embed first one in chat block, flush rest as separate lines
+                reply_ind = None
+                reply_root = None
+                if pending_reply_indicators:
+                    # Take the FIRST reply indicator to embed in the chat block (maintains UX order)
+                    reply_ind = pending_reply_indicators[0][0]
+                    reply_root = pending_reply_indicators[0][1]
+                    # Remove the first one - remaining ones will be flushed separately
+                    pending_reply_indicators = pending_reply_indicators[1:]
+                
+                # Flush any REMAINING reply indicators as separate lines BEFORE the chat block
+                # This handles the edge case of multiple consecutive reply indicators
+                if pending_reply_indicators:
+                    indent = 5  # Match avatar indent
+                    indent_str = " " * indent
+                    for pending_line, pending_root, pending_msgid in pending_reply_indicators:
+                        indented_line = Text(indent_str) + pending_line
+                        renderable.append(indented_line)
+                        render_roots.append(pending_root)
+                        render_msgids.append(pending_msgid)
+                    pending_reply_indicators.clear()
+                
+                # Now render the chat block (with embedded reply indicator if any)
+                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid, mime_type=mime_type, is_streaming=is_streaming)
+                for block_line, block_root in zip(block_lines, block_roots):
                     renderable.append(block_line)
                     render_roots.append(block_root)
-                    # Reply indicator line gets msgid=None so clicks open the thread
-                    # All other lines get the message's msgid
-                    if i == reply_indicator_index:
-                        render_msgids.append(None)  # Reply indicator click -> open thread
-                    else:
-                        render_msgids.append(msgid)  # Message click -> context menu
+                    render_msgids.append(msgid)  # All lines get the message's msgid
             else:
                 # Continuation of same sender - just message body, indented
                 # Get current text from message_index if available (for edited messages)

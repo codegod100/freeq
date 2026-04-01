@@ -789,11 +789,12 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
                 from freeq_textual.widgets import SlottedMessageList, MessageItem
                 slotted = app.query_one("#messages", SlottedMessageList)
                 
-                # Find the reply indicator - it has thread_root="root1" and msgid=None
+                # Find the reply indicator - it has thread_root="root1"
+                # (msgid may be set or None depending on implementation)
                 reply_indicator = None
                 for child in slotted.children:
                     if isinstance(child, MessageItem):
-                        if child.thread_root == "root1" and child.msgid is None:
+                        if child.thread_root == "root1":
                             reply_indicator = child
                             break
                 
