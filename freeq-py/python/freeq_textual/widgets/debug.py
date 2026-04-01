@@ -11,6 +11,16 @@ Failure heuristics:
 - Slot type mismatches (variant not allowed)
 - Network event ordering issues
 - State mutation during render
+
+DOCUMENTATION REQUIREMENT:
+Every time this logger proves a bug, you MUST create a comment in the
+relevant code spot explaining:
+1. What the bug was (with log message as evidence)
+2. Why it happened (root cause analysis)
+3. How the fix works (implementation details)
+
+This creates a provable trail from detection to resolution.
+Example: BufferList child count mismatch → comment in update_buffers()
 """
 
 import datetime

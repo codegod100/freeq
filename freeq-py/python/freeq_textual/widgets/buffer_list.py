@@ -13,6 +13,12 @@ WHY GLOBAL STATE IS BAD:
 - Component can't be reused independently
 
 FRIENDS DON'T LET FRIENDS USE GLOBAL STATE!
+
+BUG HISTORY (proved by debug.py logging):
+2026-03-31: INVARIANT VIOLATION: BufferList child count mismatch: expected 8, got 16
+- Root cause: ListView.clear() doesn't remove children, only clears selection state
+- Fix: Explicit child.remove() loop in update_buffers()
+- See: debug.py DOCUMENTATION REQUIREMENT for logging trail
 """
 
 from textual.widgets import ListView, ListItem, Static
@@ -44,8 +50,10 @@ class BufferList(AutoLogMixin, ListView):
         pre_clear_count = len(list(self.children))
         _dbg(f"BufferList.update_buffers: clearing {pre_clear_count} items, adding {len(buffers)} new items")
         
-        # BUG FIX: self.clear() doesn't actually remove children in Textual ListView
-        # Need to explicitly remove all children
+        # BUG PROVED BY LOG: INVARIANT VIOLATION: BufferList child count mismatch: expected 8, got 16
+        # ListView.clear() doesn't actually remove children - only clears internal selection state
+        # The 8 old items remained, 8 new items added = 16 total (duplicates visible in UI)
+        # Fix: Explicitly remove each child before adding new ones
         for child in list(self.children):
             child.remove()
         
