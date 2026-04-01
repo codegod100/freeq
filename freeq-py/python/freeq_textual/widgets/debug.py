@@ -297,4 +297,3 @@ def log_correlation_id(
 ) -> None:
     """Log correlation ID for tracing async operations."""
     _dbg(f"CORRELATION: {operation} id={correlation_id}")
-
