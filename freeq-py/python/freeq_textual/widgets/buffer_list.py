@@ -47,31 +47,49 @@ class BufferList(AutoLogMixin, ListView):
         """Update the buffer list with current buffers and mark active one."""
         from .debug import _dbg
         
-        pre_clear_count = len(list(self.children))
-        _dbg(f"BufferList.update_buffers: clearing {pre_clear_count} items, adding {len(buffers)} new items")
+        # PROVABLE BUG: clear() and remove_items() both fail on Textual ListView
+        # See: previous INVARIANT VIOLATION logs showing 16 items instead of 8
+        # 
+        # SOLUTION: Sync instead of clear/recreate
+        # - Get current items by name
+        # - Add new items that don't exist
+        # - Remove items no longer in buffers
+        # - Update active state on all
         
-        # BUG PROVED BY LOG: INVARIANT VIOLATION: BufferList child count mismatch: expected 8, got 16
-        # ListView.clear() and child.remove() don't work - Textual manages ListView children specially
-        # Need to use ListView.remove_items() method (added in PR #4384)
-        if self.children:
-            indices = list(range(len(self.children)))
-            self.remove_items(indices)
+        current_items = {item.name: item for item in self.children if hasattr(item, 'name')}
+        new_buffer_names = {b.name for b in buffers}
         
-        # Force immediate removal by clearing internal state
-        self._nodes._nodes.clear() if hasattr(self, '_nodes') else None
+        _dbg(f"BufferList.update_buffers: syncing {len(current_items)} current vs {len(buffers)} new")
         
-        post_clear_count = len(list(self.children))
-        _dbg(f"BufferList.update_buffers: after clear, have {post_clear_count} items (expected 0)")
+        # Remove items no longer in buffers (work backwards to avoid index issues)
+        for name, item in list(current_items.items()):
+            if name not in new_buffer_names:
+                _dbg(f"BufferList.update_buffers: removing '{name}' (no longer in buffers)")
+                item.remove()
         
+        # Add new items or update existing
         for buffer in buffers:
             label = buffer.name
             if buffer.unread:
                 label = f"{label} ({buffer.unread})"
-            item = ListItem(Static(label), name=buffer.name)
-            if buffer.name == active:
-                item.add_class("active")
-            self.append(item)
-            _dbg(f"BufferList.update_buffers: added item '{label}' (active={buffer.name == active})")
+            
+            if buffer.name in current_items:
+                # Update existing item label and active state
+                item = current_items[buffer.name]
+                static = item.query_one(Static)
+                static.update(label)
+                if buffer.name == active:
+                    item.add_class("active")
+                else:
+                    item.remove_class("active")
+                _dbg(f"BufferList.update_buffers: updated '{label}' (active={buffer.name == active})")
+            else:
+                # Create new item
+                item = ListItem(Static(label), name=buffer.name)
+                if buffer.name == active:
+                    item.add_class("active")
+                self.append(item)
+                _dbg(f"BufferList.update_buffers: added '{label}' (active={buffer.name == active})")
         
         final_count = len(list(self.children))
         _dbg(f"BufferList.update_buffers: done, total children={final_count}")
