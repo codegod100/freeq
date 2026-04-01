@@ -8,6 +8,15 @@ from .message_item import MessageItem
 from .slotted_message_list import SlottedMessageList
 from .slots import Slot, SlottedMessageItem, SlotManager, slot_manager
 from .spinner import BaseSpinner, InlineSpinner, LoadingOverlay
+from .sum_slots import (
+    ComposedSlotMessage,
+    MessageActionsSlot,
+    SlotVariant,
+    SumSlot,
+    SumSlotManager,
+    ThreadPanelSlot,
+    sum_slot_manager,
+)
 from .messages_panel import MessagesPanel, MessagesPanelWithThread
 from .scrollable_log import ScrollableLog
 from .thread_panel import ThreadMessage, ThreadPanel
@@ -19,23 +28,30 @@ from ..components import get_component
 __all__ = [
     "BaseSpinner",
     "BufferList",
+    "ComposedSlotMessage",
     "DebugPanel",
     "InlineSpinner",
     "LayoutAwareRender",
     "LoadingOverlay",
+    "MessageActionsSlot",
     "MessageItem",
     "MessagesPanel",
     "MessagesPanelWithThread",
     "RenderablePanel",
     "ScrollableLog",
-    "SlottedMessageItem",
-    "SlottedMessageList",
     "Slot",
     "SlotManager",
+    "SlotVariant",
+    "SlottedMessageItem",
+    "SlottedMessageList",
+    "SumSlot",
+    "SumSlotManager",
     "ThreadMessage",
     "ThreadPanel",
+    "ThreadPanelSlot",
     "_dbg",
+    "get_component",
     "set_debug_callback",
-    "get_component",  # Export so everyone can get their friends!
-    "slot_manager",  # Global slot manager
+    "slot_manager",
+    "sum_slot_manager",
 ]
