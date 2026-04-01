@@ -749,6 +749,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         Always uses avatars. Markdown is detected and rendered with proper formatting.
         """
+        from .debug import _dbg
+        
         parts: list[Text] = []
         # Always use avatars
         avatar = self._format_avatar(sender)
@@ -762,6 +764,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         nick_len = len(sender) + 2  # ": "
         indent += nick_len
         
+        _dbg(f"FORMAT: sender='{sender}', nick_len={nick_len}, indent={indent}, width={width}")
+        
         # Check if this is markdown - if so, render first then handle wrapping
         is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(text)
         
@@ -774,17 +778,44 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             return Text().assemble(*parts)
         
         if width > 0:
+            # DETECT: Check if indent exceeds width (would cause wrapping issues)
+            if indent >= width:
+                _dbg(f"  [SUSPICIOUS] indent ({indent}) >= width ({width}), wrapping will fail")
+            
             # Wrap text to width with indent
             lines = self._format_message_lines(text, indent, width)
+            
+            # DETECT: Check for width accounting mismatch
+            # First line available = width - nick_part (already rendered)
+            # But _format_message_lines uses available = width - indent for ALL lines
+            first_line_available = width - nick_len
+            continuation_available = width - indent
+            _dbg(f"  WIDTH CHECK: first_line_available={first_line_available}, continuation_available={continuation_available}")
+            
             if lines:
                 # First line goes on same line as nick (no indent, it's after nick)
-                parts.append(self._format_message_body(lines[0].plain.lstrip(), mime_type, is_streaming))
+                first_line_text = lines[0].plain.lstrip()
+                _dbg(f"  FIRST LINE: len={len(first_line_text)}, text='{first_line_text[:40]}...'")
+                
+                # DETECT: First line might be too long
+                if len(first_line_text) > first_line_available:
+                    _dbg(f"  [SUSPECTED BUG] First line len ({len(first_line_text)}) > available ({first_line_available}), word may wrap incorrectly")
+                
+                parts.append(self._format_message_body(first_line_text, mime_type, is_streaming))
                 result = Text().assemble(*parts)
                 # Continuation lines need indent + URL processing
-                for cont_line in lines[1:]:
+                for i, cont_line in enumerate(lines[1:], 1):
                     result.append(Text("\n"))
                     # cont_line has indent baked in, preserve it
-                    indented = Text(" " * indent) + self._format_message_body(cont_line.plain.lstrip(), mime_type, is_streaming)
+                    cont_text = cont_line.plain.lstrip()
+                    cont_len = len(cont_line.plain)
+                    _dbg(f"  CONT LINE {i}: len={cont_len}, text='{cont_text[:40]}...'")
+                    
+                    # DETECT: Continuation line too long
+                    if cont_len > width:
+                        _dbg(f"  [SUSPECTED BUG] Continuation line {i} len ({cont_len}) > width ({width})")
+                    
+                    indented = Text(" " * indent) + self._format_message_body(cont_text, mime_type, is_streaming)
                     result.append(indented)
                 return result
         
@@ -847,35 +878,70 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         Handles word wrapping manually to ensure proper indentation on all lines,
         including continuation lines when long words need to break.
         """
+        from .debug import _dbg
+        
         available = max(20, width - indent)
         words = text.split()
         lines: list[Text] = []
         current = ""
         
+        _dbg(f"WRAPPING: {len(words)} words, width={width}, indent={indent}, available={available}")
+        
         for word in words:
             test = f"{current} {word}".strip()
-            if len(test) <= available:
+            test_len = len(test)
+            
+            if test_len <= available:
                 current = test
             else:
                 if current:
                     # Flush current line with proper indent
-                    lines.append(Text(" " * indent + current))
+                    line_text = " " * indent + current
+                    line_len = len(line_text)
+                    lines.append(Text(line_text))
+                    _dbg(f"  WRAP: line flushed, len={line_len}, content='{current[:30]}...'")
+                    
+                    # DETECT: Line too long (shouldn't happen with proper wrapping)
+                    if line_len > width:
+                        _dbg(f"  [SUSPICIOUS] Line exceeds width: {line_len} > {width}")
+                
                 # Check if the word itself is too long for available space
-                if len(word) > available:
+                word_len = len(word)
+                if word_len > available:
                     # Break long word into chunks that fit
+                    _dbg(f"  LONG WORD: '{word[:20]}...' ({word_len} chars) > available ({available})")
                     chunk_start = 0
+                    chunk_num = 0
                     while chunk_start < len(word):
                         chunk = word[chunk_start:chunk_start + available]
-                        lines.append(Text(" " * indent + chunk))
+                        chunk_line = " " * indent + chunk
+                        lines.append(Text(chunk_line))
+                        _dbg(f"    chunk {chunk_num}: len={len(chunk_line)}, starts with '{chunk[:20]}...'")
                         chunk_start += available
+                        chunk_num += 1
                     current = ""
                 else:
                     current = word
+                    _dbg(f"  NEW LINE: starting with '{word[:30]}...'")
         
         # Flush remaining text
         if current:
-            lines.append(Text(" " * indent + current))
+            final_line = " " * indent + current
+            final_len = len(final_line)
+            lines.append(Text(final_line))
+            _dbg(f"  FINAL: len={final_len}, content='{current[:30]}...'")
+            
+            # DETECT: Final line misalignment
+            if final_len > width:
+                _dbg(f"  [SUSPICIOUS] Final line exceeds width: {final_len} > {width}")
+            if lines and len(lines) > 1:
+                prev_line = lines[-2].plain if len(lines) >= 2 else ""
+                # Check if last word could have fit on previous line
+                prev_content_len = len(prev_line.strip())
+                if prev_content_len + 1 + len(current) <= available:
+                    _dbg(f"  [SUSPECTED BUG] Last word '{current[:20]}...' could fit on previous line ({prev_content_len}+1+{len(current)}={prev_content_len+1+len(current)} <= {available})")
         
+        _dbg(f"WRAPPING DONE: {len(lines)} lines produced")
         return lines
 
     def _split_text_by_lines(self, text: Text) -> list[Text]:
@@ -2569,6 +2635,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     content = Text(line)
                 else:
                     content = line
+                
+                # DETECT: Content width vs container width mismatch
+                content_width = len(content.plain) if hasattr(content, 'plain') else len(str(content))
+                if content_width > width:
+                    _dbg(f"  [SUSPECTED BUG] Line content width ({content_width}) > container width ({width})")
+                    _dbg(f"    msgid={msgid[:8] if msgid else None}, content preview: '{str(content)[:50]}...'")
+                
                 log.write(content, msgid=msgid, thread_root=thread_root)
                 count += 1
         
