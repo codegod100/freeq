@@ -51,11 +51,14 @@ class BufferList(AutoLogMixin, ListView):
         _dbg(f"BufferList.update_buffers: clearing {pre_clear_count} items, adding {len(buffers)} new items")
         
         # BUG PROVED BY LOG: INVARIANT VIOLATION: BufferList child count mismatch: expected 8, got 16
-        # ListView.clear() doesn't actually remove children - only clears internal selection state
-        # The 8 old items remained, 8 new items added = 16 total (duplicates visible in UI)
-        # Fix: Explicitly remove each child before adding new ones
-        for child in list(self.children):
-            child.remove()
+        # ListView.clear() and child.remove() don't work - Textual manages ListView children specially
+        # Need to use ListView.remove_items() method (added in PR #4384)
+        if self.children:
+            indices = list(range(len(self.children)))
+            self.remove_items(indices)
+        
+        # Force immediate removal by clearing internal state
+        self._nodes._nodes.clear() if hasattr(self, '_nodes') else None
         
         post_clear_count = len(list(self.children))
         _dbg(f"BufferList.update_buffers: after clear, have {post_clear_count} items (expected 0)")
