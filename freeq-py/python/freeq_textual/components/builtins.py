@@ -187,8 +187,20 @@ class ReplyPanel(AutoLogMixin, Vertical):
 class ContextMenu(AutoLogMixin, Horizontal):
     """Context menu for message actions - thin action bar.
     
-    Designed to fit perfectly in a Slot below a message.
-    Thin, compact, readable.
+    DESIGN PHILOSOPHY: Be invisible, be slim.
+    
+    The ContextMenu mounts into a slot below a message. It should appear
+    as if the action buttons are just floating inline with the message stream,
+    not boxed in a separate container.
+    
+    Key principles:
+    - transparent background (no box around buttons)
+    - no border (no visual separation from message)
+    - zero padding (tight fit in the slot)
+    - buttons provide their own hover states only
+    
+    This creates the "slim" aesthetic - the menu appears inline without
+    feeling like a popup or overlay.
     
     Slot-based architecture:
     - Mounts into a Slot below the message
@@ -198,30 +210,58 @@ class ContextMenu(AutoLogMixin, Horizontal):
     
     DEFAULT_CSS = """
     ContextMenu {
+        /* INVISIBLE CONTAINER: The menu itself should have no visual presence.
+         * It's just a holder for the buttons. All visual styling comes from
+         * the buttons themselves (hover states).
+         */
         width: 1fr;
         height: auto;
-        background: $surface-darken-1;
-        border: none;
-        padding: 0 1;
+        background: transparent;  /* No box around buttons */
+        border: none;             /* No visual separation */
+        padding: 0;               /* Tight fit, no extra space */
         align: left middle;
     }
     
     ContextMenu Button {
-        background: transparent;
+        /* MINIMAL BUTTONS: Only show presence on hover.
+         * Transparent by default, subtle background on hover.
+         * Tight padding (0 1) to keep buttons compact.
+         */
+        background: transparent;    /* Invisible until hover */
         border: none;
         content-align: center middle;
-        padding: 0 2;
+        padding: 0 1;              /* Tight horizontal spacing */
         height: auto;
-        min-width: 10;
+        min-width: 8;
         width: auto;
         color: $text;
         text-style: bold;
     }
     
     ContextMenu Button:hover {
+        /* HOVER STATE: The only visual feedback.
+         * When hovering, button gets primary background.
+         * This is the ONLY styling - no default state styling.
+         */
         background: $primary;
         color: $text;
         text-style: bold;
+    }
+    
+    ContextMenu Button.close-btn {
+        /* TINY CLOSE: Just an X, minimal space.
+         * Muted by default, red on hover for danger indication.
+         */
+        min-width: 2;
+        width: auto;
+        padding: 0;              /* No padding, just the X */
+        margin-left: 1;         /* Small separation from other buttons */
+        color: $text-muted;      /* Subtle, not drawing attention */
+    }
+    
+    ContextMenu Button.close-btn:hover {
+        background: $error;
+        color: $text;
     }
     """
 
@@ -248,6 +288,10 @@ class ContextMenu(AutoLogMixin, Horizontal):
             btn = Button(label)
             btn._callback = callback  # type: ignore
             yield btn
+        # Add close button at the end
+        close_btn = Button("✕", classes="close-btn")
+        close_btn._is_close = True  # type: ignore
+        yield close_btn
 
     def on_mount(self) -> None:
         super().on_mount()  # AutoLogMixin logs mount
@@ -265,9 +309,19 @@ class ContextMenu(AutoLogMixin, Horizontal):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         super().on_button_pressed(event)  # AutoLogMixin logs button press
+        # Check if this is the close button
+        if getattr(event.button, '_is_close', False):
+            self._close()
+            return
         callback = getattr(event.button, '_callback', None)
         if callback:
-            callback(self._msgid)
+            # Call the action callback - if it returns True, don't auto-close
+            # This allows callbacks that mount replacement components (like EmojiPicker)
+            # to handle their own lifecycle
+            skip_close = callback(self._msgid)
+            if skip_close:
+                # Callback is handling the handoff, don't close yet
+                return
         self._close()
 
     def on_key(self, event) -> None:

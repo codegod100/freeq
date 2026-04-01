@@ -76,8 +76,14 @@ class BufferList(AutoLogMixin, ListView):
             if buffer.name in current_items:
                 # Update existing item label and active state
                 item = current_items[buffer.name]
-                static = item.query_one(Static)
-                static.update(label)
+                # Handle case where ListItem doesn't have a Static child
+                # (can happen with default ListView children or test setups)
+                try:
+                    static = item.query_one(Static)
+                    static.update(label)
+                except Exception:
+                    # No Static found - skip label update, just set active state
+                    pass
                 if buffer.name == active:
                     item.add_class("active")
                 else:

@@ -3,6 +3,8 @@
 WE'RE ALL FRIENDS HERE! This widget is registered in components/all.py
 """
 
+from collections.abc import Callable
+
 from textual.widgets import Button, Static
 from textual.containers import Horizontal
 from textual.message import Message
@@ -36,16 +38,24 @@ class EmojiPicker(AutoLogMixin, Horizontal):
     
     DEFAULT_CSS = """
     EmojiPicker {
+        /* INVISIBLE CONTAINER: Like ContextMenu, the picker should have no visual presence.
+         * It's just a holder for the emoji buttons. All visual styling comes from
+         * the buttons themselves (hover states).
+         */
         width: 1fr;
         height: auto;
-        background: $surface-darken-1;
-        border-top: solid $panel-lighten-2;
-        padding: 0 1;
+        background: transparent;  /* No box around buttons */
+        border: none;             /* No visual separation */
+        padding: 0;               /* Tight fit, no extra space */
         align: left middle;
     }
     
     EmojiPicker Button {
-        background: transparent;
+        /* MINIMAL BUTTONS: Only show presence on hover.
+         * Transparent by default, subtle background on hover.
+         * Tight padding (0 1) to keep buttons compact.
+         */
+        background: transparent;    /* Invisible until hover */
         border: none;
         padding: 0 1;
         min-width: 3;
@@ -54,6 +64,7 @@ class EmojiPicker(AutoLogMixin, Horizontal):
     }
     
     EmojiPicker Button:hover {
+        /* HOVER STATE: The only visual feedback. */
         background: $primary 30%;
         text-style: bold;
     }
@@ -78,11 +89,13 @@ class EmojiPicker(AutoLogMixin, Horizontal):
         self,
         msgid: str | None = None,
         emojis: list[str] | None = None,
+        on_close: Callable[[], None] | None = None,
         **kwargs
     ) -> None:
         super().__init__(**kwargs)
         self._msgid = msgid
         self._emojis = emojis or CHOICE_EMOJIS
+        self._on_close = on_close  # Slot callback to clear parent slot
 
     def compose(self):
         # Single horizontal row of emojis
@@ -99,12 +112,22 @@ class EmojiPicker(AutoLogMixin, Horizontal):
             buttons[0].focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle emoji button press.
+        
+        HARD FAIL PHILOSOPHY: No try/except here. If emitting the message or
+        calling on_close fails, that's a real bug we want to know about.
+        Textual's message passing should not fail - if it does, we need to fix
+        the underlying issue, not swallow the error.
+        """
         super().on_button_pressed(event)  # AutoLogMixin logs button press
         emoji = getattr(event.button, '_emoji', None)
         if emoji:
             self._log(f"selected {emoji}")
+            # Emit message - if this fails, let it crash (hard fail philosophy)
             self.post_message(self.EmojiSelected(emoji, self._msgid))
-        # Call on_close if provided (slot callback)
-        if hasattr(self, '_on_close') and self._on_close:
+        # Call on_close if provided (slot callback to clear parent slot)
+        # No try/except - if callback fails, we want to know
+        if self._on_close:
             self._on_close()
+        # Remove self from slot - this will trigger slot cleanup via unmount
         self.remove()

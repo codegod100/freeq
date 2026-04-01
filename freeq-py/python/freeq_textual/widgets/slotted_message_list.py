@@ -35,6 +35,7 @@ class SlottedMessageList(Vertical):
         border: solid $panel-lighten-2;
         background: $surface;
         display: block;
+        scrollbar-gutter: stable;
     }
 
     SlottedMessageList MessageItem {
@@ -103,7 +104,8 @@ class SlottedMessageList(Vertical):
         """Handle message click - emit MessageClicked."""
         event.stop()
         _dbg(f"SlottedMessageList: message clicked msgid={event.msgid[:8] if event.msgid else None}")
-        self.post_message(self.MessageClicked(event.msgid, self._msgid_to_item.get(event.msgid)))
+        # Pass the widget from the event (includes thread_root for reply indicators)
+        self.post_message(self.MessageClicked(event.msgid, event.widget))
 
     def mount_in_slot(self, msgid: str | None, widget: Widget) -> None:
         """Mount a widget into the slot of a specific message.

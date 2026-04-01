@@ -211,28 +211,52 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(composer.value, "hi")
 
     def _rendered_lines(self, app: FreeqTextualApp) -> list[str]:
-        log = app.query_one(RichLog)
+        """Extract rendered text lines from the message display widget.
+        
+        Supports both RichLog (old) and SlottedMessageList (new) architectures.
+        """
         result: list[str] = []
-        for renderable in log.lines:
-            # RichLog.lines contains Strip objects with Segments after render
-            # Try to extract plain text
-            text = ""
-            if hasattr(renderable, 'plain'):
-                # Rich Text object (pre-render)
-                text = renderable.plain
-            elif hasattr(renderable, '__iter__'):
-                # Strip with Segments
-                try:
-                    text = "".join(seg.text for seg in renderable if hasattr(seg, 'text'))
-                except Exception:
+        
+        # Try SlottedMessageList first (new widget-based architecture)
+        try:
+            from freeq_textual.widgets import SlottedMessageList, MessageItem
+            slotted = app.query_one("#messages", SlottedMessageList)
+            for child in slotted.children:
+                if isinstance(child, MessageItem):
+                    # MessageItem stores content in _content attribute
+                    content = getattr(child, '_content', None)
+                    if content:
+                        plain = content.plain if hasattr(content, 'plain') else str(content)
+                        normalized = self._normalize_line(plain)
+                        if normalized:
+                            result.append(normalized)
+            return result
+        except Exception:
+            pass
+        
+        # Fallback to RichLog (old architecture, for backwards compatibility)
+        try:
+            log = app.query_one(RichLog)
+            for renderable in log.lines:
+                text = ""
+                if hasattr(renderable, 'plain'):
+                    text = renderable.plain
+                elif hasattr(renderable, '__iter__'):
+                    try:
+                        text = "".join(seg.text for seg in renderable if hasattr(seg, 'text'))
+                    except Exception:
+                        text = str(renderable)
+                else:
                     text = str(renderable)
-            else:
-                text = str(renderable)
-            text = text.strip()
-            if text:
-                normalized = self._normalize_line(text)
-                if normalized:
-                    result.append(normalized)
+                text = text.strip()
+                if text:
+                    normalized = self._normalize_line(text)
+                    if normalized:
+                        result.append(normalized)
+            return result
+        except Exception:
+            pass
+        
         return result
 
     def _thread_header(self, app: FreeqTextualApp) -> str:
@@ -444,77 +468,83 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
         app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
-            app.active_buffer = "#freeq"
-            client.queue_events(
-                {
-                    "type": "message",
-                    "from": "alice",
-                    "target": "#freeq",
-                    "text": "root message for thread",
-                    "tags": {"msgid": "root1"},
-                },
-                {
-                    "type": "message",
-                    "from": "bob",
-                    "target": "#freeq",
-                    "text": "reply in thread",
-                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
-                },
-            )
-            app._poll_events()
-            await pilot.pause()
+                app.active_buffer = "#freeq"
+                client.queue_events(
+                    {
+                        "type": "message",
+                        "from": "alice",
+                        "target": "#freeq",
+                        "text": "root message for thread",
+                        "tags": {"msgid": "root1"},
+                    },
+                    {
+                        "type": "message",
+                        "from": "bob",
+                        "target": "#freeq",
+                        "text": "reply in thread",
+                        "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                    },
+                )
+                app._poll_events()
+                await pilot.pause()
 
-            # Open the thread panel
-            app._open_thread("root1")
-            await pilot.pause()
-            await pilot.pause()  # Wait for timer-based rendering
+                # Open the thread panel
+                app._open_thread("root1")
+                await pilot.pause()
+                await pilot.pause()  # Wait for timer-based rendering
 
-            header = self._thread_header(app)
-            rendered = self._thread_rendered_lines(app)
-            rendered_text = " ".join(rendered)
+                header = self._thread_header(app)
+                rendered = self._thread_rendered_lines(app)
+                rendered_text = " ".join(rendered)
 
-            self.assertIn("Thread", header)
-            self.assertIn("2 msg", header)
-            self.assertIn("2 msg", header)
-            self.assertIn("alice:", rendered_text)
-            self.assertIn("bob:", rendered_text)
-            self.assertIn("root message for thread", rendered_text)
-            self.assertIn("reply in thread", rendered_text)
+                self.assertIn("Thread", header)
+                self.assertIn("2 msg", header)
+                self.assertIn("2 msg", header)
+                self.assertIn("alice:", rendered_text)
+                self.assertIn("bob:", rendered_text)
+                self.assertIn("root message for thread", rendered_text)
+                self.assertIn("reply in thread", rendered_text)
 
-            # Thread panel should be visible
-            panel = app.query_one("#thread-panel")
-            self.assertTrue(app._thread_panel_is_open())
+                # Thread panel should be visible
+                panel = app.query_one("#thread-panel")
+                self.assertTrue(app._thread_panel_is_open())
 
     async def test_reply_indicator_renders_between_name_and_message(self) -> None:
         client = FakeClient()
         app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
-            app.active_buffer = "#freeq"
-            client.queue_events(
-                {
-                    "type": "message",
-                    "from": "alice",
-                    "target": "#freeq",
-                    "text": "root message",
-                    "tags": {"msgid": "root1"},
-                },
-                {
-                    "type": "message",
-                    "from": "bob",
-                    "target": "#freeq",
-                    "text": "reply body",
-                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
-                },
-            )
-            app._poll_events()
-            await pilot.pause()
+                app.active_buffer = "#freeq"
+                client.queue_events(
+                    {
+                        "type": "message",
+                        "from": "alice",
+                        "target": "#freeq",
+                        "text": "root message",
+                        "tags": {"msgid": "root1"},
+                    },
+                    {
+                        "type": "message",
+                        "from": "bob",
+                        "target": "#freeq",
+                        "text": "reply body",
+                        "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                    },
+                )
+                app._poll_events()
+                await pilot.pause()
 
-            rendered = self._rendered_lines(app)
-            reply_index = next(index for index, line in enumerate(rendered) if "replying to alice" in line)
-            bob_index = next(index for index, line in enumerate(rendered) if line.startswith("bob:"))
+                rendered = self._rendered_lines(app)
+                
+                # In slotted architecture, reply indicator is embedded in the chat block
+                # Order: header ("bob") -> reply indicator ("↳ replying to...") -> message ("reply body")
+                reply_index = next(index for index, line in enumerate(rendered) if "replying to alice" in line)
+                bob_header_index = next(index for index, line in enumerate(rendered) if line == "bob")
+                reply_body_index = next(index for index, line in enumerate(rendered) if line == "reply body")
 
-            self.assertLess(reply_index, bob_index)
+                # Reply indicator should appear after bob's header but before the reply body
+                self.assertLess(bob_header_index, reply_index)
+                self.assertLess(reply_index, reply_body_index)
 
     async def test_opening_thread_rerenders_main_log_for_new_width(self) -> None:
         client = FakeClient()
@@ -686,41 +716,96 @@ class ReplayBatchingTests(unittest.IsolatedAsyncioTestCase):
             # The thread root msgid should be set
             self.assertEqual(app.open_thread_root, "thread_root")
 
-    async def test_clicking_wrapped_reply_indicator_opens_thread(self) -> None:
+    async def test_clicking_reply_message_shows_context_menu(self) -> None:
+        """Clicking on a reply message shows context menu (not thread panel).
+        
+        UX CHANGE: Reply messages now show context menu, not thread.
+        Only reply INDICATORS (the '↳ replying to...' line) open the thread.
+        This separates exploration (indicators) from actions (messages).
+        """
         client = FakeClient()
         app = FreeqTextualApp(client)
 
         async with app.run_test() as pilot:
-            app.active_buffer = "#freeq"
-            client.queue_events(
-                {
-                    "type": "message",
-                    "from": "alice",
-                    "target": "#freeq",
-                    "text": "root message " * 12,
-                    "tags": {"msgid": "root1"},
-                },
-                {
-                    "type": "message",
-                    "from": "bob",
-                    "target": "#freeq",
-                    "text": "reply in thread",
-                    "tags": {"msgid": "reply1", "+draft/reply": "root1"},
-                },
-            )
-            app._poll_events()
-            await pilot.pause()
+                app.active_buffer = "#freeq"
+                client.queue_events(
+                    {
+                        "type": "message",
+                        "from": "alice",
+                        "target": "#freeq",
+                        "text": "root message " * 12,
+                        "tags": {"msgid": "root1"},
+                    },
+                    {
+                        "type": "message",
+                        "from": "bob",
+                        "target": "#freeq",
+                        "text": "reply in thread",
+                        "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                    },
+                )
+                app._poll_events()
+                await pilot.pause()
 
-            # Use message-based click system instead of coordinate-based
-            from freeq_textual.widgets import SlottedMessageList
-            slotted = app.query_one("#messages", SlottedMessageList)
-            
-            # Click on the reply message by msgid
-            slotted.post_message(SlottedMessageList.MessageClicked("reply1", None))
-            await pilot.pause()
+                # Use message-based click system
+                from freeq_textual.widgets import SlottedMessageList
+                slotted = app.query_one("#messages", SlottedMessageList)
+                
+                # Click on the reply message by msgid - this should show context menu, not thread
+                slotted.post_message(SlottedMessageList.MessageClicked("reply1", None))
+                await pilot.pause()
 
-            self.assertEqual(app.open_thread_root, "root1")
-            self.assertTrue(app._thread_panel_is_open())
+                # Thread should NOT be open (message click shows context menu, not thread)
+                self.assertEqual(app.open_thread_root, "")
+                self.assertFalse(app._thread_panel_is_open())
+
+    async def test_clicking_reply_indicator_opens_thread(self) -> None:
+        """Clicking on reply indicator (msgid=None, has thread_root) opens thread."""
+        client = FakeClient()
+        app = FreeqTextualApp(client)
+
+        async with app.run_test() as pilot:
+                app.active_buffer = "#freeq"
+                client.queue_events(
+                    {
+                        "type": "message",
+                        "from": "alice",
+                        "target": "#freeq",
+                        "text": "root message " * 12,
+                        "tags": {"msgid": "root1"},
+                    },
+                    {
+                        "type": "message",
+                        "from": "bob",
+                        "target": "#freeq",
+                        "text": "reply in thread",
+                        "tags": {"msgid": "reply1", "+draft/reply": "root1"},
+                    },
+                )
+                app._poll_events()
+                await pilot.pause()
+
+                # Find the reply indicator MessageItem (has thread_root but no msgid)
+                from freeq_textual.widgets import SlottedMessageList, MessageItem
+                slotted = app.query_one("#messages", SlottedMessageList)
+                
+                # Find the reply indicator - it has thread_root="root1" and msgid=None
+                reply_indicator = None
+                for child in slotted.children:
+                    if isinstance(child, MessageItem):
+                        if child.thread_root == "root1" and child.msgid is None:
+                            reply_indicator = child
+                            break
+                
+                self.assertIsNotNone(reply_indicator, "Reply indicator MessageItem not found")
+                
+                # Click on the reply indicator - this should open the thread
+                slotted.post_message(SlottedMessageList.MessageClicked(None, reply_indicator))
+                await pilot.pause()
+
+                # Thread should be open
+                self.assertEqual(app.open_thread_root, "root1")
+                self.assertTrue(app._thread_panel_is_open())
 
     async def test_cached_session_channels_are_rejoined_on_auth_restore(self) -> None:
         client = FakeClient()

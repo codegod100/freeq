@@ -12,6 +12,7 @@ from pathlib import Path
 from queue import SimpleQueue
 import re
 import threading
+import time  # Startup timing
 import webbrowser
 from urllib.request import urlopen
 
@@ -37,7 +38,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessageItem, MessagesPanel, MessagesPanelWithThread, ScrollableLog, SidePanelSlot, SlottedMessageList, ThreadMessage, ThreadPanel
+from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessageItem, MessagesPanel, ScrollableLog, SidePanelSlot, SlottedMessageList, ThreadMessage, ThreadPanel
 from .components import get_component
 from .components.all import *  # noqa: F401 - registers all widgets as friends!
 
@@ -52,22 +53,48 @@ UserList = get_component('user_list')
 ScrollableLog = get_component('scrollable_log')
 SlottedMessageList = get_component('slotted_message_list')
 MessagesPanel = get_component('messages_panel')
-MessagesPanelWithThread = get_component('messages_panel_with_thread')
 LoadingOverlay = get_component('loading_overlay')
 InlineSpinner = get_component('inline_spinner')
 from .widgets.layout_render import LayoutAwareRender
 
-try:
-    from PIL import Image, ImageOps, UnidentifiedImageError
-except ImportError:  # pragma: no cover - dependency is optional outside the dev shell
-    Image = None
-    ImageOps = None
-    UnidentifiedImageError = Exception
+# LAZY IMPORTS: Defer heavy image processing libraries until needed
+# These add ~200-500ms to import time but are only needed for avatar/image rendering
+_PIL_AVAILABLE = None
+Image = None
+ImageOps = None
+UnidentifiedImageError = Exception
 
-try:
-    from rich_pixels import Pixels
-except ImportError:  # pragma: no cover - dependency is optional outside the dev shell
-    Pixels = None
+_Pixels = None  # rich_pixels - heavy import, only needed for avatar rendering
+
+def _ensure_pil():
+    """Lazy import PIL - called only when image processing is needed."""
+    global _PIL_AVAILABLE, Image, ImageOps, UnidentifiedImageError
+    if _PIL_AVAILABLE is None:
+        try:
+            from PIL import Image as PILImage, ImageOps as PILImageOps, UnidentifiedImageError as PILUnidentifiedImageError
+            Image = PILImage
+            ImageOps = PILImageOps
+            UnidentifiedImageError = PILUnidentifiedImageError
+            _PIL_AVAILABLE = True
+            _dbg("PIL lazy import successful")
+        except ImportError:
+            _PIL_AVAILABLE = False
+            _dbg("PIL not available")
+
+def _ensure_rich_pixels():
+    """Lazy import rich_pixels - called only when pixel rendering is needed."""
+    global _Pixels
+    if _Pixels is None:
+        try:
+            from rich_pixels import Pixels as RichPixels
+            _Pixels = RichPixels
+            _dbg("rich_pixels lazy import successful")
+        except ImportError:
+            _dbg("rich_pixels not available")
+    return _Pixels
+
+# Backwards compatibility - property to access Pixels lazily
+Pixels = property(lambda self: _ensure_rich_pixels())
 
 # Image URL pattern (defined early for use in the app)
 _IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(?:\?[^\s]*)?', re.IGNORECASE)
@@ -81,6 +108,15 @@ _IMAGE_URL_RE = re.compile(r'https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|svg)(
 
 # Import the ONE TRUE _dbg from widgets/debug.py
 from .widgets.debug import _dbg  # noqa: E402 - must import after module setup
+
+# STARTUP TIMING: Track load performance
+_START_TIME = time.perf_counter()
+
+def _startup_time(label: str) -> float:
+    """Log and return elapsed time since module load."""
+    elapsed = time.perf_counter() - _START_TIME
+    _dbg(f"STARTUP [{elapsed:.3f}s] {label}")
+    return elapsed
 
 # Import textual-image lazily at runtime to avoid module-level issues
 def _ensure_textual_image():
@@ -233,7 +269,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     open_thread_root = reactive("")
 
     def __init__(self, client: FreeqClient, **kwargs) -> None:
-        # Extract known kwargs before super().__init__
         self.initial_channel = kwargs.pop("initial_channel", None)
         self.auth_broker = kwargs.pop("auth_broker", None)
         self.auth_handle = kwargs.pop("auth_handle", None)
@@ -294,6 +329,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         yield Header()
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
+            # ThreadPanel placeholder - shown when thread is open
+            # Using display:none to hide without affecting layout (unlike visibility:hidden)
+            yield ThreadPanel(id="thread-panel")
             yield MessagesPanel(use_slots=True)
             # NOTE: SidePanelSlot is DOCKED (see sum_slots.py), so it overlays
             # rather than participating in Horizontal layout. This prevents it
@@ -312,6 +350,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         yield OverlaySlot(id="overlay-slot", empty_height=0)
 
     def on_mount(self) -> None:
+        _startup_time("App.on_mount starting")
         _dbg("App.on_mount()")
         # Check textual-image availability at runtime
         _dbg(f"TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, TextualImageRenderable={TextualImageRenderable is not None}")
@@ -327,7 +366,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         self._refresh_layout_widths()
         # Avatars always enabled, use tile fallback if rich-pixels unavailable
-        if Pixels is None:
+        # (Pixels is lazily loaded, so check via the getter)
+        if _Pixels is None:
             self._append_status("avatars: rich-pixels unavailable, using tile fallback", "yellow")
         self._append_status(f"connecting to {self.client.server_addr}...", "dim")
         self._scroll_mode = "end"
@@ -347,7 +387,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._restore_auth()
         elif self.auth_handle:
             self._begin_auth(self.auth_handle)
-        self._seed_self_avatar_handle()
+        # Defer avatar seeding to improve startup time
+        self.call_later(self._seed_self_avatar_handle)
+        _startup_time("App.on_mount done")
         _dbg("App.on_mount() done")
 
     def _restore_session_channels(self) -> None:
@@ -992,13 +1034,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"  -> total lines: {len(lines)}")
         return lines
 
-    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None]]:
-        """Return tuple of (lines, thread_roots) for a chat message.
+    def _format_chat_block(self, sender: str, text: str, width: int = 80, reply_indicator: Text | None = None, reply_thread_root: str | None = None, timestamp: str = "", msgid: str | None = None, *, mime_type: str = "", is_streaming: bool = False) -> tuple[list[Text], list[str | None], int]:
+        """Return tuple of (lines, thread_roots, reply_indicator_index) for a chat message.
         
         With avatars:
         - Line 1: ████ nick HH:MMpm MM/DD
         - Line 2: ████ reply indicator (if any) OR first line of message
         - Line 3+:      continuation (same column as line 2 text)
+        
+        Returns:
+            reply_indicator_index: Index of reply indicator line in lines, or -1 if none
         """
         name = Text(sender, style=f"bold {_nick_color(sender)}")
         roots: list[str | None] = []
@@ -1039,6 +1084,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         line1.append_text(time_text)
         lines = [line1]
         roots = [None]  # nick line has no thread_root
+        reply_indicator_index = -1  # Track which line is the reply indicator (for click handling)
         
         # Line 2: avatar row 2 + reply indicator (if any)
         if reply_indicator:
@@ -1061,6 +1107,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             reply_line.append_text(reply_indicator)
             lines.append(reply_line)
             roots.append(reply_thread_root)
+            reply_indicator_index = len(lines) - 1  # Mark this line as the reply indicator
         
         # Check for markdown - handle multi-line formatted output
         is_markdown = mime_type == "text/markdown" or self._looks_like_markdown(current_text)
@@ -1113,7 +1160,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             # Add reactions to last line
             if lines:
                 lines[-1].append_text(reactions_text)
-            return lines, roots
+            return lines, roots, reply_indicator_index
         
         # Wrap message text (non-markdown)
         
@@ -1136,7 +1183,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             if len(lines) == 1:
                 lines.append(self._make_avatar_text_line(rows[1], Text()))
                 roots.append(None)
-            return lines, roots
+            return lines, roots, reply_indicator_index
         
         words = current_text.split()
         _dbg(f"CHAT_BLOCK: wrapping {len(words)} words, width={width}, text_avail={text_avail}")
@@ -1296,7 +1343,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         else:
             _dbg(f"Skipping image check: TEXTUAL_IMAGE_AVAILABLE={TEXTUAL_IMAGE_AVAILABLE}, has_text={bool(current_text)}, has_msgid={bool(msgid)}")
         
-        return lines, roots
+        return lines, roots, reply_indicator_index
 
     def _load_image_async(self, msgid: str, url: str, buffer_key: str) -> None:
         """Load and render an image asynchronously using Textual workers."""
@@ -1401,13 +1448,34 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return line
 
     def _format_reply_indicator(self, parent_sender: str, snippet: str, thread_root: str) -> Text:
-        """Dim reply indicator: `  ↳ replying to <nick>: <snippet>`."""
+        """Format a reply indicator line: `  ↳ replying to <nick>: <snippet>`.
+        
+        VISUAL DESIGN:
+        - 2 leading spaces for alignment with message text (after ████ )
+        - Unicode arrow (↳) for visual distinction
+        - "replying to" in italic for context
+        - Parent nick in their color (faint, via dim)
+        - First 20 chars of parent message as snippet
+        
+        The reply indicator should feel like a lightweight annotation,
+        not a heavy UI element. Hence the dim styling throughout.
+        
+        Args:
+            parent_sender: Nickname of the message being replied to
+            snippet: Preview of the parent message content
+            thread_root: msgid of the parent (used for click handling)
+        
+        Returns:
+            Rich Text object with styling applied
+        """
         indicator = Text(no_wrap=False, overflow="fold")
-        indicator.append("  \u21b3 ", style="dim")
+        indicator.append("  \u21b3 ", style="dim")  # 2 spaces + arrow
         indicator.append("replying to ", style="dim italic")
         indicator.append(parent_sender, style=f"dim {_nick_color(parent_sender)}")
         indicator.append(": ", style="dim")
-        indicator.append(snippet, style="dim")
+        # Truncate snippet to avoid overly long indicators
+        snippet_short = snippet[:20] + "..." if len(snippet) > 20 else snippet
+        indicator.append(snippet_short, style="dim")
         return indicator
 
     def _format_system(self, text: str, style: str = "") -> Text:
@@ -1426,6 +1494,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self,
         log: ScrollableLog,
         lines: list[object],
+        width: int,
         *,
         thread_roots: list[str | None] | None = None,
         msgids: list[str | None] | None = None,
@@ -1443,7 +1512,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         rendered_msgids_result: list[str | None] = []
         roots = thread_roots or [None] * len(lines)
         mids = msgids or [None] * len(lines)
-        width = log.size.width
         for line, thread_root, msgid in zip(lines, roots, mids):
             before = len(log.lines)
             # Pass location and thread_root to the component - IT tracks them
@@ -1642,11 +1710,13 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 if self._is_reply_indicator(line):
                     pending_reply_indicators.append((line, thread_root, msgid))
                     continue
-                for pending_line, pending_root, pending_msgid in pending_reply_indicators:
-                    renderable.append(pending_line)
-                    render_roots.append(pending_root)
-                    render_msgids.append(pending_msgid)
-                pending_reply_indicators.clear()
+                    # NOTE: Don't flush pending_reply_indicators here.
+                    # They should be embedded in the next chat message's chat block
+                    # (if it's the first message from that sender) or flushed when
+                    # that chat message is processed. Flushing here causes them to be
+                    # rendered as separate lines with msgid=None, breaking click-to-thread.
+                # System message that's not a reply indicator - append it
+                # but keep pending_reply_indicators for the next chat message
                 renderable.append(line)
                 render_roots.append(thread_root)
                 render_msgids.append(msgid)
@@ -1673,11 +1743,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 reply_ind = pending_reply_indicators[0][0] if pending_reply_indicators else None
                 reply_root = pending_reply_indicators[0][1] if pending_reply_indicators else None
                 pending_reply_indicators.clear()
-                block_lines, block_roots = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid, mime_type=mime_type, is_streaming=is_streaming)
-                for block_line, block_root in zip(block_lines, block_roots):
+                block_lines, block_roots, reply_indicator_index = self._format_chat_block(sender, text, width, reply_indicator=reply_ind, reply_thread_root=reply_root, timestamp=timestamp, msgid=msgid, mime_type=mime_type, is_streaming=is_streaming)
+                for i, (block_line, block_root) in enumerate(zip(block_lines, block_roots)):
                     renderable.append(block_line)
                     render_roots.append(block_root)
-                    render_msgids.append(msgid)  # All lines of same message share msgid
+                    # Reply indicator line gets msgid=None so clicks open the thread
+                    # All other lines get the message's msgid
+                    if i == reply_indicator_index:
+                        render_msgids.append(None)  # Reply indicator click -> open thread
+                    else:
+                        render_msgids.append(msgid)  # Message click -> context menu
             else:
                 # Continuation of same sender - just message body, indented
                 # Get current text from message_index if available (for edited messages)
@@ -1766,9 +1841,24 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     if isinstance(last_line, Text):
                         last_line.append_text(reactions_text)
 
+            # SPACER: Add blank line between messages from DIFFERENT senders.
+            # This creates visual separation between conversation turns.
+            # 
+            # NOTE ON GAP SIZE:
+            # The spacer line height is controlled by Text content:
+            # - Text(" ") = full line height with space character
+            # - Text("") = minimal height (might not render)
+            #
+            # If gap still feels too tall, check CSS gap settings in:
+            # - SlottedMessageList (container gap)
+            # - MessageItem (internal gap)
+            #
+            # The spacer helps distinguish where one message ends and next begins,
+            # especially important when reply indicators are present.
             next_meta = metas[index + 1] if index + 1 < len(metas) else None
             next_sender = self._nick_key(next_meta[0]) if next_meta is not None else None
             if next_meta is None or next_sender != sender_key:
+                _dbg(f"  adding spacer line between {sender_key} and {next_sender or 'end'}")
                 renderable.append(Text(" "))
                 render_roots.append(None)
                 render_msgids.append(None)
@@ -1900,12 +1990,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         self.client.raw(f"WHOIS {nick}")
 
     def _prepare_avatar_image(self, image: object) -> object | None:
+        """Prepare avatar image for terminal display."""
+        _ensure_pil()  # Lazy load PIL before image processing
         if Image is None or ImageOps is None or not isinstance(image, Image.Image):
             return None
         prepared = ImageOps.fit(image.convert("RGB"), (4, 2), method=Image.Resampling.LANCZOS)
         return prepared
 
     def _avatar_rows_from_image(self, image: object) -> list[list[str]] | None:
+        """Generate colored rows from a PIL image for terminal display."""
+        _ensure_pil()  # Lazy load PIL before image processing
         if Image is None or not isinstance(image, Image.Image):
             return None
         width, height = image.size
@@ -1921,6 +2015,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return rows
 
     def _fetch_bluesky_avatar_data(self, handle: str) -> tuple[list[str] | None, object | None]:
+        """Fetch avatar data from Bluesky - palette and optional image bytes."""
+        _ensure_pil()  # Lazy load PIL before image processing
         if Image is None:
             return None, None
 
@@ -2074,16 +2170,19 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     # ── Thread panel ───────────────────────────────────────────────────────
 
     def _thread_panel_is_open(self) -> bool:
-        """Check if MessagesPanelWithThread is mounted (vs MessagesPanel)."""
-        return bool(self.query(MessagesPanelWithThread))
+        """Check if thread panel is currently visible."""
+        try:
+            panel = self.query_one("#thread-panel", ThreadPanel)
+            return "shown" in panel.classes
+        except Exception:
+            return False
 
     def _open_thread(self, thread_root: str) -> None:
-        """Open the thread panel - swap to MessagesPanelWithThread.
+        """Open the thread panel - show it between sidebar and messages.
         
         Fails hard if:
         - thread_root is empty
-        - no existing panel to remove (shouldn't happen)
-        - panel swap fails
+        - panel not found (shouldn't happen)
         """
         if not thread_root:
             raise ValueError("_open_thread: empty thread_root")
@@ -2097,7 +2196,6 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._scroll_target_msgid = thread_root
             return
         
-        
         self.open_thread_root = thread_root
         
         # Collect messages
@@ -2105,37 +2203,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         _dbg(f"  collected {len(messages)} messages")
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
         
-        # Find and remove existing panel - exactly one must exist
-        body = self.query_one("#body", Horizontal)
+        # Show thread panel with messages
+        thread_panel = self.query_one("#thread-panel", ThreadPanel)
+        thread_panel.show_thread(thread_root, thread_msgs, self._format_thread_message)
+        _dbg(f"  thread panel shown")
         
-        # Find the existing panel - should be exactly one
-        panels = list(self.query(MessagesPanel)) + list(self.query(MessagesPanelWithThread))
-        if len(panels) != 1:
-            raise RuntimeError(f"Expected 1 panel, found {len(panels)} - corrupt state")
-        
-        old_panel = panels[0]
-        _dbg(f"  removing {type(old_panel).__name__}")
-        old_panel.remove()
-        _dbg(f"  removed old panel")
-        
-        # Mount new panel after removal completes (remove is async)
-        def mount_new():
-            new_panel = MessagesPanelWithThread(
-                thread_root, thread_msgs, self._format_thread_message, use_slots=True
-            )
-            body.mount(new_panel)
-            _dbg(f"  mounted MessagesPanelWithThread")
-            # Set scroll mode for when the scheduled render happens
-            self._scroll_mode = "message"
-            self._scroll_target_msgid = thread_root
-        
-        self.call_later(mount_new)
+        # Set scroll mode for when the scheduled render happens
+        self._scroll_mode = "message"
+        self._scroll_target_msgid = thread_root
 
     def _close_thread(self) -> None:
-        """Close the thread panel - swap back to MessagesPanel.
+        """Close the thread panel - hide it.
         
         Fails hard if:
-        - No MessagesPanelWithThread to remove (shouldn't happen)
+        - No thread panel found (shouldn't happen)
         """
         _dbg(f"_close_thread() open_thread_root was {self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
         
@@ -2144,26 +2225,18 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         self.open_thread_root = ""
         
-        # Remove MessagesPanelWithThread - must exist
-        body = self.query_one("#body", Horizontal)
-        old = self.query_one(MessagesPanelWithThread)
-        _dbg(f"_close_thread: removing MessagesPanelWithThread")
-        old.remove()
+        # Hide thread panel
+        thread_panel = self.query_one("#thread-panel", ThreadPanel)
+        thread_panel.hide_thread()
+        _dbg(f"  thread panel hidden")
         
-        # Mount new panel after removal completes (remove is async)
-        def mount_new():
-            new_panel = MessagesPanel(use_slots=True)
-            body.mount(new_panel)
-            _dbg(f"_close_thread: mounted new MessagesPanel")
-            self.query_one("#composer", Input).focus()
-        
-        self.call_later(mount_new)
+        self.query_one("#composer", Input).focus()
 
     @on(ThreadPanel.Closed)
     def handle_thread_panel_closed(self, event: ThreadPanel.Closed) -> None:
-        """Handle thread panel closed event - swap back to MessagesPanel.
+        """Handle thread panel closed event - hide the panel.
         
-        Fails hard if no MessagesPanelWithThread exists.
+        Fails hard if no thread is open.
         """
         del event
         _dbg(f"handle_thread_panel_closed() open_thread_root={self.open_thread_root[:8] if self.open_thread_root else 'empty'}")
@@ -2173,19 +2246,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         self.open_thread_root = ""
         
-        # Remove MessagesPanelWithThread - must exist
-        body = self.query_one("#body", Horizontal)
-        old = self.query_one(MessagesPanelWithThread)
-        old.remove()
+        # Hide thread panel
+        thread_panel = self.query_one("#thread-panel", ThreadPanel)
+        thread_panel.hide_thread()
+        _dbg(f"  thread panel hidden via close button")
         
-        # Mount new panel after removal completes (remove is async)
-        def mount_new():
-            new_panel = MessagesPanel()
-            body.mount(new_panel)
-            self.query_one("#composer", Input).focus()
-        
-        
-        self.call_later(mount_new)
+        self.query_one("#composer", Input).focus()
 
     @on(ThreadPanel.ReplySent)
     def handle_thread_panel_reply(self, event: ThreadPanel.ReplySent) -> None:
@@ -2220,14 +2286,26 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
     def _refresh_thread_panel(self) -> None:
         """Refresh the thread panel with current messages.
         
-        Fails hard if thread panel not found when open_thread_root is set.
+        Updates the inline ThreadPanel if it's visible.
+        
+        NOTE: No try/except blocks - hard fail philosophy. If something is wrong,
+        we want the error to surface immediately rather than silently swallow it.
+        Use guards (is_mounted checks) for known race conditions instead.
         """
         if not self.open_thread_root:
             return
-        panel = self.query_one(MessagesPanelWithThread)
+        
+        # Guard: Don't run before mount or if panel doesn't exist
+        if not self.is_mounted:
+            return
+        
+        panel = self.query_one("#thread-panel", ThreadPanel)
+        if "shown" not in panel.classes:
+            return  # Panel is hidden, nothing to refresh
+        
         messages = self._collect_thread_messages(self.open_thread_root)
         thread_msgs = [ThreadMessage(m.sender, m.text) for m in messages]
-        panel.refresh_thread_messages(thread_msgs)
+        panel.refresh_messages(thread_msgs)
 
     # ── Click detection on message log ─────────────────────────────────────
 
@@ -2274,17 +2352,65 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Handle clicks from SlottedMessageList widget.
         
         Slot-based architecture - each message is a widget with a slot.
+        
+        THREAD OPENING PHILOSOPHY (UPDATED):
+        ONLY reply INDICATOR opens thread. Reply MESSAGE shows context menu.
+        
+        Rationale:
+        - Reply indicator = "this is part of a thread, explore it"
+        - Reply message = "this is a message, interact with it"
+        
+        This separates navigation (exploring threads) from actions (replying, editing, reacting).
+        Users expect message clicks to show actions, not navigation.
+        
+        Previous behavior (BROKEN): Both indicator AND message opened thread.
+        This was confusing - user couldn't interact with reply messages directly.
+        
+        Current behavior (FIXED):
+        - Reply INDICATOR clicked: opens thread panel
+        - Reply MESSAGE clicked: shows context menu (like any other message)
+        - Regular message clicked: shows context menu
         """
         _dbg(f"SlottedMessageList.MessageClicked: msgid={event.msgid[:8] if event.msgid else None}")
         
-        # Get the slotted list and show context menu
-        try:
-            slotted = self.query_one("#messages", SlottedMessageList)
-        except Exception:
+        # Get the widget that was clicked (may be None for some events)
+        widget = event.widget
+        
+        # CASE 1: Reply INDICATOR clicked (msgid=None but has thread_root)
+        # This is the ONLY way to open a thread by clicking.
+        # The reply indicator is a separate widget with no msgid but has thread_root.
+        if not event.msgid and widget and hasattr(widget, 'thread_root') and widget.thread_root:
+            thread_root = widget.thread_root
+            _dbg(f"  reply INDICATOR clicked -> opening thread for {thread_root[:8]}")
+            self._open_thread(thread_root)
             return
         
-        # Show context menu in slot for this message
-        if event.msgid and event.widget:
+        # CASE 2: Clicked on something with no msgid and no thread info - ignore
+        # This could be a spacer, system message, or other non-interactive element.
+        if not event.msgid:
+            _dbg(f"  no msgid and no thread_root -> ignoring click")
+            return
+        
+        # CASE 3: Reply MESSAGE clicked
+        # Intentionally NOT opening thread - user gets context menu instead.
+        # They can use the reply indicator above this message to open the thread.
+        msg_info = self.message_index.get(event.msgid)
+        if msg_info and msg_info.reply_to:
+            _dbg(f"  reply MESSAGE clicked (reply_to={msg_info.reply_to[:8]}) -> showing context menu")
+            # Fall through to context menu below
+        else:
+            _dbg(f"  regular message clicked -> showing context menu")
+        
+        # Show context menu for the clicked message
+        # All messages (regular AND replies) get the context menu.
+        try:
+            slotted = self.query_one("#messages", SlottedMessageList)
+        except Exception as e:
+            _dbg(f"  ERROR: could not find messages widget: {e}")
+            return
+        
+        if widget:
+            _dbg(f"  mounting context menu in slot for msgid={event.msgid[:8]}")
             self._show_context_menu_in_slot(slotted, event.msgid)
 
     def _show_context_menu_in_slot(self, slotted: SlottedMessageList, msgid: str) -> None:
@@ -2507,40 +2633,59 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         else:
             _dbg("  ERROR: side-panel slot not found")
     
-    def _on_menu_react(self, msgid: str | None) -> None:
-        """Handle React from context menu - show emoji picker in message slot."""
-        _dbg(f"Context menu React: msgid={msgid}")
+    def _on_menu_react(self, msgid: str | None) -> bool:
+        """Handle React from context menu - show emoji picker in the SAME slot.
+        
+        SLOT HANDOFF: ContextMenu closes, EmojiPicker takes its place in the same slot.
+        This keeps the UI focused - the action bar just switches content.
+        
+        Why same slot? 
+        - User is already focused on this message (clicked it to open context menu)
+        - Keeping picker in same location maintains spatial context
+        - No jumping around or floating overlays
+        
+        HARD FAIL PHILOSOPHY:
+        No try/except blocks here. If the widget isn't mounted or query fails,
+        that's a real bug that should surface immediately. We use guards instead:
+        - Check is_mounted before querying
+        - Check query results before using them
+        - Let real errors crash so we know to fix the root cause
+        
+        Returns:
+            bool: True to skip ContextMenu's auto-close (we're handling handoff)
+        """
+        _dbg(f"_on_menu_react: msgid={msgid[:8] if msgid else None}")
         if not msgid:
-            return
+            _dbg(f"  no msgid, returning")
+            return False  # Let menu close normally
         
-        # Get the inline actions slot for this message and load emoji picker
-        # For now, use overlay slot as fallback
-        slot_id = f"msg-{msgid[:8]}-actions" if msgid else None
+        # Guard: Don't run if app isn't mounted yet (race condition)
+        if not self.is_mounted:
+            _dbg(f"  not mounted, deferring")
+            self.call_later(lambda: self._on_menu_react(msgid))
+            return False
         
-        # Try to find the message's slot in slotted message list
-        messages_list = self.query_one("#messages", (SlottedMessageList, ScrollableLog))
-        if isinstance(messages_list, SlottedMessageList):
-            # Find message item by msgid
-            for item in messages_list.children:
-                if hasattr(item, 'msgid') and item.msgid == msgid:
-                    if hasattr(item, 'actions_slot') and item.actions_slot:
-                        item.actions_slot.load_variant(
-                            EmojiPicker,
-                            msgid=msgid,
-                            on_close=lambda: _dbg(f"EmojiPicker closed for {msgid[:8]}")
-                        )
-                        _dbg(f"  loaded EmojiPicker into message slot for {msgid[:8]}")
-                        return
+        # Find the slotted message list
+        slotted = self.query_one("#messages", SlottedMessageList)
         
-        # Fallback: use overlay slot
-        overlay_slot = self.query_one("#overlay-slot", TypedSlot)
-        if overlay_slot:
-            overlay_slot.load_variant(
-                EmojiPicker,
-                msgid=msgid,
-                on_close=lambda: _dbg(f"EmojiPicker closed for {msgid[:8]}")
-            )
-            _dbg(f"  loaded EmojiPicker into overlay slot for {msgid[:8]}")
+        # Create emoji picker with close callback
+        def on_emoji_close():
+            _dbg(f"EmojiPicker closed for {msgid[:8]}")
+            # Slot is cleared automatically when widget is removed
+        
+        picker = EmojiPicker(
+            msgid=msgid,
+            on_close=on_emoji_close,
+        )
+        
+        # Mount into the SAME slot that ContextMenu was just using
+        # ContextMenu's on_close already cleared the slot, so we can mount directly
+        slotted.mount_in_slot(msgid, picker)
+        _dbg(f"  mounted EmojiPicker in message slot for {msgid[:8]} (replaced ContextMenu)")
+        
+        # Return True to tell ContextMenu NOT to auto-close
+        # We're handling the handoff - the ContextMenu will be replaced by EmojiPicker
+        return True
     
     def _on_menu_edit(self, msgid: str | None) -> None:
         """Handle Edit from context menu - prompt for new text and send edit."""
@@ -2669,12 +2814,19 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _render_active_buffer_scrollable(self, log: ScrollableLog) -> None:
         """Render buffer content using legacy ScrollableLog (text-based)."""
-        width = log.size.width
+        raw_width = log.size.width
+        # Clamp to actual terminal width to prevent double-wrapping by terminal
+        import os
+        terminal_width = os.get_terminal_size().columns
+        width = min(raw_width, terminal_width)
+        if width != raw_width:
+            _dbg(f"  WIDTH ADJUST (scrollable): {raw_width} -> {width} (terminal is {terminal_width})")
         log.clear()
         render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
         rendered_threads, rendered_msgids = self._write_render_lines(
             log,
             render_lines,
+            width,
             thread_roots=render_roots,
             msgids=render_msgids,
         )
@@ -2701,7 +2853,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             check_widget_state(log, "render")
             
             log.clear()
-            width = log.size.width or self.screen.size.width - 20 or 80
+            raw_width = log.size.width or self.screen.size.width - 20 or 80
+            # Clamp to actual terminal width to prevent double-wrapping by terminal
+            import os
+            try:
+                terminal_width = os.get_terminal_size().columns
+                width = min(raw_width, terminal_width)
+                if width != raw_width:
+                    _dbg(f"  WIDTH ADJUST: {raw_width} -> {width} (terminal is {terminal_width})")
+            except OSError:
+                # No TTY (e.g., in tests) - use raw_width without clamping
+                width = raw_width
+            # Subtract 1 for scrollbar gutter (matches scrollable_log.py adjustment)
+            width = max(20, width - 1)
+            _dbg(f"  WIDTH (after scrollbar adjust): {width}")
             
             render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
             
@@ -2761,9 +2926,24 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _scroll_to_message(self, msgid: str) -> None:
         """Scroll to a specific message after rendering is complete."""
-        log = self.query_one("#messages", ScrollableLog)
-        success = log.scroll_to_location(msgid)
-        _dbg(f"_scroll_to_message({msgid[:8]}): result={success}, lines={len(log.lines)}, virtual_size={log.virtual_size}")
+        # Handle both ScrollableLog and SlottedMessageList
+        from textual.css.query import WrongType
+        try:
+            log = self.query_one("#messages", ScrollableLog)
+            success = log.scroll_to_location(msgid)
+            _dbg(f"_scroll_to_message({msgid[:8]}): scrollable result={success}")
+        except (NoMatches, WrongType):
+            # SlottedMessageList - find the MessageItem and scroll to it
+            try:
+                slotted = self.query_one("#messages", SlottedMessageList)
+                item = slotted._msgid_to_item.get(msgid)
+                if item:
+                    item.scroll_visible()
+                    _dbg(f"_scroll_to_message({msgid[:8]}): slotted scrolled to item")
+                else:
+                    _dbg(f"_scroll_to_message({msgid[:8]}): item not found in slotted list")
+            except Exception as e:
+                _dbg(f"_scroll_to_message({msgid[:8]}): slotted error: {e}")
         self._scroll_mode = "preserve"
         if self.active_buffer in self.buffers:
             self.buffers[self.active_buffer].unread = 0
@@ -3288,6 +3468,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                     line_meta=(sender, text, tags.get("time", "")),
                     thread_root=thread_root,
                 )
+            
             return
         if event_type == "topic_changed":
             channel = event["channel"]
