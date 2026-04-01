@@ -6,6 +6,7 @@ from .debug_panel import DebugPanel
 from .layout_render import LayoutAwareRender, RenderablePanel
 from .message_item import MessageItem
 from .slotted_message_list import SlottedMessageList
+from .slots import Slot, SlottedMessageItem, SlotManager, slot_manager
 from .spinner import BaseSpinner, InlineSpinner, LoadingOverlay
 from .messages_panel import MessagesPanel, MessagesPanelWithThread
 from .scrollable_log import ScrollableLog
@@ -27,10 +28,14 @@ __all__ = [
     "MessagesPanelWithThread",
     "RenderablePanel",
     "ScrollableLog",
+    "SlottedMessageItem",
     "SlottedMessageList",
+    "Slot",
+    "SlotManager",
     "ThreadMessage",
     "ThreadPanel",
     "_dbg",
     "set_debug_callback",
     "get_component",  # Export so everyone can get their friends!
+    "slot_manager",  # Global slot manager
 ]

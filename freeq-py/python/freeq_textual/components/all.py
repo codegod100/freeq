@@ -13,6 +13,7 @@ from ..widgets.scrollable_log import ScrollableLog
 from ..widgets.slotted_message_list import SlottedMessageList
 from ..widgets.messages_panel import MessagesPanel, MessagesPanelWithThread
 from ..widgets.spinner import LoadingOverlay, InlineSpinner
+from ..widgets.slots import Slot, SlottedMessageItem, SlotManager
 
 # Import built-in components (they register themselves via decorator)
 from .emoji_picker import EmojiPicker  # noqa: F401 - registers as friend!
@@ -26,6 +27,9 @@ ComponentRegistry._components['messages_panel'] = MessagesPanel
 ComponentRegistry._components['messages_panel_with_thread'] = MessagesPanelWithThread
 ComponentRegistry._components['loading_overlay'] = LoadingOverlay
 ComponentRegistry._components['inline_spinner'] = InlineSpinner
+ComponentRegistry._components['slot'] = Slot
+ComponentRegistry._components['slotted_message_item'] = SlottedMessageItem
+ComponentRegistry._components['slot_manager'] = SlotManager
 # EmojiPicker registers itself via @ComponentRegistry.register decorator!
 
 __all__ = [
@@ -37,5 +41,8 @@ __all__ = [
     'MessagesPanelWithThread',
     'LoadingOverlay',
     'InlineSpinner',
+    'Slot',
+    'SlottedMessageItem',
+    'SlotManager',
     'EmojiPicker',  # CHOICE EMOJIS!
-]
+]"

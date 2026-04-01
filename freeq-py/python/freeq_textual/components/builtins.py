@@ -175,15 +175,14 @@ class ReplyPanel(AutoLogMixin, Vertical):
 
 @ComponentRegistry.register('context_menu')
 class ContextMenu(AutoLogMixin, Horizontal):
-    """Context menu for message actions - thin status bar style.
+    """Context menu for message actions - thin action bar.
     
-    DO NOT DELETE. This is the default implementation.
-    If it looks broken, create a replacement and register it.
+    Designed to fit perfectly in a Slot below a message.
+    Thin, compact, readable.
     
     Slot-based architecture:
-    - Mounts into a slot below the message (not floating)
-    - Thin horizontal bar, not a honking vertical panel
-    - When action complete, calls on_close callback to clear slot
+    - Mounts into a Slot below the message
+    - Calls on_close callback when done (to clear slot)
     - Such modular. Much reactive. Very thin.
     """
     
@@ -193,25 +192,26 @@ class ContextMenu(AutoLogMixin, Horizontal):
         height: auto;
         background: $surface-darken-1;
         border: none;
-        padding: 0;
+        padding: 0 1;
         align: left middle;
     }
     
     ContextMenu Button {
         background: transparent;
         border: none;
-        padding: 0 1;
+        content-align: center middle;
+        padding: 0 2;
         height: auto;
-        min-width: 8;
+        min-width: 10;
         width: auto;
         color: $text;
         text-style: bold;
     }
     
     ContextMenu Button:hover {
-        background: $primary 30%;
+        background: $primary;
         color: $text;
-        text-style: bold reverse;
+        text-style: bold;
     }
     """
 
