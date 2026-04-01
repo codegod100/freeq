@@ -1,7 +1,20 @@
 """Custom widgets for freeq-textual."""
 
 from .buffer_list import BufferList
-from .debug import _dbg, set_debug_callback
+from .debug import (
+    _dbg,
+    _error,
+    _warn,
+    check_render_pipeline,
+    check_slot_operation,
+    check_widget_state,
+    log_operation,
+    log_state_snapshot,
+    set_context,
+    set_debug_callback,
+    validate_invariant,
+    validate_warning,
+)
 from .debug_panel import DebugPanel
 from .layout_render import LayoutAwareRender, RenderablePanel
 from .message_item import MessageItem

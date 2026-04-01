@@ -2437,27 +2437,34 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         Each message becomes a MessageItem widget with a slot below it.
         """
-        _dbg(f"_render_active_buffer_slotted START buffer={self.active_buffer}")
-        log.clear()
-        width = log.size.width or self.screen.size.width - 20 or 80  # Fallback if not laid out yet
-        _dbg(f"  width={width} (log.size.width={log.size.width}, screen.width={self.screen.size.width})")
+        from .widgets import check_render_pipeline, check_widget_state, log_operation
         
-        render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
-        _dbg(f"  _renderable_lines returned: {len(render_lines)} lines")
-        
-        # Create MessageItem widgets for each rendered line
-        from rich.text import Text
-        count = 0
-        for line, thread_root, msgid in zip(render_lines, render_roots, render_msgids):
-            # Convert line to Text if needed
-            if isinstance(line, str):
-                content = Text(line)
-                _dbg(f"  line {count}: str -> Text, len={len(line)}")
-            else:
-                content = line
-                _dbg(f"  line {count}: {type(line).__name__}, len={len(str(line))}")
-            log.write(content, msgid=msgid, thread_root=thread_root)
-            count += 1
+        with log_operation("render_slotted", buffer=self.active_buffer):
+            check_widget_state(log, "render")
+            
+            log.clear()
+            width = log.size.width or self.screen.size.width - 20 or 80
+            
+            render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
+            
+            # Proactive validation of render pipeline
+            check_render_pipeline(
+                buffer_key=self.active_buffer,
+                raw_line_count=len(self.messages.get(self.active_buffer, [])),
+                rendered_line_count=len(render_lines),
+                width=width,
+            )
+            
+            # Create MessageItem widgets for each rendered line
+            from rich.text import Text
+            count = 0
+            for line, thread_root, msgid in zip(render_lines, render_roots, render_msgids):
+                if isinstance(line, str):
+                    content = Text(line)
+                else:
+                    content = line
+                log.write(content, msgid=msgid, thread_root=thread_root)
+                count += 1
         
         _dbg(f"render slotted buffer={self.active_buffer} wrote={count} items")
         self._apply_scroll_mode(log)
@@ -3191,20 +3198,36 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     @on(ListView.Selected, "#sidebar")
     def handle_sidebar_select(self, event: ListView.Selected) -> None:
+        from .widgets import log_operation, set_context, log_state_snapshot
+        
         _dbg(f"handle_sidebar_select(item={event.item.name!r})")
         if event.item.name is None:
             return
-        self.active_buffer = self._buffer_key(event.item.name)
-        self.open_thread_root = ""
         
-        # Swap back to MessagesPanel if thread panel was open
-        if self._thread_panel_is_open():
-            self._close_thread()
+        # Set correlation context for this user operation
+        set_context("user_operation", "channel_switch")
+        set_context("from_buffer", self.active_buffer)
+        set_context("to_buffer", event.item.name)
         
-        self._scroll_mode = "end"
-        self._render_active_buffer()
-        self._refresh_user_list()  # Update user list for new channel
-        self.query_one("#composer", Input).focus()
+        with log_operation("channel_switch", 
+                          from_buffer=self.active_buffer,
+                          to_buffer=event.item.name):
+            
+            log_state_snapshot(self, "pre_switch")
+            
+            self.active_buffer = self._buffer_key(event.item.name)
+            self.open_thread_root = ""
+            
+            # Swap back to MessagesPanel if thread panel was open
+            if self._thread_panel_is_open():
+                self._close_thread()
+            
+            self._scroll_mode = "end"
+            self._render_active_buffer()
+            self._refresh_user_list()
+            self.query_one("#composer", Input).focus()
+            
+            log_state_snapshot(self, "post_switch")
 
     def _session_channels(self) -> list[str]:
         return sorted(

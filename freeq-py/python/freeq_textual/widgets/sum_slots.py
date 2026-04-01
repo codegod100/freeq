@@ -241,22 +241,21 @@ class TypedSlot(Widget, Generic[T]):
         on_close: Callable[[], None] | None = None,
         **kwargs: Any
     ) -> T | None:
-        """Load a component variant into this slot.
+        """Load a component variant into this slot."""
+        from .debug import check_slot_operation, validate_invariant
         
-        Args:
-            component_class: The component class (must be allowed by slot type)
-            *args: Constructor args
-            on_close: Callback when component closes
-            **kwargs: Constructor kwargs
-            
-        Returns:
-            The mounted component, or None if variant not allowed
-        """
         # Type check
         if component_class not in self._slot_type.allowed_variants:
-            _dbg(f"TypedSlot: {component_class.__name__} not allowed in {self._slot_type_name}")
-            _dbg(f"  allowed: {[v.__name__ for v in self._slot_type.allowed_variants]}")
+            check_slot_operation(self, component_class, success=False)
             return None
+        
+        # Pre-condition: check state
+        validate_invariant(
+            self.is_mounted,
+            f"slot {self.id} not mounted during load_variant",
+            slot=self.id,
+            component=component_class.__name__
+        )
         
         # Clear existing
         self.clear()
@@ -267,20 +266,18 @@ class TypedSlot(Widget, Generic[T]):
             self._current_component = component
             self._current_variant_name = component_class.__name__.lower()
             
-            # Mount directly to self (we're a container)
             self.mount(component)
             
             self.has_content = True
             self.current_variant = self._current_variant_name
-            
-            # Store on_close
             self._on_close = on_close
             
-            _dbg(f"TypedSlot: loaded {component_class.__name__} into {self._slot_type_name}")
+            check_slot_operation(self, component_class, success=True)
             return component
             
         except Exception as e:
             _dbg(f"TypedSlot: failed to create {component_class.__name__}: {e}")
+            check_slot_operation(self, component_class, success=False)
             return None
     
     def clear(self) -> None:
