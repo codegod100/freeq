@@ -1042,6 +1042,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Line 2: avatar row 2 + reply indicator (if any)
         if reply_indicator:
+            # DETECT: Reply indicator may be too long
+            reply_plain = reply_indicator.plain if hasattr(reply_indicator, 'plain') else str(reply_indicator)
+            reply_len = len(reply_plain)
+            _dbg(f"CHAT_BLOCK: reply_indicator len={reply_len}, text_avail={text_avail}")
+            
+            if reply_len > text_avail:
+                _dbg(f"  [SUSPECTED BUG] Reply indicator too long ({reply_len} > {text_avail}), needs wrapping")
+                # Truncate with ellipsis for now
+                reply_indicator = Text(reply_plain[:text_avail-3] + "...", style="dim")
+            
             reply_line = Text()
             for color in rows[1]:
                 reply_line.append("\u2588", style=color)
@@ -1157,8 +1167,27 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                         lines.append(cont)
                     # Message line gets thread_root for replies (larger click target)
                     roots.append(reply_thread_root)
-                current = word
-                line_num += 1
+                
+                # Check if word itself is too long and needs chunking
+                word_display = self._format_message_body(word, mime_type, is_streaming).plain
+                word_len = len(word_display)
+                if word_len > text_avail:
+                    _dbg(f"    [SUSPECTED BUG] Word too long ({word_len} > {text_avail}), chunking: '{word[:30]}...'")
+                    # Break long word into chunks
+                    chunk_start = 0
+                    while chunk_start < len(word):
+                        chunk_text = word[chunk_start:chunk_start + text_avail]
+                        chunk_display = self._format_message_body(chunk_text, mime_type, is_streaming)
+                        cont = Text(indent)
+                        cont.append_text(chunk_display)
+                        lines.append(cont)
+                        roots.append(reply_thread_root)
+                        line_num += 1
+                        chunk_start += text_avail
+                    current = ""
+                else:
+                    current = word
+                    line_num += 1
         
         
         # Flush remaining text
@@ -1170,26 +1199,41 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             # DETECT: Last line issues
             if display_len > text_avail:
                 _dbg(f"    [SUSPECTED BUG] Final line {line_num} len ({display_len}) > text_avail ({text_avail})")
-            
-            # DETECT: Could last word have fit on previous line?
-            if line_num > 0 and lines:
-                prev_line_text = lines[-1].plain.lstrip() if hasattr(lines[-1], 'plain') else str(lines[-1])
-                prev_len = len(prev_line_text)
-                # Approximate: could we have added this word to previous line?
-                if prev_len + 1 + display_len <= text_avail + len(indent):
-                    _dbg(f"    [SUSPECTED BUG] Final word could fit on previous line ({prev_len}+1+{display_len}={prev_len+1+display_len} <= available)")
-            
-            if line_num == 0 and not reply_indicator:
-                last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
-                last_line.append_text(reactions_text)  # Add reactions to last line
-                lines.append(last_line)
+                # FIX: Chunk the long final line
+                chunk_start = 0
+                plain_current = current  # Use raw text for chunking
+                while chunk_start < len(plain_current):
+                    chunk_text = plain_current[chunk_start:chunk_start + text_avail]
+                    chunk_display = self._format_message_body(chunk_text, mime_type, is_streaming)
+                    cont = Text(indent)
+                    cont.append_text(chunk_display)
+                    # Only add reactions to last chunk
+                    if chunk_start + text_avail >= len(plain_current):
+                        cont.append_text(reactions_text)
+                    lines.append(cont)
+                    roots.append(reply_thread_root)
+                    line_num += 1
+                    chunk_start += text_avail
             else:
-                cont = Text(indent)
-                cont.append_text(self._format_message_body(current, mime_type, is_streaming))
-                cont.append_text(reactions_text)  # Add reactions to last line
-                lines.append(cont)
-            # Message line gets thread_root for replies (larger click target)
-            roots.append(reply_thread_root)
+                # DETECT: Could last word have fit on previous line?
+                if line_num > 0 and lines:
+                    prev_line_text = lines[-1].plain.lstrip() if hasattr(lines[-1], 'plain') else str(lines[-1])
+                    prev_len = len(prev_line_text)
+                    # Approximate: could we have added this word to previous line?
+                    if prev_len + 1 + display_len <= text_avail + len(indent):
+                        _dbg(f"    [SUSPECTED BUG] Final word could fit on previous line ({prev_len}+1+{display_len}={prev_len+1+display_len} <= available)")
+                
+                if line_num == 0 and not reply_indicator:
+                    last_line = self._make_avatar_text_line(rows[1], self._format_message_body(current, mime_type, is_streaming))
+                    last_line.append_text(reactions_text)  # Add reactions to last line
+                    lines.append(last_line)
+                else:
+                    cont = Text(indent)
+                    cont.append_text(self._format_message_body(current, mime_type, is_streaming))
+                    cont.append_text(reactions_text)  # Add reactions to last line
+                    lines.append(cont)
+                # Message line gets thread_root for replies (larger click target)
+                roots.append(reply_thread_root)
         else:
             # No message text, just add reactions to last line if any
             if reactions_text and lines:
