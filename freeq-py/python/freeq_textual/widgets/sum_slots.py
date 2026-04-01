@@ -57,7 +57,7 @@ class InlineActionsSlotType(SlotType):
     def __init__(self) -> None:
         # Import variants
         from ..components.builtins import ContextMenu
-        from .emoji_picker import EmojiPicker
+        from ..components.emoji_picker import EmojiPicker
         
         self.allowed_variants = [ContextMenu, EmojiPicker]
 
@@ -133,8 +133,8 @@ class OverlaySlotType(SlotType):
     def __init__(self) -> None:
         # Overlays can hold modals, dialogs, and fallback components
         from ..components.builtins import ContextMenu, ReplyPanel
+        from ..components.emoji_picker import EmojiPicker
         from ..widgets.thread_panel import ThreadPanel
-        from .emoji_picker import EmojiPicker
         
         # Allow components that might need global/fallback positioning
         self.allowed_variants = [ContextMenu, EmojiPicker, ReplyPanel, ThreadPanel]
