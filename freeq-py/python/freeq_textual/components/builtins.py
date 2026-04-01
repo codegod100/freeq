@@ -182,12 +182,12 @@ class ContextMenu(AutoLogMixin, Vertical):
     DEFAULT_CSS = """
     ContextMenu {
         layer: overlay;
-        dock: top;
         background: $surface;
         border: round $primary;
         padding: 0 1;
         width: auto;
         height: auto;
+        position: absolute;
     }
     
     ContextMenu Button {

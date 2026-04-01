@@ -2158,9 +2158,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             ],
             msgid=msgid,
         )
-        # Mount to screen, dock to top
+        # Mount to screen with absolute positioning at click location
+        menu.styles.position = "absolute"
+        menu.styles.offset = (event.x, event.y)
         self.screen.mount(menu)
-        _dbg(f"  mounted ContextMenu msgid={msgid}")
+        _dbg(f"  mounted ContextMenu at ({event.x}, {event.y}) msgid={msgid}")
     
     def _get_log(self) -> ScrollableLog | None:
         """Get the messages ScrollableLog widget."""
