@@ -206,8 +206,9 @@ class TypedSlot(Widget, Generic[T]):
     
     def compose(self):
         """Compose the slot container."""
-        # Yield nothing - we mount components directly
-        pass
+        # Empty slot - components mounted dynamically via load_variant()
+        if False:
+            yield  # Make this a generator, but yield nothing initially
     
     def watch_has_content(self, has_content: bool) -> None:
         """Update CSS when content changes."""
