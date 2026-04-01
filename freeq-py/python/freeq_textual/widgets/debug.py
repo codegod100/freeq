@@ -9,6 +9,8 @@ Failure heuristics:
 - Race conditions (events during unmount)
 - Content pipeline failures (empty after processing)
 - Slot type mismatches (variant not allowed)
+- Network event ordering issues
+- State mutation during render
 """
 
 import datetime
@@ -26,6 +28,9 @@ _LOG_FILE = "/tmp/freeq.log"
 # Track recent operations for correlation
 _operation_context: dict[str, Any] = {}
 
+# Timing history for anomaly detection
+_timing_history: dict[str, list[float]] = {}
+
 
 def set_debug_callback(callback: Callable[[str], None] | None) -> None:
     """Set or clear the debug callback for real-time output."""
@@ -40,6 +45,11 @@ def _dbg(msg: str, level: str = "DEBUG") -> None:
         f.write(f"{timestamped}\n")
     if _debug_callback:
         _debug_callback(f"[{level}] {msg}")
+
+
+def _info(msg: str) -> None:
+    """Info - normal operations."""
+    _dbg(msg, "INFO")
 
 
 def _warn(msg: str) -> None:
@@ -243,3 +253,48 @@ def trace_method(cls, method_name: str):
     
     setattr(cls, method_name, wrapper)
     return wrapper
+
+
+# Additional heuristic functions for specific failure points
+
+def check_network_event_order(
+    event_type: str,
+    expected_state: str,
+    actual_state: str,
+) -> None:
+    """Check network events arrive in expected order."""
+    if expected_state != actual_state:
+        _warn(f"NETWORK: event {event_type} arrived in state {actual_state}, expected {expected_state}")
+
+
+def check_content_encoding(
+    content: str,
+    source: str,
+) -> None:
+    """Check content for encoding issues."""
+    if '\ufffd' in content:
+        _warn(f"ENCODING: replacement char found in {source} - possible encoding issue")
+    
+    if any(ord(c) > 0x10FFFF for c in content):
+        _error(f"ENCODING: invalid unicode in {source}")
+
+
+def check_memory_pressure(
+    buffer_count: int,
+    message_count: int,
+) -> None:
+    """Check for potential memory issues."""
+    if buffer_count > 100:
+        _warn(f"MEMORY: {buffer_count} buffers - potential leak?")
+    
+    if message_count > 10000:
+        _warn(f"MEMORY: {message_count} messages - consider pruning")
+
+
+def log_correlation_id(
+    operation: str,
+    correlation_id: str,
+) -> None:
+    """Log correlation ID for tracing async operations."""
+    _dbg(f"CORRELATION: {operation} id={correlation_id}")
+
