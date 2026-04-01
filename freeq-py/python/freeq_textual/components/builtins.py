@@ -204,12 +204,14 @@ class ContextMenu(AutoLogMixin, Horizontal):
         height: 1;
         min-width: 8;
         width: auto;
-        text-style: none;
+        color: $text;
+        text-style: bold;
     }
     
     ContextMenu Button:hover {
-        background: $primary 20%;
-        text-style: bold;
+        background: $primary 30%;
+        color: $text;
+        text-style: bold reverse;
     }
     """
 
