@@ -166,6 +166,20 @@ def check_widget_state(widget, operation: str) -> None:
         w, h = widget.size
         if w == 0 or h == 0:
             _warn(f"WIDGET: {name} has zero size ({w}x{h}) during {operation}")
+            # NEW: Detailed diagnostics for zero-width cases
+            if w == 0 and hasattr(widget, 'parent') and widget.parent:
+                parent = widget.parent
+                parent_name = getattr(parent, 'id', None) or type(parent).__name__
+                pw, ph = parent.size if hasattr(parent, 'size') else (0, 0)
+                _warn(f"WIDGET_DETAIL: {name} parent={parent_name} parent_size={pw}x{ph}")
+                # Log siblings
+                if hasattr(parent, 'children'):
+                    for i, sibling in enumerate(parent.children):
+                        sib_name = getattr(sibling, 'id', None) or type(sibling).__name__
+                        if hasattr(sibling, 'size'):
+                            sw, sh = sibling.size
+                            display = getattr(sibling, 'display', '?')
+                            _warn(f"WIDGET_DETAIL: sibling[{i}]={sib_name} size={sw}x{sh} display={display}")
     
     if hasattr(widget, 'is_active') and not widget.is_active:
         _warn(f"WIDGET: {name} not active during {operation}")
