@@ -158,7 +158,11 @@ class ReplyPanel(AutoLogMixin, Vertical):
 
     def on_mount(self) -> None:
         super().on_mount()  # AutoLogMixin logs mount
-        self.query_one("#reply-input", Input).focus()
+        inp = self.query_one("#reply-input", Input)
+        inp.focus()
+        # For edit mode: move cursor to end instead of selecting all
+        if self._is_edit:
+            inp.cursor_position = len(inp.value)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         super().on_button_pressed(event)  # AutoLogMixin logs button press
