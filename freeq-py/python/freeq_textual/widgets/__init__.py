@@ -4,6 +4,8 @@ from .buffer_list import BufferList
 from .debug import _dbg, set_debug_callback
 from .debug_panel import DebugPanel
 from .layout_render import LayoutAwareRender, RenderablePanel
+from .message_item import MessageItem
+from .slotted_message_list import SlottedMessageList
 from .spinner import BaseSpinner, InlineSpinner, LoadingOverlay
 from .messages_panel import MessagesPanel, MessagesPanelWithThread
 from .scrollable_log import ScrollableLog
@@ -20,10 +22,12 @@ __all__ = [
     "InlineSpinner",
     "LayoutAwareRender",
     "LoadingOverlay",
+    "MessageItem",
     "MessagesPanel",
     "MessagesPanelWithThread",
     "RenderablePanel",
     "ScrollableLog",
+    "SlottedMessageList",
     "ThreadMessage",
     "ThreadPanel",
     "_dbg",

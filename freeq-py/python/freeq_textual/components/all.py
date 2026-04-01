@@ -10,6 +10,7 @@ from ..components import ComponentRegistry
 from ..widgets.thread_panel import ThreadPanel
 from ..widgets.buffer_list import BufferList
 from ..widgets.scrollable_log import ScrollableLog
+from ..widgets.slotted_message_list import SlottedMessageList
 from ..widgets.messages_panel import MessagesPanel, MessagesPanelWithThread
 from ..widgets.spinner import LoadingOverlay, InlineSpinner
 
@@ -20,6 +21,7 @@ from .emoji_picker import EmojiPicker  # noqa: F401 - registers as friend!
 ComponentRegistry._components['thread_panel'] = ThreadPanel
 ComponentRegistry._components['buffer_list'] = BufferList
 ComponentRegistry._components['scrollable_log'] = ScrollableLog
+ComponentRegistry._components['slotted_message_list'] = SlottedMessageList
 ComponentRegistry._components['messages_panel'] = MessagesPanel
 ComponentRegistry._components['messages_panel_with_thread'] = MessagesPanelWithThread
 ComponentRegistry._components['loading_overlay'] = LoadingOverlay
@@ -30,9 +32,10 @@ __all__ = [
     'ThreadPanel',
     'BufferList', 
     'ScrollableLog',
+    'SlottedMessageList',
     'MessagesPanel',
     'MessagesPanelWithThread',
     'LoadingOverlay',
     'InlineSpinner',
     'EmojiPicker',  # CHOICE EMOJIS!
-]
+]"

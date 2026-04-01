@@ -177,17 +177,20 @@ class ContextMenu(AutoLogMixin, Vertical):
     
     DO NOT DELETE. This is the default implementation.
     If it looks broken, create a replacement and register it.
+    
+    Slot-based architecture:
+    - Mounts into a slot below the message (not floating)
+    - When action complete, calls on_close callback to clear slot
+    - Such modular. Much reactive.
     """
     
     DEFAULT_CSS = """
     ContextMenu {
-        layer: overlay;
+        width: 1fr;
+        height: auto;
         background: $surface;
         border: round $primary;
         padding: 0 1;
-        width: auto;
-        height: auto;
-        position: absolute;
     }
     
     ContextMenu Button {
@@ -213,10 +216,12 @@ class ContextMenu(AutoLogMixin, Vertical):
         self,
         actions: list[tuple[str, callable]],
         msgid: str | None = None,
+        on_close: callable | None = None,
     ) -> None:
         super().__init__()
         self._actions = actions
         self._msgid = msgid
+        self._on_close = on_close
 
     def compose(self):
         for label, callback in self._actions:
@@ -231,17 +236,24 @@ class ContextMenu(AutoLogMixin, Vertical):
         if buttons:
             buttons[0].focus()
 
+    def _close(self) -> None:
+        """Close the menu and clear parent slot if callback provided."""
+        # Call on_close callback to clear parent slot
+        if self._on_close:
+            self._on_close()
+        self.remove()
+
     def on_button_pressed(self, event: Button.Pressed) -> None:
         super().on_button_pressed(event)  # AutoLogMixin logs button press
         callback = getattr(event.button, '_callback', None)
         if callback:
             callback(self._msgid)
-        self.remove()
+        self._close()
 
     def on_key(self, event) -> None:
         """Handle ESC key to close menu."""
         if hasattr(event, 'key') and event.key == 'escape':
-            self.remove()
+            self._close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

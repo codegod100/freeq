@@ -37,7 +37,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, ThreadMessage, ThreadPanel
+from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessagesPanel, MessagesPanelWithThread, ScrollableLog, SlottedMessageList, ThreadMessage, ThreadPanel
 from .components import get_component
 from .components.all import *  # noqa: F401 - registers all widgets as friends!
 
@@ -50,6 +50,7 @@ ThreadPanel = get_component('thread_panel')
 BufferList = get_component('buffer_list')
 UserList = get_component('user_list')
 ScrollableLog = get_component('scrollable_log')
+SlottedMessageList = get_component('slotted_message_list')
 MessagesPanel = get_component('messages_panel')
 MessagesPanelWithThread = get_component('messages_panel_with_thread')
 LoadingOverlay = get_component('loading_overlay')
@@ -279,7 +280,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         yield Header()
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
-            yield MessagesPanel()
+            yield MessagesPanel(use_slots=True)
             yield UserList(id="user-list")
         yield Input(
             placeholder="Type a message or /join /channel",
@@ -1919,7 +1920,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # Mount new panel after removal completes (remove is async)
         def mount_new():
             new_panel = MessagesPanelWithThread(
-                thread_root, thread_msgs, self._format_thread_message
+                thread_root, thread_msgs, self._format_thread_message, use_slots=True
             )
             body.mount(new_panel)
             _dbg(f"  mounted MessagesPanelWithThread")
@@ -1950,7 +1951,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         # Mount new panel after removal completes (remove is async)
         def mount_new():
-            new_panel = MessagesPanel()
+            new_panel = MessagesPanel(use_slots=True)
             body.mount(new_panel)
             _dbg(f"_close_thread: mounted new MessagesPanel")
             self.query_one("#composer", Input).focus()
@@ -2054,6 +2055,16 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         else:
             _dbg(f"  no thread at virtual_y={virtual_y}")
 
+    @on(SlottedMessageList.MessageClicked)
+    def _on_slotted_message_clicked(self, event: SlottedMessageList.MessageClicked) -> None:
+        """Handle clicks from SlottedMessageList widget.
+        
+        Slot-based architecture - each message is a widget with a slot.
+        """
+        _dbg(f"SlottedMessageList.MessageClicked: msgid={event.msgid[:8] if event.msgid else None}")
+        # Thread handling can be added here if needed
+        # For now, just log - context menu is shown via on_click -> _show_context_menu
+
     @on(ScrollableLog.ScrolledToTop)
     def _on_scrolled_to_top(self, event: ScrollableLog.ScrolledToTop) -> None:
         """Load more history when scrolled to top."""
@@ -2108,6 +2119,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 menu.remove()
             for picker in self.query(EmojiPicker):
                 picker.remove()
+            # Clear any active slots in SlottedMessageList
+            try:
+                slotted = self.query_one("#messages", SlottedMessageList)
+                slotted.clear_active_slot()
+            except Exception:
+                pass
 
     @on(events.Click, "#messages")
     def _on_message_log_click(self, event: events.Click) -> None:
@@ -2139,35 +2156,74 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             self._show_context_menu(event, log)
     
     def _show_context_menu(self, event: events.Click, log) -> None:
-        """Show context menu at click position."""
+        """Show context menu in the slot below the clicked message.
+        
+        Slot-based architecture:
+        - Each message has a reserved slot below it
+        - ContextMenu mounts into the slot (not floating)
+        - When action completes, component is destroyed, slot is empty
+        - Such modular. Much reactive.
+        """
         _dbg(f"_show_context_menu: x={event.x} y={event.y}")
         
-        # Close any existing menu
-        for menu in self.query(ContextMenu):
-            menu.remove()
-        
         # Find which message is under cursor
-        virtual_y = int(event.y + log.scroll_y)
-        msgid = self._get_msgid_at_line(virtual_y)
-        
-        # Create menu
-        menu = ContextMenu(
-            actions=[
-                ("Reply", self._on_menu_reply),
-                ("React", self._on_menu_react),
-            ],
-            msgid=msgid,
-        )
-        # Mount to screen with absolute positioning at click location
-        menu.styles.position = "absolute"
-        menu.styles.offset = (event.x, event.y)
-        self.screen.mount(menu)
-        _dbg(f"  mounted ContextMenu at ({event.x}, {event.y}) msgid={msgid}")
+        if isinstance(log, SlottedMessageList):
+            # Slotted architecture - mount into message's slot
+            virtual_y = int(event.y + log.scroll_y)
+            msgid = log.msgid_at(virtual_y)
+            
+            # Clear any existing slot first (exclusive slots)
+            log.clear_active_slot()
+            
+            # Create menu with on_close callback to clear slot
+            def clear_slot():
+                log.clear_active_slot()
+            
+            menu = ContextMenu(
+                actions=[
+                    ("Reply", self._on_menu_reply),
+                    ("React", self._on_menu_react),
+                ],
+                msgid=msgid,
+                on_close=clear_slot,
+            )
+            
+            # Mount into the slot - the slot is part of the message layout
+            log.mount_in_slot(msgid, menu)
+            _dbg(f"  mounted ContextMenu in slot for msgid={msgid[:8] if msgid else None}")
+        else:
+            # Legacy ScrollableLog - use absolute positioning
+            # Close any existing menu
+            for menu in self.query(ContextMenu):
+                menu.remove()
+            
+            virtual_y = int(event.y + log.scroll_y)
+            msgid = self._get_msgid_at_line(virtual_y)
+            
+            # Create menu
+            menu = ContextMenu(
+                actions=[
+                    ("Reply", self._on_menu_reply),
+                    ("React", self._on_menu_react),
+                ],
+                msgid=msgid,
+            )
+            # Mount to screen with absolute positioning at click location
+            menu.styles.position = "absolute"
+            menu.styles.offset = (event.x, event.y)
+            self.screen.mount(menu)
+            _dbg(f"  mounted ContextMenu at ({event.x}, {event.y}) msgid={msgid[:8] if msgid else None}")
     
-    def _get_log(self) -> ScrollableLog | None:
-        """Get the messages ScrollableLog widget."""
+    def _get_log(self) -> ScrollableLog | SlottedMessageList | None:
+        """Get the messages widget (ScrollableLog or SlottedMessageList)."""
         try:
+            # Try ScrollableLog first (legacy)
             return self.query_one("#messages", ScrollableLog)
+        except Exception:
+            pass
+        try:
+            # Try SlottedMessageList (new slot-based architecture)
+            return self.query_one("#messages", SlottedMessageList)
         except Exception:
             return None
 

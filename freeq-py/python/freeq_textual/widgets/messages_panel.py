@@ -10,11 +10,15 @@ from .layout_render import RenderablePanel
 
 # Import for type hints and compose() - friends can still import friends!
 from .scrollable_log import ScrollableLog
+from .slotted_message_list import SlottedMessageList
 from .thread_panel import ThreadMessage, ThreadPanel
 
 
 class MessagesPanel(Widget, RenderablePanel):
-    """Message log only (thread panel closed)."""
+    """Message log only (thread panel closed).
+    
+    Supports both ScrollableLog (text-based) and SlottedMessageList (widget-based with slots).
+    """
 
     DEFAULT_CSS = """
     MessagesPanel {
@@ -22,23 +26,33 @@ class MessagesPanel(Widget, RenderablePanel):
     }
     """
 
+    def __init__(self, use_slots: bool = False, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._use_slots = use_slots
+
     def on_mount(self) -> None:
         # Trigger render after layout is computed
         self.trigger_app_render()
 
     def compose(self):
-        yield ScrollableLog(
-            id="messages",
-            highlight=True,
-            markup=False,
-            min_width=0,
-            wrap=True,
-            auto_scroll=False,
-        )
+        if self._use_slots:
+            yield SlottedMessageList(id="messages")
+        else:
+            yield ScrollableLog(
+                id="messages",
+                highlight=True,
+                markup=False,
+                min_width=0,
+                wrap=True,
+                auto_scroll=False,
+            )
 
 
 class MessagesPanelWithThread(Widget, RenderablePanel):
-    """Message log with thread panel side by side (thread panel open)."""
+    """Message log with thread panel side by side (thread panel open).
+    
+    Supports both ScrollableLog (text-based) and SlottedMessageList (widget-based with slots).
+    """
 
     DEFAULT_CSS = """
     MessagesPanelWithThread {
@@ -50,13 +64,14 @@ class MessagesPanelWithThread(Widget, RenderablePanel):
     }
     """
 
-    def __init__(self, thread_root: str, thread_messages: list[ThreadMessage], formatter, **kwargs) -> None:
+    def __init__(self, thread_root: str, thread_messages: list[ThreadMessage], formatter, use_slots: bool = False, **kwargs) -> None:
         # Force unique ID
         kwargs["id"] = "messages-panel-with-thread"
         super().__init__(**kwargs)
         self._thread_root = thread_root
         self._thread_messages = thread_messages
         self._formatter = formatter
+        self._use_slots = use_slots
 
     def on_mount(self) -> None:
         # Trigger render after layout is computed
@@ -64,14 +79,17 @@ class MessagesPanelWithThread(Widget, RenderablePanel):
 
     def compose(self):
         with Horizontal(id="messages-and-thread"):
-            yield ScrollableLog(
-                id="messages",
-                highlight=True,
-                markup=False,
-                min_width=0,
-                wrap=True,
-                auto_scroll=False,
-            )
+            if self._use_slots:
+                yield SlottedMessageList(id="messages")
+            else:
+                yield ScrollableLog(
+                    id="messages",
+                    highlight=True,
+                    markup=False,
+                    min_width=0,
+                    wrap=True,
+                    auto_scroll=False,
+                )
             yield ThreadPanel(
                 self._thread_root,
                 self._thread_messages,
