@@ -90,7 +90,7 @@ class MessageItem(Vertical):
         else:
             content = str(content)
             _dbg(f"MessageItem.compose msgid={self._msgid[:8] if self._msgid else None} type={content_type} content={content[:50]!r}")
-        yield Static(content, classes="message-area")
+        yield Static(content, classes="message-area", markup=True)
         yield Vertical(id="slot")
     
     def on_mount(self) -> None:
