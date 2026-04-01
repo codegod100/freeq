@@ -2439,8 +2439,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """
         _dbg(f"_render_active_buffer_slotted START buffer={self.active_buffer}")
         log.clear()
-        width = log.size.width
-        _dbg(f"  width={width}")
+        width = log.size.width or self.screen.size.width - 20 or 80  # Fallback if not laid out yet
+        _dbg(f"  width={width} (log.size.width={log.size.width}, screen.width={self.screen.size.width})")
         
         render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
         _dbg(f"  _renderable_lines returned: {len(render_lines)} lines")
@@ -2463,6 +2463,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
 
     def _apply_scroll_mode(self, log) -> None:
         """Apply scroll mode to log (works with both ScrollableLog and SlottedMessageList)."""
+        _dbg(f"_apply_scroll_mode: mode={self._scroll_mode}")
         # Handle scroll positioning
         # - end: new live message, scroll to bottom
         # - home: history loaded, scroll to top to show new old messages
@@ -2470,8 +2471,10 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         # - preserve: switch channel, keep current scroll position
         if self._scroll_mode == "end":
             log.scroll_end(animate=False)
+            _dbg(f"  scrolled to end")
         elif self._scroll_mode == "home":
             log.scroll_home(animate=False)
+            _dbg(f"  scrolled to home")
         elif self._scroll_mode == "message":
             # Scroll to a specific message (used when opening thread)
             _dbg(f"scroll mode=message, target={self._scroll_target_msgid[:8] if self._scroll_target_msgid else 'empty'}")
@@ -2479,6 +2482,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
                 target = self._scroll_target_msgid
                 self._scroll_target_msgid = ""
                 self.call_later(lambda: self._scroll_to_message(target))
+        else:
+            _dbg(f"  no scroll (preserve/other)")
 
     def _scroll_to_message(self, msgid: str) -> None:
         """Scroll to a specific message after rendering is complete."""
