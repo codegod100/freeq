@@ -190,8 +190,8 @@ class ContextMenu(AutoLogMixin, Horizontal):
     DEFAULT_CSS = """
     ContextMenu {
         width: 1fr;
-        height: 1;
-        background: $surface;
+        height: auto;
+        background: $surface-darken-1;
         border: none;
         padding: 0;
         align: left middle;
@@ -201,7 +201,7 @@ class ContextMenu(AutoLogMixin, Horizontal):
         background: transparent;
         border: none;
         padding: 0 1;
-        height: 1;
+        height: auto;
         min-width: 8;
         width: auto;
         color: $text;
