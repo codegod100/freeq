@@ -289,6 +289,9 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             classes="-textual-compact",
         )
         yield Footer(compact=True)
+        # Overlay slot for floating components (initially hidden)
+        from .widgets import OverlaySlot
+        yield OverlaySlot(id="overlay-slot", empty_height=0)
 
     def on_mount(self) -> None:
         _dbg("App.on_mount()")
@@ -2299,19 +2302,39 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg("  ERROR: side-panel slot not found")
     
     def _on_menu_react(self, msgid: str | None) -> None:
-        """Handle React from context menu - show emoji picker."""
+        """Handle React from context menu - show emoji picker in message slot."""
         _dbg(f"Context menu React: msgid={msgid}")
         if not msgid:
             return
         
-        # Close any existing emoji picker
-        for picker in self.query(EmojiPicker):
-            picker.remove()
+        # Get the inline actions slot for this message and load emoji picker
+        # For now, use overlay slot as fallback
+        slot_id = f"msg-{msgid[:8]}-actions" if msgid else None
         
-        # Create and mount emoji picker
-        picker = EmojiPicker(msgid=msgid)
-        self.screen.mount(picker)
-        _dbg(f"  mounted EmojiPicker for {msgid[:8]}")
+        # Try to find the message's slot in slotted message list
+        messages_list = self.query_one("#messages", (SlottedMessageList, ScrollableLog))
+        if isinstance(messages_list, SlottedMessageList):
+            # Find message item by msgid
+            for item in messages_list.children:
+                if hasattr(item, 'msgid') and item.msgid == msgid:
+                    if hasattr(item, 'actions_slot') and item.actions_slot:
+                        item.actions_slot.load_variant(
+                            EmojiPicker,
+                            msgid=msgid,
+                            on_close=lambda: _dbg(f"EmojiPicker closed for {msgid[:8]}")
+                        )
+                        _dbg(f"  loaded EmojiPicker into message slot for {msgid[:8]}")
+                        return
+        
+        # Fallback: use overlay slot
+        overlay_slot = self.query_one("#overlay-slot", TypedSlot)
+        if overlay_slot:
+            overlay_slot.load_variant(
+                EmojiPicker,
+                msgid=msgid,
+                on_close=lambda: _dbg(f"EmojiPicker closed for {msgid[:8]}")
+            )
+            _dbg(f"  loaded EmojiPicker into overlay slot for {msgid[:8]}")
     
     @on(EmojiPicker.EmojiSelected)
     def handle_emoji_selected(self, event: EmojiPicker.EmojiSelected) -> None:

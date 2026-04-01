@@ -58,9 +58,8 @@ class InlineActionsSlotType(SlotType):
         # Import variants
         from ..components.builtins import ContextMenu
         from .emoji_picker import EmojiPicker
-        from ..components.reply_panel import ReplyInput  # Assuming this exists
         
-        self.allowed_variants = [ContextMenu, EmojiPicker, ReplyInput]
+        self.allowed_variants = [ContextMenu, EmojiPicker]
 
 
 class SidePanelSlotType(SlotType):

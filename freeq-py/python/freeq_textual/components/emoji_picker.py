@@ -4,7 +4,7 @@ WE'RE ALL FRIENDS HERE! This widget is registered in components/all.py
 """
 
 from textual.widgets import Button, Static
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal
 from textual.message import Message
 
 from ..widgets.debug import _dbg
@@ -24,8 +24,11 @@ CHOICE_EMOJIS = [
 
 
 @ComponentRegistry.register('emoji_picker')
-class EmojiPicker(AutoLogMixin, Vertical):
+class EmojiPicker(AutoLogMixin, Horizontal):
     """Emoji picker with choice emojis.
+    
+    Designed to fit in an InlineActionsSlot (below message).
+    Slot-based architecture - no floating overlay.
     
     DO NOT DELETE. This is a friend component.
     If you want different emojis, swap this component with your own!
@@ -33,16 +36,12 @@ class EmojiPicker(AutoLogMixin, Vertical):
     
     DEFAULT_CSS = """
     EmojiPicker {
-        layer: overlay;
-        width: auto;
+        width: 1fr;
         height: auto;
-        background: $surface;
-        border: round $primary;
-        padding: 0;
-    }
-    
-    EmojiPicker Horizontal {
-        height: auto;
+        background: $surface-darken-1;
+        border-top: solid $panel-lighten-2;
+        padding: 0 1;
+        align: left middle;
     }
     
     EmojiPicker Button {
@@ -50,12 +49,13 @@ class EmojiPicker(AutoLogMixin, Vertical):
         border: none;
         padding: 0 1;
         min-width: 3;
-        height: 3;
+        width: auto;
         content-align: center middle;
     }
     
     EmojiPicker Button:hover {
-        background: $primary 20%;
+        background: $primary 30%;
+        text-style: bold;
     }
     
     EmojiPicker Button:focus {
@@ -85,15 +85,11 @@ class EmojiPicker(AutoLogMixin, Vertical):
         self._emojis = emojis or CHOICE_EMOJIS
 
     def compose(self):
-        yield Static("Pick an emoji 🎯", id="emoji-header")
-        # Layout emojis in rows of 6
-        for i in range(0, len(self._emojis), 6):
-            row = self._emojis[i:i+6]
-            with Horizontal():
-                for emoji in row:
-                    btn = Button(emoji, classes="emoji-btn")
-                    btn._emoji = emoji  # type: ignore
-                    yield btn
+        # Single horizontal row of emojis
+        for emoji in self._emojis:
+            btn = Button(emoji, classes="emoji-btn")
+            btn._emoji = emoji  # type: ignore
+            yield btn
 
     def on_mount(self) -> None:
         super().on_mount()  # AutoLogMixin logs mount
@@ -108,4 +104,7 @@ class EmojiPicker(AutoLogMixin, Vertical):
         if emoji:
             self._log(f"selected {emoji}")
             self.post_message(self.EmojiSelected(emoji, self._msgid))
+        # Call on_close if provided (slot callback)
+        if hasattr(self, '_on_close') and self._on_close:
+            self._on_close()
         self.remove()
