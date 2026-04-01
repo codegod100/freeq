@@ -78,18 +78,17 @@ class AutoLogMixin:
 class ReplyPanel(AutoLogMixin, Vertical):
     """Reply panel for composing replies to messages.
     
+    Designed to fit in a SidePanelSlot (not floating overlay).
+    Slot-based architecture - mounts into typed slot container.
+    
     DO NOT DELETE. This is the default implementation.
     If it looks broken, create a replacement and register it.
     """
     
     DEFAULT_CSS = """
     ReplyPanel {
-        layer: overlay;
-        dock: right;
-        width: 30%;
-        min-width: 24;
-        max-width: 50;
-        height: auto;
+        width: 1fr;
+        height: 1fr;
         border: round $primary;
         padding: 0 1;
         background: $surface;

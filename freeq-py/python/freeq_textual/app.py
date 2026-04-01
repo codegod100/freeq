@@ -37,7 +37,7 @@ from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, ListItem, ListView, Static
 
 from .client import BrokerAuthFlow, FreeqAuthBroker, FreeqClient
-from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessageItem, MessagesPanel, MessagesPanelWithThread, ScrollableLog, SlottedMessageList, ThreadMessage, ThreadPanel
+from .widgets import BufferList, InlineSpinner, LoadingOverlay, MessageItem, MessagesPanel, MessagesPanelWithThread, ScrollableLog, SidePanelSlot, SlottedMessageList, ThreadMessage, ThreadPanel
 from .components import get_component
 from .components.all import *  # noqa: F401 - registers all widgets as friends!
 
@@ -281,6 +281,7 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         with Horizontal(id="body"):
             yield BufferList(id="sidebar")
             yield MessagesPanel(use_slots=True)
+            yield SidePanelSlot(id="side-panel", empty_height=0)
             yield UserList(id="user-list")
         yield Input(
             placeholder="Type a message or /join /channel",
@@ -2002,6 +2003,12 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         """Handle reply sent from reply panel."""
         _dbg(f"handle_reply_panel_reply(msgid={event.reply_to_msgid[:8]!r}, text={event.text[:20]!r}...)")
         self._send_reply(event.target, event.reply_to_msgid, event.text)
+        
+        # Close the side panel slot after sending reply
+        side_slot = self.query_one("#side-panel", SidePanelSlot)
+        if side_slot:
+            side_slot.clear()
+            _dbg("  cleared side-panel slot after reply")
 
     def _refresh_thread_panel(self) -> None:
         """Refresh the thread panel with current messages.
@@ -2264,18 +2271,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         return None
     
     def _on_menu_reply(self, msgid: str | None) -> None:
-        """Handle Reply from context menu - show reply panel."""
+        """Handle Reply from context menu - show reply panel in side slot."""
         _dbg(f"_on_menu_reply(msgid={msgid[:8] if msgid else None})")
         
         if not msgid:
             return
-        
-        # Close any existing reply panel
-        count = len(list(self.query(ReplyPanel)))
-        for panel in self.query(ReplyPanel):
-            _dbg(f"  removing existing ReplyPanel")
-            panel.remove()
-        _dbg(f"  removed {count} existing panels")
         
         # Get message context
         msg = self.message_index.get(msgid)
@@ -2283,17 +2283,20 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             _dbg(f"  msgid {msgid} not found in index")
             return
         
-        # Create and mount reply panel - IT OWNS ITS STATE!
-        # No global _reply_to_msgid needed, ReplyPanel has its own reply_to_msgid
-        panel = ReplyPanel(
-            reply_to_msgid=msgid,
-            context=msg.text,
-            sender=msg.sender,
-            target=self._display_name(self.active_buffer),
-        )
-        # Mount to screen as overlay, positioned right
-        self.screen.mount(panel)
-        _dbg(f"  mounted ReplyPanel for {msgid[:8]}")
+        # Get side panel slot and load ReplyPanel
+        side_slot = self.query_one("#side-panel", SidePanelSlot)
+        if side_slot:
+            side_slot.load_variant(
+                ReplyPanel,
+                reply_to_msgid=msgid,
+                context=msg.text,
+                sender=msg.sender,
+                target=self._display_name(self.active_buffer),
+                on_close=lambda: _dbg(f"ReplyPanel closed for {msgid[:8]}")
+            )
+            _dbg(f"  loaded ReplyPanel into side-panel slot for {msgid[:8]}")
+        else:
+            _dbg("  ERROR: side-panel slot not found")
     
     def _on_menu_react(self, msgid: str | None) -> None:
         """Handle React from context menu - show emoji picker."""
