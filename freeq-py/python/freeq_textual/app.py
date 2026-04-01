@@ -2369,13 +2369,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         4. Write lines to RichLog, tracking thread roots and msgids per row
         5. Scroll to appropriate position (end/home/message/preserve)
         """
+        _dbg(f"_render_active_buffer START buffer={self.active_buffer}")
+        
         # Guard: Screen must exist and be mounted.
         if not self.screen or not self.screen.is_mounted:
+            _dbg(f"  ABORT: screen not ready")
             return
         
         # Guard: #messages must exist (compose must have finished for MessagesPanel).
         # This is only needed during startup - once app is running, #messages always exists.
         if not self.screen.query("#messages"):
+            _dbg(f"  ABORT: #messages not found")
             return
         
         active_name = self._display_name(self.active_buffer)
@@ -2386,11 +2390,14 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         try:
             log = self.query_one("#messages", ScrollableLog)
             is_slotted = False
-        except Exception:
+            _dbg(f"  using ScrollableLog (legacy mode)")
+        except Exception as e1:
             try:
                 log = self.query_one("#messages", SlottedMessageList)
                 is_slotted = True
-            except Exception:
+                _dbg(f"  using SlottedMessageList (slot mode)")
+            except Exception as e2:
+                _dbg(f"  ERROR: No messages widget found. ScrollableLog error: {e1}, SlottedMessageList error: {e2}")
                 return  # No messages widget found
         
         if is_slotted:
@@ -2399,6 +2406,8 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         else:
             # Legacy ScrollableLog path
             self._render_active_buffer_scrollable(log)
+        
+        _dbg(f"_render_active_buffer END")
 
     def _render_active_buffer_scrollable(self, log: ScrollableLog) -> None:
         """Render buffer content using legacy ScrollableLog (text-based)."""
@@ -2428,12 +2437,17 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
         
         Each message becomes a MessageItem widget with a slot below it.
         """
+        _dbg(f"_render_active_buffer_slotted START buffer={self.active_buffer}")
         log.clear()
         width = log.size.width
+        _dbg(f"  width={width}")
+        
         render_lines, render_roots, render_msgids = self._renderable_lines(self.active_buffer, width)
+        _dbg(f"  _renderable_lines returned: {len(render_lines)} lines")
         
         # Create MessageItem widgets for each rendered line
         from rich.text import Text
+        count = 0
         for line, thread_root, msgid in zip(render_lines, render_roots, render_msgids):
             # Convert line to Text if needed
             if isinstance(line, str):
@@ -2441,9 +2455,11 @@ class FreeqTextualApp(App[None], LayoutAwareRender):
             else:
                 content = line
             log.write(content, msgid=msgid, thread_root=thread_root)
+            count += 1
         
-        _dbg(f"render slotted buffer={self.active_buffer} messages={len(render_lines)}")
+        _dbg(f"render slotted buffer={self.active_buffer} wrote={count} items")
         self._apply_scroll_mode(log)
+        _dbg(f"_render_active_buffer_slotted END")
 
     def _apply_scroll_mode(self, log) -> None:
         """Apply scroll mode to log (works with both ScrollableLog and SlottedMessageList)."""
