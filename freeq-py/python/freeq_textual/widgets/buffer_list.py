@@ -33,6 +33,7 @@ class BufferList(AutoLogMixin, ListView):
         width: 20;
         min-width: 14;
         max-width: 24;
+        height: 1fr;
     }
     """
 
