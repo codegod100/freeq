@@ -20,11 +20,17 @@ from ..components.builtins import AutoLogMixin
 
 
 class BufferList(AutoLogMixin, ListView):
-    """Sidebar widget showing list of buffers (channels and DMs)."""
+    """Sidebar widget showing list of buffers (channels and DMs).
+    
+    REGRESSION FIX: Changed from 15% to fixed width 20
+    - Mixing percentages with 1fr in Horizontal caused layout conflicts
+    - When MessagesPanel uses 1fr, percentage-based siblings can cause 1fr to calc as 0
+    - Fixed width allows proper fractional space calculation
+    """"
     
     DEFAULT_CSS = """
     BufferList {
-        width: 15%;
+        width: 20;
         min-width: 14;
         max-width: 24;
     }

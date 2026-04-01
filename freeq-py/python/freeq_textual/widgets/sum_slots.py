@@ -66,11 +66,16 @@ class SidePanelSlotType(SlotType):
     """Slot type for side panels (right-side overlays).
     
     Visual: Fixed width panel, right side, overlays content
+    
+    REGRESSION FIX: Changed from 30% to fixed width 30
+    - Mixing percentages with 1fr in Horizontal caused MessagesPanel to get zero width
+    - Percentage + fractional layout calculation conflicted, leaving 1fr with 0 space
+    - Fixed width allows proper 1fr calculation for MessagesPanel
     """
     
     default_css = """
     SidePanelSlot {
-        width: 30%;
+        width: 30;
         min-width: 24;
         max-width: 50;
         height: 1fr;

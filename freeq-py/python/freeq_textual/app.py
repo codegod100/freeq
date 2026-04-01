@@ -195,6 +195,19 @@ class ThreadState:
 
 
 class FreeqTextualApp(App[None], LayoutAwareRender):
+    # LAYOUT ARCHITECTURE WARNING:
+    # The Horizontal(#body) contains 4 children with mixed sizing strategies:
+    # - BufferList: fixed width (20) - REGRESSION: was 15%, caused 1fr calc issues
+    # - MessagesPanel: 1fr (takes remaining space) - MUST have non-zero width
+    # - SidePanelSlot: fixed width (30, display:none when empty) - REGRESSION: was 30%
+    # - UserList: fixed width (25)
+    # 
+    # CRITICAL: Do NOT use percentage widths with 1fr in the same Horizontal.
+    # Mixing percentage + fractional sizing causes Textual to give 1fr zero space
+    # when calculating percentage widths first. Result: invisible messages.
+    # 
+    # TESTS REQUIRED: See tests/test_messages_panel_regression.py
+    # If messages disappear, check /tmp/freeq.log for "zero size" warnings.
     DEFAULT_CSS = """
     #body {
         width: 1fr;
