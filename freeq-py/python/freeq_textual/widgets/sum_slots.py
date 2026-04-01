@@ -1,24 +1,18 @@
-"""Sum type slot framework - type-safe component slots.
+"""Finite slot type system - components are variants of slot classes.
 
 Architecture:
-- Each slot is a sum type (variant) that defines valid component types
-- Slots are typed: ContextSlot can only hold context components
-- Variants encode what can be loaded, preventing runtime errors
-- Much type-safe. Very sum-type. So algebraic.
+- Fixed set of slot classes (InlineActions, SidePanel, Overlay, Content)
+- Components register as valid variants for specific slot types
+- Type-safe loading: slot.load_variant(ComponentClass)
+- Each slot type has distinct visual behavior and positioning
 
-Example:
-    class MessageActionsSlot(SumSlot):
-        variants = [ContextMenu, EmojiPicker, ReplyPanel]
-    
-    # Only ContextMenu, EmojiPicker, or ReplyPanel can load
-    slot.load(ContextMenu, msgid=msgid)
-    slot.load(EmojiPicker)  # Type-safe variant
+Such finite. Much variant. Very type-safe.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, TypeVar, Generic, get_type_hints
-from textual.containers import Vertical
+from typing import Any, Callable, TypeVar, Generic
+from textual.containers import Vertical, Horizontal
 from textual.widget import Widget
 from textual.reactive import reactive
 
@@ -28,70 +22,157 @@ from ..widgets.debug import _dbg
 T = TypeVar('T', bound=Widget)
 
 
-class SlotVariant:
-    """Base class for slot variants.
+class SlotType:
+    """Base class for slot types - defines visual behavior and allowed variants."""
     
-    Each variant defines:
-    - The component class that can be loaded
-    - How to construct it (args/kwargs mapping)
-    - Lifecycle callbacks
-    """
-    
-    def __init__(
-        self,
-        component_class: type[T],
-        *args: Any,
-        on_close: Callable[[], None] | None = None,
-        **kwargs: Any
-    ):
-        self.component_class = component_class
-        self.args = args
-        self.kwargs = kwargs
-        self.on_close = on_close
-    
-    def create(self) -> T:
-        """Create the component instance."""
-        return self.component_class(*self.args, **self.kwargs)
-    
-    def close(self) -> None:
-        """Call close callback."""
-        if self.on_close:
-            self.on_close()
+    # Override in subclasses
+    allowed_variants: list[type[Widget]] = []
+    default_css: str = ""
+    container_class = Vertical
 
 
-class SumSlot(Vertical, Generic[T]):
-    """A sum-type slot that can hold one of several variant component types.
+class InlineActionsSlotType(SlotType):
+    """Slot type for inline action bars below messages.
     
-    The variants define what can be loaded. Type-safe at construction time.
-    
-    Usage:
-        class MessageSlot(SumSlot[ContextMenu | EmojiPicker]):
-            pass
-        
-        slot = MessageSlot()
-        slot.load_variant(ContextMenu, msgid="abc123")
+    Visual: Thin horizontal bar, below content, expands message height
     """
     
-    DEFAULT_CSS = """
-    SumSlot {
+    default_css = """
+    InlineActionsSlot {
         width: 1fr;
         height: auto;
         display: none;
     }
     
-    SumSlot.occupied {
+    InlineActionsSlot.occupied {
         display: block;
-    }
-    
-    SumSlot.occupied.variant-context_menu {
         background: $surface-darken-1;
         border-top: solid $panel-lighten-2;
+        padding: 0 1;
+    }
+    """
+    
+    container_class = Horizontal
+    
+    def __init__(self) -> None:
+        # Import variants
+        from ..components.builtins import ContextMenu
+        from .emoji_picker import EmojiPicker
+        from ..components.reply_panel import ReplyInput  # Assuming this exists
+        
+        self.allowed_variants = [ContextMenu, EmojiPicker, ReplyInput]
+
+
+class SidePanelSlotType(SlotType):
+    """Slot type for side panels (right-side overlays).
+    
+    Visual: Fixed width panel, right side, overlays content
+    """
+    
+    default_css = """
+    SidePanelSlot {
+        width: 30%;
+        min-width: 24;
+        max-width: 50;
+        height: 1fr;
+        display: none;
     }
     
-    SumSlot.occupied.variant-emoji_picker {
-        background: $success-darken-2;
-        border-top: solid $success;
+    SidePanelSlot.occupied {
+        display: block;
+        border: round $primary;
+        background: $surface;
+        padding: 0 1;
     }
+    
+    SidePanelSlot.occupied.variant-thread_panel {
+        border: round $success;
+    }
+    
+    SidePanelSlot.occupied.variant-reply_panel {
+        border: round $primary;
+    }
+    """
+    
+    container_class = Vertical
+    
+    def __init__(self) -> None:
+        from ..widgets.thread_panel import ThreadPanel
+        from ..components.builtins import ReplyPanel
+        
+        self.allowed_variants = [ThreadPanel, ReplyPanel]
+
+
+class OverlaySlotType(SlotType):
+    """Slot type for floating overlays/modals.
+    
+    Visual: Floating, centered or positioned, modal behavior
+    """
+    
+    default_css = """
+    OverlaySlot {
+        layer: overlay;
+        width: auto;
+        height: auto;
+        display: none;
+    }
+    
+    OverlaySlot.occupied {
+        display: block;
+    }
+    """
+    
+    container_class = Vertical
+    
+    def __init__(self) -> None:
+        # Overlays can hold modals, dialogs, etc.
+        self.allowed_variants = []  # Populated dynamically
+
+
+class ContentSlotType(SlotType):
+    """Slot type for main content areas.
+    
+    Visual: Full-width, scrollable, main content
+    """
+    
+    default_css = """
+    ContentSlot {
+        width: 1fr;
+        height: 1fr;
+        display: none;
+    }
+    
+    ContentSlot.occupied {
+        display: block;
+    }
+    """
+    
+    container_class = Vertical
+    
+    def __init__(self) -> None:
+        # Messages, system notices, etc.
+        from ..widgets.thread_panel import ThreadMessage
+        self.allowed_variants = [ThreadMessage]  # Base content types
+
+
+# Map slot type names to classes
+SLOT_TYPES: dict[str, type[SlotType]] = {
+    'inline_actions': InlineActionsSlotType,
+    'side_panel': SidePanelSlotType,
+    'overlay': OverlaySlotType,
+    'content': ContentSlotType,
+}
+
+
+class TypedSlot(Widget, Generic[T]):
+    """A slot instance of a specific slot type.
+    
+    Each slot is an instance of a slot type, and can hold variants
+    allowed by that slot type.
+    
+    Usage:
+        slot = TypedSlot('inline_actions', id='msg-123-actions')
+        slot.load_variant(ContextMenu, msgid='abc123')
     """
     
     has_content: reactive[bool] = reactive(False)
@@ -99,23 +180,43 @@ class SumSlot(Vertical, Generic[T]):
     
     def __init__(
         self,
+        slot_type_name: str,
         *args,
-        allowed_variants: list[type[Widget]] | None = None,
         empty_height: int = 0,
         **kwargs
     ) -> None:
-        super().__init__(*args, **kwargs)
-        self._allowed_variants = allowed_variants or []
+        # Get slot type class
+        slot_type_class = SLOT_TYPES.get(slot_type_name)
+        if not slot_type_class:
+            raise ValueError(f"Unknown slot type: {slot_type_name}")
+        
+        self._slot_type = slot_type_class()
+        self._slot_type_name = slot_type_name
         self._empty_height = empty_height
         self._current_component: Widget | None = None
         self._current_variant_name: str | None = None
+        
+        # Use container class from slot type
+        container_class = self._slot_type.container_class
+        
+        # Initialize container
+        super().__init__(*args, **kwargs)
+        
+        # Apply slot type CSS
+        self._base_styles = self._slot_type.default_css
+    
+    def compose(self):
+        """Compose the slot container."""
+        # Yield nothing - we mount components directly
+        pass
     
     def watch_has_content(self, has_content: bool) -> None:
         """Update CSS when content changes."""
         self.toggle_class(has_content, "occupied")
         if not has_content:
             self.styles.height = self._empty_height
-            self.remove_class(f"variant-{self._current_variant_name}")
+            if self._current_variant_name:
+                self.remove_class(f"variant-{self._current_variant_name}")
         else:
             self.styles.height = "auto"
             if self._current_variant_name:
@@ -123,9 +224,9 @@ class SumSlot(Vertical, Generic[T]):
     
     def watch_current_variant(self, variant: str | None) -> None:
         """Update variant CSS class."""
-        # Remove old variant class
-        for v in self._allowed_variants:
-            self.remove_class(f"variant-{v.__name__.lower()}")
+        # Remove old variant classes
+        for allowed in self._slot_type.allowed_variants:
+            self.remove_class(f"variant-{allowed.__name__.lower()}")
         # Add new variant class
         if variant:
             self.add_class(f"variant-{variant}")
@@ -137,10 +238,10 @@ class SumSlot(Vertical, Generic[T]):
         on_close: Callable[[], None] | None = None,
         **kwargs: Any
     ) -> T | None:
-        """Load a specific variant component into the slot.
+        """Load a component variant into this slot.
         
         Args:
-            component_class: The component class to load (must be in allowed_variants)
+            component_class: The component class (must be allowed by slot type)
             *args: Constructor args
             on_close: Callback when component closes
             **kwargs: Constructor kwargs
@@ -148,64 +249,40 @@ class SumSlot(Vertical, Generic[T]):
         Returns:
             The mounted component, or None if variant not allowed
         """
-        # Type check: is this variant allowed?
-        if self._allowed_variants and component_class not in self._allowed_variants:
-            _dbg(f"SumSlot: variant {component_class.__name__} not allowed in {self.id}")
-            _dbg(f"  allowed: {[v.__name__ for v in self._allowed_variants]}")
+        # Type check
+        if component_class not in self._slot_type.allowed_variants:
+            _dbg(f"TypedSlot: {component_class.__name__} not allowed in {self._slot_type_name}")
+            _dbg(f"  allowed: {[v.__name__ for v in self._slot_type.allowed_variants]}")
             return None
         
         # Clear existing
         self.clear()
         
-        # Create variant wrapper
-        variant = SlotVariant(component_class, *args, on_close=on_close, **kwargs)
-        
-        # Mount component
+        # Create and mount
         try:
-            component = variant.create()
+            component = component_class(*args, **kwargs)
             self._current_component = component
             self._current_variant_name = component_class.__name__.lower()
+            
+            # Mount directly to self (we're a container)
             self.mount(component)
             
             self.has_content = True
             self.current_variant = self._current_variant_name
             
-            _dbg(f"SumSlot: loaded variant {component_class.__name__} into {self.id}")
+            # Store on_close
+            self._on_close = on_close
+            
+            _dbg(f"TypedSlot: loaded {component_class.__name__} into {self._slot_type_name}")
             return component
             
         except Exception as e:
-            _dbg(f"SumSlot: failed to create {component_class.__name__}: {e}")
+            _dbg(f"TypedSlot: failed to create {component_class.__name__}: {e}")
             return None
-    
-    def load(
-        self,
-        component: Widget,
-        variant_name: str | None = None,
-        on_close: Callable[[], None] | None = None
-    ) -> Widget | None:
-        """Load a pre-constructed component (for dynamic loading).
-        
-        Less type-safe than load_variant() but more flexible.
-        """
-        self.clear()
-        
-        self._current_component = component
-        self._current_variant_name = variant_name or type(component).__name__.lower()
-        self.mount(component)
-        
-        self.has_content = True
-        self.current_variant = self._current_variant_name
-        
-        # Store on_close for later
-        self._on_close = on_close
-        
-        _dbg(f"SumSlot: loaded component {type(component).__name__} into {self.id}")
-        return component
     
     def clear(self) -> None:
         """Clear the slot."""
         if self._current_component:
-            # Call close callback
             if hasattr(self, '_on_close') and self._on_close:
                 self._on_close()
             
@@ -215,7 +292,7 @@ class SumSlot(Vertical, Generic[T]):
             self.has_content = False
             self.current_variant = None
             
-            _dbg(f"SumSlot: cleared {self.id}")
+            _dbg(f"TypedSlot: cleared {self._slot_type_name}")
     
     @property
     def is_occupied(self) -> bool:
@@ -230,157 +307,108 @@ class SumSlot(Vertical, Generic[T]):
         return self._current_variant_name
     
     @property
+    def slot_type_name(self) -> str:
+        return self._slot_type_name
+    
+    @property
     def allowed_variants(self) -> list[type[Widget]]:
-        return self._allowed_variants.copy()
+        return self._slot_type.allowed_variants.copy()
 
 
-class MessageActionsSlot(SumSlot):
-    """Slot for message actions - can hold ContextMenu, EmojiPicker, etc."""
-    
-    DEFAULT_CSS = """
-    MessageActionsSlot {
-        width: 1fr;
-        height: auto;
-        display: none;
-    }
-    
-    MessageActionsSlot.occupied {
-        display: block;
-        background: $surface-darken-1;
-        border-top: solid $panel-lighten-2;
-        padding: 0 1;
-    }
-    """
+class InlineActionsSlot(TypedSlot):
+    """Convenience constructor for inline actions slots."""
     
     def __init__(self, *args, **kwargs) -> None:
-        # Import here to avoid circular imports
-        from ..components.builtins import ContextMenu
-        from .emoji_picker import EmojiPicker
-        
-        super().__init__(*args, **kwargs)
-        # Define allowed variants at initialization
-        self._allowed_variants = [ContextMenu, EmojiPicker]
+        super().__init__('inline_actions', *args, **kwargs)
 
 
-class ThreadPanelSlot(SumSlot):
-    """Slot for thread panel - can hold ThreadPanel."""
-    
-    DEFAULT_CSS = """
-    ThreadPanelSlot {
-        width: 30%;
-        min-width: 24;
-        max-width: 50;
-        height: 1fr;
-        display: none;
-    }
-    
-    ThreadPanelSlot.occupied {
-        display: block;
-        border: round $success;
-        background: $surface;
-        padding: 0 1;
-    }
-    """
+class SidePanelSlot(TypedSlot):
+    """Convenience constructor for side panel slots."""
     
     def __init__(self, *args, **kwargs) -> None:
-        from ..widgets.thread_panel import ThreadPanel
-        super().__init__(*args, **kwargs)
-        self._allowed_variants = [ThreadPanel]
+        super().__init__('side_panel', *args, **kwargs)
 
 
-class ComposedSlotMessage(Vertical):
-    """Message with typed slot below it.
+class OverlaySlot(TypedSlot):
+    """Convenience constructor for overlay slots."""
     
-    Uses SumSlot for type-safe slot operations.
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__('overlay', *args, **kwargs)
+
+
+class ContentSlot(TypedSlot):
+    """Convenience constructor for content slots."""
+    
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__('content', *args, **kwargs)
+
+
+class SlotVariantRegistry:
+    """Registry for slot type variant mappings.
+    
+    Allows dynamic registration of component variants to slot types.
     """
     
-    DEFAULT_CSS = """
-    ComposedSlotMessage {
-        width: 1fr;
-        height: auto;
+    _variants: dict[str, list[type[Widget]]] = {
+        'inline_actions': [],
+        'side_panel': [],
+        'overlay': [],
+        'content': [],
     }
     
-    ComposedSlotMessage .message-content {
-        width: 1fr;
-        height: auto;
-    }
-    """
-    
-    def __init__(
-        self,
-        content: Any,
-        msgid: str | None = None,
-        thread_root: str | None = None,
-        slot_type: type[SumSlot] = MessageActionsSlot,
-        **kwargs
-    ) -> None:
-        super().__init__(**kwargs)
-        self._content = content
-        self._msgid = msgid
-        self._thread_root = thread_root
-        self._slot_type = slot_type
-        self._actions_slot: SumSlot | None = None
-    
-    def compose(self):
-        from textual.widgets import Static
-        from rich.text import Text
+    @classmethod
+    def register(cls, slot_type: str, component_class: type[Widget]) -> None:
+        """Register a component as valid variant for slot type."""
+        if slot_type not in cls._variants:
+            raise ValueError(f"Unknown slot type: {slot_type}")
         
-        # Message content
-        content_str = str(self._content) if isinstance(self._content, (str, Text)) else str(self._content)
-        yield Static(content_str, classes="message-content")
-        
-        # Typed slot
-        yield self._slot_type(id=f"slot-{self._msgid[:8] if self._msgid else 'none'}")
+        if component_class not in cls._variants[slot_type]:
+            cls._variants[slot_type].append(component_class)
+            _dbg(f"SlotVariantRegistry: registered {component_class.__name__} for {slot_type}")
     
-    def on_mount(self) -> None:
-        try:
-            self._actions_slot = self.query_one(SumSlot)
-        except Exception:
-            pass
+    @classmethod
+    def get_variants(cls, slot_type: str) -> list[type[Widget]]:
+        """Get all registered variants for slot type."""
+        return cls._variants.get(slot_type, [])
     
-    @property
-    def actions_slot(self) -> SumSlot | None:
-        return self._actions_slot
-    
-    @property
-    def msgid(self) -> str | None:
-        return self._msgid
-    
-    @property
-    def thread_root(self) -> str | None:
-        return self._thread_root
+    @classmethod
+    def is_valid(cls, slot_type: str, component_class: type[Widget]) -> bool:
+        """Check if component is valid variant for slot type."""
+        return component_class in cls._variants.get(slot_type, [])
 
 
-# Sum type slot manager for exclusive slot coordination
-class SumSlotManager:
-    """Global manager for sum-type slots.
+# Global slot coordinator
+class SlotCoordinator:
+    """Coordinates slots across the app.
     
-    Ensures only one slot of a given type is active at a time.
+    - Ensures only one slot per type is active (optional)
+    - Manages slot IDs
+    - Handles exclusive slot loading
     """
     
     def __init__(self) -> None:
-        self._slots: dict[str, SumSlot] = {}
-        self._active_by_type: dict[str, SumSlot] = {}
+        self._slots: dict[str, TypedSlot] = {}
+        self._active_by_type: dict[str, TypedSlot] = {}
     
-    def register(self, slot_id: str, slot: SumSlot) -> None:
-        """Register a slot."""
+    def register(self, slot_id: str, slot: TypedSlot) -> None:
+        """Register a slot with coordinator."""
         self._slots[slot_id] = slot
     
-    def load_variant_exclusive(
+    def load_exclusive(
         self,
         slot_id: str,
         component_class: type[T],
         *args: Any,
         **kwargs: Any
     ) -> T | None:
-        """Load variant, clearing other slots of same type."""
+        """Load component, clearing other slots of same type."""
         slot = self._slots.get(slot_id)
         if not slot:
             return None
         
-        slot_type = type(slot).__name__
+        slot_type = slot.slot_type_name
         
-        # Clear other slots of same type
+        # Clear other slots of this type
         if slot_type in self._active_by_type:
             other = self._active_by_type[slot_type]
             if other != slot:
@@ -398,16 +426,16 @@ class SumSlotManager:
         
         return component
     
-    def clear_all_of_type(self, slot_type: str) -> None:
+    def clear_type(self, slot_type: str) -> None:
         """Clear all slots of a specific type."""
-        for slot_id, slot in self._slots.items():
-            if type(slot).__name__ == slot_type and slot.is_occupied:
+        for slot in self._slots.values():
+            if slot.slot_type_name == slot_type and slot.is_occupied:
                 slot.clear()
         self._active_by_type.pop(slot_type, None)
     
-    def get_slot(self, slot_id: str) -> SumSlot | None:
+    def get_slot(self, slot_id: str) -> TypedSlot | None:
         return self._slots.get(slot_id)
 
 
-# Global sum slot manager
-sum_slot_manager = SumSlotManager()
+# Global coordinator instance
+slot_coordinator = SlotCoordinator()

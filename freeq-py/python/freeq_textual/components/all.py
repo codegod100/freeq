@@ -15,10 +15,12 @@ from ..widgets.messages_panel import MessagesPanel, MessagesPanelWithThread
 from ..widgets.spinner import LoadingOverlay, InlineSpinner
 from ..widgets.slots import Slot, SlottedMessageItem, SlotManager
 from ..widgets.sum_slots import (
-    SumSlot,
-    MessageActionsSlot,
-    ThreadPanelSlot,
-    SumSlotManager,
+    TypedSlot,
+    InlineActionsSlot,
+    SidePanelSlot,
+    OverlaySlot,
+    ContentSlot,
+    SlotCoordinator,
 )
 
 # Import built-in components (they register themselves via decorator)
@@ -36,11 +38,13 @@ ComponentRegistry._components['inline_spinner'] = InlineSpinner
 ComponentRegistry._components['slot'] = Slot
 ComponentRegistry._components['slotted_message_item'] = SlottedMessageItem
 ComponentRegistry._components['slot_manager'] = SlotManager
-# Sum type slots
-ComponentRegistry._components['sum_slot'] = SumSlot
-ComponentRegistry._components['message_actions_slot'] = MessageActionsSlot
-ComponentRegistry._components['thread_panel_slot'] = ThreadPanelSlot
-ComponentRegistry._components['sum_slot_manager'] = SumSlotManager
+# Sum type slots (finite slot system)
+ComponentRegistry._components['typed_slot'] = TypedSlot
+ComponentRegistry._components['inline_actions_slot'] = InlineActionsSlot
+ComponentRegistry._components['side_panel_slot'] = SidePanelSlot
+ComponentRegistry._components['overlay_slot'] = OverlaySlot
+ComponentRegistry._components['content_slot'] = ContentSlot
+ComponentRegistry._components['slot_coordinator'] = SlotCoordinator
 # EmojiPicker registers itself via @ComponentRegistry.register decorator!
 
 __all__ = [
@@ -55,9 +59,11 @@ __all__ = [
     'Slot',
     'SlottedMessageItem',
     'SlotManager',
-    'SumSlot',
-    'MessageActionsSlot',
-    'ThreadPanelSlot',
-    'SumSlotManager',
+    'TypedSlot',
+    'InlineActionsSlot',
+    'SidePanelSlot',
+    'OverlaySlot',
+    'ContentSlot',
+    'SlotCoordinator',
     'EmojiPicker',
 ]
