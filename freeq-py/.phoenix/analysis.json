@@ -1,0 +1,103 @@
+{
+  "timestamp": "2026-04-09T20:22:29.168Z",
+  "schemas": {
+    "spec": {
+      "clauses": 39,
+      "types": [
+        "REQUIREMENT",
+        "CONSTRAINT",
+        "DEFINITION"
+      ]
+    },
+    "canon": {
+      "nodes": 39,
+      "d_rate": 0,
+      "classification": {
+        "A": 39,
+        "B": 0,
+        "C": 0,
+        "D": 0
+      }
+    },
+    "iu": {
+      "units": 3,
+      "coverage": 100
+    }
+  },
+  "axioms": {
+    "satisfied": 7,
+    "violated": 3,
+    "all_sat": false,
+    "details": [
+      {
+        "name": "canonical_deterministic",
+        "desc": "∀c1,c2: SpecClause, normalize(c1)=normalize(c2) ⟹ canonize(c1)=canonize(c2)",
+        "status": "SAT"
+      },
+      {
+        "name": "provenance_total",
+        "desc": "∀n: CanonNode, ∃c: SpecClause where n derivedFrom c",
+        "status": "SAT"
+      },
+      {
+        "name": "drate_bounded",
+        "desc": "∀c: CanonNode, dRate(c) ∈ [0, 1]",
+        "status": "SAT",
+        "value": 0
+      },
+      {
+        "name": "iu_covering",
+        "desc": "∀n: CanonNode, ∃iu: IU where n ∈ containsCanon(iu)",
+        "status": "SAT"
+      },
+      {
+        "name": "iu_nonempty",
+        "desc": "∀iu: IU, |containsCanon(iu)| ≥ 1",
+        "status": "SAT"
+      },
+      {
+        "name": "iu_uniqueness",
+        "desc": "∀n: CanonNode, ∃! iu: IU where n ∈ containsCanon(iu)",
+        "status": "SAT"
+      },
+      {
+        "name": "no_orphans",
+        "desc": "¬∃r: Requirement without iu: IU where r ∈ iu",
+        "status": "SAT"
+      }
+    ]
+  },
+  "violations": [
+    {
+      "axiom": "risk_evidence",
+      "desc": "∀iu: IU, riskTier(iu)=critical ⟹ hasEvidence(iu)",
+      "found": "1 critical IUs without evidence",
+      "examples": [
+        "c5324a6c63367c81"
+      ]
+    },
+    {
+      "axiom": "traceability_total",
+      "desc": "∀fn: CodeFunction, ∃c: CanonNode where tracesTo(fn, c)",
+      "found": "1 files without traceability",
+      "examples": [
+        "src/generated/auth_flow.py"
+      ]
+    },
+    {
+      "axiom": "no_orphan_code",
+      "desc": "∀f: CodeFile, ∃iu: IU where implementsIU(f, iu)",
+      "found": "1 orphan code files",
+      "examples": [
+        "src/generated/auth_flow.py"
+      ]
+    }
+  ],
+  "morphisms": {
+    "mu_ingest": "ThSpec → ThClause",
+    "mu_canon": "ThClause → ThCanon",
+    "mu_plan": "ThCanon → ThIU",
+    "mu_codegen": "ThIU → ThCode"
+  },
+  "verdict": "INVALID"
+}

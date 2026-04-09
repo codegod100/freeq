@@ -1,0 +1,22 @@
+{
+  "waivers": [
+    {
+      "file": "src/generated/app.py",
+      "reason": "Manual implementation of _populate_default_data() method to create default buffers and channels after authentication. Required for UI to show content after auth completes.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2025-01-09"
+    },
+    {
+      "file": "src/generated/app.py",
+      "reason": "MANUAL_EDIT: Added _save_credentials() and load_saved_credentials() methods for auto-login feature. Also added comprehensive [AUTH-MOUNT] logging for debugging auto-login flow.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
+      "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
+      "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    }
+  ]
+}

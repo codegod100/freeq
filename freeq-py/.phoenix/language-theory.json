@@ -1,0 +1,210 @@
+{
+  "language": "python-textual",
+  "languageName": "Python (Textual TUI)",
+  "extension": ".py",
+  "moduleSystem": "commonjs",
+  "iuMappings": [
+    {
+      "id": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
+      "name": "Requirements Domain",
+      "domain": "requirements",
+      "riskTier": "low",
+      "files": {
+        "dir": "requirements",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "RequirementsWidget",
+          "type": "widget",
+          "pattern": "class RequirementsWidget(Widget)",
+          "description": "Main widget for Requirements Domain"
+        },
+        {
+          "name": "RequirementsState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass RequirementsState",
+          "description": "Data model for Requirements Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "03ef4d2524aa5a2dd4b43799105bc29221ef75e4a7ff20bc00d20d68b2a3156f",
+        "09daab1c07a9eec58e6ee9013da511c686ecce3e7d4fd20941babd0e1ec25a8e",
+        "1f540d2c172a135ae91eac5a0c17e7bc9fbad1e8b9d0818a2c7ff1df4c0b0c27",
+        "8330b04e652de8524716d48b2d450c525d4003343b3bc5982cecb51a839dfe41"
+      ]
+    },
+    {
+      "id": "c40ae8a571196ecf7450fd67b205abbc07d9bd4b5481c4248a8bbaaff1d7aefe",
+      "name": "Definitions Domain",
+      "domain": "definitions",
+      "riskTier": "low",
+      "files": {
+        "dir": "definitions",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "DefinitionsWidget",
+          "type": "widget",
+          "pattern": "class DefinitionsWidget(Widget)",
+          "description": "Main widget for Definitions Domain"
+        },
+        {
+          "name": "DefinitionsState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass DefinitionsState",
+          "description": "Data model for Definitions Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "6ab64ae1c2a1a97e298c7c0f93472b2f293fe4645ee51753722d7e55d44b5d72"
+      ]
+    },
+    {
+      "id": "c5aaf840967198d00d9ff435b8d9b6a7e0647b2017b8f759426552d91707cfb7",
+      "name": "Phoenix Domain",
+      "domain": "phoenix",
+      "riskTier": "critical",
+      "files": {
+        "dir": "phoenix",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "PhoenixWidget",
+          "type": "widget",
+          "pattern": "class PhoenixWidget(Widget)",
+          "description": "Main widget for Phoenix Domain"
+        },
+        {
+          "name": "PhoenixState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass PhoenixState",
+          "description": "Data model for Phoenix Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "00609785d53408a1277848b43540ab7b4e4f7f965ced99dd8c5e3af69635dad1",
+        "06aa548a95ba6d637a449a6f56dfaf24c30b4b1d9c032e35f8e81524fa884b5f",
+        "0700ec73627d49bfecc5ba409be51649e687bdcae5dc2f9e521d82bd7290ab8b",
+        "072adb6427003edaa2d0fd6d4aa63a8811a719703f2ffbe9411139ed154fb409",
+        "0858367659ab9aca666c96d339b0f79b8f7648763f3a2b3422f7c21e06a0cdfa",
+        "0a5f52d49dc98e653e5f4ce64e38522e05c2fe1b5fc61fd44dc31654bcd264d3",
+        "17c03e585de1746bb4826f747baf9eb86cba0eb9a4a49850d4e51e9f6cdb7a7a",
+        "19fdfbf45872bfa7f099f4a229d74dcae76e864336d142d670b58b5d7d76e6d7",
+        "2848d1ea4860718792b64543da3ce7e0f5d4f12f51ec6a24de53d742e5f663f4",
+        "29f85ffbfd885fe61a9fdb269cd5ef23c478766a714a097300fcd97ddc597685",
+        "2c33febc53d562d381594ef43a6a36da1e423e682d6ff15d15476104811f62db",
+        "2c760e464b018245535e21459815a4f9c7dcdf0978815ffea76d078a9ba45a8a",
+        "43cb8709f677ad190772ae7b9edd4be2b0d2b8ddcf2d673f81cc2fc900a8e062",
+        "49bd657d1ad12ab2f2be549a6fc7bea0cb1c12c0af73696b51b9375690ec84e1",
+        "4c0826309e782e452979d474a7e1d511054f88a0530d6293af66c4dff10f7077",
+        "506aa0180085c0fcebf110df5bd75c8067f2886d81578f285373fc658cb098f7",
+        "507a5d0793022f215140f62d5e27309fb905120a9ecd56f4d93db810ed697390",
+        "56cd806bd5d1807460a53ee00152a90ed896a6ee5d536efdf0872796336a8b98",
+        "59dee27c9ade08c87ea565c9d3f9df53b2d5aa667595cd7e81a04cd1d9ce3a90",
+        "5b3f1747723af382356508facbbbbecf6b11fa1d4ff59e1572c7db0cac2a9d88",
+        "702fe5c56344be8dc382370194fe41ceaf31ca2311ffb8b1c370e499272e4d19",
+        "73f44b63b97b3687cd3cfc106ec5f7a45b5ed97d5850467d7e5f9dca78db0ed0",
+        "75b072bf01a332b9a151078c60189160cc02dfd6e91a6a9a8cf5ea14176d3f36",
+        "77eff8b84fc75df20570c0dad4ea21c86cab3b1f152a6196df9791e1ade15080",
+        "7ae921b29ae50cc6286715165197d749a64b94206e3eae9d8f8b13851c9659c5",
+        "8434d1391693020be1941469fd2a960f8e0b76d7cc0951271c9baa5e33332e04",
+        "886f6d8971bd980470529a8d1b2569d7717075ee08cc4afea240211b889d1e2f",
+        "908b31e13cc059a39e82ac61338892b28aa5f5cb070e79d6474ad4777548342f",
+        "90b2f2f6ee04283bc6d6889c71e4bdca16223601282f5accfb163826f660d6a6",
+        "9ab8c582aad6fb55ca5f6379f38df3887804b8540c1b0f814452f9e58695b2bc",
+        "a2d079738624723c07e69d319a09615436a9e2736afc175daf7652759c92550a",
+        "aa6fe46ae8e8820e9f8fd20cb706868b18761d7d848213ec6c158ed2117b3dd4",
+        "afa0b8b7b9c7f5fd5891c3200f1828d18573f7bb8783061eb823db1674f553d5",
+        "b210cb48fdd569f47eac13c60fb8da0d48b29e09609e594506ee4864b609c1dd",
+        "b4402a28335168d467916030c50bbf378ef67b0fa14ad24674f2ab3ffc152dad",
+        "b6c493166c85230127ef94ba1e7d918172be667e9e952190f34002299d03fcce",
+        "b782e6c8d07c6bf5fba75dff435d934578383bb9653e2cec062b28da2ab6ec42",
+        "bdf099529af27c1436807df8f9c295ee75cd5f1a380cd4ac5a372bd7a5148dde",
+        "bf9948003551269c77ea869ce63ee16dec7cffe83e943a3ec931a5ae7c1ba97f",
+        "c020b58c63e12bfef9c8ab27486ec3d482f643c567139d39993a7bba797fbc64",
+        "c385163a67ef14daf590bbbcf6533b7f443fca7dea79f7a4ed1c2ef6850bda07",
+        "c7e70dd1daa047c9c5aea1a6c20abbcb4a8a99ec6d5313e4d7e0afd5617116e0",
+        "c8d3e822312badb702aa134b658325fa2b6be7a6da1ab3cf69767c1e60abaae2",
+        "cd651a5948819c795d79981332fe27f1faf73974703cf87e56a3992d8074d71c",
+        "d2b176111627e5f7c02052ea517db9c953e9ecf5b7e85949ea421273baae6676",
+        "d44c672d242d486eac457b0a70126cb15b64825aa8ae3e3168cdeb2d4ce4fa9d",
+        "d9af2095ff70a07830c5c8b40f852eb809cea110584c33e5abcdd077d3e4b92a",
+        "de968fc4e569b7b68bff03ab4333ecc3497632e354777f8ed8116cfb90cf7b50",
+        "e1ee2c9ea071a944bc315c07f9067621ad18784850ab79fcf75a99fecadacc9c",
+        "e46b05d26c1c234a129bb026c822561dd3c50e5a5d94dafdf6f57dd73baa5648",
+        "e595e2c93ffe8946f9c67b7ea0c506d10051661863033b56f65715ad7398cbdf",
+        "e6bcffa73751cf1d2ded62d641250aeda57814523238526110b610a23d5039fd",
+        "ed53f4ea610ae8964b322f736463d47301d8336a416b05e69db82227ccbe1cdc",
+        "ed81a1ef902feddc63364b2383fd6fe8bcf5eb3134661ea530c11b95b3a39a1c",
+        "ed95a1fd6ffc90fbf2e7650fff2b986c023cb15344ac357f18fb4558152b07e3",
+        "f76639d23adb36c117d4965032cb613bbb7efbaa950a820e49349be20661a0e5",
+        "f803e53f0f7da24457152a70d8ec48ac1808fe33e5dc35cdf58ffbe61b464601",
+        "fc52514bd7e88e924f4dba4b66c60e3806a62e86e268397944e98d23f5534128"
+      ]
+    }
+  ],
+  "constraintMappings": [
+    {
+      "statement": "must not exceed limitation",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "must support minimum requirement",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "textuals input widget does not accept a multiline parameter do not pass multilinetruefalse to input",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "all textual messages must call superinit in their init method",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "the apppy must include entry point block if name main runapp for python m srcgeneratedapp to work",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    }
+  ],
+  "deliverable": {
+    "dir": "widgets",
+    "serverFile": "app.py",
+    "storeFile": "models.py",
+    "patterns": {
+      "serverFramework": "None (TUI application)",
+      "uiPattern": "Textual widgets with CSS styling",
+      "stateManagement": "reactive attributes on Widget classes"
+    }
+  }
+}

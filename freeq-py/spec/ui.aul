@@ -1,0 +1,169 @@
+-- FreeQ Textual TUI - UI Theory Declaration
+-- Phoenix Abstract UI Language (AUL)
+
+-- ============================================
+-- STATES
+-- ============================================
+
+state Authenticating:
+  description: "User must complete OAuth authentication"
+  priority: blocking
+  
+state Connecting:
+  description: "Authenticated, establishing IRC connection"
+  priority: loading
+  
+state Connected:
+  description: "Fully connected, normal chat operation"
+  priority: normal
+  
+state Disconnected:
+  description: "Connection lost, showing reconnect option"
+  priority: error
+
+-- ============================================
+-- REGIONS
+-- ============================================
+
+region Header:
+  geometry: DOCK_TOP(height: 1)
+  visibility:
+    Authenticating: false
+    Connecting: false
+    Connected: true
+    Disconnected: true
+  content: [Clock, Title]
+
+region Sidebar:
+  geometry: PERCENT(25)
+  visibility:
+    Authenticating: false
+    Connecting: true
+    Connected: true
+    Disconnected: true
+  content: [BufferList]
+
+region MainContent:
+  geometry: PERCENT(60)
+  visibility:
+    Authenticating: false
+    Connecting: true
+    Connected: true
+    Disconnected: true
+  content: [MessageList, InputBar]
+
+region UserList:
+  geometry: PERCENT(15)
+  visibility:
+    Authenticating: false
+    Connecting: true
+    Connected: true
+    Disconnected: true
+  content: [UserList]
+
+region Footer:
+  geometry: DOCK_BOTTOM(height: 1)
+  visibility:
+    Authenticating: false
+    Connecting: false
+    Connected: true
+    Disconnected: true
+  content: [StatusBar, KeyHints]
+
+-- ============================================
+-- OVERLAYS
+-- ============================================
+
+overlay Authentication:
+  trigger: state == Authenticating
+  presentation: FULLSCREEN
+  dismissable: false
+  content: [Title, Description, HandleInput, ConnectButton, GuestButton, CancelButton]
+  backdrop: SOLID_COLOR($surface-darken-2)
+
+overlay Loading:
+  trigger: state == Connecting
+  presentation: FULLSCREEN
+  dismissable: false
+  content: [Spinner, StatusText]
+  backdrop: TRANSPARENT
+
+overlay ThreadPanel:
+  trigger: event == ShowThread
+  presentation: MODAL_RIGHT(width: 40%)
+  dismissable: true
+  content: [ThreadTree, CloseButton]
+
+overlay EmojiPicker:
+  trigger: event == OpenEmojiPicker
+  presentation: MODAL_CENTERED
+  dismissable: true
+  content: [EmojiGrid, SearchInput]
+
+overlay ContextMenu:
+  trigger: event == ShowContextMenu
+  presentation: INLINE_AT_CURSOR
+  dismissable: true
+  content: [MenuItems]
+
+overlay DebugPanel:
+  trigger: event == ToggleDebug
+  presentation: DOCK_BOTTOM(height: 10)
+  dismissable: true
+  content: [LogOutput]
+
+-- ============================================
+-- TRANSITIONS
+-- ============================================
+
+transition Authenticating -> Connecting:
+  on: AuthCompleted
+  animation: FADE
+  duration: 300ms
+  
+transition Connecting -> Connected:
+  on: ConnectionEstablished
+  animation: FADE
+  duration: 200ms
+  
+transition Connected -> Disconnected:
+  on: ConnectionLost
+  animation: INSTANT
+  duration: 0ms
+  
+transition Disconnected -> Connecting:
+  on: ReconnectRequested
+  animation: FADE
+  duration: 300ms
+
+-- ============================================
+-- INVARIANTS
+-- ============================================
+
+invariant SingleFullscreenOverlay:
+  description: "Only one fullscreen overlay visible at a time"
+  check: count(overlays.where(presentation == FULLSCREEN && visible)) <= 1
+
+invariant AuthBeforeConnect:
+  description: "Cannot reach Connected without passing Authenticating"
+  check: state.sequence.includes(Authenticating) before Connected
+
+invariant OverlayAboveContent:
+  description: "All overlays render above regions"
+  check: min(overlays.zIndex) > max(regions.zIndex)
+
+invariant HeaderFooterMutual:
+  description: "Header and Footer visibility tied during auth"
+  check: Header.visible == Footer.visible in all states
+
+-- ============================================
+-- GEOMETRY CONSTRAINTS
+-- ============================================
+
+constraint SidebarWidth:
+  description: "Sidebar + MainContent + UserList = 100%"
+  check: Sidebar.width + MainContent.width + UserList.width == 100%
+
+constraint NoOverflow:
+  description: "No region content exceeds container"
+  check: all regions have overflow: hidden or scroll

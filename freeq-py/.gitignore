@@ -1,0 +1,24 @@
+# Phoenix VCS
+.phoenix/graphs/
+.phoenix/manifests/
+.phoenix/evidence/
+.phoenix/purge-backup/
+.phoenix/state.json
+
+# Generated code (keep in version control or not - your choice)
+# src/generated/
+
+# Dependencies
+node_modules/
+*.log
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
