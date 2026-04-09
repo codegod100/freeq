@@ -239,16 +239,6 @@ class FreeQApp(App):
             )
             logger.info("[AUTH-MOUNT] Default data populated")
             
-            # Explicitly refresh sidebar to show populated buffers
-            # This ensures buffers are rendered even if watch_buffers wasn't triggered
-            try:
-                sidebar = self.query_one("#sidebar", Vertical)
-                buffer_sidebar = sidebar.query_one("BufferSidebar")
-                buffer_sidebar.watch_buffers(self.app_state.buffers)
-                logger.info("[AUTH-MOUNT] Sidebar explicitly refreshed with buffers")
-            except Exception as e:
-                logger.warning(f"[AUTH-MOUNT] Could not refresh sidebar: {e}")
-            
             # Show main UI directly (no auth screen)
             self.app_state.ui.auth_overlay_visible = False
             self.state = AppUIState.CONNECTED
@@ -319,15 +309,6 @@ class FreeQApp(App):
         # 1b. Populate default buffers and channels so UI has content to display
         self._populate_default_data(event.handle, event.nick)
         logger.info("[AUTH] Default buffers and channels populated")
-        
-        # Explicitly refresh sidebar to show populated buffers
-        try:
-            sidebar = self.query_one("#sidebar", Vertical)
-            buffer_sidebar = sidebar.query_one("BufferSidebar")
-            buffer_sidebar.watch_buffers(self.app_state.buffers)
-            logger.info("[AUTH] Sidebar explicitly refreshed with populated buffers")
-        except Exception as e:
-            logger.warning(f"[AUTH] Could not refresh sidebar: {e}")
         
         # 2. Update UI state (CRITICAL)
         # @phoenix-canon: node-77eff8b8
@@ -526,15 +507,6 @@ class FreeQApp(App):
         # Populate default buffers for guest mode
         self._populate_default_data("guest", "Guest")
         logger.info("[GUEST] Default buffers populated for guest mode")
-        
-        # Explicitly refresh sidebar for guest mode
-        try:
-            sidebar = self.query_one("#sidebar", Vertical)
-            buffer_sidebar = sidebar.query_one("BufferSidebar")
-            buffer_sidebar.watch_buffers(self.app_state.buffers)
-            logger.info("[GUEST] Sidebar explicitly refreshed for guest mode")
-        except Exception as e:
-            logger.warning(f"[GUEST] Could not refresh sidebar: {e}")
         
         # Sync UI
         logger.info("[GUEST] Calling _update_ui_from_state() to make main UI visible")
