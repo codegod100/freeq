@@ -815,15 +815,10 @@ class FreeQApp(App):
             return
         
         try:
-            input_bar = self.query_one("#input-bar", Vertical)
-            # Try to find an Input widget within and focus it
-            for child in input_bar.children:
-                if hasattr(child, "focus"):
-                    child.focus()
-                    logger.info(f"[UI] Focus set to input widget: {type(child).__name__}")
-                    break
-            else:
-                logger.warning("[UI] No focusable widget found in #input-bar")
+            # Query the InputBar widget and focus its input
+            input_bar = self.query_one("InputBar")
+            input_bar.focus_input()
+            logger.info("[UI] Focus set to InputBar")
         except Exception as e:
             logger.error(f"[UI] ERROR focusing input bar: {e}", exc_info=True)
     

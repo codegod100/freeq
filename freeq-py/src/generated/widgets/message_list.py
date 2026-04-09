@@ -25,7 +25,7 @@ class MessageList(VerticalScroll):
     DEFAULT_CSS = """
     MessageList {
         width: 100%;
-        height: 100%;
+        height: 1fr;
         overflow-y: scroll;
         background: $surface-darken-1;
     }

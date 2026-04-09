@@ -43,6 +43,12 @@
       "date": "2026-04-09"
     },
     {
+      "file": "src/generated/widgets/message_list.py",
+      "reason": "BUG_FIX: Changed MessageList height from '100%' to '1fr'. The height: 100% was causing MessageList to take up all available space in the Vertical container, pushing InputBar completely out of view. Using height: 1fr allows MessageList to take remaining space while InputBar gets its natural height. This fixes the 'no way to enter text' issue.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
       "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",
