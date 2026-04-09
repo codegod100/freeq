@@ -28,8 +28,15 @@ Generated from spec files. Each requirement has a unique hash-based ID.
 - [node-506aa018] the system must use at protocol oauth via freeqauthbroker for authentication
 - [node-b4402a28] on app mount the app must check for stored authentication credentials and autologin if valid credentials exist
 - [node-90b2f2f6] the system must persist authentication credentials webtoken handle did nick to configfreeqauthjson after successful login
-- [node-8434d139] authscreen must show a remember login checkbox that defaults to checked
-- [node-b6c49316] when remember login is enabled credentials must be saved immediately after successful authentication
+- [node-a5ed0034] credentials must always be saved automatically after successful authentication no checkbox needed
+- [node-0e795028] credentials must be saved immediately after successful authentication
+- [node-88b2976a] the freeqapp class must implement savechannels method that saves joined channels to configfreeqsessionjson
+- [node-17c917a5] the savechannels method must save a json file with field channels containing a list of joined channel names eg general help
+- [node-1626593b] the freeqapp class must implement loadchannels method that loads saved channels from configfreeqsessionjson
+- [node-46330d6b] on app mount after authentication succeeds the app must call loadchannels to restore previously joined channels
+- [node-16523444] when channels are loaded the app must populate appstatebuffers with a bufferstate for each saved channel so they appear in the sidebar immediately
+- [node-e6aa0806] on app unmount or when channels change the app must call savechannels to persist the current channel list
+- [node-5e0e56e9] the session storage directory configfreeq must be created if it does not exist when saving channels
 - [node-e595e2c9] on app startup the app must load stored credentials from configfreeqauthjson and validate the webtoken with the broker
 - [node-7ae921b2] if stored credentials are invalid or expired the app must show authscreen for reauthentication
 - [node-c020b58c] the stored credentials must include handle did nickname webtoken and timestamp

@@ -250,6 +250,20 @@ class FreeQApp(App):
             except Exception as e:
                 logger.warning(f"[AUTH-MOUNT] Could not refresh sidebar: {e}")
             
+            # Load saved channels from session
+            # REQUIREMENT: On app mount, after authentication succeeds, the app
+            # MUST call _load_channels() to restore previously joined channels
+            loaded_channels = self._load_channels()
+            if loaded_channels:
+                # Refresh sidebar again to show loaded channels
+                try:
+                    sidebar = self.query_one("#sidebar", Vertical)
+                    buffer_sidebar = sidebar.query_one("BufferSidebar")
+                    buffer_sidebar.watch_buffers(self.app_state.buffers)
+                    logger.info(f"[AUTH-MOUNT] Sidebar refreshed with {len(loaded_channels)} loaded channels")
+                except Exception as e:
+                    logger.warning(f"[AUTH-MOUNT] Could not refresh sidebar after loading channels: {e}")
+            
             # Show main UI directly (no auth screen)
             self.app_state.ui.auth_overlay_visible = False
             self.state = AppUIState.CONNECTED
@@ -331,6 +345,15 @@ class FreeQApp(App):
             logger.info("[AUTH] Sidebar explicitly refreshed with populated buffers")
         except Exception as e:
             logger.warning(f"[AUTH] Could not refresh sidebar: {e}")
+        
+        # 1c. Save channels along with credentials
+        self._save_channels()
+        logger.info("[AUTH] Channels saved to session")
+        
+        # 1d. Load any previously saved channels
+        loaded_channels = self._load_channels()
+        if loaded_channels:
+            logger.info(f"[AUTH] Loaded {len(loaded_channels)} previously saved channels")
         
         # 2. Update UI state (CRITICAL)
         # @phoenix-canon: node-77eff8b8
@@ -443,6 +466,108 @@ class FreeQApp(App):
         except Exception as e:
             logger.warning(f"[AUTH] Failed to save credentials: {e}")
             return False
+    
+    def _save_channels(self) -> bool:
+        """Save joined channels to ~/.config/freeq/session.json.
+        
+        REQUIREMENT: The FreeQApp class MUST implement _save_channels() method
+        that saves joined channels to ~/.config/freeq/session.json.
+        
+        REQUIREMENT: The _save_channels() method MUST save a JSON file with
+        field 'channels' containing a list of joined channel names.
+        
+        REQUIREMENT: On app unmount or when channels change, the app MUST call
+        _save_channels() to persist the current channel list.
+        
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        import json
+        from pathlib import Path
+        
+        try:
+            # Create directory if it doesn't exist
+            session_dir = Path.home() / ".config" / "freeq"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Get channel names from buffers
+            channels = [
+                buf.name for buf in self.app_state.buffers.values()
+                if buf.buffer_type == BufferType.CHANNEL and buf.name != "console"
+            ]
+            
+            # Prepare session data
+            data = {"channels": channels}
+            
+            # Write to file
+            session_path = session_dir / "session.json"
+            with open(session_path, 'w') as f:
+                json.dump(data, f, indent=2)
+            
+            logger.info(f"[AUTH] Saved {len(channels)} channels to session: {channels}")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"[AUTH] Failed to save channels: {e}")
+            return False
+    
+    def _load_channels(self) -> list:
+        """Load saved channels from ~/.config/freeq/session.json.
+        
+        REQUIREMENT: The FreeQApp class MUST implement _load_channels() method
+        that loads saved channels from ~/.config/freeq/session.json.
+        
+        REQUIREMENT: On app mount, after authentication succeeds, the app MUST
+        call _load_channels() to restore previously joined channels.
+        
+        REQUIREMENT: When channels are loaded, the app MUST populate
+        app_state.buffers with a BufferState for each saved channel so they
+        appear in the sidebar immediately.
+        
+        Returns:
+            List of channel names, empty list if no saved channels
+        """
+        import json
+        from pathlib import Path
+        
+        session_path = Path.home() / ".config" / "freeq" / "session.json"
+        
+        if not session_path.exists():
+            logger.info("[AUTH] No saved session file found")
+            return []
+        
+        try:
+            with open(session_path, 'r') as f:
+                data = json.load(f)
+            
+            channels = data.get("channels", [])
+            
+            # Create buffers for each saved channel
+            for channel_name in channels:
+                if channel_name not in self.app_state.buffers:
+                    from datetime import datetime
+                    channel_buffer = BufferState(
+                        id=channel_name.replace("#", "").replace("&", ""),
+                        name=channel_name,
+                        buffer_type=BufferType.CHANNEL,
+                        messages=[],
+                        unread_count=0,
+                        scroll_position=0.0,
+                    )
+                    # Add to buffers dict
+                    new_buffers = dict(self.app_state.buffers)
+                    new_buffers[channel_name] = channel_buffer
+                    self.app_state.buffers = new_buffers
+            
+            logger.info(f"[AUTH] Loaded {len(channels)} channels from session: {channels}")
+            return channels
+            
+        except json.JSONDecodeError as e:
+            logger.warning(f"[AUTH] Invalid JSON in session file: {e}")
+            return []
+        except Exception as e:
+            logger.warning(f"[AUTH] Failed to load channels: {e}")
+            return []
     
     def _populate_default_data(self, handle: str, nick: str) -> None:
         """Populate default buffers and channels so UI shows content after auth.
@@ -701,6 +826,16 @@ class FreeQApp(App):
                 logger.warning("[UI] No focusable widget found in #input-bar")
         except Exception as e:
             logger.error(f"[UI] ERROR focusing input bar: {e}", exc_info=True)
+    
+    def on_unmount(self) -> None:
+        """Save channels when app closes.
+        
+        REQUIREMENT: On app unmount or when channels change, the app MUST
+        call _save_channels() to persist the current channel list.
+        """
+        logger.info("[APP] App unmounting, saving channels...")
+        self._save_channels()
+        super().on_unmount()
     
     # Action handlers
     def action_quit(self):

@@ -32,6 +32,20 @@
 
 - REQUIREMENT: Credentials MUST be saved immediately after successful authentication
 
+- REQUIREMENT: The FreeQApp class MUST implement _save_channels() method that saves joined channels to ~/.config/freeq/session.json
+
+- REQUIREMENT: The _save_channels() method MUST save a JSON file with field 'channels' containing a list of joined channel names (e.g., ["#general", "#help"])
+
+- REQUIREMENT: The FreeQApp class MUST implement _load_channels() method that loads saved channels from ~/.config/freeq/session.json
+
+- REQUIREMENT: On app mount, after authentication succeeds, the app MUST call _load_channels() to restore previously joined channels
+
+- REQUIREMENT: When channels are loaded, the app MUST populate app_state.buffers with a BufferState for each saved channel so they appear in the sidebar immediately
+
+- REQUIREMENT: On app unmount or when channels change, the app MUST call _save_channels() to persist the current channel list
+
+- REQUIREMENT: The session storage directory ~/.config/freeq MUST be created if it does not exist when saving channels
+
 - REQUIREMENT: On app startup, the app MUST load stored credentials from ~/.config/freeq/auth.json and validate the web_token with the broker
 
 - REQUIREMENT: If stored credentials are invalid or expired, the app MUST show AuthScreen for re-authentication

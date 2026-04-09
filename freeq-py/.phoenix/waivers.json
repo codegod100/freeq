@@ -37,6 +37,12 @@
       "date": "2026-04-09"
     },
     {
+      "file": "src/generated/app.py",
+      "reason": "SPEC_UPDATE: Added channel persistence feature as per spec/auth.md REQUIREMENT: 'The FreeQApp class MUST implement _save_channels() and _load_channels() methods'. Methods save joined channels to ~/.config/freeq/session.json and restore them on app start. Called in on_mount() after auto-login, in on_auth_screen_auth_completed() after OAuth, and in on_unmount() when app closes. Logs [AUTH] for all operations.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
       "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",
