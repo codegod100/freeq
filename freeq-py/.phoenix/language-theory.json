@@ -78,7 +78,7 @@
       ]
     },
     {
-      "id": "ae1c9b32518f35a2403284f65b150eea50e809b59afd79feecc611a72e1a162d",
+      "id": "d17053e0622088ec360478545790ccf5fbab6bb7303e3a51908735ae32adf2d0",
       "name": "Phoenix Domain",
       "domain": "phoenix",
       "riskTier": "critical",
@@ -154,6 +154,7 @@
         "b4402a28335168d467916030c50bbf378ef67b0fa14ad24674f2ab3ffc152dad",
         "b782e6c8d07c6bf5fba75dff435d934578383bb9653e2cec062b28da2ab6ec42",
         "bdf099529af27c1436807df8f9c295ee75cd5f1a380cd4ac5a372bd7a5148dde",
+        "bede3741b1534f77efb73fcb2aee2b41bfe8fae4d736d6446d40ddd03ec33ba1",
         "bf9948003551269c77ea869ce63ee16dec7cffe83e943a3ec931a5ae7c1ba97f",
         "c020b58c63e12bfef9c8ab27486ec3d482f643c567139d39993a7bba797fbc64",
         "c385163a67ef14daf590bbbcf6533b7f443fca7dea79f7a4ed1c2ef6850bda07",
@@ -198,6 +199,11 @@
     },
     {
       "statement": "all textual messages must call superinit in their init method",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "when importing both textuals message event class and a chat message model textuals message must be aliased eg from textualmessage import message as textualmessage to avoid name collision event message classes must inherit from textualmessage not the chat message model",
       "matchedPattern": null,
       "implementation": "manual review needed"
     },

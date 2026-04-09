@@ -82,4 +82,5 @@ Generated from spec files. Each requirement has a unique hash-based ID.
 - [node-c385163a] widget initialization must accept id classes kwargs and pass to superinit
 - [node-f76639d2] textuals input widget does not accept a multiline parameter do not pass multilinetruefalse to input
 - [node-56cd806b] all textual messages must call superinit in their init method
+- [node-bede3741] when importing both textuals message event class and a chat message model textuals message must be aliased eg from textualmessage import message as textualmessage to avoid name collision event message classes must inherit from textualmessage not the chat message model
 - [node-5b3f1747] the apppy must include entry point block if name main runapp for python m srcgeneratedapp to work

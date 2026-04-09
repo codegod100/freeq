@@ -50,6 +50,8 @@
 
 - CONSTRAINT: All Textual Messages MUST call super().__init__() in their __init__ method
 
+- CONSTRAINT: When importing both Textual's `Message` event class AND a chat `Message` model, Textual's Message MUST be aliased (e.g., `from textual.message import Message as TextualMessage`) to avoid name collision. Event message classes MUST inherit from TextualMessage, NOT the chat Message model.
+
 - CONSTRAINT: The app.py MUST include entry point block `if __name__ == "__main__": run_app()` for `python -m src.generated.app` to work
 
 ## Part 1: Abstract System Design

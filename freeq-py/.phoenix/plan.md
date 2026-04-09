@@ -57,11 +57,11 @@ Planned from canonical requirements. Each IU groups related requirements by feat
 
 ---
 
-## IU-ae1c9b32: Phoenix Domain (CRITICAL)
+## IU-d17053e0: Phoenix Domain (CRITICAL)
 
-**Description:** Implements phoenix functionality with 68 requirements
+**Description:** Implements phoenix functionality with 69 requirements
 
-**Risk Tier:** critical (68 requirements)
+**Risk Tier:** critical (69 requirements)
 
 **Canonical Requirements:**
 - 00609785d534...
@@ -74,7 +74,7 @@ Planned from canonical requirements. Each IU groups related requirements by feat
 - 1626593bf32a...
 - 165234442479...
 - 17c03e585de1...
-- ... and 58 more
+- ... and 59 more
 
 **Contract:**
 - Inputs: on authcompleted message the app must update state pop auth screen set all region widgets visibletrue and focus input bar, textuals input widget does not accept a multiline parameter do not pass multilinetruefalse to input
@@ -99,6 +99,6 @@ Planned from canonical requirements. Each IU groups related requirements by feat
 
 ## Coverage Summary
 
-- Total canonical nodes: 73
-- Covered: 73
+- Total canonical nodes: 74
+- Covered: 74
 - Orphans: 0

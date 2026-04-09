@@ -39,6 +39,7 @@ This instruction includes a theory morphism that maps Implementation Units to Py
 - UNMATCHED: "must support minimum requirement..." → manual review needed
 - UNMATCHED: "textuals input widget does not accept a multiline ..." → manual review needed
 - UNMATCHED: "all textual messages must call superinit in their ..." → manual review needed
+- UNMATCHED: "when importing both textuals message event class a..." → manual review needed
 - UNMATCHED: "the apppy must include entry point block if name m..." → manual review needed
 
 ## Deliverable Structure
@@ -197,5 +198,5 @@ Create `src/generated/app.py`:
 - [ ] Follows Textual best practices (reactive state, compose, CSS)
 
 ---
-Generated: 2026-04-09T23:02:58.129Z
+Generated: 2026-04-09T23:18:39.579Z
 Language Variant: python-textual
