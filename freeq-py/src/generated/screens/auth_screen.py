@@ -23,6 +23,10 @@ from textual.message import Message
 from textual.app import Binding
 from textual import on
 
+# Configure logging for auth screen
+import logging
+logger = logging.getLogger(__name__)
+
 
 # @phoenix-canon: node-bdf09952
 class AuthCompleted(Message):
@@ -391,6 +395,7 @@ class AuthScreen(ModalScreen):
         Canon: node-2c33febc - Open browser on Connect button
         Canon: node-59dee27c - Poll for OAuth completion in background thread
         """
+        logger.info("[AUTH-SCREEN] Connect button pressed")
         self._start_authentication()
     
     # @phoenix-canon: node-e46b05d2
@@ -439,10 +444,12 @@ class AuthScreen(ModalScreen):
         try:
             # Initialize flow
             from ..auth_flow import BrokerAuthFlow
+            logger.info(f"[AUTH-SCREEN] Starting OAuth flow for handle: {handle}")
             self._flow = BrokerAuthFlow(self._auth_broker_url)
             result = self._flow.start_login(handle)
             self._session_id = result["session_id"]
             self._oauth_url = result["url"]
+            logger.info(f"[AUTH-SCREEN] OAuth session started: {self._session_id}")
             
             # Show URL
             try:
@@ -453,11 +460,13 @@ class AuthScreen(ModalScreen):
             
             # Open browser immediately
             # @phoenix-canon: node-2c33febc
+            logger.info("[AUTH-SCREEN] Opening browser for OAuth")
             webbrowser.open(self._oauth_url)
             self.auth_status = "Browser opened! Complete auth in browser..."
             
             # Start polling in background thread
             # @phoenix-canon: node-59dee27c
+            logger.info("[AUTH-SCREEN] Starting background polling thread")
             self._stop_polling.clear()
             self._poll_thread = threading.Thread(
                 target=self._poll_for_completion,
@@ -482,6 +491,8 @@ class AuthScreen(ModalScreen):
         max_attempts = 120  # 2 minutes at 1 second intervals
         attempt = 0
         
+        logger.info(f"[AUTH-SCREEN] Starting poll loop (max {max_attempts} attempts)")
+        
         while not self._stop_polling.is_set() and attempt < max_attempts:
             attempt += 1
             
@@ -490,13 +501,16 @@ class AuthScreen(ModalScreen):
                 result = self._flow.poll_auth_result(self._session_id)
                 
                 if result:
+                    logger.info(f"[AUTH-SCREEN] Poll success after {attempt} attempts")
                     # Validate broker_token
                     if "broker_token" not in result:
+                        logger.error(f"[AUTH-SCREEN] Auth result missing broker_token!")
                         self.app.call_from_thread(
                             lambda: self._on_auth_failed("Auth failed: missing broker_token")
                         )
                         return
                     
+                    logger.info(f"[AUTH-SCREEN] Auth complete, posting AuthCompleted message")
                     # Success - update UI on main thread
                     self.app.call_from_thread(
                         lambda: self.on_auth_complete(result)
@@ -508,6 +522,7 @@ class AuthScreen(ModalScreen):
         
         # Timeout
         if not self._stop_polling.is_set():
+            logger.warning(f"[AUTH-SCREEN] Auth timed out after {attempt} attempts")
             self.app.call_from_thread(
                 lambda: self._on_auth_failed("Authentication timed out. Please try again.")
             )
@@ -532,20 +547,24 @@ class AuthScreen(ModalScreen):
         Canon: node-b782e6c8 - Dismiss after posting completion message
         """
         self.is_polling = False  # This triggers watch_is_polling to show connect button
+        logger.info(f"[AUTH-SCREEN] Auth completion started, result keys: {list(result.keys())}")
         
         # Validate broker_token
         broker_token = result.get("broker_token")
         if not broker_token:
+            logger.error("[AUTH-SCREEN] Missing broker_token in auth result!")
             self._on_auth_failed("Missing broker_token in auth result")
             return
         
         # Get session details from broker
         session = None
         if self._flow:
+            logger.info("[AUTH-SCREEN] Refreshing session with broker")
             session = self._flow.refresh_session(broker_token)
         
         if not session:
             # Use result data directly if session fetch fails
+            logger.warning("[AUTH-SCREEN] Session refresh failed, using result data directly")
             session = {
                 "handle": result.get("handle", self._handle),
                 "did": result.get("did", ""),
@@ -557,6 +576,7 @@ class AuthScreen(ModalScreen):
         did = session.get("did", "")
         nick = session.get("nick", handle.split(".")[0] if "." in handle else handle)
         
+        logger.info(f"[AUTH-SCREEN] Posting AuthCompleted: handle={handle}, did={did}, nick={nick}")
         self.auth_status = f"Authenticated as {handle}"
         
         # CRITICAL: Step 1 - Post completion message FIRST
@@ -567,11 +587,13 @@ class AuthScreen(ModalScreen):
             nick=nick,
             broker_token=broker_token,
         ))
+        logger.info("[AUTH-SCREEN] AuthCompleted message posted")
         
         # CRITICAL: Step 2 - Dismiss screen IMMEDIATELY after posting message
         # This closes the AuthScreen ModalScreen and shows the main UI
         # Direct transition - no loading overlay
         # @phoenix-canon: node-b782e6c8
+        logger.info("[AUTH-SCREEN] Dismissing AuthScreen")
         self.dismiss()
     
     # @phoenix-canon: node-e46b05d2
@@ -588,21 +610,25 @@ class AuthScreen(ModalScreen):
         Canon: node-e46b05d2 - Post GuestModeRequested message
         Canon: node-b782e6c8 - Dismiss after posting message
         """
+        logger.info("[AUTH-SCREEN] Guest mode requested")
         # Stop any ongoing polling
         self._stop_polling.set()
         
         # Post guest mode message FIRST
         # @phoenix-canon: node-e46b05d2
         self.post_message(GuestModeRequested())
+        logger.info("[AUTH-SCREEN] GuestModeRequested message posted")
         
         # Dismiss screen IMMEDIATELY after posting message
         # Direct transition - no loading overlay
         # @phoenix-canon: node-b782e6c8
+        logger.info("[AUTH-SCREEN] Dismissing screen for guest mode")
         self.dismiss()
     
     # @phoenix-canon: node-59dee27c
     def _on_auth_failed(self, error: str) -> None:
         """Handle authentication failure."""
+        logger.error(f"[AUTH-SCREEN] Auth failed: {error}")
         self.error_message = error
         self.auth_status = "Authentication failed"
         self.is_polling = False  # This triggers watch_is_polling to show connect button

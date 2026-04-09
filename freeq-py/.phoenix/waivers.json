@@ -19,6 +19,12 @@
       "date": "2026-04-09"
     },
     {
+      "file": "src/generated/screens/auth_screen.py",
+      "reason": "DEBUGGING: Added comprehensive [AUTH-SCREEN] logging to trace OAuth flow. AuthScreen had no logging, making it impossible to diagnose why credentials weren't being saved. Added logging to: on_connect_button, _start_authentication, _poll_for_completion, on_auth_complete, _request_guest_mode, _on_auth_failed.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
       "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",
