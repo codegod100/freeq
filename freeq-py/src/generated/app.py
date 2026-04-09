@@ -39,6 +39,8 @@ from .widgets import (
     MessageList,
     InputBar,
     UserList,
+    CommandEntered,
+    MessageSent,
 )
 
 
@@ -684,6 +686,88 @@ class FreeQApp(App):
         logger.warning(f"[AUTH] AuthFailed event received: {event.error}")
         # Could show error notification or retry option
         pass
+    
+    @on(CommandEntered)
+    def on_command_entered(self, event: CommandEntered) -> None:
+        """Handle command entered by user.
+        
+        REQUIREMENT: When user types a command (starts with /), the app MUST
+        parse and execute the command appropriately.
+        """
+        command = event.command
+        logger.info(f"[COMMAND] Command entered: {command}")
+        
+        # Parse command and args
+        if command.startswith("/"):
+            parts = command[1:].split(None, 1)
+            cmd = parts[0].lower() if parts else ""
+            args = parts[1] if len(parts) > 1 else ""
+            
+            if cmd == "join" and args:
+                channel = args.strip()
+                logger.info(f"[COMMAND] Joining channel: {channel}")
+                
+                # Create buffer for the channel
+                from .models import BufferState, BufferType
+                if channel not in self.app_state.buffers:
+                    buffer_state = BufferState(
+                        id=channel,
+                        name=channel,
+                        type=BufferType.CHANNEL,
+                        messages=[],
+                        users={},
+                        unread_count=0
+                    )
+                    self.app_state.buffers[channel] = buffer_state
+                    logger.info(f"[COMMAND] Created buffer for {channel}")
+                    
+                    # Refresh sidebar to show new channel
+                    try:
+                        sidebar = self.query_one("#sidebar", Vertical)
+                        buffer_sidebar = sidebar.query_one("BufferSidebar")
+                        buffer_sidebar.watch_buffers(self.app_state.buffers)
+                        logger.info(f"[COMMAND] Sidebar refreshed with {channel}")
+                    except Exception as e:
+                        logger.warning(f"[COMMAND] Could not refresh sidebar: {e}")
+                
+                # Switch to the channel
+                self.app_state.ui.active_buffer_id = channel
+                logger.info(f"[COMMAND] Switched active buffer to {channel}")
+                
+                # Save channels to session
+                self._save_channels()
+            else:
+                logger.warning(f"[COMMAND] Unknown command: {cmd}")
+    
+    @on(MessageSent)
+    def on_message_sent(self, event: MessageSent) -> None:
+        """Handle message sent by user.
+        
+        REQUIREMENT: When user sends a message, the app MUST add it to the
+        active buffer's messages.
+        """
+        logger.info(f"[MESSAGE] Message sent: {event.content[:50]}...")
+        
+        active_buffer_id = self.app_state.ui.active_buffer_id
+        if not active_buffer_id or active_buffer_id not in self.app_state.buffers:
+            logger.warning("[MESSAGE] No active buffer to send message to")
+            return
+        
+        # Create message
+        from .models import Message as ChatMessage
+        from datetime import datetime
+        
+        msg = ChatMessage(
+            id=f"local_{datetime.now().timestamp()}",
+            sender=self.app_state.session.nick or "You",
+            content=event.content,
+            timestamp=datetime.now()
+        )
+        
+        # Add to buffer
+        buffer = self.app_state.buffers[active_buffer_id]
+        buffer.messages.append(msg)
+        logger.info(f"[MESSAGE] Added message to {active_buffer_id}")
     
     # @phoenix-canon: node-43cb8709
     def _update_ui_from_state(self) -> None:
