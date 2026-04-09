@@ -6,7 +6,7 @@ from textual.widget import Widget
 from textual.containers import Horizontal
 from textual.widgets import Input, Button, Static
 from textual.reactive import reactive
-from textual.message import Message
+from textual.message import Message as TextualMessage
 from textual import on
 
 from ..models import Message, AppState
@@ -215,7 +215,7 @@ class InputBar(Widget):
             pass
 
 
-class MessageSent(Message):
+class MessageSent(TextualMessage):
     """Message sent event.
     
     REQUIREMENT: All event messages MUST inherit from textual.message.Message 
@@ -228,7 +228,7 @@ class MessageSent(Message):
         self.reply_to = reply_to
 
 
-class CommandEntered(Message):
+class CommandEntered(TextualMessage):
     """Command entered event.
     
     REQUIREMENT: All event messages MUST inherit from textual.message.Message 
@@ -240,7 +240,7 @@ class CommandEntered(Message):
         self.command = command
 
 
-class EmojiPickerRequested(Message):
+class EmojiPickerRequested(TextualMessage):
     """Request to open emoji picker.
     
     REQUIREMENT: All event messages MUST inherit from textual.message.Message 
@@ -251,7 +251,7 @@ class EmojiPickerRequested(Message):
         super().__init__()  # REQUIRED for Textual messages
 
 
-class AttachRequested(Message):
+class AttachRequested(TextualMessage):
     """Request to attach file.
     
     REQUIREMENT: All event messages MUST inherit from textual.message.Message 
