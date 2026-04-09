@@ -24,6 +24,12 @@
 
 - REQUIREMENT: The BufferSidebar MUST be explicitly refreshed after _populate_default_data() is called because the reactive buffers dict reference does not trigger watch_buffers when mutated
 
+- REQUIREMENT: When auto-login completes in on_mount(), the app MUST explicitly call buffer_sidebar.watch_buffers(app_state.buffers) to force sidebar refresh because Textual compose() runs before on_mount() and sidebar was composed with empty buffers
+
+- REQUIREMENT: When AuthCompleted fires, the app MUST explicitly call buffer_sidebar.watch_buffers(app_state.buffers) after _populate_default_data() to ensure sidebar shows populated buffers
+
+- REQUIREMENT: When guest mode starts, the app MUST explicitly call buffer_sidebar.watch_buffers(app_state.buffers) after _populate_default_data() to ensure sidebar shows guest buffers
+
 - REQUIREMENT: MessageList MUST implement watch_messages() or watch the active buffer to re-render when messages change
 
 - REQUIREMENT: UserList MUST implement watch_users() to re-render when users change

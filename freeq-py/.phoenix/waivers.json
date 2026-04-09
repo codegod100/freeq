@@ -13,6 +13,12 @@
       "date": "2026-04-09"
     },
     {
+      "file": "src/generated/app.py",
+      "reason": "SPEC_UPDATE: Added explicit buffer_sidebar.watch_buffers() calls after _populate_default_data() in on_mount(), on_auth_screen_auth_completed(), and on_auth_screen_guest_mode_requested() as per spec/ui-components.md REQUIREMENT: 'When auto-login completes... MUST explicitly call buffer_sidebar.watch_buffers()'. This fixes sidebar not showing buffers after auth.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
       "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",

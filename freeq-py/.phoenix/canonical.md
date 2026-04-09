@@ -62,6 +62,9 @@ Generated from spec files. Each requirement has a unique hash-based ID.
 - [node-ed95a1fd] buffersidebar must implement watchbuffers to rerender when buffers change
 - [node-bf994800] when authentication completes the app must explicitly call sidebarupdatebuffersappstatebuffers to force the sidebar to rerender with the newly populated channel list
 - [node-29f85ffb] the buffersidebar must be explicitly refreshed after populatedefaultdata is called because the reactive buffers dict reference does not trigger watchbuffers when mutated
+- [node-e1f08633] when autologin completes in onmount the app must explicitly call buffersidebarwatchbuffersappstatebuffers to force sidebar refresh because textual compose runs before onmount and sidebar was composed with empty buffers
+- [node-d412194c] when authcompleted fires the app must explicitly call buffersidebarwatchbuffersappstatebuffers after populatedefaultdata to ensure sidebar shows populated buffers
+- [node-875ea8b6] when guest mode starts the app must explicitly call buffersidebarwatchbuffersappstatebuffers after populatedefaultdata to ensure sidebar shows guest buffers
 - [node-73f44b63] messagelist must implement watchmessages or watch the active buffer to rerender when messages change
 - [node-06aa548a] userlist must implement watchusers to rerender when users change
 - [node-c8d3e822] the header and footer must be hidden during authentication and visible after authentication completes
