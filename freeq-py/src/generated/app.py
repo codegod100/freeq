@@ -830,7 +830,6 @@ class FreeQApp(App):
         """
         logger.info("[APP] App unmounting, saving channels...")
         self._save_channels()
-        super().on_unmount()
     
     # Action handlers
     def action_quit(self):
