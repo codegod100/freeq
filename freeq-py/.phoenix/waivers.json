@@ -31,6 +31,12 @@
       "date": "2026-04-09"
     },
     {
+      "file": "src/generated/screens/auth_screen.py",
+      "reason": "UX_FEATURE: Added Enter key support to submit auth form. Users can now type their handle and press Enter instead of clicking Connect button. Added @on(events.Key) handler for on_key() method that calls _start_authentication() when event.key == 'enter'. Makes auth flow faster and more intuitive.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
       "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",

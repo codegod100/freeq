@@ -21,7 +21,7 @@ from textual.containers import Vertical, Horizontal
 from textual.reactive import reactive
 from textual.message import Message
 from textual.app import Binding
-from textual import on
+from textual import on, events
 
 # Configure logging for auth screen
 import logging
@@ -396,6 +396,14 @@ class AuthScreen(ModalScreen):
         Canon: node-b782e6c8 - Dismiss after posting message
         """
         self._request_guest_mode()
+    
+    # @phoenix-canon: node-2c33febc
+    @on(events.Key)
+    def on_key(self, event: events.Key) -> None:
+        """Handle key presses - Enter submits the form."""
+        if event.key == "enter":
+            logger.info("[AUTH-SCREEN] Enter key pressed, starting authentication")
+            self._start_authentication()
     
     # @phoenix-canon: node-2c33febc
     def _start_authentication(self) -> None:
