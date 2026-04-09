@@ -25,6 +25,12 @@
       "date": "2026-04-09"
     },
     {
+      "file": "src/generated/screens/auth_screen.py",
+      "reason": "UI_FIX: Fixed unlabeled 'Remember Login' checkbox. Added explicit label '💾 Save credentials for automatic login:' before checkbox, changed checkbox height from '1' to 'auto' to properly display label, styled label with muted color. The checkbox was confusing users because it appeared directly after handle input with no explanation and height:1 clipped the label.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
       "file": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",

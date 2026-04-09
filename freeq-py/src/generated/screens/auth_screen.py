@@ -209,14 +209,6 @@ class AuthScreen(ModalScreen):
         border: solid $success;
     }
     
-    /* Remember Login checkbox */
-    AuthScreen > #auth-container > #remember-login {
-        height: 1;
-        margin: 0 0 1 0;
-        content-align: left middle;
-        color: $text;
-    }
-    
     /* Polling indicator - visible only during polling */
     AuthScreen > #auth-container > #auth-polling {
         height: 2;
@@ -286,9 +278,6 @@ class AuthScreen(ModalScreen):
                 placeholder="Enter your handle (e.g., user.bsky.social)",
                 id="handle-input",
             )
-            
-            # Remember Login checkbox
-            yield Checkbox("Remember Login", value=True, id="remember-login")
             
             # Status
             yield Label(self.auth_status, id="auth-status")

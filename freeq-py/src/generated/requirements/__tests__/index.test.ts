@@ -1,28 +1,17 @@
-// ✅ Validation tests for Requirements Domain (IU-517684c6)
-// These tests validate structure, not behavior
+# ✅ Validation tests for Requirements Domain (IU-517684c6)
+# These tests validate structure, not behavior
 
-// @phoenix-iu: 517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81
-// @phoenix-name: Requirements Domain
-// @phoenix-risk: low
-// @phoenix-short: IU-517684c6
+from requirements_domain import _phoenix, RequirementsDomain
 
-import { describe, it, expect } from 'vitest';
-import { processrequirementsDomain } from '../index.js';
+# Traceability test (validates VCS identity)
+def test_traceability():
+    """Verify Phoenix VCS traceability is present."""
+    assert _phoenix is not None
+    assert _phoenix["iu_id"] == "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81"
+    assert _phoenix["name"] == "Requirements Domain"
 
-describe('Requirements Domain', () => {
-  // Traceability validation (structure only)
-  it('has phoenix traceability comments', () => {
-    // Read the impl file and check for @phoenix-iu comment
-    const fs = require('fs');
-    const path = require('path');
-    const implPath = path.join(__dirname, '..', 'index.ts');
-    const impl = fs.readFileSync(implPath, 'utf-8');
-    expect(impl).toMatch(/@phoenix-iu:.*517684c6f05097ed/);
-  });
-
-  // Structure validation for processrequirementsDomain
-  it('has processrequirementsDomain function', () => {
-    expect(typeof processrequirementsDomain).toBe('function');
-  });
-
-});
+# Structure validation (NOT behavior testing)
+def test_model_structure():
+    """Verify RequirementsDomain can be instantiated."""
+    instance = RequirementsDomain(id="test-123")
+    assert instance.id == "test-123"

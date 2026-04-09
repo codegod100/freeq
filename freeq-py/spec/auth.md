@@ -28,9 +28,9 @@
 
 - REQUIREMENT: The system MUST persist authentication credentials (web_token, handle, did, nick) to ~/.config/freeq/auth.json after successful login
 
-- REQUIREMENT: AuthScreen MUST show a 'Remember Login' checkbox that defaults to checked
+- REQUIREMENT: Credentials MUST always be saved automatically after successful authentication (no checkbox needed)
 
-- REQUIREMENT: When 'Remember Login' is enabled, credentials MUST be saved immediately after successful authentication
+- REQUIREMENT: Credentials MUST be saved immediately after successful authentication
 
 - REQUIREMENT: On app startup, the app MUST load stored credentials from ~/.config/freeq/auth.json and validate the web_token with the broker
 
