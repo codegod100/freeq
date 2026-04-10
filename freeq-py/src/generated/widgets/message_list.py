@@ -28,11 +28,14 @@ class MessageList(VerticalScroll):
         height: 1fr;
         overflow-y: scroll;
         background: $surface-darken-1;
+        border: solid red;
     }
     MessageList .messages-container {
         width: 100%;
         height: auto;
         min-height: 100%;
+        border: solid blue;
+    }
     }
     MessageList .thread-highlight {
         border-left: solid $primary;
@@ -171,10 +174,19 @@ class MessageList(VerticalScroll):
             # Only add new messages instead of clearing everything
             if target_count > current_count:
                 logger.info(f"[REACTIVE] Adding {target_count - current_count} new messages (total: {target_count})")
+                start_time = __import__('time').time()
+                new_widgets = []
                 for i in range(current_count, target_count):
                     msg = target_messages[i]
                     widget = MessageWidget(message=msg)
+                    new_widgets.append(widget)
+                
+                # Mount all at once for better performance
+                logger.info(f"[REACTIVE] Created {len(new_widgets)} widgets in {__import__('time').time() - start_time:.3f}s, now mounting...")
+                for widget in new_widgets:
                     container.mount(widget)
+                mount_time = __import__('time').time() - start_time
+                logger.info(f"[REACTIVE] Mounting took {mount_time:.3f}s total")
                 container.refresh()
             elif target_count < current_count:
                 # Remove excess widgets
