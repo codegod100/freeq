@@ -97,7 +97,11 @@ class BufferSidebar(Widget):
         if buffer.unread_count > 0:
             unread_indicator = f" [{buffer.unread_count}]"
         
-        buffer_type_indicator = "#" if buffer.buffer_type == BufferType.CHANNEL else "@"
+        # Don't add # if name already starts with #
+        if buffer.buffer_type == BufferType.CHANNEL:
+            buffer_type_indicator = "" if buffer.name.startswith('#') else "#"
+        else:
+            buffer_type_indicator = "@"
         
         widget = Static(
             f"{buffer_type_indicator}{buffer.name}{unread_indicator}",
