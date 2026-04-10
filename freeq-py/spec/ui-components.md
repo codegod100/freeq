@@ -56,9 +56,7 @@
 
 ## Layout Requirements (Fractional Sizing)
 
-- REQUIREMENT: Layout MUST use pure fractional (fr) units for all regions. Sidebar: 1fr, Main content: 4fr, User list: 1fr. This gives message content 4x the space of each sidebar.
-
-- REQUIREMENT: Each sidebar MUST have max-width constraint (e.g., max-width: 25 for sidebar, max-width: 20 for user list) to prevent excessive growth at large terminal sizes while still using fr units.
+- REQUIREMENT: Layout MUST use pure fractional (fr) units WITHOUT max-width constraints. Sidebar: 1fr, Main content: 6fr, User list: 1fr. This gives message content 6x the space of each sidebar (75% vs 12.5% each).
 
 - REQUIREMENT: MessageList CSS height MUST be '1fr' NOT '100%'. Using height: 100% causes MessageList to take all available space in Vertical container, pushing InputBar out of view. Using height: 1fr allows MessageList to take remaining space while InputBar gets its natural height.
 
