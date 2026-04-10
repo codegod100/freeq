@@ -36,7 +36,6 @@ class MessageList(VerticalScroll):
         min-height: 100%;
         border: solid blue;
     }
-    }
     MessageList .thread-highlight {
         border-left: solid $primary;
     }
