@@ -758,7 +758,7 @@ class FreeQApp(App):
         
         msg = ChatMessage(
             id=f"local_{datetime.now().timestamp()}",
-            sender=self.app_state.session.nick or "You",
+            sender=self.app_state.session.nickname or "You",
             content=event.content,
             timestamp=datetime.now()
         )
