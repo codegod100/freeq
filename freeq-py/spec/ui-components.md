@@ -62,6 +62,8 @@
 
 - REQUIREMENT: MessageList refresh_messages() MUST batch widget creation for performance. Create all MessageWidget instances first, then mount them in a loop, rather than interleaving creation and mounting.
 
+- REQUIREMENT: MessageList refresh_messages() MUST show ALL messages in the buffer, not just those within visible_range. The visible_range is for virtualization optimization but new messages must always be mounted regardless of scroll position. Use `target_messages = self.messages` not `self.messages[start:end]`.
+
 ## Sidebar Display Requirements
 
 - REQUIREMENT: BufferSidebar MUST prevent double ## in channel names. When displaying CHANNEL type buffers, only add # prefix if buffer.name does NOT already start with #. This prevents ##test when buffer.name is already '#test'.

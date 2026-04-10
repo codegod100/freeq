@@ -166,8 +166,9 @@ class MessageList(VerticalScroll):
             # Get current widget count for incremental update
             current_widgets = list(container.children)
             current_count = len(current_widgets)
-            start, end = self.visible_range
-            target_messages = self.messages[start:end]
+            # Show all messages, not just visible range - proper virtualization needs scroll tracking
+            # For now, mount all messages to ensure new messages appear
+            target_messages = self.messages
             target_count = len(target_messages)
             
             # Only add new messages instead of clearing everything
