@@ -73,16 +73,15 @@ class MessageList(VerticalScroll):
     def compose(self):
         """Compose message list."""
         # @phoenix-canon: node-c385163a
-        logger.info(f"[UI] MessageList composing with {len(self.messages)} messages")
+        logger.debug(f"[UI] MessageList composing with {len(self.messages)} messages")
         from .message_item import MessageWidget
-        from textual.containers import Vertical
         from textual.containers import Vertical
         count = 0
         with Vertical(classes="messages-container"):
             for msg in self.messages[self.visible_range[0]:self.visible_range[1]]:
                 yield MessageWidget(message=msg)
                 count += 1
-        logger.info(f"[UI] MessageList composed with {count} MessageWidgets, range {self.visible_range}")
+        logger.debug(f"[UI] MessageList composed with {count} MessageWidgets")
     
     # @phoenix-canon: node-43cb8709
     def watch_messages(self, messages: List[Message]):
@@ -96,7 +95,12 @@ class MessageList(VerticalScroll):
             logger.debug("[REACTIVE] watch_messages called but not mounted, skipping")
             return
         
-        logger.info(f"[REACTIVE] watch_messages: updating with {len(messages)} messages")
+        # Avoid refreshing if message count hasn't changed
+        if len(messages) == len(self.messages):
+            logger.debug(f"[REACTIVE] watch_messages: count unchanged ({len(messages)}), skipping refresh")
+            return
+        
+        logger.info(f"[REACTIVE] watch_messages: updating from {len(self.messages)} to {len(messages)} messages")
         self.refresh_messages()
     
     # @phoenix-canon: node-43cb8709

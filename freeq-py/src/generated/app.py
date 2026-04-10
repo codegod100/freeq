@@ -1115,8 +1115,15 @@ class FreeQApp(App):
                     break
                 
                 event_type = event.get("type", "unknown")
-                server_logger.info(f"[POLL] Received event: {event_type}")
-                server_logger.info(f"[POLL] Event data: {event}")
+                # Only log important events, debug for routine polling
+                if event_type in ("message", "privmsg", "notice", "join", "part"):
+                    server_logger.info(f"[POLL] Received event: {event_type}")
+                else:
+                    server_logger.debug(f"[POLL] Received event: {event_type}")
+                
+                # Only log full event data for important events
+                if event_type in ("message", "privmsg"):
+                    server_logger.debug(f"[POLL] Event data: {event}")
                 
                 # Handle different event types
                 if event_type in ("message", "privmsg"):
