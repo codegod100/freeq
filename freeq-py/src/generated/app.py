@@ -713,9 +713,8 @@ class FreeQApp(App):
                     buffer_state = BufferState(
                         id=channel,
                         name=channel,
-                        type=BufferType.CHANNEL,
+                        buffer_type=BufferType.CHANNEL,
                         messages=[],
-                        users={},
                         unread_count=0
                     )
                     self.app_state.buffers[channel] = buffer_state
