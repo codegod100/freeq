@@ -41,6 +41,7 @@ from .widgets import (
     UserList,
     CommandEntered,
     MessageSent,
+    BufferSelected,
 )
 
 
@@ -767,6 +768,28 @@ class FreeQApp(App):
         buffer = self.app_state.buffers[active_buffer_id]
         buffer.messages.append(msg)
         logger.info(f"[MESSAGE] Added message to {active_buffer_id}")
+    
+    @on(BufferSelected)
+    def on_buffer_selected(self, event: BufferSelected) -> None:
+        """Handle buffer selection from sidebar.
+        
+        REQUIREMENT: When user clicks a buffer in sidebar, the app MUST
+        switch the active buffer and update the UI.
+        """
+        logger.info(f"[BUFFER] Buffer selected: {event.buffer_id}")
+        
+        # Update active buffer
+        self.app_state.ui.active_buffer_id = event.buffer_id
+        logger.info(f"[BUFFER] Switched active buffer to {event.buffer_id}")
+        
+        # Update the UI to show the selected buffer's messages
+        try:
+            message_list = self.query_one("MessageList")
+            # Trigger refresh by updating reactive data
+            message_list.refresh()
+            logger.info(f"[BUFFER] MessageList refreshed for {event.buffer_id}")
+        except Exception as e:
+            logger.warning(f"[BUFFER] Could not refresh MessageList: {e}")
     
     # @phoenix-canon: node-43cb8709
     def _update_ui_from_state(self) -> None:
