@@ -5,6 +5,7 @@ from textual.widget import Widget
 from textual.widgets import Static, Label
 from textual.containers import Horizontal
 from textual.reactive import reactive
+from textual.message import Message as TextualMessage
 from rich.text import Text
 from rich.markdown import Markdown
 from datetime import datetime
@@ -112,3 +113,18 @@ class MessageWidget(Widget):
             last = m.end()
         text.append(content[last:])
         return text
+
+
+# Keep for backward compatibility with __init__.py exports
+class MessageItem(MessageWidget):
+    """Alternative name for MessageWidget."""
+    pass
+
+
+class MessageWidgetClicked(TextualMessage):
+    """Message widget click event."""
+    
+    def __init__(self, message: Message, is_own: bool = False):
+        super().__init__()
+        self.message = message
+        self.is_own = is_own
