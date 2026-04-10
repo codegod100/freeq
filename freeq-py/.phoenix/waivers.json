@@ -41,6 +41,12 @@
       "reason": "MISSING_IU_NOT_NEEDED: This IU is configured for TypeScript (.ts) but project is Python. The requirements-domain.py implementation exists and is functional.",
       "approved_by": "phoenix-pipeline",
       "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/widgets/message_list.py",
+      "reason": "DEBUGGING: Added extra logging line to trace message display issue (target_count vs current_count comparison)",
+      "approved_by": "human-debug",
+      "date": "2026-04-10"
     }
   ],
   "note": "All waivers represent SPEC_IMPLEMENTED status - code implements requirements from spec/auth.md, spec/ui-components.md, and spec/messaging.md. Drift exists because Phoenix manifest was generated for TypeScript (.ts) but project is Python (.py)."

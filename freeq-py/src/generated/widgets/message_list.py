@@ -171,6 +171,7 @@ class MessageList(VerticalScroll):
             target_count = len(target_messages)
             
             # Only add new messages instead of clearing everything
+            logger.info(f"[REACTIVE] Comparing counts: target={target_count}, current={current_count}")
             if target_count > current_count:
                 logger.info(f"[REACTIVE] Adding {target_count - current_count} new messages (total: {target_count})")
                 start_time = __import__('time').time()
