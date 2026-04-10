@@ -95,12 +95,7 @@ class MessageList(VerticalScroll):
             logger.debug("[REACTIVE] watch_messages called but not mounted, skipping")
             return
         
-        # Avoid refreshing if message count hasn't changed
-        if len(messages) == len(self.messages):
-            logger.debug(f"[REACTIVE] watch_messages: count unchanged ({len(messages)}), skipping refresh")
-            return
-        
-        logger.info(f"[REACTIVE] watch_messages: updating from {len(self.messages)} to {len(messages)} messages")
+        logger.info(f"[REACTIVE] watch_messages: {len(messages)} messages")
         self.refresh_messages()
     
     # @phoenix-canon: node-43cb8709
@@ -127,8 +122,12 @@ class MessageList(VerticalScroll):
         active_buffer_id = self.app_state.ui.active_buffer_id
         if active_buffer_id and active_buffer_id in self.app_state.buffers:
             buffer = self.app_state.buffers[active_buffer_id]
-            self.messages = list(buffer.messages) if hasattr(buffer, 'messages') else []
-            logger.info(f"[REACTIVE] MessageList refreshed from buffer {active_buffer_id}: {len(self.messages)} messages")
+            new_messages = list(buffer.messages) if hasattr(buffer, 'messages') else []
+            logger.info(f"[REACTIVE] MessageList loading {len(new_messages)} messages from buffer {active_buffer_id}")
+            self.messages = new_messages
+            # Directly refresh to ensure UI updates
+            self.refresh_messages()
+            logger.info(f"[REACTIVE] MessageList UI refreshed with {len(self.messages)} messages")
         else:
             self.messages = []
     
