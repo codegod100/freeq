@@ -54,6 +54,24 @@
 
 - CONSTRAINT: The app.py MUST include entry point block `if __name__ == "__main__": run_app()` for `python -m src.generated.app` to work
 
+## MessageList Display Requirements
+
+- REQUIREMENT: MessageList CSS height MUST be '1fr' NOT '100%'. Using height: 100% causes MessageList to take all available space in Vertical container, pushing InputBar out of view. Using height: 1fr allows MessageList to take remaining space while InputBar gets its natural height.
+
+- REQUIREMENT: MessageList MUST implement incremental message updates in refresh_messages(). Instead of remove_children() + remounting all widgets (which blocks UI for 16+ seconds with 20+ messages), only add NEW message widgets that don't exist yet. Preserve existing widgets and only mount new ones.
+
+- REQUIREMENT: MessageList refresh_messages() MUST batch widget creation for performance. Create all MessageWidget instances first, then mount them in a loop, rather than interleaving creation and mounting.
+
+## Sidebar Display Requirements
+
+- REQUIREMENT: BufferSidebar MUST prevent double ## in channel names. When displaying CHANNEL type buffers, only add # prefix if buffer.name does NOT already start with #. This prevents ##test when buffer.name is already '#test'.
+
+## AuthScreen UX Requirements
+
+- REQUIREMENT: AuthScreen MUST support Enter key to submit auth form. Users can type their handle and press Enter instead of clicking Connect button. Implement @on(events.Key) handler that calls _start_authentication() when event.key == 'enter'.
+
+- REQUIREMENT: AuthScreen MUST NOT show 'Remember Login' checkbox. Credentials MUST always be saved automatically after successful authentication (no checkbox needed). This simplifies UX and reduces user confusion.
+
 ## Part 1: Abstract System Design
 
 ### UI States (PhoenixUI Theory)

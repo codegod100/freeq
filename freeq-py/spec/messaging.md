@@ -10,6 +10,12 @@
 
 - REQUIREMENT: When creating Message instances, code MUST use the exact field names from the model - 'target' (not 'channel_id'), 'sender' (not 'sender_id'), timestamp=datetime.now() (not isoformat string)
 
+## MessageWidget Implementation Requirements
+
+- REQUIREMENT: MessageWidget MUST use Static widget for avatar with rich.Text styling instead of Label with style= parameter. Textual's Label widget does NOT accept a style= parameter. Use: `Static(Text(char, style=f"bold white on {color}"), classes="avatar")` instead of `Label(char, style=f"background: {color}")`.
+
+- REQUIREMENT: MessageWidget MUST NOT use method name `_render_content()` as it conflicts with Textual's internal widget rendering method. Use `_format_message_content()` instead to avoid 'TypeError: MessageWidget._render_content() missing 1 required positional argument' error.
+
 ## Part 1: Abstract System Design
 
 ### Domain Model

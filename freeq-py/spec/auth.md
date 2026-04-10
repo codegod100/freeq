@@ -80,6 +80,16 @@
 
 - REQUIREMENT: AuthScreen MUST dismiss itself after posting completion message (Textual pattern)
 
+## App Lifecycle Requirements
+
+- REQUIREMENT: FreeQApp MUST store the set_interval timer handle in self._poll_timer when starting IRC message polling. This is required to cancel the timer on exit.
+
+- REQUIREMENT: FreeQApp on_unmount() MUST stop the IRC polling timer before disconnecting the client. Call `self._poll_timer.stop()` to prevent the repeating timer from keeping the event loop alive when user exits with Ctrl+Q or Ctrl+C.
+
+- REQUIREMENT: FreeQApp on_unmount() MUST disconnect the IRC client to prevent hang on exit. Call `self.client.disconnect()` after stopping the polling timer.
+
+- REQUIREMENT: FreeQApp MUST reduce logging overhead by logging POLL events at DEBUG level instead of INFO level. Only log important IRC events (message, privmsg, notice, join, part) at INFO level. This prevents I/O blocking that was causing UI to freeze.
+
 ## Part 1: Abstract System Design
 
 ### Authentication Flows
