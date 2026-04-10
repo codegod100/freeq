@@ -136,7 +136,7 @@ class MessageWidget(Static):
                     )
                 
                 # Content (rendered)
-                rendered = self._render_content(self.message.content)
+                rendered = self._format_message_content(self.message.content)
                 yield Static(rendered)
                 
                 # Reactions bar
@@ -165,7 +165,7 @@ class MessageWidget(Static):
         """Format as 12-hour with date (e.g., '2:30pm 1/15')."""
         return dt.strftime("%-I:%M%p %-m/%-d")
     
-    def _render_content(self, content: str) -> Any:
+    def _format_message_content(self, content: str) -> Any:
         """Render message content with formatting."""
         # Preprocess
         content = content.replace("\\n", "\n").strip()
