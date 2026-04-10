@@ -7,6 +7,7 @@ Generated Textual TUI app with all 34 IUs.
 """
 
 import logging
+import os
 from typing import Optional, Dict
 
 from textual.app import App
@@ -47,11 +48,15 @@ from .widgets import (
 
 # Setup logger
 logger = logging.getLogger(__name__)
+# Log to file instead of stderr to avoid corrupting TUI
+log_file = os.path.expanduser("~/.config/freeq/app.log")
+os.makedirs(os.path.dirname(log_file), exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
+    handlers=[logging.FileHandler(log_file, mode='a')]
 )
+logger.info(f"[APP] Logging initialized to {log_file}")
 
 
 # @phoenix-canon: IU-517684c6
