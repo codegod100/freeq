@@ -155,19 +155,8 @@ class FreeQApp(App):
         border-left: solid $primary;
     }
     
-    /* When parent has visible class, children are visible */
-    FreeQApp > #main-layout.visible > #sidebar,
-    FreeQApp > #main-layout.visible > #main-content,
-    FreeQApp > #main-layout.visible > #user-list-panel {
-        display: block;
-    }
-    
-    /* Hide children by default when parent is hidden */
-    FreeQApp > #main-layout > #sidebar,
-    FreeQApp > #main-layout > #main-content,
-    FreeQApp > #main-layout > #user-list-panel {
-        display: none;
-    }
+    /* Visibility controlled by parent .visible class and widget.visible property */
+    /* Children inherit visibility from parent, no explicit display needed */
     """
     
     BINDINGS = [
