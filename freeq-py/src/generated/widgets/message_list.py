@@ -147,7 +147,7 @@ class MessageList(VerticalScroll):
                 widget.remove_class("thread-highlight")
     
     def refresh_messages(self):
-        """Refresh message widgets."""
+        """Refresh message widgets - incremental update for performance."""
         # @phoenix-canon: node-43cb8709
         if not self.is_mounted:
             logger.debug("[REACTIVE] refresh_messages called but not mounted, skipping")
@@ -157,20 +157,30 @@ class MessageList(VerticalScroll):
             from .message_item import MessageWidget
             from textual.containers import Vertical
             container = self.query_one(".messages-container", Vertical)
-            container.remove_children()
             
+            # Get current widget count for incremental update
+            current_widgets = list(container.children)
+            current_count = len(current_widgets)
             start, end = self.visible_range
-            logger.info(f"[REACTIVE] refresh_messages: rendering {len(self.messages[start:end])} messages (range {start}:{end})")
-            for msg in self.messages[start:end]:
-                widget = MessageWidget(message=msg)
-                container.mount(widget)
-                logger.debug(f"[REACTIVE] Mounted MessageWidget for {msg.sender}: {msg.content[:20]}...")
+            target_messages = self.messages[start:end]
+            target_count = len(target_messages)
             
-            # Force refresh to ensure UI updates
-            self.refresh()
-            container.refresh()
-            
-            logger.info(f"[REACTIVE] refresh_messages: done rendering {len(self.messages[start:end])} messages")
+            # Only add new messages instead of clearing everything
+            if target_count > current_count:
+                logger.info(f"[REACTIVE] Adding {target_count - current_count} new messages (total: {target_count})")
+                for i in range(current_count, target_count):
+                    msg = target_messages[i]
+                    widget = MessageWidget(message=msg)
+                    container.mount(widget)
+                container.refresh()
+            elif target_count < current_count:
+                # Remove excess widgets
+                logger.info(f"[REACTIVE] Removing {current_count - target_count} old messages")
+                for widget in current_widgets[target_count:]:
+                    widget.remove()
+            else:
+                logger.debug(f"[REACTIVE] Message count unchanged: {target_count}")
+                
         except Exception as e:
             logger.error(f"[REACTIVE] refresh_messages error: {e}", exc_info=True)
     
