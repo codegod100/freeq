@@ -1118,7 +1118,7 @@ class FreeQApp(App):
                 server_logger.info(f"[POLL] Event data: {event}")
                 
                 # Handle different event types
-                if event_type == "privmsg":
+                if event_type in ("message", "privmsg"):
                     self._handle_incoming_message(event)
                 elif event_type == "notice":
                     self._handle_incoming_message(event)  # Treat notices like privmsg
@@ -1150,11 +1150,12 @@ class FreeQApp(App):
     def _handle_incoming_message(self, event: dict) -> None:
         """Handle incoming PRIVMSG from IRC server."""
         try:
-            target = event.get("target", "")
-            sender = event.get("nick", "unknown")
-            content = event.get("message", "")
+            # Event can have different field names depending on type
+            target = event.get("target", "") or event.get("channel", "")
+            sender = event.get("from", "") or event.get("nick", "unknown")
+            content = event.get("text", "") or event.get("message", "")
             
-            server_logger.info(f"[RECV] PRIVMSG from {sender} to {target}: {content[:50]}...")
+            server_logger.info(f"[RECV] MESSAGE from {sender} to {target}: {content[:50]}...")
             
             # Normalize target to buffer key
             buffer_key = target if target.startswith('#') else '#' + target
