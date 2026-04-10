@@ -29,6 +29,8 @@ class MessageWidget(Static):
     MessageWidget {
         height: auto;
         padding: 0 1;
+        background: $surface;
+        border: solid $primary;
     }
     MessageWidget:hover {
         background: $surface-darken-1;
@@ -96,6 +98,10 @@ class MessageWidget(Static):
     
     def compose(self):
         """Compose message widget."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[MESSAGE_WIDGET] Composing message from {self.message.sender}: {self.message.content[:30]}...")
+        
         # Avatar (first letter of nick, colored)
         avatar_color = self._get_avatar_color(self.message.sender)
         
@@ -140,6 +146,13 @@ class MessageWidget(Static):
                                 yield Label(f"{emoji} {count}")
                             else:
                                 yield Label(emoji)
+    
+    def render(self):
+        """Render method for debugging - ensures widget has content."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"[MESSAGE_WIDGET] Rendering {self.message.sender}: {self.message.content[:20]}...")
+        return super().render()
     
     def _get_avatar_color(self, nick: str) -> str:
         """Generate deterministic color from nick hash."""
