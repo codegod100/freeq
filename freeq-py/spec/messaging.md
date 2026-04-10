@@ -18,6 +18,8 @@
 
 - REQUIREMENT: MessageWidget MUST extend Widget (not Static) when using compose() with containers. Static is for simple content via render() method; containers like Horizontal/Vertical require the Widget base class with compose() pattern.
 
+- REQUIREMENT: MessageWidget MUST use semantic layout with minimal CSS. Structure: [Avatar] [Content Column] where Content = [Meta Row] [Body] [Reactions]. Let Textual's default sizing (height: auto, width: 1fr) handle layout rather than explicit margins and padding. Define WHAT (semantic roles: avatar, meta, body, reacts) not HOW (explicit pixel/character sizing).
+
 ## Part 1: Abstract System Design
 
 ### Domain Model
