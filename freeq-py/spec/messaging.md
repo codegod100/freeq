@@ -16,6 +16,8 @@
 
 - REQUIREMENT: MessageWidget MUST NOT use method name `_render_content()` as it conflicts with Textual's internal widget rendering method. Use `_format_message_content()` instead to avoid 'TypeError: MessageWidget._render_content() missing 1 required positional argument' error.
 
+- REQUIREMENT: MessageWidget MUST extend Widget (not Static) when using compose() with containers. Static is for simple content via render() method; containers like Horizontal/Vertical require the Widget base class with compose() pattern.
+
 ## Part 1: Abstract System Design
 
 ### Domain Model

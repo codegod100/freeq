@@ -28,13 +28,6 @@ class MessageList(VerticalScroll):
         height: 1fr;
         overflow-y: scroll;
         background: $surface-darken-1;
-        border: solid red;
-    }
-    MessageList .messages-container {
-        width: 100%;
-        height: auto;
-        min-height: 100%;
-        border: solid blue;
     }
     MessageList .thread-highlight {
         border-left: solid $primary;

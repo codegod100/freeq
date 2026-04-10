@@ -18,11 +18,14 @@ from ..models import Message
 
 
 # @phoenix-canon: node-c385163a
-class MessageWidget(Static):
+class MessageWidget(Widget):
     """Display a single message with avatar, nick, content.
     
     REQUIREMENT: Widget initialization MUST accept id, classes, **kwargs 
     and pass to super().__init__().
+    
+    NOTE: Extends Widget (not Static) because we use compose() with containers.
+    Static is for simple content rendering via render() method.
     """
     
     DEFAULT_CSS = """
@@ -30,7 +33,6 @@ class MessageWidget(Static):
         height: auto;
         padding: 0 1;
         background: $surface;
-        border: solid $primary;
     }
     MessageWidget:hover {
         background: $surface-darken-1;
@@ -61,9 +63,10 @@ class MessageWidget(Static):
     }
     MessageWidget .content {
         margin-left: 3;
+        width: 1fr;
     }
     MessageWidget .reaction-bar {
-        height: 1;
+        height: auto;
         margin-top: 1;
         margin-left: 3;
     }
