@@ -58,6 +58,15 @@ logging.basicConfig(
 )
 logger.info(f"[APP] Logging initialized to {log_file}")
 
+# Setup separate server logger
+server_logger = logging.getLogger("freeq.server")
+server_logger.setLevel(logging.DEBUG)
+server_log_file = os.path.expanduser("~/.config/freeq/server.log")
+server_handler = logging.FileHandler(server_log_file, mode='a')
+server_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+server_logger.addHandler(server_handler)
+server_logger.info("[SERVER] Server logging initialized")
+
 
 # @phoenix-canon: IU-517684c6
 class RequirementsWidget:
@@ -717,6 +726,18 @@ class FreeQApp(App):
             if cmd == "join" and args:
                 channel = args.strip()
                 logger.info(f"[COMMAND] Joining channel: {channel}")
+                server_logger.info(f"[JOIN] User requested join: {channel}")
+                
+                # Try to join via IRC client
+                try:
+                    if hasattr(self, 'client') and self.client:
+                        server_logger.info(f"[JOIN] Sending JOIN command to server: {channel}")
+                        self.client.join(channel)
+                        server_logger.info(f"[JOIN] Server accepted JOIN for {channel}")
+                    else:
+                        server_logger.warning(f"[JOIN] No IRC client - channel will be local only")
+                except Exception as e:
+                    server_logger.error(f"[JOIN] Failed to join server: {e}")
                 
                 # Create buffer for the channel
                 from .models import BufferState, BufferType
@@ -754,13 +775,15 @@ class FreeQApp(App):
         """Handle message sent by user.
         
         REQUIREMENT: When user sends a message, the app MUST add it to the
-        active buffer's messages.
+        active buffer's messages AND send to IRC server if connected.
         """
         logger.info(f"[MESSAGE] Message sent: {event.content[:50]}...")
+        server_logger.info(f"[SEND] User sent message: {event.content[:50]}...")
         
         active_buffer_id = self.app_state.ui.active_buffer_id
         if not active_buffer_id or active_buffer_id not in self.app_state.buffers:
             logger.warning("[MESSAGE] No active buffer to send message to")
+            server_logger.warning("[SEND] Failed - no active buffer")
             return
         
         # Create message
@@ -774,10 +797,26 @@ class FreeQApp(App):
             timestamp=datetime.now()
         )
         
-        # Add to buffer
+        # Add to buffer locally
         buffer = self.app_state.buffers[active_buffer_id]
         buffer.messages.append(msg)
         logger.info(f"[MESSAGE] Added message to {active_buffer_id}")
+        
+        # Try to send to IRC server
+        try:
+            # Check if we have a client connection
+            if hasattr(self, 'client') and self.client:
+                target = active_buffer_id if not active_buffer_id.startswith('#') else active_buffer_id
+                server_logger.info(f"[SEND] Sending to IRC target: {target}")
+                self.client.send_message(target, event.content)
+                server_logger.info(f"[SEND] Message sent to server successfully")
+                logger.info(f"[MESSAGE] Sent to IRC server: {target}")
+            else:
+                server_logger.warning("[SEND] No IRC client connection available")
+                logger.warning("[MESSAGE] Not connected to IRC server - message stored locally only")
+        except Exception as e:
+            server_logger.error(f"[SEND] Failed to send to server: {e}")
+            logger.error(f"[MESSAGE] Failed to send to IRC server: {e}")
     
     @on(BufferSelected)
     def on_buffer_selected(self, event: BufferSelected) -> None:
