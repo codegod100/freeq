@@ -591,11 +591,18 @@ class FreeQApp(App):
             session_dir = Path.home() / ".config" / "freeq"
             session_dir.mkdir(parents=True, exist_ok=True)
             
-            # Get channel names from buffers
-            channels = [
-                buf.name for buf in self.app_state.buffers.values()
-                if buf.buffer_type == BufferType.CHANNEL and buf.name != "console"
-            ]
+            # Get channel names from buffers and normalize (ensure # prefix)
+            channels = []
+            seen = set()
+            for buf in self.app_state.buffers.values():
+                if buf.buffer_type == BufferType.CHANNEL and buf.name and buf.name.lower() != "console":
+                    # Normalize: always use # prefix
+                    name = buf.name if buf.name.startswith('#') else '#' + buf.name
+                    # Deduplicate (case-insensitive for IRC)
+                    key = name.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        channels.append(name)
             
             # Prepare session data
             data = {"channels": channels}
@@ -641,26 +648,38 @@ class FreeQApp(App):
             with open(session_path, 'r') as f:
                 data = json.load(f)
             
-            channels = data.get("channels", [])
+            raw_channels = data.get("channels", [])
             
-            # Create buffers for each saved channel
+            # Normalize and deduplicate channels
+            channels = []
+            seen = set()
+            for name in raw_channels:
+                if name and name.lower() != "console":
+                    # Normalize: ensure # prefix
+                    normalized = name if name.startswith('#') else '#' + name
+                    key = normalized.lower()
+                    if key not in seen:
+                        seen.add(key)
+                        channels.append(normalized)
+            
+            # Create buffers for each unique normalized channel
             for channel_name in channels:
                 if channel_name not in self.app_state.buffers:
                     from datetime import datetime
                     channel_buffer = BufferState(
-                        id=channel_name.replace("#", "").replace("&", ""),
-                        name=channel_name,
+                        id=channel_name.lstrip('#'),  # ID without #
+                        name=channel_name,  # Name with #
                         buffer_type=BufferType.CHANNEL,
                         messages=[],
                         unread_count=0,
                         scroll_position=0.0,
                     )
-                    # Add to buffers dict
+                    # Add to buffers dict using normalized name as key
                     new_buffers = dict(self.app_state.buffers)
                     new_buffers[channel_name] = channel_buffer
                     self.app_state.buffers = new_buffers
             
-            logger.info(f"[AUTH] Loaded {len(channels)} channels from session: {channels}")
+            logger.info(f"[AUTH] Loaded {len(channels)} unique channels from session: {channels}")
             return channels
             
         except json.JSONDecodeError as e:
@@ -804,6 +823,10 @@ class FreeQApp(App):
             
             if cmd == "join" and args:
                 channel = args.strip()
+                # Normalize channel name - ensure it starts with #
+                if not channel.startswith('#'):
+                    channel = '#' + channel
+                
                 logger.info(f"[COMMAND] Joining channel: {channel}")
                 server_logger.info(f"[JOIN] User requested join: {channel}")
                 
@@ -818,17 +841,17 @@ class FreeQApp(App):
                 except Exception as e:
                     server_logger.error(f"[JOIN] Failed to join server: {e}")
                 
-                # Create buffer for the channel
+                # Create buffer for the channel (use normalized name as key)
                 from .models import BufferState, BufferType
                 if channel not in self.app_state.buffers:
                     buffer_state = BufferState(
-                        id=channel,
-                        name=channel,
+                        id=channel.lstrip('#'),  # ID without #
+                        name=channel,  # Name with #
                         buffer_type=BufferType.CHANNEL,
                         messages=[],
                         unread_count=0
                     )
-                    self.app_state.buffers[channel] = buffer_state
+                    self.app_state.buffers = {**self.app_state.buffers, channel: buffer_state}
                     logger.info(f"[COMMAND] Created buffer for {channel}")
                     
                     # Refresh sidebar to show new channel
