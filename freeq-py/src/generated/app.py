@@ -1239,13 +1239,22 @@ class FreeQApp(App):
         server_logger.info(f"[RECV] TOPIC for {channel}: {topic}")
     
     def on_unmount(self) -> None:
-        """Save channels when app closes.
+        """Save channels and disconnect when app closes.
         
         REQUIREMENT: On app unmount or when channels change, the app MUST
         call _save_channels() to persist the current channel list.
         """
         logger.info("[APP] App unmounting, saving channels...")
         self._save_channels()
+        
+        # Disconnect IRC client to prevent hang on exit
+        if self.client:
+            logger.info("[APP] Disconnecting IRC client...")
+            try:
+                self.client.disconnect()
+                logger.info("[APP] IRC client disconnected")
+            except Exception as e:
+                logger.warning(f"[APP] Error disconnecting client: {e}")
     
     # Action handlers
     def action_quit(self):
