@@ -129,27 +129,28 @@ class FreeQApp(App):
         display: none;
     }
     
-    /* When visible: show container with horizontal layout */
+    /* When visible: show with horizontal layout */
     FreeQApp > #main-layout.visible {
         display: block;
+        layout: horizontal;
     }
     
-    /* Sidebar - small share */
+    /* Sidebar - ~12.5% */
     FreeQApp > #main-layout > #sidebar {
-        width: 1fr;
+        width: 12%;
         height: 100%;
         border-right: solid $primary;
     }
     
-    /* Main content area - dominant share (6x sidebar) */
+    /* Main content area - ~75% */
     FreeQApp > #main-layout > #main-content {
-        width: 6fr;
+        width: 76%;
         height: 100%;
     }
     
-    /* User list panel - small share */
+    /* User list panel - ~12.5% */
     FreeQApp > #main-layout > #user-list-panel {
-        width: 1fr;
+        width: 12%;
         height: 100%;
         border-left: solid $primary;
     }
