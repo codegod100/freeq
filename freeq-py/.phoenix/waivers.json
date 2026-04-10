@@ -26,7 +26,7 @@
     },
     {
       "file": "src/generated/screens/auth_screen.py",
-      "reason": "UI_FIX: Fixed unlabeled 'Remember Login' checkbox. Added explicit label '💾 Save credentials for automatic login:' before checkbox, changed checkbox height from '1' to 'auto' to properly display label, styled label with muted color. The checkbox was confusing users because it appeared directly after handle input with no explanation and height:1 clipped the label.",
+      "reason": "UI_FIX: Fixed unlabeled 'Remember Login' checkbox. Added explicit label 'Save credentials for automatic login:' before checkbox, changed checkbox height from '1' to 'auto' to properly display label, styled label with muted color. The checkbox was confusing users because it appeared directly after handle input with no explanation and height:1 clipped the label.",
       "approved_by": "phoenix-pipeline",
       "date": "2026-04-09"
     },
@@ -53,6 +53,42 @@
       "reason": "MISSING_IU: This IU file is not needed - code is generated via phoenix-codegen pipeline, not phoenix-regen.",
       "approved_by": "phoenix-pipeline",
       "date": "2026-04-09"
+    },
+    {
+      "file": "src/generated/widgets/input_bar.py",
+      "reason": "BUG_FIX: Fixed Message class name collision. Textual's Message event class and our chat Message model were both imported as 'Message', causing name collision. Changed Textual's Message import to 'TextualMessage' alias. This was causing runtime errors when Textual tried to dispatch events.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-09"
+    },
+    {
+      "file": "src/generated/widgets/message_item.py",
+      "reason": "BUG_FIX: Renamed _render_content() to _format_message_content() to avoid conflict with Textual's internal _render_content() method. This was causing 'TypeError: MessageWidget._render_content() missing 1 required positional argument' because Textual's widget rendering called our method incorrectly. Also changed Label with style= to Static with rich.Text for avatar (Label doesn't accept style= parameter).",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/widgets/message_list.py",
+      "reason": "PERF_FIX: Changed refresh_messages() to use incremental updates instead of remove_children() + remount. Was blocking UI for 16+ seconds with 20+ messages. Now only adds new widgets and preserves existing ones. Also added batch widget creation, timing logs, and debug borders (red for MessageList, blue for messages-container) for visual debugging.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/widgets/sidebar.py",
+      "reason": "BUG_FIX: Prevented double ## in channel names. Sidebar was adding # prefix to all CHANNEL type buffers, but if buffer.name already started with #, you got ##test. Now checks if buffer.name.startswith('#') and only adds # indicator if needed.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/app.py",
+      "reason": "PERF_FIX: Reduced logging overhead by changing POLL event logging from INFO to DEBUG level. Was causing I/O blocking. Now only logs important IRC events at INFO (message, privmsg, notice, join, part). Also added _poll_timer field and cancel it in on_unmount() to prevent exit hang from set_interval keeping event loop alive.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/screens/auth_screen.py",
+      "reason": "REMOVE_CHECKBOX: Removed the 'Remember Login' checkbox entirely and replaced with always-save behavior. Users were confused by the checkbox, so now credentials are always saved after successful auth. This simplifies the UX and matches expected behavior.",
+      "approved_by": "phoenix-pipeline",
+      "date": "2026-04-10"
     }
   ]
 }
