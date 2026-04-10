@@ -31,6 +31,7 @@ class MessageWidget(Widget):
     DEFAULT_CSS = """
     MessageWidget {
         height: auto;
+        layout: horizontal;
         padding: 0 1;
         background: $surface;
     }
@@ -44,10 +45,20 @@ class MessageWidget(Widget):
         color: $text;
         content-align: center middle;
         text-style: bold;
+        margin-right: 1;
+    }
+    MessageWidget .content {
+        width: 1fr;
+        height: auto;
+    }
+    MessageWidget .header {
+        height: auto;
+        margin-bottom: 0;
     }
     MessageWidget .nick {
         text-style: bold;
         color: $text-accent;
+        margin-right: 1;
     }
     MessageWidget .timestamp {
         color: $text-muted;
@@ -61,14 +72,13 @@ class MessageWidget(Widget):
         color: $warning;
         text-style: italic;
     }
-    MessageWidget .content {
-        margin-left: 3;
-        width: 1fr;
+    MessageWidget .message-text {
+        margin-top: 0;
+        height: auto;
     }
     MessageWidget .reaction-bar {
-        height: auto;
-        margin-top: 1;
-        margin-left: 3;
+        height: 1;
+        margin-top: 0;
     }
     MessageWidget .reply-indicator {
         color: $primary;
@@ -138,9 +148,9 @@ class MessageWidget(Widget):
                         classes="reply-indicator"
                     )
                 
-                # Content (rendered)
+                # Content (rendered) - compact single line
                 rendered = self._format_message_content(self.message.content)
-                yield Static(rendered)
+                yield Static(rendered, classes="message-text")
                 
                 # Reactions bar
                 if self.message.reactions:
@@ -151,13 +161,6 @@ class MessageWidget(Widget):
                                 yield Label(f"{emoji} {count}")
                             else:
                                 yield Label(emoji)
-    
-    def render(self):
-        """Render method for debugging - ensures widget has content."""
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.debug(f"[MESSAGE_WIDGET] Rendering {self.message.sender}: {self.message.content[:20]}...")
-        return super().render()
     
     def _get_avatar_color(self, nick: str) -> str:
         """Generate deterministic color from nick hash."""
