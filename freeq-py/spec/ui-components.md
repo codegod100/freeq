@@ -54,11 +54,11 @@
 
 - CONSTRAINT: The app.py MUST include entry point block `if __name__ == "__main__": run_app()` for `python -m src.generated.app` to work
 
-## Layout Requirements (Semantic Sizing)
+## Layout Requirements (Fractional Sizing)
 
-- REQUIREMENT: Layout MUST use semantic sizing (content-driven) rather than explicit percentages. Main content area (messages) MUST use `width: 1fr` to take remaining space after fixed-width sidebars.
+- REQUIREMENT: Layout MUST use pure fractional (fr) units for all regions. Sidebar: 1fr, Main content: 4fr, User list: 1fr. This gives message content 4x the space of each sidebar.
 
-- REQUIREMENT: Sidebars (sidebar, user-list) MUST use fixed character widths (e.g., `width: 30` for sidebar, `width: 20` for user list) rather than percentages. This prioritizes message content over chrome.
+- REQUIREMENT: Each sidebar MUST have max-width constraint (e.g., max-width: 25 for sidebar, max-width: 20 for user list) to prevent excessive growth at large terminal sizes while still using fr units.
 
 - REQUIREMENT: MessageList CSS height MUST be '1fr' NOT '100%'. Using height: 100% causes MessageList to take all available space in Vertical container, pushing InputBar out of view. Using height: 1fr allows MessageList to take remaining space while InputBar gets its natural height.
 

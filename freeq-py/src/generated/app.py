@@ -134,23 +134,25 @@ class FreeQApp(App):
         display: block;
     }
     
-    /* Sidebar - sized by content, fixed minimum */
+    /* Sidebar - fractional width (1 part) */
     FreeQApp > #main-layout > #sidebar {
-        width: 30;
+        width: 1fr;
         height: 100%;
+        max-width: 25;
         border-right: solid $primary;
     }
     
-    /* Main content area - takes remaining space (semantic priority) */
+    /* Main content area - largest share (4 parts) */
     FreeQApp > #main-layout > #main-content {
-        width: 1fr;
+        width: 4fr;
         height: 100%;
     }
     
-    /* User list panel - sized by content, fixed minimum */
+    /* User list panel - smallest share (1 part) */
     FreeQApp > #main-layout > #user-list-panel {
-        width: 20;
+        width: 1fr;
         height: 100%;
+        max-width: 20;
         border-left: solid $primary;
     }
     
