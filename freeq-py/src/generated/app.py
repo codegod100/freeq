@@ -134,22 +134,22 @@ class FreeQApp(App):
         display: block;
     }
     
-    /* Sidebar (25%) */
+    /* Sidebar - sized by content, fixed minimum */
     FreeQApp > #main-layout > #sidebar {
-        width: 25%;
+        width: 30;
         height: 100%;
         border-right: solid $primary;
     }
     
-    /* Main content area (60%) */
+    /* Main content area - takes remaining space (semantic priority) */
     FreeQApp > #main-layout > #main-content {
-        width: 60%;
+        width: 1fr;
         height: 100%;
     }
     
-    /* User list panel (15%) */
+    /* User list panel - sized by content, fixed minimum */
     FreeQApp > #main-layout > #user-list-panel {
-        width: 15%;
+        width: 20;
         height: 100%;
         border-left: solid $primary;
     }
