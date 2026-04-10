@@ -32,6 +32,7 @@ class MessageList(VerticalScroll):
     MessageList .messages-container {
         width: 100%;
         height: auto;
+        min-height: 100%;
     }
     MessageList .thread-highlight {
         border-left: solid $primary;
@@ -75,10 +76,13 @@ class MessageList(VerticalScroll):
         logger.info(f"[UI] MessageList composing with {len(self.messages)} messages")
         from .message_item import MessageWidget
         from textual.containers import Vertical
+        from textual.containers import Vertical
+        count = 0
         with Vertical(classes="messages-container"):
             for msg in self.messages[self.visible_range[0]:self.visible_range[1]]:
                 yield MessageWidget(message=msg)
-        logger.info(f"[UI] MessageList composed, showing range {self.visible_range}")
+                count += 1
+        logger.info(f"[UI] MessageList composed with {count} MessageWidgets, range {self.visible_range}")
     
     # @phoenix-canon: node-43cb8709
     def watch_messages(self, messages: List[Message]):
@@ -158,7 +162,14 @@ class MessageList(VerticalScroll):
             start, end = self.visible_range
             logger.info(f"[REACTIVE] refresh_messages: rendering {len(self.messages[start:end])} messages (range {start}:{end})")
             for msg in self.messages[start:end]:
-                container.mount(MessageWidget(message=msg))
+                widget = MessageWidget(message=msg)
+                container.mount(widget)
+                logger.debug(f"[REACTIVE] Mounted MessageWidget for {msg.sender}: {msg.content[:20]}...")
+            
+            # Force refresh to ensure UI updates
+            self.refresh()
+            container.refresh()
+            
             logger.info(f"[REACTIVE] refresh_messages: done rendering {len(self.messages[start:end])} messages")
         except Exception as e:
             logger.error(f"[REACTIVE] refresh_messages error: {e}", exc_info=True)
