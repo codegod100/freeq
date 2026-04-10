@@ -317,6 +317,10 @@ class FreeQApp(App):
                 logger.info("[AUTH-MOUNT] IRC client connected for auto-login")
                 server_logger.info(f"[CONNECT] Auto-login: Connected to {self.server}")
                 
+                # Start message polling worker
+                self._start_message_polling()
+                logger.info("[AUTH-MOUNT] Message polling started")
+                
                 # Auto-join loaded channels
                 if loaded_channels:
                     for channel in loaded_channels:
@@ -439,6 +443,10 @@ class FreeQApp(App):
             self.client.connect()
             logger.info("[AUTH] IRC client connected successfully")
             server_logger.info(f"[CONNECT] Connected to {self.server}")
+            
+            # Start message polling worker
+            self._start_message_polling()
+            logger.info("[AUTH] Message polling started")
             
             # Join any loaded channels
             for channel in loaded_channels:
@@ -1078,6 +1086,101 @@ class FreeQApp(App):
             logger.info("[UI] Focus set to InputBar")
         except Exception as e:
             logger.error(f"[UI] ERROR focusing input bar: {e}", exc_info=True)
+    
+    def _start_message_polling(self) -> None:
+        """Start background worker to poll for incoming IRC messages."""
+        server_logger.info("[POLL] Starting message polling worker")
+        self._poll_messages()
+    
+    @work(thread=True, exclusive=False)
+    def _poll_messages(self) -> None:
+        """Background worker that polls for IRC events."""
+        import time
+        server_logger.info("[POLL] Message polling worker started")
+        
+        while self.is_running and self.client:
+            try:
+                # Poll for events with 100ms timeout
+                event = self.client.poll_event(timeout_ms=100)
+                
+                if event:
+                    event_type = event.get("type", "unknown")
+                    server_logger.info(f"[POLL] Received event: {event_type}")
+                    
+                    # Handle different event types
+                    if event_type == "privmsg":
+                        self._handle_incoming_message(event)
+                    elif event_type == "join":
+                        self._handle_join_event(event)
+                    elif event_type == "part":
+                        self._handle_part_event(event)
+                    else:
+                        server_logger.debug(f"[POLL] Unhandled event type: {event_type}")
+                
+                # Small delay to prevent busy-waiting
+                time.sleep(0.01)
+                
+            except Exception as e:
+                server_logger.error(f"[POLL] Error polling messages: {e}")
+                time.sleep(0.1)  # Back off on error
+        
+        server_logger.info("[POLL] Message polling worker stopped")
+    
+    def _handle_incoming_message(self, event: dict) -> None:
+        """Handle incoming PRIVMSG from IRC server."""
+        try:
+            target = event.get("target", "")
+            sender = event.get("nick", "unknown")
+            content = event.get("message", "")
+            
+            server_logger.info(f"[RECV] PRIVMSG from {sender} to {target}: {content[:50]}...")
+            
+            # Normalize target to buffer key
+            buffer_key = target if target.startswith('#') else '#' + target
+            
+            # Create message
+            from datetime import datetime
+            from .models import Message as ChatMessage
+            
+            msg = ChatMessage(
+                id=f"irc_{datetime.now().timestamp()}",
+                sender=sender,
+                content=content,
+                timestamp=datetime.now()
+            )
+            
+            # Add to buffer (thread-safe via reactive update)
+            self.call_from_thread(self._add_message_to_buffer, buffer_key, msg)
+            logger.info(f"[MESSAGE] Received from {sender} in {buffer_key}")
+            
+        except Exception as e:
+            server_logger.error(f"[RECV] Error handling message: {e}")
+    
+    def _add_message_to_buffer(self, buffer_key: str, msg) -> None:
+        """Add message to buffer (called from main thread)."""
+        try:
+            if buffer_key in self.app_state.buffers:
+                buffer = self.app_state.buffers[buffer_key]
+                buffer.messages.append(msg)
+                # Trigger reactive update
+                self.app_state.buffers = dict(self.app_state.buffers)
+                server_logger.info(f"[RECV] Added message to {buffer_key}")
+            else:
+                server_logger.warning(f"[RECV] No buffer found for {buffer_key}")
+        except Exception as e:
+            server_logger.error(f"[RECV] Error adding message to buffer: {e}")
+    
+    def _handle_join_event(self, event: dict) -> None:
+        """Handle JOIN event from IRC server."""
+        nick = event.get("nick", "unknown")
+        channel = event.get("channel", "")
+        server_logger.info(f"[RECV] JOIN: {nick} joined {channel}")
+    
+    def _handle_part_event(self, event: dict) -> None:
+        """Handle PART event from IRC server."""
+        nick = event.get("nick", "unknown")
+        channel = event.get("channel", "")
+        server_logger.info(f"[RECV] PART: {nick} left {channel}")
     
     def on_unmount(self) -> None:
         """Save channels when app closes.
