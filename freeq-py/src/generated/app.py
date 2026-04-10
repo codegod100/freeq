@@ -206,6 +206,7 @@ class FreeQApp(App):
         self.tls = tls
         self.tls_insecure = tls_insecure
         self.client = None  # IRC client - set up after auth
+        self._poll_timer = None  # Timer handle for IRC polling
         
         # Initialize state
         self.app_state = AppState()
@@ -1094,7 +1095,7 @@ class FreeQApp(App):
         NOT a background worker, to ensure thread safety with Textual UI.
         """
         server_logger.info("[POLL] Starting message polling with set_interval")
-        self.set_interval(0.1, self._poll_irc_events)
+        self._poll_timer = self.set_interval(0.1, self._poll_irc_events)
         server_logger.info("[POLL] Message polling started (100ms interval)")
     
     def _poll_irc_events(self) -> None:
@@ -1246,6 +1247,12 @@ class FreeQApp(App):
         """
         logger.info("[APP] App unmounting, saving channels...")
         self._save_channels()
+        
+        # Stop polling timer to prevent hang on exit
+        if self._poll_timer:
+            logger.info("[APP] Stopping IRC polling timer...")
+            self._poll_timer.stop()
+            logger.info("[APP] IRC polling timer stopped")
         
         # Disconnect IRC client to prevent hang on exit
         if self.client:
