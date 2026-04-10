@@ -1120,6 +1120,8 @@ class FreeQApp(App):
                 # Handle different event types
                 if event_type == "privmsg":
                     self._handle_incoming_message(event)
+                elif event_type == "notice":
+                    self._handle_incoming_message(event)  # Treat notices like privmsg
                 elif event_type == "join":
                     self._handle_join_event(event)
                 elif event_type == "part":
@@ -1128,8 +1130,17 @@ class FreeQApp(App):
                     self._handle_nick_event(event)
                 elif event_type == "quit":
                     self._handle_quit_event(event)
+                elif event_type == "names":
+                    self._handle_names_event(event)
+                elif event_type == "topic":
+                    self._handle_topic_event(event)
+                elif event_type == "motd":
+                    server_logger.info(f"[RECV] MOTD: {event.get('motd', '')[:50]}...")
+                elif event_type in ("raw_line", "names_end", "end_of_motd"):
+                    # Silently ignore these common events
+                    pass
                 else:
-                    server_logger.debug(f"[POLL] Unhandled event type: {event_type}")
+                    server_logger.debug(f"[POLL] Unhandled event type: {event_type}, data: {event}")
                     
         except Exception as e:
             server_logger.error(f"[POLL] Error polling messages: {e}")
@@ -1203,6 +1214,19 @@ class FreeQApp(App):
         nick = event.get("nick", "unknown")
         reason = event.get("reason", "")
         server_logger.info(f"[RECV] QUIT: {nick} ({reason})")
+    
+    def _handle_names_event(self, event: dict) -> None:
+        """Handle NAMES event (user list) from IRC server."""
+        channel = event.get("channel", "")
+        nicks = event.get("nicks", [])
+        server_logger.info(f"[RECV] NAMES: {len(nicks)} users in {channel}")
+        # TODO: Update user list for channel
+    
+    def _handle_topic_event(self, event: dict) -> None:
+        """Handle TOPIC event from IRC server."""
+        channel = event.get("channel", "")
+        topic = event.get("topic", "")
+        server_logger.info(f"[RECV] TOPIC for {channel}: {topic}")
     
     def on_unmount(self) -> None:
         """Save channels when app closes.
