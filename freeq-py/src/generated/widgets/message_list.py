@@ -74,7 +74,8 @@ class MessageList(VerticalScroll):
         # @phoenix-canon: node-c385163a
         logger.info(f"[UI] MessageList composing with {len(self.messages)} messages")
         from .message_item import MessageWidget
-        with Widget(classes="messages-container"):
+        from textual.containers import Vertical
+        with Vertical(classes="messages-container"):
             for msg in self.messages[self.visible_range[0]:self.visible_range[1]]:
                 yield MessageWidget(message=msg)
         logger.info(f"[UI] MessageList composed, showing range {self.visible_range}")
@@ -150,7 +151,8 @@ class MessageList(VerticalScroll):
         
         try:
             from .message_item import MessageWidget
-            container = self.query_one(".messages-container", Widget)
+            from textual.containers import Vertical
+            container = self.query_one(".messages-container", Vertical)
             container.remove_children()
             
             start, end = self.visible_range
