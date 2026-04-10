@@ -145,15 +145,21 @@ class MessageList(VerticalScroll):
         """Refresh message widgets."""
         # @phoenix-canon: node-43cb8709
         if not self.is_mounted:
+            logger.debug("[REACTIVE] refresh_messages called but not mounted, skipping")
             return
         
-        from .message_item import MessageWidget
-        container = self.query_one(".messages-container", Widget)
-        container.remove_children()
-        
-        start, end = self.visible_range
-        for msg in self.messages[start:end]:
-            container.mount(MessageWidget(message=msg))
+        try:
+            from .message_item import MessageWidget
+            container = self.query_one(".messages-container", Widget)
+            container.remove_children()
+            
+            start, end = self.visible_range
+            logger.info(f"[REACTIVE] refresh_messages: rendering {len(self.messages[start:end])} messages (range {start}:{end})")
+            for msg in self.messages[start:end]:
+                container.mount(MessageWidget(message=msg))
+            logger.info(f"[REACTIVE] refresh_messages: done rendering {len(self.messages[start:end])} messages")
+        except Exception as e:
+            logger.error(f"[REACTIVE] refresh_messages error: {e}", exc_info=True)
     
     def add_message(self, message: Message):
         """Add message to list."""
