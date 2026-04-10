@@ -45,6 +45,11 @@ from .widgets import (
     BufferSelected,
 )
 
+# Import IRC client from original app
+import sys
+sys.path.insert(0, '/home/nandi/code/freeq/freeq-py/python')
+from freeq_textual.client import FreeqClient
+
 
 # Setup logger
 logger = logging.getLogger(__name__)
@@ -187,11 +192,20 @@ class FreeQApp(App):
         broker_url: str = "https://auth.freeq.at",
         session_path: str = None,
         web_token: str = None,
+        server: str = "irc.freeq.at:6697",
+        nick: str = None,
+        tls: bool = False,
+        tls_insecure: bool = False,
     ):
         """Initialize main app."""
         super().__init__()
         self.broker_url = broker_url
         self.session_path = session_path or "~/.config/freeq/session.json"
+        self.server = server
+        self.nick = nick
+        self.tls = tls
+        self.tls_insecure = tls_insecure
+        self.client = None  # IRC client - set up after auth
         
         # Initialize state
         self.app_state = AppState()
@@ -286,6 +300,38 @@ class FreeQApp(App):
                 except Exception as e:
                     logger.warning(f"[AUTH-MOUNT] Could not refresh sidebar after loading channels: {e}")
             
+            # Initialize IRC client for auto-login
+            nick = saved_creds.get("nick", "freeq")
+            web_token = saved_creds.get("web_token", "")
+            logger.info(f"[AUTH-MOUNT] Initializing IRC client for auto-login: {nick}@{self.server}")
+            server_logger.info(f"[CONNECT] Auto-login: Initializing IRC client: nick={nick}")
+            try:
+                self.client = FreeqClient(
+                    server_addr=self.server,
+                    nick=nick,
+                    web_token=web_token,
+                    tls=self.tls,
+                    tls_insecure=self.tls_insecure,
+                )
+                self.client.connect()
+                logger.info("[AUTH-MOUNT] IRC client connected for auto-login")
+                server_logger.info(f"[CONNECT] Auto-login: Connected to {self.server}")
+                
+                # Auto-join loaded channels
+                if loaded_channels:
+                    for channel in loaded_channels:
+                        if channel and not channel.startswith('Console'):
+                            try:
+                                logger.info(f"[AUTH-MOUNT] Auto-joining: {channel}")
+                                server_logger.info(f"[JOIN] Auto-login join: {channel}")
+                                self.client.join(channel)
+                            except Exception as e:
+                                logger.warning(f"[AUTH-MOUNT] Could not auto-join {channel}: {e}")
+            except Exception as e:
+                logger.error(f"[AUTH-MOUNT] Failed to connect IRC client: {e}")
+                server_logger.error(f"[CONNECT] Auto-login failed: {e}")
+                self.client = None
+            
             # Show main UI directly (no auth screen)
             self.app_state.ui.auth_overlay_visible = False
             self.state = AppUIState.CONNECTED
@@ -376,6 +422,39 @@ class FreeQApp(App):
         loaded_channels = self._load_channels()
         if loaded_channels:
             logger.info(f"[AUTH] Loaded {len(loaded_channels)} previously saved channels")
+        
+        # 1e. Initialize IRC client and connect to server
+        logger.info(f"[AUTH] Initializing IRC client for {event.nick}@{self.server}")
+        server_logger.info(f"[CONNECT] Initializing IRC client: nick={event.nick}, server={self.server}")
+        try:
+            self.client = FreeqClient(
+                server_addr=self.server,
+                nick=event.nick or "freeq",
+                web_token=event.broker_token,
+                tls=self.tls,
+                tls_insecure=self.tls_insecure,
+            )
+            logger.info(f"[AUTH] IRC client created, connecting to {self.server}")
+            server_logger.info(f"[CONNECT] Client created, calling connect()")
+            self.client.connect()
+            logger.info("[AUTH] IRC client connected successfully")
+            server_logger.info(f"[CONNECT] Connected to {self.server}")
+            
+            # Join any loaded channels
+            for channel in loaded_channels:
+                if channel and not channel.startswith('Console'):
+                    try:
+                        logger.info(f"[AUTH] Auto-joining channel: {channel}")
+                        server_logger.info(f"[JOIN] Auto-joining saved channel: {channel}")
+                        self.client.join(channel)
+                        server_logger.info(f"[JOIN] Successfully joined {channel}")
+                    except Exception as e:
+                        logger.warning(f"[AUTH] Could not auto-join {channel}: {e}")
+                        server_logger.warning(f"[JOIN] Failed to join {channel}: {e}")
+        except Exception as e:
+            logger.error(f"[AUTH] Failed to initialize IRC client: {e}")
+            server_logger.error(f"[CONNECT] Failed to connect: {e}")
+            self.client = None
         
         # 2. Update UI state (CRITICAL)
         # @phoenix-canon: node-77eff8b8
