@@ -107,6 +107,22 @@ class MessageList(VerticalScroll):
         
         self.refresh_messages()
     
+    def refresh_from_buffer(self) -> None:
+        """Refresh messages from current active buffer.
+        
+        Called when new messages arrive from IRC server.
+        """
+        if not self.app_state:
+            return
+        
+        active_buffer_id = self.app_state.ui.active_buffer_id
+        if active_buffer_id and active_buffer_id in self.app_state.buffers:
+            buffer = self.app_state.buffers[active_buffer_id]
+            self.messages = list(buffer.messages) if hasattr(buffer, 'messages') else []
+            logger.info(f"[REACTIVE] MessageList refreshed from buffer {active_buffer_id}: {len(self.messages)} messages")
+        else:
+            self.messages = []
+    
     # @phoenix-canon: node-43cb8709
     def watch_highlighted_thread(self, root_msgid: Optional[str]):
         """Highlight all messages in thread.

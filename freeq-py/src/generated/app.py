@@ -1187,6 +1187,15 @@ class FreeQApp(App):
                 # Trigger reactive update
                 self.app_state.buffers = dict(self.app_state.buffers)
                 server_logger.info(f"[RECV] Added message to {buffer_key}")
+                
+                # Refresh MessageList if this is the active buffer
+                if buffer_key == self.app_state.ui.active_buffer_id:
+                    try:
+                        message_list = self.query_one("MessageList")
+                        message_list.refresh_from_buffer()
+                        logger.info(f"[RECV] MessageList refreshed for active buffer {buffer_key}")
+                    except Exception as e:
+                        logger.warning(f"[RECV] Could not refresh MessageList: {e}")
             else:
                 server_logger.warning(f"[RECV] No buffer found for {buffer_key}")
         except Exception as e:
