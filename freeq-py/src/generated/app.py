@@ -1088,43 +1088,53 @@ class FreeQApp(App):
             logger.error(f"[UI] ERROR focusing input bar: {e}", exc_info=True)
     
     def _start_message_polling(self) -> None:
-        """Start background worker to poll for incoming IRC messages."""
-        server_logger.info("[POLL] Starting message polling worker")
-        self._poll_messages()
+        """Start polling for incoming IRC messages using Textual's set_interval.
+        
+        REQUIREMENT: Message polling MUST use set_interval from main thread,
+        NOT a background worker, to ensure thread safety with Textual UI.
+        """
+        server_logger.info("[POLL] Starting message polling with set_interval")
+        self.set_interval(0.1, self._poll_irc_events)
+        server_logger.info("[POLL] Message polling started (100ms interval)")
     
-    @work(thread=True, exclusive=False)
-    def _poll_messages(self) -> None:
-        """Background worker that polls for IRC events."""
-        import time
-        server_logger.info("[POLL] Message polling worker started")
+    def _poll_irc_events(self) -> None:
+        """Poll for IRC events and handle them.
         
-        while self.is_running and self.client:
-            try:
-                # Poll for events with 100ms timeout
-                event = self.client.poll_event(timeout_ms=100)
+        REQUIREMENT: Must drain all pending events, not just one.
+        """
+        if not self.client:
+            return
+        
+        try:
+            # Drain all pending events (non-blocking)
+            while True:
+                event = self.client.poll_event(timeout_ms=0)
                 
-                if event:
-                    event_type = event.get("type", "unknown")
-                    server_logger.info(f"[POLL] Received event: {event_type}")
+                if event is None:
+                    break
+                
+                event_type = event.get("type", "unknown")
+                server_logger.info(f"[POLL] Received event: {event_type}")
+                server_logger.info(f"[POLL] Event data: {event}")
+                
+                # Handle different event types
+                if event_type == "privmsg":
+                    self._handle_incoming_message(event)
+                elif event_type == "join":
+                    self._handle_join_event(event)
+                elif event_type == "part":
+                    self._handle_part_event(event)
+                elif event_type == "nick":
+                    self._handle_nick_event(event)
+                elif event_type == "quit":
+                    self._handle_quit_event(event)
+                else:
+                    server_logger.debug(f"[POLL] Unhandled event type: {event_type}")
                     
-                    # Handle different event types
-                    if event_type == "privmsg":
-                        self._handle_incoming_message(event)
-                    elif event_type == "join":
-                        self._handle_join_event(event)
-                    elif event_type == "part":
-                        self._handle_part_event(event)
-                    else:
-                        server_logger.debug(f"[POLL] Unhandled event type: {event_type}")
-                
-                # Small delay to prevent busy-waiting
-                time.sleep(0.01)
-                
-            except Exception as e:
-                server_logger.error(f"[POLL] Error polling messages: {e}")
-                time.sleep(0.1)  # Back off on error
-        
-        server_logger.info("[POLL] Message polling worker stopped")
+        except Exception as e:
+            server_logger.error(f"[POLL] Error polling messages: {e}")
+            import traceback
+            server_logger.error(f"[POLL] Traceback: {traceback.format_exc()}")
     
     def _handle_incoming_message(self, event: dict) -> None:
         """Handle incoming PRIVMSG from IRC server."""
@@ -1181,6 +1191,18 @@ class FreeQApp(App):
         nick = event.get("nick", "unknown")
         channel = event.get("channel", "")
         server_logger.info(f"[RECV] PART: {nick} left {channel}")
+    
+    def _handle_nick_event(self, event: dict) -> None:
+        """Handle NICK change event from IRC server."""
+        old_nick = event.get("old_nick", "unknown")
+        new_nick = event.get("new_nick", "unknown")
+        server_logger.info(f"[RECV] NICK: {old_nick} changed to {new_nick}")
+    
+    def _handle_quit_event(self, event: dict) -> None:
+        """Handle QUIT event from IRC server."""
+        nick = event.get("nick", "unknown")
+        reason = event.get("reason", "")
+        server_logger.info(f"[RECV] QUIT: {nick} ({reason})")
     
     def on_unmount(self) -> None:
         """Save channels when app closes.
