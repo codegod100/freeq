@@ -107,11 +107,13 @@ class MessageWidget(Static):
         
         # Main layout with avatar and content
         with Horizontal():
-            yield Label(
+            # Use Static with styled text instead of Label (Label doesn't accept style=)
+            from rich.text import Text
+            avatar_text = Text(
                 self.message.sender[0].upper() if self.message.sender else "?",
-                classes="avatar",
-                style=f"background: {avatar_color};"
+                style=f"bold white on {avatar_color}"
             )
+            yield Static(avatar_text, classes="avatar")
             
             with Vertical(classes="content"):
                 # Header row: nick, timestamp, edit mark
