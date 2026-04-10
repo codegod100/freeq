@@ -1171,8 +1171,8 @@ class FreeQApp(App):
                 timestamp=datetime.now()
             )
             
-            # Add to buffer (thread-safe via reactive update)
-            self.call_from_thread(self._add_message_to_buffer, buffer_key, msg)
+            # Add to buffer directly (we're in main thread via set_interval)
+            self._add_message_to_buffer(buffer_key, msg)
             logger.info(f"[MESSAGE] Received from {sender} in {buffer_key}")
             
         except Exception as e:
