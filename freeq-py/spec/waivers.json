@@ -47,7 +47,19 @@
       "reason": "DEBUGGING: Added extra logging line to trace message display issue (target_count vs current_count comparison)",
       "approved_by": "human-debug",
       "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/app.py",
+      "reason": "BUGFIX: Layout width fixes. Vertical containers default to width: 1fr causing equal thirds. Set explicit widths: sidebar=25, main-content=1fr, user-list-panel=25. Also removed display: block/none manipulation that breaks Horizontal layout.",
+      "approved_by": "human",
+      "date": "2026-04-10"
+    },
+    {
+      "file": "src/generated/app.py",
+      "reason": "BUGFIX: Message deduplication. IRC server echoes own messages back. Added check in _add_message_to_buffer() to skip if incoming message matches last sent message (same content + sender is our nick).",
+      "approved_by": "human",
+      "date": "2026-04-10"
     }
   ],
-  "note": "All waivers represent SPEC_IMPLEMENTED status - code implements requirements from spec/auth.md, spec/ui-components.md, and spec/messaging.md. Drift exists because Phoenix manifest was generated for TypeScript (.ts) but project is Python (.py)."
+  "note": "All waivers represent SPEC_IMPLEMENTED status - code implements requirements from spec/auth.md, spec/ui-components.md, and spec/messaging.md. Additional human-approved waivers for layout bugfixes and message deduplication. Drift exists because Phoenix manifest was generated for TypeScript (.ts) but project is Python (.py)."
 }

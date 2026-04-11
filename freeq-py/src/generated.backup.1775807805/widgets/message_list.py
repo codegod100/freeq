@@ -28,6 +28,13 @@ class MessageList(VerticalScroll):
         height: 1fr;
         overflow-y: scroll;
         background: $surface-darken-1;
+        border: solid red;
+    }
+    MessageList .messages-container {
+        width: 100%;
+        height: auto;
+        min-height: 100%;
+        border: solid blue;
     }
     MessageList .thread-highlight {
         border-left: solid $primary;
@@ -68,14 +75,14 @@ class MessageList(VerticalScroll):
     def compose(self):
         """Compose message list."""
         # @phoenix-canon: node-c385163a
-        # Note: VerticalScroll handles its own container, mount widgets directly
         logger.debug(f"[UI] MessageList composing with {len(self.messages)} messages")
         from .message_item import MessageWidget
+        from textual.containers import Vertical
         count = 0
-        # Show all messages - VerticalScroll handles scrolling
-        for msg in self.messages:
-            yield MessageWidget(message=msg)
-            count += 1
+        with Vertical(classes="messages-container"):
+            for msg in self.messages[self.visible_range[0]:self.visible_range[1]]:
+                yield MessageWidget(message=msg)
+                count += 1
         logger.debug(f"[UI] MessageList composed with {count} MessageWidgets")
     
     # @phoenix-canon: node-43cb8709
@@ -153,16 +160,17 @@ class MessageList(VerticalScroll):
         
         try:
             from .message_item import MessageWidget
+            from textual.containers import Vertical
+            container = self.query_one(".messages-container", Vertical)
             
-            # Get current widget count for incremental update (direct children of VerticalScroll)
-            current_widgets = list(self.children)
+            # Get current widget count for incremental update
+            current_widgets = list(container.children)
             current_count = len(current_widgets)
-            # Show all messages, not just visible range
-            target_messages = self.messages
+            start, end = self.visible_range
+            target_messages = self.messages[start:end]
             target_count = len(target_messages)
             
             # Only add new messages instead of clearing everything
-            logger.info(f"[REACTIVE] Comparing counts: target={target_count}, current={current_count}")
             if target_count > current_count:
                 logger.info(f"[REACTIVE] Adding {target_count - current_count} new messages (total: {target_count})")
                 start_time = __import__('time').time()
@@ -175,11 +183,10 @@ class MessageList(VerticalScroll):
                 # Mount all at once for better performance
                 logger.info(f"[REACTIVE] Created {len(new_widgets)} widgets in {__import__('time').time() - start_time:.3f}s, now mounting...")
                 for widget in new_widgets:
-                    self.mount(widget)
+                    container.mount(widget)
                 mount_time = __import__('time').time() - start_time
                 logger.info(f"[REACTIVE] Mounting took {mount_time:.3f}s total")
-                # Scroll to show new messages
-                self.scroll_end(animate=False)
+                container.refresh()
             elif target_count < current_count:
                 # Remove excess widgets
                 logger.info(f"[REACTIVE] Removing {current_count - target_count} old messages")

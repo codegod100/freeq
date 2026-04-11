@@ -54,6 +54,16 @@
 
 - CONSTRAINT: The app.py MUST include entry point block `if __name__ == "__main__": run_app()` for `python -m src.generated.app` to work
 
+- REQUIREMENT: BufferSidebar MUST visually indicate the currently active/selected channel with distinct styling (highlight, accent color, or marker) when app_state.ui.active_buffer_id is set
+- REQUIREMENT: BufferSidebar MUST implement watch_active_buffer() or react to active_buffer_id changes to update the visual selection indicator immediately when the user selects a different channel
+- REQUIREMENT: The selected channel indicator MUST be clearly visible and distinguishable from unselected channels using CSS classes (e.g., '.selected', '.active') applied to the channel list item
+- SCENARIO: Channel Selection Indicator Update
+  GIVEN the user is viewing the sidebar with multiple channels
+  AND channel '#general' is currently selected and highlighted
+  WHEN the user clicks on channel '#help' in the sidebar
+  THEN the '#general' channel item SHALL lose its selected styling
+  AND the '#help' channel item SHALL immediately gain selected styling
+  AND the main content area SHALL display the '#help' channel messages
 ## Layout Requirements (Fractional Sizing)
 
 - REQUIREMENT: Layout MUST use percentages reflecting the 1:6:1 ratio. Sidebar: 12%, Main content: 76%, User list: 12%. This gives message content ~6x the space of each sidebar.

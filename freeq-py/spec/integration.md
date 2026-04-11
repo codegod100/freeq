@@ -334,6 +334,8 @@ class UIState:
     debug_panel_open: bool = False
 
 
+- REQUIREMENT: The BufferState dataclass MUST include a scroll_position field with type float and default value 0.0 to track the user's scroll position in each buffer.
+
 @dataclass
 class BufferState:
     """Channel or query buffer state."""

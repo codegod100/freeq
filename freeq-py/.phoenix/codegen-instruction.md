@@ -33,6 +33,55 @@ This instruction includes a theory morphism that maps Implementation Units to Py
     - MODEL: PhoenixState
       (Data model for Phoenix Domain)
 
+- App Domain (low):
+  Classes:
+    - WIDGET: AppWidget
+      (Main widget for App Domain)
+    - MODEL: AppState
+      (Data model for App Domain)
+
+- Part Domain (low):
+  Classes:
+    - WIDGET: PartWidget
+      (Main widget for Part Domain)
+    - MODEL: PartState
+      (Data model for Part Domain)
+
+- Message Domain (high):
+  Classes:
+    - WIDGET: MessageWidget
+      (Main widget for Message Domain)
+    - MODEL: MessageState
+      (Data model for Message Domain)
+
+- MessageWidget Domain (high):
+  Classes:
+    - WIDGET: MessagewidgetWidget
+      (Main widget for MessageWidget Domain)
+    - MODEL: MessagewidgetState
+      (Data model for MessageWidget Domain)
+
+- Layout Domain (high):
+  Classes:
+    - WIDGET: LayoutWidget
+      (Main widget for Layout Domain)
+    - MODEL: LayoutState
+      (Data model for Layout Domain)
+
+- Sidebar Domain (high):
+  Classes:
+    - WIDGET: SidebarWidget
+      (Main widget for Sidebar Domain)
+    - MODEL: SidebarState
+      (Data model for Sidebar Domain)
+
+- AuthScreen Domain (critical):
+  Classes:
+    - WIDGET: AuthscreenWidget
+      (Main widget for AuthScreen Domain)
+    - MODEL: AuthscreenState
+      (Data model for AuthScreen Domain)
+
 ### Constraint → Implementation Mapping
 
 - UNMATCHED: "must not exceed limitation..." → manual review needed
@@ -77,7 +126,7 @@ src/generated/
 
 Generate a complete Textual TUI application by implementing all 34 IUs from the theory mapping above.
 
-### Step 1: Data Models (3 IUs)
+### Step 1: Data Models (10 IUs)
 Create `src/generated/models.py` with all data classes:
 - For each IU, create a @dataclass(slots=True) model
 - Include fields derived from the "Classes" section above
@@ -198,5 +247,5 @@ Create `src/generated/app.py`:
 - [ ] Follows Textual best practices (reactive state, compose, CSS)
 
 ---
-Generated: 2026-04-09T23:18:39.579Z
+Generated: 2026-04-11T05:24:54.587Z
 Language Variant: python-textual

@@ -129,34 +129,44 @@ class FreeQApp(App):
         display: none;
     }
     
-    /* When visible: show with horizontal layout */
+    /* When visible: show container with horizontal layout */
     FreeQApp > #main-layout.visible {
         display: block;
-        layout: horizontal;
     }
     
-    /* Sidebar - ~12.5% */
+    /* Sidebar (25%) */
     FreeQApp > #main-layout > #sidebar {
-        width: 12%;
+        width: 25%;
         height: 100%;
         border-right: solid $primary;
     }
     
-    /* Main content area - ~75% */
+    /* Main content area (60%) */
     FreeQApp > #main-layout > #main-content {
-        width: 76%;
+        width: 60%;
         height: 100%;
     }
     
-    /* User list panel - ~12.5% */
+    /* User list panel (15%) */
     FreeQApp > #main-layout > #user-list-panel {
-        width: 12%;
+        width: 15%;
         height: 100%;
         border-left: solid $primary;
     }
     
-    /* Visibility controlled by parent .visible class and widget.visible property */
-    /* Children inherit visibility from parent, no explicit display needed */
+    /* When parent has visible class, children are visible */
+    FreeQApp > #main-layout.visible > #sidebar,
+    FreeQApp > #main-layout.visible > #main-content,
+    FreeQApp > #main-layout.visible > #user-list-panel {
+        display: block;
+    }
+    
+    /* Hide children by default when parent is hidden */
+    FreeQApp > #main-layout > #sidebar,
+    FreeQApp > #main-layout > #main-content,
+    FreeQApp > #main-layout > #user-list-panel {
+        display: none;
+    }
     """
     
     BINDINGS = [

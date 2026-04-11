@@ -10,6 +10,16 @@
 
 - REQUIREMENT: When creating Message instances, code MUST use the exact field names from the model - 'target' (not 'channel_id'), 'sender' (not 'sender_id'), timestamp=datetime.now() (not isoformat string)
 
+## Message Sending Requirements (Optimistic UI)
+
+- REQUIREMENT: When `handle_submit` sends a message via `client.send_message()`, it MUST immediately append the message to the target buffer using `_append_line()` before waiting for server response
+- REQUIREMENT: The optimistic message MUST use the current client's nickname as sender
+- REQUIREMENT: The optimistic message MUST be assigned a temporary msgid for tracking and deduplication
+- REQUIREMENT: The implementation MUST call `_render_active_buffer()` immediately after appending the optimistic message
+- REQUIREMENT: When a server message echo is received, the handler MUST detect if it matches a pending optimistic message by comparing sender nickname and content hash
+- REQUIREMENT: If a matching optimistic message is found, the handler MUST skip appending a duplicate line and update the message_index entry with the server-assigned msgid
+- REQUIREMENT: See `optimistic-ui-implementation.md` for complete implementation details
+
 ## MessageWidget Implementation Requirements
 
 - REQUIREMENT: MessageWidget MUST use Static widget for avatar with rich.Text styling instead of Label with style= parameter. Textual's Label widget does NOT accept a style= parameter. Use: `Static(Text(char, style=f"bold white on {color}"), classes="avatar")` instead of `Label(char, style=f"background: {color}")`.

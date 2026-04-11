@@ -78,7 +78,7 @@
       ]
     },
     {
-      "id": "d17053e0622088ec360478545790ccf5fbab6bb7303e3a51908735ae32adf2d0",
+      "id": "fc13fe2fcfbbd90aeb7f3c0c2edc23a6711235a2281efffc80545519e5bd31c6",
       "name": "Phoenix Domain",
       "domain": "phoenix",
       "riskTier": "critical",
@@ -120,7 +120,9 @@
         "165234442479c421bb4e020e3b1a295a93dadb79c654f7cea6ff8ac3ef62bf41",
         "17c03e585de1746bb4826f747baf9eb86cba0eb9a4a49850d4e51e9f6cdb7a7a",
         "17c917a5991304091834834841b34f37f4e8cedf025f5180fd94b59147c3fbe6",
+        "19decd68f2f6915f2139ef35cfcb50c2034cb49e24f446b405ae42de9c49ffba",
         "19fdfbf45872bfa7f099f4a229d74dcae76e864336d142d670b58b5d7d76e6d7",
+        "1dc9e86a6fbb56c7c2a6851fd15056e5f1db575b978941d524e1e34288ba9d0c",
         "2848d1ea4860718792b64543da3ce7e0f5d4f12f51ec6a24de53d742e5f663f4",
         "29f85ffbfd885fe61a9fdb269cd5ef23c478766a714a097300fcd97ddc597685",
         "2c33febc53d562d381594ef43a6a36da1e423e682d6ff15d15476104811f62db",
@@ -166,6 +168,7 @@
         "d44c672d242d486eac457b0a70126cb15b64825aa8ae3e3168cdeb2d4ce4fa9d",
         "d9af2095ff70a07830c5c8b40f852eb809cea110584c33e5abcdd077d3e4b92a",
         "de968fc4e569b7b68bff03ab4333ecc3497632e354777f8ed8116cfb90cf7b50",
+        "e11b2ced432bfcc9b3f718533947ddb56c97ed05a6bcec69c314d891598f4c33",
         "e1ee2c9ea071a944bc315c07f9067621ad18784850ab79fcf75a99fecadacc9c",
         "e1f0863326cb176b064d64d6bf4a39530b7e3dbc28e382b555e267afea0b71a4",
         "e46b05d26c1c234a129bb026c822561dd3c50e5a5d94dafdf6f57dd73baa5648",
@@ -177,7 +180,270 @@
         "ed95a1fd6ffc90fbf2e7650fff2b986c023cb15344ac357f18fb4558152b07e3",
         "f76639d23adb36c117d4965032cb613bbb7efbaa950a820e49349be20661a0e5",
         "f803e53f0f7da24457152a70d8ec48ac1808fe33e5dc35cdf58ffbe61b464601",
+        "fafbc401ef39c69a916b14fc590ff83fc5d9f4c1b12023d5b143a5f719a5d9f1",
         "fc52514bd7e88e924f4dba4b66c60e3806a62e86e268397944e98d23f5534128"
+      ]
+    },
+    {
+      "id": "0ad7d2abfa3ae987ca6b8e4b51fb79a0c67b3ee2cb56a2c3e9b5a360a7cfa6c8",
+      "name": "App Domain",
+      "domain": "app",
+      "riskTier": "low",
+      "files": {
+        "dir": "app",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "AppWidget",
+          "type": "widget",
+          "pattern": "class AppWidget(Widget)",
+          "description": "Main widget for App Domain"
+        },
+        {
+          "name": "AppState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass AppState",
+          "description": "Data model for App Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "0abc32622c36bcc2b4ff568d58c32daf955218b103860ce16ed10a621fc8c0b9",
+        "9b72066f57aedd33deda7c8d50016a02ade7ee7b8b574dea8d48be011a0bea82",
+        "c0fe61db52951d813822dd8e48b4ca4c673904c73299e957b692584e06fb27c1",
+        "cfdb499e317a6b7cc3520e5c1c480d3e930c388b16040105aa498a96b010177e"
+      ]
+    },
+    {
+      "id": "c26aa3c44263b96f61bef49d9f34f2c8ac178ddb817c13a81cae8fac8910cde9",
+      "name": "Part Domain",
+      "domain": "part",
+      "riskTier": "low",
+      "files": {
+        "dir": "part",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "PartWidget",
+          "type": "widget",
+          "pattern": "class PartWidget(Widget)",
+          "description": "Main widget for Part Domain"
+        },
+        {
+          "name": "PartState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass PartState",
+          "description": "Data model for Part Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "7aa13656a8edde5c826e24adee512f81d7eec53f2f3eaf4375ae7f4e980da9e2"
+      ]
+    },
+    {
+      "id": "208c47be4710f625733d024b8f84026264540dcef60a157cbfad2dab97e9cfd0",
+      "name": "Message Domain",
+      "domain": "message",
+      "riskTier": "high",
+      "files": {
+        "dir": "message",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "MessageWidget",
+          "type": "widget",
+          "pattern": "class MessageWidget(Widget)",
+          "description": "Main widget for Message Domain"
+        },
+        {
+          "name": "MessageState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass MessageState",
+          "description": "Data model for Message Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "008da2678933fcf39e3bd35c8b27e6010109d259c0a718fc614267b7941c32b7",
+        "1a5715cdc96232bc0ed33c852c464834ec02e98ac5c59fbde50a56a9cf4dca6f",
+        "47d3c4b7a48dbb47b488c8122673127eea5642158dda6340db3c59956d2c7d3b",
+        "9f60fc3faf0aee2f79c40391ccfca7563018f1ba22b8b9a3edfe41062472afbb",
+        "aaf8574e45a08b76f96a45b6080b2fc4d0d893fff307fbe423ccc88951087b24",
+        "ab42a071587a10c040aab8e15618a6c3745fe76eecd8d74e34261fc938497cc4",
+        "fbf0cc734cb0e2075b93667ca4526e00613102d91624abe5dc82a2997425d083"
+      ]
+    },
+    {
+      "id": "046b9cd014d42593ad98d1288d04d78703133dce78a12c56a7e527f960a81eb1",
+      "name": "MessageWidget Domain",
+      "domain": "messagewidget",
+      "riskTier": "high",
+      "files": {
+        "dir": "messagewidget",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "MessagewidgetWidget",
+          "type": "widget",
+          "pattern": "class MessagewidgetWidget(Widget)",
+          "description": "Main widget for MessageWidget Domain"
+        },
+        {
+          "name": "MessagewidgetState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass MessagewidgetState",
+          "description": "Data model for MessageWidget Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "500f5a0918802920083ae9976657da3d092746619ef03ec29ea5046d71305e97",
+        "b42b35145bcf068534bace0bc11f1dd3c64af99dce40a5a320f6a5d1c53b86ea",
+        "def7c33f03e67d756d9ee06ea2386c2e971fad77191ac0bef34fbb0c4b8a8e47",
+        "f68d1a91aa39fbfa9a52dbf98a6cd92d7f8ef34e0913d132d98d239e590e873d"
+      ]
+    },
+    {
+      "id": "a96593424cd519d92b63146dc23690213672cbbc4d266ea9860e9492b2ceed25",
+      "name": "Layout Domain",
+      "domain": "layout",
+      "riskTier": "high",
+      "files": {
+        "dir": "layout",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "LayoutWidget",
+          "type": "widget",
+          "pattern": "class LayoutWidget(Widget)",
+          "description": "Main widget for Layout Domain"
+        },
+        {
+          "name": "LayoutState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass LayoutState",
+          "description": "Data model for Layout Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "3488aa1d915d7b08a50592ad73209e5ac99ee8f18998a0827971268ff7611ef7",
+        "6bcd6b4bbcc9d484cdaf9fd69a063a083cd6adc774fa872877d16aba8cd452ec",
+        "cb18d3273fdb618c427a24968ba527f37116bb03c6a7504233b0dff56738a3ae",
+        "dbd65556ee47c247c9233471bcb6b67f87a81e1f44b8a202375ac6d7f75ed1ef",
+        "f75dd72e09bf81035024c902d2d2b1055121d3c5d3168db204879fddcc1e55d0"
+      ]
+    },
+    {
+      "id": "ca271b2e8005632feddfe07bf14f769c1e0614debc58045696bd44758ebc3931",
+      "name": "Sidebar Domain",
+      "domain": "sidebar",
+      "riskTier": "high",
+      "files": {
+        "dir": "sidebar",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "SidebarWidget",
+          "type": "widget",
+          "pattern": "class SidebarWidget(Widget)",
+          "description": "Main widget for Sidebar Domain"
+        },
+        {
+          "name": "SidebarState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass SidebarState",
+          "description": "Data model for Sidebar Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "5df2a61256d4eebf874443ead00b2e0c1ff94c5b20a38525698350fda36e2cd2"
+      ]
+    },
+    {
+      "id": "624d5dcbd1815ec403479bcefd96729ab15710ed00907cee9bd830b20b16b0f8",
+      "name": "AuthScreen Domain",
+      "domain": "authscreen",
+      "riskTier": "critical",
+      "files": {
+        "dir": "authscreen",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "AuthscreenWidget",
+          "type": "widget",
+          "pattern": "class AuthscreenWidget(Widget)",
+          "description": "Main widget for AuthScreen Domain"
+        },
+        {
+          "name": "AuthscreenState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass AuthscreenState",
+          "description": "Data model for AuthScreen Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "4ecf2de3cc1214bcc1648f5008f7aa658c9769f7fdd2c94873054e222a30d51e",
+        "c60d2e47a38a593d5e152afa0d7b8d09774a07ad3b8af93c600dea1852cb85f8"
       ]
     }
   ],

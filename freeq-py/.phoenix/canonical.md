@@ -84,3 +84,52 @@ Generated from spec files. Each requirement has a unique hash-based ID.
 - [node-56cd806b] all textual messages must call superinit in their init method
 - [node-bede3741] when importing both textuals message event class and a chat message model textuals message must be aliased eg from textualmessage import message as textualmessage to avoid name collision event message classes must inherit from textualmessage not the chat message model
 - [node-5b3f1747] the apppy must include entry point block if name main runapp for python m srcgeneratedapp to work
+- [node-e11b2ced] buffersidebar must visually indicate the currently activeselected channel with distinct styling highlight accent color or marker when appstateuiactivebufferid is set
+- [node-fafbc401] buffersidebar must implement watchactivebuffer or react to activebufferid changes to update the visual selection indicator immediately when the user selects a different channel
+- [node-1dc9e86a] the selected channel indicator must be clearly visible and distinguishable from unselected channels using css classes eg selected active applied to the channel list item
+- [node-19decd68] channel selection indicator update
+
+## App Lifecycle Requirements
+
+- [node-0abc3262] freeqapp must store the setinterval timer handle in selfpolltimer when starting irc message polling this is required to cancel the timer on exit
+- [node-cfdb499e] freeqapp onunmount must stop the irc polling timer before disconnecting the client call selfpolltimerstop to prevent the repeating timer from keeping the event loop alive when user exits with ctrlq or ctrlc
+- [node-9b72066f] freeqapp onunmount must disconnect the irc client to prevent hang on exit call selfclientdisconnect after stopping the polling timer
+- [node-c0fe61db] freeqapp must reduce logging overhead by logging poll events at debug level instead of info level only log important irc events message privmsg notice join part at info level this prevents io blocking that was causing ui to freeze
+
+## Part 2: Implementation Guidance (Python/Textual)
+
+- [node-7aa13656] the bufferstate dataclass must include a scrollposition field with type float and default value 00 to track the users scroll position in each buffer
+
+## Message Sending Requirements (Optimistic UI)
+
+- [node-aaf8574e] when handlesubmit sends a message via clientsendmessage it must immediately append the message to the target buffer using appendline before waiting for server response
+- [node-1a5715cd] the optimistic message must use the current clients nickname as sender
+- [node-008da267] the optimistic message must be assigned a temporary msgid for tracking and deduplication
+- [node-ab42a071] the implementation must call renderactivebuffer immediately after appending the optimistic message
+- [node-47d3c4b7] when a server message echo is received the handler must detect if it matches a pending optimistic message by comparing sender nickname and content hash
+- [node-9f60fc3f] if a matching optimistic message is found the handler must skip appending a duplicate line and update the messageindex entry with the serverassigned msgid
+- [node-fbf0cc73] see optimisticuiimplementationmd for complete implementation details
+
+## MessageWidget Implementation Requirements
+
+- [node-b42b3514] messagewidget must use static widget for avatar with richtext styling instead of label with style parameter textuals label widget does not accept a style parameter use statictextchar stylefbold white on color classesavatar instead of labelchar stylefbackground color
+- [node-def7c33f] messagewidget must not use method name rendercontent as it conflicts with textuals internal widget rendering method use formatmessagecontent instead to avoid typeerror messagewidgetrendercontent missing 1 required positional argument error
+- [node-500f5a09] messagewidget must extend widget not static when using compose with containers static is for simple content via render method containers like horizontalvertical require the widget base class with compose pattern
+- [node-f68d1a91] messagewidget must use semantic layout with minimal css structure avatar content column where content meta row body reactions let textuals default sizing height auto width 1fr handle layout rather than explicit margins and padding define what semantic roles avatar meta body reacts not how explicit pixelcharacter sizing
+
+## Layout Requirements (Fractional Sizing)
+
+- [node-cb18d327] layout must use percentages reflecting the 161 ratio sidebar 12 main content 76 user list 12 this gives message content 6x the space of each sidebar
+- [node-f75dd72e] messagelist css height must be 1fr not 100 using height 100 causes messagelist to take all available space in vertical container pushing inputbar out of view using height 1fr allows messagelist to take remaining space while inputbar gets its natural height
+- [node-6bcd6b4b] messagelist must implement incremental message updates in refreshmessages instead of removechildren remounting all widgets which blocks ui for 16 seconds with 20 messages only add new message widgets that dont exist yet preserve existing widgets and only mount new ones
+- [node-dbd65556] messagelist refreshmessages must batch widget creation for performance create all messagewidget instances first then mount them in a loop rather than interleaving creation and mounting
+- [node-3488aa1d] messagelist refreshmessages must show all messages in the buffer not just those within visiblerange the visiblerange is for virtualization optimization but new messages must always be mounted regardless of scroll position use targetmessages selfmessages not selfmessagesstartend
+
+## Sidebar Display Requirements
+
+- [node-5df2a612] buffersidebar must prevent double in channel names when displaying channel type buffers only add prefix if buffername does not already start with this prevents test when buffername is already test
+
+## AuthScreen UX Requirements
+
+- [node-c60d2e47] authscreen must support enter key to submit auth form users can type their handle and press enter instead of clicking connect button implement oneventskey handler that calls startauthentication when eventkey enter
+- [node-4ecf2de3] authscreen must not show remember login checkbox credentials must always be saved automatically after successful authentication no checkbox needed this simplifies ux and reduces user confusion
