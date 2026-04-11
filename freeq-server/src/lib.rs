@@ -13,6 +13,7 @@ pub mod plugin;
 pub mod policy;
 pub mod s2s;
 pub mod sasl;
+pub mod secrets;
 pub mod server;
 pub mod verifiers;
 pub mod web;

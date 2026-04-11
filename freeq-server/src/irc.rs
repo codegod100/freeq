@@ -180,7 +180,7 @@ fn unescape_tag_value(s: &str) -> String {
 }
 
 /// Escape a value for IRCv3 tag encoding.
-fn escape_tag_value(s: &str) -> String {
+pub(crate) fn escape_tag_value(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -222,6 +222,7 @@ pub const RPL_ENDOFBANLIST: &str = "368";
 pub const RPL_INVITELIST: &str = "346";
 pub const RPL_ENDOFINVITELIST: &str = "347";
 
+pub const ERR_TOOMANYCHANNELS: &str = "405";
 pub const ERR_BANNEDFROMCHAN: &str = "474";
 pub const ERR_INVITEONLYCHAN: &str = "473";
 pub const ERR_BADCHANNELKEY: &str = "475";

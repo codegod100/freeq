@@ -75,6 +75,8 @@ class MainActivity : ComponentActivity() {
                 // Persist secrets for session restore
                 brokerTok?.let {
                     state.securePrefs.edit().putString("brokerToken", it).apply()
+                    // Track login time for 14-day minimum session duration
+                    state.prefs.edit().putLong("lastLoginTime", System.currentTimeMillis()).apply()
                 }
                 did?.let {
                     state.securePrefs.edit().putString("did", it).apply()

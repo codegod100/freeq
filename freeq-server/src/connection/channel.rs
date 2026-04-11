@@ -23,6 +23,36 @@ pub(super) fn handle_join(
     let hostmask = conn.hostmask();
     let did = conn.authenticated_did.as_deref();
 
+    // Reject excessively long channel names to prevent memory abuse.
+    if channel.len() > 64 {
+        let reply = Message::from_server(
+            server_name,
+            "479",
+            vec![nick, channel, "Channel name too long (max 64 characters)"],
+        );
+        send(state, session_id, format!("{reply}\r\n"));
+        return;
+    }
+
+    // Per-user channel limit to prevent memory exhaustion
+    const MAX_CHANNELS_PER_USER: usize = 100;
+    if !conn.is_oper {
+        let channels = state.channels.lock();
+        let current_count = channels
+            .values()
+            .filter(|ch| ch.members.contains(session_id))
+            .count();
+        if current_count >= MAX_CHANNELS_PER_USER {
+            let reply = Message::from_server(
+                server_name,
+                irc::ERR_TOOMANYCHANNELS,
+                vec![nick, channel, "You have joined too many channels"],
+            );
+            send(state, session_id, format!("{reply}\r\n"));
+            return;
+        }
+    }
+
     // A channel is "new" only if it doesn't exist at all — not locally,
     // not via S2S. If remote members are present (from S2S sync), the
     // channel already exists on the federation and the joining user
@@ -894,7 +924,11 @@ pub(super) fn handle_mode(
                     return;
                 }
 
-                let mask = mode_arg.unwrap();
+                let mask = mode_arg.unwrap().trim();
+                if mask.is_empty() {
+                    return; // Reject empty/whitespace-only ban masks
+                }
+                let mask = mask; // rebind after trim
                 if adding {
                     let entry = BanEntry::new(mask.to_string(), conn.hostmask());
                     let mut channels = state.channels.lock();
@@ -1383,6 +1417,16 @@ pub(super) fn handle_topic(
 
     match new_topic {
         Some(text) => {
+            // Enforce topic length limit to prevent memory abuse.
+            if text.len() > 512 {
+                let reply = Message::from_server(
+                    server_name,
+                    "FAIL",
+                    vec!["TOPIC", "TOO_LONG", "Topic too long (max 512 characters)"],
+                );
+                send(state, session_id, format!("{reply}\r\n"));
+                return;
+            }
             // Check +t: if topic_locked, only ops can set topic
             let (is_op, is_locked) = {
                 let channels = state.channels.lock();
@@ -1504,8 +1548,29 @@ pub(super) fn handle_part(
     conn: &Connection,
     channel: &str,
     state: &Arc<SharedState>,
+    server_name: &str,
     session_id: &str,
+    send: &impl Fn(&Arc<SharedState>, &str, String),
 ) {
+    let nick = conn.nick_or_star();
+
+    // Verify user is in the channel
+    let in_channel = state
+        .channels
+        .lock()
+        .get(channel)
+        .map(|ch| ch.members.contains(session_id))
+        .unwrap_or(false);
+    if !in_channel {
+        let reply = Message::from_server(
+            server_name,
+            crate::irc::ERR_NOTONCHANNEL,
+            vec![nick, channel, "You're not on that channel"],
+        );
+        send(state, session_id, format!("{reply}\r\n"));
+        return;
+    }
+
     let hostmask = conn.hostmask();
     let part_msg = format!(":{hostmask} PART {channel}\r\n");
 

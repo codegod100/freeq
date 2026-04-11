@@ -51,7 +51,7 @@ class ChannelState(val name: String) {
     val members = mutableStateListOf<MemberInfo>()
     var topic = mutableStateOf("")
     val typingUsers = mutableStateMapOf<String, Date>()
-    var lastActivityTime: Long = System.currentTimeMillis()
+    var lastActivityTime = mutableStateOf(0L)
     var hasMoreHistory = mutableStateOf(true)
 
     private val messageIds = mutableSetOf<String>()
@@ -75,8 +75,9 @@ class ChannelState(val name: String) {
         } else {
             messages.add(msg)
         }
-        if (msg.timestamp.time > lastActivityTime) {
-            lastActivityTime = msg.timestamp.time
+        // Only real messages (not system join/part) update lastActivityTime
+        if (msg.from.isNotEmpty() && msg.timestamp.time > lastActivityTime.value) {
+            lastActivityTime.value = msg.timestamp.time
         }
     }
 
@@ -152,6 +153,17 @@ class AppState(application: Application) : AndroidViewModel(application) {
         get() = "${ServerConfig.apiBaseUrl}/auth/broker"
     private var brokerRetryCount = 0
     private var consecutive401Count = 0  // Require 3 consecutive 401s before nuking token
+
+    // Keep users logged in for at least 14 days unless they explicitly log out
+    private val lastLoginTime: Long
+        get() = prefs.getLong("lastLoginTime", 0L)
+
+    private val canAutoClearBrokerCredentials: Boolean
+        get() {
+            if (lastLoginTime == 0L) return false
+            val fourteenDaysMs = 14L * 24 * 60 * 60 * 1000
+            return System.currentTimeMillis() - lastLoginTime >= fourteenDaysMs
+        }
     internal var intentionalDisconnect = false
     var loggedOut = mutableStateOf(false)
     private var cachedWebToken: String? = null
@@ -318,7 +330,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
         cachedWebToken = null
         cachedWebTokenExpiry = 0L
         securePrefs.edit().remove("brokerToken").remove("did").remove("webToken").apply()
-        prefs.edit().remove("nick").remove("webTokenExpiry").apply()
+        prefs.edit().remove("nick").remove("webTokenExpiry").remove("lastLoginTime").apply()
         nick.value = ""
         disconnect()
     }
@@ -390,15 +402,16 @@ class AppState(application: Application) : AndroidViewModel(application) {
                 continue
             }
             // 401 = broker token may be invalid — require 3 consecutive 401s before nuking
+            // But keep users logged in for at least 14 days unless they explicitly log out
             if (status == 401) {
                 consecutive401Count++
-                if (consecutive401Count >= 3) {
+                if (consecutive401Count >= 3 && canAutoClearBrokerCredentials) {
                     consecutive401Count = 0
                     this.brokerToken = null
                     cachedWebToken = null
                     cachedWebTokenExpiry = 0L
                     securePrefs.edit().remove("brokerToken").remove("webToken").apply()
-                    prefs.edit().remove("webTokenExpiry").apply()
+                    prefs.edit().remove("webTokenExpiry").remove("lastLoginTime").apply()
                     throw Exception("Session expired — please sign in again")
                 } else {
                     throw Exception("Auth failed (attempt $consecutive401Count/3)")
@@ -583,7 +596,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
         if (nick.isEmpty()) return ChannelState("")
         dmBuffers.firstOrNull { it.name.equals(nick, ignoreCase = true) }?.let { return it }
         val dm = ChannelState(nick)
-        dm.lastActivityTime = 0L // Don't appear as recent until a message arrives
+        dm.lastActivityTime.value = 0L // Don't appear as recent until a message arrives
         dmBuffers.add(dm)
         requestHistory(nick)
         return dm
@@ -707,7 +720,6 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
             is FreeqEvent.Joined -> {
                 val ch = state.getOrCreateChannel(event.channel)
-                ch.lastActivityTime = System.currentTimeMillis()
                 if (event.nick.equals(state.nick.value, ignoreCase = true)) {
                     // We joined — clear stale members before NAMES arrives
                     ch.members.clear()
@@ -887,7 +899,6 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
             is FreeqEvent.TopicChanged -> {
                 val ch = state.getOrCreateChannel(event.channel)
                 ch.topic.value = event.topic.text
-                ch.lastActivityTime = System.currentTimeMillis()
             }
 
             is FreeqEvent.ModeChanged -> {

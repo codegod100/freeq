@@ -1020,6 +1020,8 @@ async fn handle_s2s_connection(
                         tracing::debug!(peer = %read_peer, msg_count, "S2S received: {}", line.chars().take(120).collect::<String>());
 
                         // Phase 2: Unwrap signed envelopes
+                        // C-7 fix: Reject unsigned operational messages.
+                        // Only Hello/HelloAck/KeyRotation are exempt (handshake/key mgmt).
                         let msg = match msg {
                             S2sMessage::Signed { ref payload, ref signature, ref signer } => {
                                 match read_manager.verify_signed(payload, signature, signer, &authenticated_peer_id) {
@@ -1030,7 +1032,17 @@ async fn handle_s2s_connection(
                                     }
                                 }
                             }
-                            other => other,
+                            S2sMessage::Hello { .. }
+                            | S2sMessage::HelloAck { .. }
+                            | S2sMessage::KeyRotation { .. } => msg,
+                            other => {
+                                tracing::warn!(
+                                    peer = %read_peer,
+                                    msg_type = %serde_json::to_string(&other).unwrap_or_default().chars().take(60).collect::<String>(),
+                                    "S2S: rejected unsigned message — signing required"
+                                );
+                                continue;
+                            }
                         };
 
                         let event = AuthenticatedS2sEvent {

@@ -121,6 +121,7 @@ pub async fn handle_connection(conn: Connection, state: Arc<SharedState>) {
 /// Load or generate a persistent secret key for stable endpoint identity.
 fn load_or_create_secret_key(path: &std::path::Path) -> Result<iroh::SecretKey> {
     if path.exists() {
+        crate::secrets::tighten_permissions(path);
         let hex = std::fs::read_to_string(path)?;
         let key: iroh::SecretKey = hex
             .trim()
@@ -135,7 +136,7 @@ fn load_or_create_secret_key(path: &std::path::Path) -> Result<iroh::SecretKey> 
         let key = iroh::SecretKey::from_bytes(&bytes);
         // Serialize as hex bytes
         let hex: String = key.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
-        std::fs::write(path, &hex)?;
+        crate::secrets::write_secret(path, hex.as_bytes())?;
         tracing::info!("Generated new iroh secret key at {}", path.display());
         Ok(key)
     }

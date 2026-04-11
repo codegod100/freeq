@@ -11,9 +11,12 @@
 
 use std::collections::HashMap;
 
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -46,7 +49,10 @@ struct CachedSession {
 }
 
 impl OAuthSession {
-    /// Save session to a JSON file.
+    /// Save session to a JSON file (plaintext).
+    ///
+    /// **Deprecated**: Writes tokens as plaintext JSON. Use
+    /// [`save_encrypted`](Self::save_encrypted) instead.
     pub fn save(&self, path: &std::path::Path) -> Result<()> {
         let cached = CachedSession {
             did: self.did.clone(),
@@ -74,10 +80,84 @@ impl OAuthSession {
         Ok(())
     }
 
-    /// Load session from a JSON file.
+    /// Save session encrypted with AES-256-GCM.
+    ///
+    /// The `key` must be 32 bytes. Use [`derive_session_key`] to derive one
+    /// from a DID and machine-specific material.
+    ///
+    /// File format: `nonce (12 bytes) || ciphertext+tag`.
+    pub fn save_encrypted(&self, path: &std::path::Path, key: &[u8; 32]) -> Result<()> {
+        let cached = CachedSession {
+            did: self.did.clone(),
+            handle: self.handle.clone(),
+            access_token: self.access_token.clone(),
+            pds_url: self.pds_url.clone(),
+            dpop_key: self.dpop_key.to_base64url(),
+            dpop_nonce: self.dpop_nonce.clone(),
+        };
+        let plaintext = serde_json::to_vec(&cached)?;
+
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|e| anyhow::anyhow!("cipher init: {e}"))?;
+        let nonce = Aes256Gcm::generate_nonce(OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce, plaintext.as_slice())
+            .map_err(|e| anyhow::anyhow!("encrypt: {e}"))?;
+
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce);
+        out.extend_from_slice(&ciphertext);
+
+        // Create parent dirs
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        std::fs::write(path, &out)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        Ok(())
+    }
+
+    /// Load session from a JSON file (plaintext).
+    ///
+    /// **Deprecated**: Reads plaintext JSON. Use
+    /// [`load_encrypted`](Self::load_encrypted) instead.
     pub fn load(path: &std::path::Path) -> Result<Self> {
         let json = std::fs::read_to_string(path)?;
         let cached: CachedSession = serde_json::from_str(&json)?;
+        let dpop_key = DpopKey::from_base64url(&cached.dpop_key)?;
+        Ok(Self {
+            did: cached.did,
+            handle: cached.handle,
+            access_token: cached.access_token,
+            pds_url: cached.pds_url,
+            dpop_key,
+            dpop_nonce: cached.dpop_nonce,
+        })
+    }
+
+    /// Load session from an encrypted file.
+    ///
+    /// Expects the format produced by [`save_encrypted`](Self::save_encrypted):
+    /// `nonce (12 bytes) || ciphertext+tag`.
+    pub fn load_encrypted(path: &std::path::Path, key: &[u8; 32]) -> Result<Self> {
+        let data = std::fs::read(path)?;
+        anyhow::ensure!(data.len() >= 12, "encrypted session file too short");
+
+        let (nonce_bytes, ciphertext) = data.split_at(12);
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|e| anyhow::anyhow!("cipher init: {e}"))?;
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| anyhow::anyhow!("decryption failed (wrong key or tampered file)"))?;
+
+        let cached: CachedSession = serde_json::from_slice(&plaintext)?;
         let dpop_key = DpopKey::from_base64url(&cached.dpop_key)?;
         Ok(Self {
             did: cached.did,
@@ -128,6 +208,25 @@ pub fn default_session_path(handle: &str) -> std::path::PathBuf {
     config_dir
         .join("freeq-tui")
         .join(format!("{handle}.session.json"))
+}
+
+/// Derive a 32-byte encryption key from a DID and machine-specific material.
+///
+/// Uses HKDF-SHA256 with the `machine_secret` as input key material and the
+/// DID as salt. The `machine_secret` should be something unique to this
+/// machine (e.g. a random value stored once, or derived from OS keychain
+/// material).
+///
+/// ```ignore
+/// let key = derive_session_key(b"machine-specific-secret", "did:plc:abc123");
+/// session.save_encrypted(&path, &key)?;
+/// ```
+pub fn derive_session_key(machine_secret: &[u8], did: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(Some(did.as_bytes()), machine_secret);
+    let mut key = [0u8; 32];
+    hk.expand(b"freeq-session-encryption", &mut key)
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    key
 }
 
 /// Authorization server metadata (RFC 8414 / AT Protocol extensions).

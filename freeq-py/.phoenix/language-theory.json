@@ -1,0 +1,492 @@
+{
+  "language": "python-textual",
+  "languageName": "Python (Textual TUI)",
+  "extension": ".py",
+  "moduleSystem": "commonjs",
+  "iuMappings": [
+    {
+      "id": "517684c6f05097edc7c4ef9e689240220d2158d6694d618dc1d53589029e1b81",
+      "name": "Requirements Domain",
+      "domain": "requirements",
+      "riskTier": "low",
+      "files": {
+        "dir": "requirements",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "RequirementsWidget",
+          "type": "widget",
+          "pattern": "class RequirementsWidget(Widget)",
+          "description": "Main widget for Requirements Domain"
+        },
+        {
+          "name": "RequirementsState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass RequirementsState",
+          "description": "Data model for Requirements Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "03ef4d2524aa5a2dd4b43799105bc29221ef75e4a7ff20bc00d20d68b2a3156f",
+        "09daab1c07a9eec58e6ee9013da511c686ecce3e7d4fd20941babd0e1ec25a8e",
+        "1f540d2c172a135ae91eac5a0c17e7bc9fbad1e8b9d0818a2c7ff1df4c0b0c27",
+        "8330b04e652de8524716d48b2d450c525d4003343b3bc5982cecb51a839dfe41"
+      ]
+    },
+    {
+      "id": "c40ae8a571196ecf7450fd67b205abbc07d9bd4b5481c4248a8bbaaff1d7aefe",
+      "name": "Definitions Domain",
+      "domain": "definitions",
+      "riskTier": "low",
+      "files": {
+        "dir": "definitions",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "DefinitionsWidget",
+          "type": "widget",
+          "pattern": "class DefinitionsWidget(Widget)",
+          "description": "Main widget for Definitions Domain"
+        },
+        {
+          "name": "DefinitionsState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass DefinitionsState",
+          "description": "Data model for Definitions Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "6ab64ae1c2a1a97e298c7c0f93472b2f293fe4645ee51753722d7e55d44b5d72"
+      ]
+    },
+    {
+      "id": "fc13fe2fcfbbd90aeb7f3c0c2edc23a6711235a2281efffc80545519e5bd31c6",
+      "name": "Phoenix Domain",
+      "domain": "phoenix",
+      "riskTier": "critical",
+      "files": {
+        "dir": "phoenix",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "PhoenixWidget",
+          "type": "widget",
+          "pattern": "class PhoenixWidget(Widget)",
+          "description": "Main widget for Phoenix Domain"
+        },
+        {
+          "name": "PhoenixState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass PhoenixState",
+          "description": "Data model for Phoenix Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "00609785d53408a1277848b43540ab7b4e4f7f965ced99dd8c5e3af69635dad1",
+        "06aa548a95ba6d637a449a6f56dfaf24c30b4b1d9c032e35f8e81524fa884b5f",
+        "0700ec73627d49bfecc5ba409be51649e687bdcae5dc2f9e521d82bd7290ab8b",
+        "072adb6427003edaa2d0fd6d4aa63a8811a719703f2ffbe9411139ed154fb409",
+        "0858367659ab9aca666c96d339b0f79b8f7648763f3a2b3422f7c21e06a0cdfa",
+        "0a5f52d49dc98e653e5f4ce64e38522e05c2fe1b5fc61fd44dc31654bcd264d3",
+        "0e79502838e045ee35273f09095c26c9e583fb99e684ae09e714d0de1f087438",
+        "1626593bf32a9039079e816a154027e08cd2a8091e49b9b0825d4a52ae4b2863",
+        "165234442479c421bb4e020e3b1a295a93dadb79c654f7cea6ff8ac3ef62bf41",
+        "17c03e585de1746bb4826f747baf9eb86cba0eb9a4a49850d4e51e9f6cdb7a7a",
+        "17c917a5991304091834834841b34f37f4e8cedf025f5180fd94b59147c3fbe6",
+        "19decd68f2f6915f2139ef35cfcb50c2034cb49e24f446b405ae42de9c49ffba",
+        "19fdfbf45872bfa7f099f4a229d74dcae76e864336d142d670b58b5d7d76e6d7",
+        "1dc9e86a6fbb56c7c2a6851fd15056e5f1db575b978941d524e1e34288ba9d0c",
+        "2848d1ea4860718792b64543da3ce7e0f5d4f12f51ec6a24de53d742e5f663f4",
+        "29f85ffbfd885fe61a9fdb269cd5ef23c478766a714a097300fcd97ddc597685",
+        "2c33febc53d562d381594ef43a6a36da1e423e682d6ff15d15476104811f62db",
+        "2c760e464b018245535e21459815a4f9c7dcdf0978815ffea76d078a9ba45a8a",
+        "43cb8709f677ad190772ae7b9edd4be2b0d2b8ddcf2d673f81cc2fc900a8e062",
+        "46330d6b57f9a916d52bcf0000d41fdeca2f4cb58144f1a8899722738bb7406d",
+        "49bd657d1ad12ab2f2be549a6fc7bea0cb1c12c0af73696b51b9375690ec84e1",
+        "4c0826309e782e452979d474a7e1d511054f88a0530d6293af66c4dff10f7077",
+        "506aa0180085c0fcebf110df5bd75c8067f2886d81578f285373fc658cb098f7",
+        "507a5d0793022f215140f62d5e27309fb905120a9ecd56f4d93db810ed697390",
+        "56cd806bd5d1807460a53ee00152a90ed896a6ee5d536efdf0872796336a8b98",
+        "59dee27c9ade08c87ea565c9d3f9df53b2d5aa667595cd7e81a04cd1d9ce3a90",
+        "5b3f1747723af382356508facbbbbecf6b11fa1d4ff59e1572c7db0cac2a9d88",
+        "5e0e56e949888c62572820f767c7a31a5b25ff51bec6f75ef53d08a21d1547b6",
+        "702fe5c56344be8dc382370194fe41ceaf31ca2311ffb8b1c370e499272e4d19",
+        "73f44b63b97b3687cd3cfc106ec5f7a45b5ed97d5850467d7e5f9dca78db0ed0",
+        "75b072bf01a332b9a151078c60189160cc02dfd6e91a6a9a8cf5ea14176d3f36",
+        "77eff8b84fc75df20570c0dad4ea21c86cab3b1f152a6196df9791e1ade15080",
+        "7ae921b29ae50cc6286715165197d749a64b94206e3eae9d8f8b13851c9659c5",
+        "875ea8b6a00e75910479ac8a4c65c6ec847aab31c6be9299fb924d7423443680",
+        "886f6d8971bd980470529a8d1b2569d7717075ee08cc4afea240211b889d1e2f",
+        "88b2976a2d8568ec6692957b46b70b318788095dcbcc757fc211c1218d618b40",
+        "908b31e13cc059a39e82ac61338892b28aa5f5cb070e79d6474ad4777548342f",
+        "90b2f2f6ee04283bc6d6889c71e4bdca16223601282f5accfb163826f660d6a6",
+        "9ab8c582aad6fb55ca5f6379f38df3887804b8540c1b0f814452f9e58695b2bc",
+        "a2d079738624723c07e69d319a09615436a9e2736afc175daf7652759c92550a",
+        "a5ed0034b6aaa28f3bd5f9c75d63198216d3f88ac831b9a6b21f71d7dbf56566",
+        "aa6fe46ae8e8820e9f8fd20cb706868b18761d7d848213ec6c158ed2117b3dd4",
+        "afa0b8b7b9c7f5fd5891c3200f1828d18573f7bb8783061eb823db1674f553d5",
+        "b210cb48fdd569f47eac13c60fb8da0d48b29e09609e594506ee4864b609c1dd",
+        "b4402a28335168d467916030c50bbf378ef67b0fa14ad24674f2ab3ffc152dad",
+        "b782e6c8d07c6bf5fba75dff435d934578383bb9653e2cec062b28da2ab6ec42",
+        "bdf099529af27c1436807df8f9c295ee75cd5f1a380cd4ac5a372bd7a5148dde",
+        "bede3741b1534f77efb73fcb2aee2b41bfe8fae4d736d6446d40ddd03ec33ba1",
+        "bf9948003551269c77ea869ce63ee16dec7cffe83e943a3ec931a5ae7c1ba97f",
+        "c020b58c63e12bfef9c8ab27486ec3d482f643c567139d39993a7bba797fbc64",
+        "c385163a67ef14daf590bbbcf6533b7f443fca7dea79f7a4ed1c2ef6850bda07",
+        "c7e70dd1daa047c9c5aea1a6c20abbcb4a8a99ec6d5313e4d7e0afd5617116e0",
+        "c8d3e822312badb702aa134b658325fa2b6be7a6da1ab3cf69767c1e60abaae2",
+        "cd651a5948819c795d79981332fe27f1faf73974703cf87e56a3992d8074d71c",
+        "d2b176111627e5f7c02052ea517db9c953e9ecf5b7e85949ea421273baae6676",
+        "d412194cf8382924c67ac787d8d31b167852d707ed99f46006d77057f6aad6af",
+        "d44c672d242d486eac457b0a70126cb15b64825aa8ae3e3168cdeb2d4ce4fa9d",
+        "d9af2095ff70a07830c5c8b40f852eb809cea110584c33e5abcdd077d3e4b92a",
+        "de968fc4e569b7b68bff03ab4333ecc3497632e354777f8ed8116cfb90cf7b50",
+        "e11b2ced432bfcc9b3f718533947ddb56c97ed05a6bcec69c314d891598f4c33",
+        "e1ee2c9ea071a944bc315c07f9067621ad18784850ab79fcf75a99fecadacc9c",
+        "e1f0863326cb176b064d64d6bf4a39530b7e3dbc28e382b555e267afea0b71a4",
+        "e46b05d26c1c234a129bb026c822561dd3c50e5a5d94dafdf6f57dd73baa5648",
+        "e595e2c93ffe8946f9c67b7ea0c506d10051661863033b56f65715ad7398cbdf",
+        "e6aa0806ec1d47d83d512b2e425fdf70806178120eebc5e9e2e6900a1089a0b3",
+        "e6bcffa73751cf1d2ded62d641250aeda57814523238526110b610a23d5039fd",
+        "ed53f4ea610ae8964b322f736463d47301d8336a416b05e69db82227ccbe1cdc",
+        "ed81a1ef902feddc63364b2383fd6fe8bcf5eb3134661ea530c11b95b3a39a1c",
+        "ed95a1fd6ffc90fbf2e7650fff2b986c023cb15344ac357f18fb4558152b07e3",
+        "f76639d23adb36c117d4965032cb613bbb7efbaa950a820e49349be20661a0e5",
+        "f803e53f0f7da24457152a70d8ec48ac1808fe33e5dc35cdf58ffbe61b464601",
+        "fafbc401ef39c69a916b14fc590ff83fc5d9f4c1b12023d5b143a5f719a5d9f1",
+        "fc52514bd7e88e924f4dba4b66c60e3806a62e86e268397944e98d23f5534128"
+      ]
+    },
+    {
+      "id": "0ad7d2abfa3ae987ca6b8e4b51fb79a0c67b3ee2cb56a2c3e9b5a360a7cfa6c8",
+      "name": "App Domain",
+      "domain": "app",
+      "riskTier": "low",
+      "files": {
+        "dir": "app",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "AppWidget",
+          "type": "widget",
+          "pattern": "class AppWidget(Widget)",
+          "description": "Main widget for App Domain"
+        },
+        {
+          "name": "AppState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass AppState",
+          "description": "Data model for App Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "0abc32622c36bcc2b4ff568d58c32daf955218b103860ce16ed10a621fc8c0b9",
+        "9b72066f57aedd33deda7c8d50016a02ade7ee7b8b574dea8d48be011a0bea82",
+        "c0fe61db52951d813822dd8e48b4ca4c673904c73299e957b692584e06fb27c1",
+        "cfdb499e317a6b7cc3520e5c1c480d3e930c388b16040105aa498a96b010177e"
+      ]
+    },
+    {
+      "id": "c26aa3c44263b96f61bef49d9f34f2c8ac178ddb817c13a81cae8fac8910cde9",
+      "name": "Part Domain",
+      "domain": "part",
+      "riskTier": "low",
+      "files": {
+        "dir": "part",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "PartWidget",
+          "type": "widget",
+          "pattern": "class PartWidget(Widget)",
+          "description": "Main widget for Part Domain"
+        },
+        {
+          "name": "PartState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass PartState",
+          "description": "Data model for Part Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "7aa13656a8edde5c826e24adee512f81d7eec53f2f3eaf4375ae7f4e980da9e2"
+      ]
+    },
+    {
+      "id": "208c47be4710f625733d024b8f84026264540dcef60a157cbfad2dab97e9cfd0",
+      "name": "Message Domain",
+      "domain": "message",
+      "riskTier": "high",
+      "files": {
+        "dir": "message",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "MessageWidget",
+          "type": "widget",
+          "pattern": "class MessageWidget(Widget)",
+          "description": "Main widget for Message Domain"
+        },
+        {
+          "name": "MessageState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass MessageState",
+          "description": "Data model for Message Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "008da2678933fcf39e3bd35c8b27e6010109d259c0a718fc614267b7941c32b7",
+        "1a5715cdc96232bc0ed33c852c464834ec02e98ac5c59fbde50a56a9cf4dca6f",
+        "47d3c4b7a48dbb47b488c8122673127eea5642158dda6340db3c59956d2c7d3b",
+        "9f60fc3faf0aee2f79c40391ccfca7563018f1ba22b8b9a3edfe41062472afbb",
+        "aaf8574e45a08b76f96a45b6080b2fc4d0d893fff307fbe423ccc88951087b24",
+        "ab42a071587a10c040aab8e15618a6c3745fe76eecd8d74e34261fc938497cc4",
+        "fbf0cc734cb0e2075b93667ca4526e00613102d91624abe5dc82a2997425d083"
+      ]
+    },
+    {
+      "id": "046b9cd014d42593ad98d1288d04d78703133dce78a12c56a7e527f960a81eb1",
+      "name": "MessageWidget Domain",
+      "domain": "messagewidget",
+      "riskTier": "high",
+      "files": {
+        "dir": "messagewidget",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "MessagewidgetWidget",
+          "type": "widget",
+          "pattern": "class MessagewidgetWidget(Widget)",
+          "description": "Main widget for MessageWidget Domain"
+        },
+        {
+          "name": "MessagewidgetState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass MessagewidgetState",
+          "description": "Data model for MessageWidget Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "500f5a0918802920083ae9976657da3d092746619ef03ec29ea5046d71305e97",
+        "b42b35145bcf068534bace0bc11f1dd3c64af99dce40a5a320f6a5d1c53b86ea",
+        "def7c33f03e67d756d9ee06ea2386c2e971fad77191ac0bef34fbb0c4b8a8e47",
+        "f68d1a91aa39fbfa9a52dbf98a6cd92d7f8ef34e0913d132d98d239e590e873d"
+      ]
+    },
+    {
+      "id": "a96593424cd519d92b63146dc23690213672cbbc4d266ea9860e9492b2ceed25",
+      "name": "Layout Domain",
+      "domain": "layout",
+      "riskTier": "high",
+      "files": {
+        "dir": "layout",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "LayoutWidget",
+          "type": "widget",
+          "pattern": "class LayoutWidget(Widget)",
+          "description": "Main widget for Layout Domain"
+        },
+        {
+          "name": "LayoutState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass LayoutState",
+          "description": "Data model for Layout Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "3488aa1d915d7b08a50592ad73209e5ac99ee8f18998a0827971268ff7611ef7",
+        "6bcd6b4bbcc9d484cdaf9fd69a063a083cd6adc774fa872877d16aba8cd452ec",
+        "cb18d3273fdb618c427a24968ba527f37116bb03c6a7504233b0dff56738a3ae",
+        "dbd65556ee47c247c9233471bcb6b67f87a81e1f44b8a202375ac6d7f75ed1ef",
+        "f75dd72e09bf81035024c902d2d2b1055121d3c5d3168db204879fddcc1e55d0"
+      ]
+    },
+    {
+      "id": "ca271b2e8005632feddfe07bf14f769c1e0614debc58045696bd44758ebc3931",
+      "name": "Sidebar Domain",
+      "domain": "sidebar",
+      "riskTier": "high",
+      "files": {
+        "dir": "sidebar",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "SidebarWidget",
+          "type": "widget",
+          "pattern": "class SidebarWidget(Widget)",
+          "description": "Main widget for Sidebar Domain"
+        },
+        {
+          "name": "SidebarState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass SidebarState",
+          "description": "Data model for Sidebar Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "5df2a61256d4eebf874443ead00b2e0c1ff94c5b20a38525698350fda36e2cd2"
+      ]
+    },
+    {
+      "id": "624d5dcbd1815ec403479bcefd96729ab15710ed00907cee9bd830b20b16b0f8",
+      "name": "AuthScreen Domain",
+      "domain": "authscreen",
+      "riskTier": "critical",
+      "files": {
+        "dir": "authscreen",
+        "index": "__init__.py"
+      },
+      "functions": [],
+      "classes": [
+        {
+          "name": "AuthscreenWidget",
+          "type": "widget",
+          "pattern": "class AuthscreenWidget(Widget)",
+          "description": "Main widget for AuthScreen Domain"
+        },
+        {
+          "name": "AuthscreenState",
+          "type": "model",
+          "pattern": "@dataclass(slots=True)\\nclass AuthscreenState",
+          "description": "Data model for AuthScreen Domain"
+        }
+      ],
+      "reactiveExports": [],
+      "components": {
+        "widget": false,
+        "screen": false,
+        "reactive": false,
+        "bindings": []
+      },
+      "canonIds": [
+        "4ecf2de3cc1214bcc1648f5008f7aa658c9769f7fdd2c94873054e222a30d51e",
+        "c60d2e47a38a593d5e152afa0d7b8d09774a07ad3b8af93c600dea1852cb85f8"
+      ]
+    }
+  ],
+  "constraintMappings": [
+    {
+      "statement": "must not exceed limitation",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "must support minimum requirement",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "textuals input widget does not accept a multiline parameter do not pass multilinetruefalse to input",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "all textual messages must call superinit in their init method",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "when importing both textuals message event class and a chat message model textuals message must be aliased eg from textualmessage import message as textualmessage to avoid name collision event message classes must inherit from textualmessage not the chat message model",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    },
+    {
+      "statement": "the apppy must include entry point block if name main runapp for python m srcgeneratedapp to work",
+      "matchedPattern": null,
+      "implementation": "manual review needed"
+    }
+  ],
+  "deliverable": {
+    "dir": "widgets",
+    "serverFile": "app.py",
+    "storeFile": "models.py",
+    "patterns": {
+      "serverFramework": "None (TUI application)",
+      "uiPattern": "Textual widgets with CSS styling",
+      "stateManagement": "reactive attributes on Widget classes"
+    }
+  }
+}

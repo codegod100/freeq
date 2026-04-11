@@ -224,6 +224,16 @@ export interface Store {
   setChannelSettingsOpen: (channel: string | null) => void;
 }
 
+/** Safely parse JSON from localStorage, returning fallback on any error. */
+function safeJsonParse<T>(value: string | null, fallback: T): T {
+  if (!value) return fallback;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function getOrCreateChannel(channels: Map<string, Channel>, name: string): Channel {
   const key = name.toLowerCase();
   let ch = channels.get(key);
@@ -267,11 +277,11 @@ export const useStore = create<Store>((set, get) => ({
   messageDensity: (localStorage.getItem('freeq-density') as 'default' | 'compact' | 'cozy') || 'default',
   showJoinPart: localStorage.getItem('freeq-show-join-part') === 'true',
   loadExternalMedia: localStorage.getItem('freeq-load-media') !== 'false',
-  favorites: new Set(JSON.parse(localStorage.getItem('freeq-favorites') || '[]')),
-  mutedChannels: new Set(JSON.parse(localStorage.getItem('freeq-muted') || '[]')),
-  bookmarks: JSON.parse(localStorage.getItem('freeq-bookmarks') || '[]').map((b: any) => ({ ...b, timestamp: new Date(b.timestamp) })),
+  favorites: new Set(safeJsonParse(localStorage.getItem('freeq-favorites'), [])),
+  mutedChannels: new Set(safeJsonParse(localStorage.getItem('freeq-muted'), [])),
+  bookmarks: safeJsonParse(localStorage.getItem('freeq-bookmarks'), []).map((b: any) => ({ ...b, timestamp: new Date(b.timestamp) })),
   bookmarksPanelOpen: false,
-  hiddenDMs: new Set(JSON.parse(localStorage.getItem('freeq-hidden-dms') || '[]')),
+  hiddenDMs: new Set(safeJsonParse(localStorage.getItem('freeq-hidden-dms'), [])),
   searchOpen: false,
   scrollToMsgId: null,
   searchQuery: '',
@@ -340,6 +350,7 @@ export const useStore = create<Store>((set, get) => ({
   }),
 
   addDmTarget: (nick) => set((s) => {
+    if (!nick || !nick.trim()) return {}; // Reject empty nick
     const channels = new Map(s.channels);
     const key = nick.toLowerCase();
     if (!channels.has(key)) {
@@ -353,11 +364,18 @@ export const useStore = create<Store>((set, get) => ({
   removeChannel: (name) => set((s) => {
     const channels = new Map(s.channels);
     channels.delete(name.toLowerCase());
+    // Clean up any in-flight batches targeting this channel
+    const batches = new Map(s.batches);
+    for (const [id, batch] of batches) {
+      if (batch.target.toLowerCase() === name.toLowerCase()) batches.delete(id);
+    }
     const activeChannel = s.activeChannel.toLowerCase() === name.toLowerCase() ? 'server' : s.activeChannel;
-    return { channels, activeChannel };
+    return { channels, batches, activeChannel };
   }),
 
   setActiveChannel: (name) => set((s) => {
+    // Validate target exists (except 'server' which is always valid)
+    if (name !== 'server' && !s.channels.has(name.toLowerCase())) return {};
     const channels = new Map(s.channels);
     // Mark last-read on the channel we're leaving
     const oldCh = channels.get(s.activeChannel.toLowerCase());
@@ -397,6 +415,7 @@ export const useStore = create<Store>((set, get) => ({
     return { channels };
   }),
   addMember: (channel, member) => set((s) => {
+    if (!member.nick || !member.nick.trim()) return {}; // Reject empty/whitespace nicks
     const channels = new Map(s.channels);
     const ch = getOrCreateChannel(channels, channel);
     const existing = ch.members.get(member.nick.toLowerCase());
@@ -446,6 +465,7 @@ export const useStore = create<Store>((set, get) => ({
   }),
 
   renameUser: (oldNick, newNick) => set((s) => {
+    if (!oldNick.trim() || !newNick.trim()) return {}; // Reject empty nicks
     const channels = new Map(s.channels);
     for (const [key, ch] of channels) {
       const member = ch.members.get(oldNick.toLowerCase());
@@ -503,15 +523,15 @@ export const useStore = create<Store>((set, get) => ({
     const adding = mode.startsWith('+');
     const modeChar = mode.replace(/^[+-]/, '');
 
-    // User modes (+o, +h, +v)
+    // User modes (+o, +h, +v) — only apply if member exists (don't create phantoms)
     if ((modeChar === 'o' || modeChar === 'h' || modeChar === 'v') && arg) {
-      const member = ch.members.get(arg.toLowerCase()) ?? {
-        nick: arg, isOp: false, isHalfop: false, isVoiced: false,
-      };
-      if (modeChar === 'o') member.isOp = adding;
-      if (modeChar === 'h') member.isHalfop = adding;
-      if (modeChar === 'v') member.isVoiced = adding;
-      ch.members.set(arg.toLowerCase(), { ...member });
+      const member = ch.members.get(arg.toLowerCase());
+      if (member) {
+        if (modeChar === 'o') member.isOp = adding;
+        if (modeChar === 'h') member.isHalfop = adding;
+        if (modeChar === 'v') member.isVoiced = adding;
+        ch.members.set(arg.toLowerCase(), { ...member });
+      }
     } else {
       // Channel modes
       if (adding) ch.modes.add(modeChar);
@@ -574,6 +594,8 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   editMessage: (channel, originalMsgId, newText, newMsgId, isStreaming) => set((s) => {
+    // Treat empty edit as a "cleared" message to prevent invisible messages
+    const displayText = newText || (isStreaming ? '' : '[message cleared]');
     const channels = new Map(s.channels);
     const ch = channels.get(channel.toLowerCase());
     if (ch) {
@@ -581,7 +603,7 @@ export const useStore = create<Store>((set, get) => ({
       // where the first edit changes id but subsequent edits still reference the original
       ch.messages = ch.messages.map((m) =>
         (m.id === originalMsgId || m.editOf === originalMsgId)
-          ? { ...m, text: newText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
+          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
           : m
       );
       channels.set(channel.toLowerCase(), { ...ch });
@@ -593,7 +615,7 @@ export const useStore = create<Store>((set, get) => ({
       if (batch.target.toLowerCase() !== channel.toLowerCase()) continue;
       batch.messages = batch.messages.map((m) =>
         (m.id === originalMsgId || m.editOf === originalMsgId)
-          ? { ...m, text: newText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
+          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
           : m
       );
       batches.set(id, batch);
@@ -614,6 +636,7 @@ export const useStore = create<Store>((set, get) => ({
   }),
 
   addReaction: (channel, msgId, emoji, fromNick) => set((s) => {
+    if (!emoji || !emoji.trim()) return {}; // Reject empty emoji
     const channels = new Map(s.channels);
     const ch = channels.get(channel.toLowerCase());
     if (!ch) return { channels };

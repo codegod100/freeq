@@ -203,10 +203,10 @@ If something feels “too clever,” it’s probably wrong.
 - [x] **`away-notify` cap** — ✅ DONE. Broadcast AWAY changes to shared channel members. Server, SDK, TUI, and web client all support it.
 - [x] **S2S authorization on Kick/Mode** — ✅ DONE. Receiving server verifies the kicker/mode-setter is an op (via remote_members is_op, founder_did, or did_ops) before executing. Unauthorized mode/kick events are rejected with warning log.
 - [x] **S2S authorization on Topic** — ✅ DONE. +t channels reject topic changes from non-ops. Removed "trust unknown users" fallback.
-- [x] **SyncResponse channel creation limit** — ✅ DONE. Capped at 500 channels per peer. Excess logged and dropped.
+- [ ] **SyncResponse channel creation limit** — NOT YET IMPLEMENTED. No 500-channel cap found in s2s.rs.
 - [x] **ChannelCreated should propagate default modes** — ✅ DONE. New channels from S2S get +nt defaults.
 - [x] **Invites should sync via S2S** — ✅ DONE. S2sMessage::Invite variant relays invite tokens (DID or nick:XXX) to peers. SyncResponse carries invites (additive merge). S2S Join enforcement checks invite list before rejecting +i. Invites consumed on join.
-- [x] **S2S rate limiting** — ✅ DONE. 100 events/sec per peer, drops with warning log.
+- [ ] **S2S rate limiting** — NOT YET IMPLEMENTED. Documented in SECURITY.md but no rate limiter in s2s.rs.
 - [x] **DPoP nonce retry for SASL verification** — ✅ DONE. Server detects PDS `use_dpop_nonce` errors, sends fresh nonce to client via NOTICE, re-issues SASL challenge. Client (SDK) updates DPoP nonce and retries automatically. Capped at 3 retries per SASL attempt to prevent infinite loops. Counter resets on new SASL attempt.
 
 ### P2 — Important

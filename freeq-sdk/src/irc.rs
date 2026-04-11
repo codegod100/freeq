@@ -119,16 +119,29 @@ impl fmt::Display for Message {
         }
 
         if let Some(ref prefix) = self.prefix {
-            write!(f, ":{prefix} ")?;
+            // Strip control characters from prefix to prevent protocol injection
+            let safe: String = prefix.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect();
+            write!(f, ":{safe} ")?;
         }
         write!(f, "{}", self.command)?;
         for (i, param) in self.params.iter().enumerate() {
-            if i == self.params.len() - 1
-                && (param.contains(' ') || param.starts_with(':') || param.is_empty())
+            // Strip CRLF/NUL from all params to prevent protocol injection
+            let safe: String = param.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect();
+            let is_last = i == self.params.len() - 1;
+            if is_last
+                && (safe.contains(' ') || safe.starts_with(':') || safe.is_empty())
             {
-                write!(f, " :{param}")?;
+                write!(f, " :{safe}")?;
+            } else if !is_last && safe.contains(' ') {
+                // Space in non-last param: force to trailing position by
+                // writing remaining params as a single trailing
+                let remaining: Vec<String> = self.params[i..].iter()
+                    .map(|p| p.chars().filter(|c| *c != '\r' && *c != '\n' && *c != '\0').collect())
+                    .collect();
+                write!(f, " :{}", remaining.join(" "))?;
+                return Ok(());
             } else {
-                write!(f, " {param}")?;
+                write!(f, " {safe}")?;
             }
         }
         Ok(())

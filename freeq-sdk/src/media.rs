@@ -177,10 +177,25 @@ impl Reaction {
 
 /// Fetch OpenGraph metadata from a URL for link preview.
 pub async fn fetch_link_preview(url: &str) -> Result<LinkPreview> {
-    let client = reqwest::Client::builder()
+    // SSRF protection: resolve hostname and reject private IPs
+    let parsed = url::Url::parse(url).context("Invalid URL for link preview")?;
+    let host = parsed
+        .host_str()
+        .context("URL has no host")?
+        .to_string();
+    let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let addrs = crate::ssrf::resolve_and_check(&host, port)
+        .await
+        .context("Link preview SSRF check failed")?;
+
+    // Use a DNS-pinned client to prevent rebinding between check and fetch
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()?;
+        .redirect(reqwest::redirect::Policy::limited(5));
+    for addr in &addrs {
+        builder = builder.resolve(&host, *addr);
+    }
+    let client = builder.build()?;
 
     let resp = client
         .get(url)

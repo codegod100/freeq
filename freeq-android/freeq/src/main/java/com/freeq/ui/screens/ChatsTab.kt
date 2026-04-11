@@ -40,13 +40,19 @@ fun ChatsTab(
     var showJoinDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    val allConversations = (appState.channels + appState.dmBuffers.filter { it.name.isNotEmpty() && it.messages.isNotEmpty() })
-        .sortedByDescending { it.lastActivityTime }
+    val allConversations by remember {
+        derivedStateOf {
+            (appState.channels + appState.dmBuffers.filter { it.name.isNotEmpty() && it.messages.isNotEmpty() })
+                .sortedByDescending { it.lastActivityTime.value }
+        }
+    }
 
-    // Scroll to top when a new channel is added
-    val channelCount = appState.channels.size
-    LaunchedEffect(channelCount) {
-        if (channelCount > 0) listState.animateScrollToItem(0)
+    // Scroll to top when conversations are ready
+    val firstConversation = allConversations.firstOrNull()?.name
+    LaunchedEffect(firstConversation) {
+        if (firstConversation != null) {
+            listState.scrollToItem(0)
+        }
     }
     val filteredConversations = if (searchText.isEmpty()) {
         allConversations

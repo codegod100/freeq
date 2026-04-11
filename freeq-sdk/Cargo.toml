@@ -33,6 +33,7 @@ hmac = { workspace = true }
 iroh = { workspace = true, optional = true }
 iroh-quinn = { workspace = true, optional = true }
 open = { workspace = true }
+url = "2"
 dirs = { workspace = true }
 parking_lot = "0.12"
 

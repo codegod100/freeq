@@ -557,24 +557,30 @@ async function handleLine(rawLine: string) {
       store.setRegistered(true);
       store.setConnectedServer(lastUrl);
       // Auto-join channels:
-      // 1. Explicit channels from connect() call (e.g. invite link)
-      // 2. Channels from current session (reconnect)
-      // 3. Saved channels from localStorage (fresh page load)
-      // For DID-authenticated users, the server also auto-joins saved channels,
-      // but sending JOIN for already-joined channels is harmless (server ignores).
-      let toJoin = autoJoinChannels.length > 0
-        ? autoJoinChannels
-        : joinedChannels.size > 0
-          ? [...joinedChannels]
-          : loadSavedChannels();
-      // Always include #freeq for new users (no saved channels)
-      if (toJoin.length === 0) toJoin = ['#freeq'];
-      // Ensure #freeq is always in the list
-      if (!toJoin.some(ch => ch.toLowerCase().replace(/^#/, '') === 'freeq' || ch.toLowerCase() === '#freeq')) {
-        toJoin.unshift('#freeq');
+      // - Explicit channels from connect() call (e.g. invite link) always apply.
+      // - For DID-authenticated users, the server auto-joins from the DB
+      //   (user_channels table, maintained on JOIN/PART). Don't duplicate.
+      // - For guests, join from in-memory session set or #freeq default.
+      let toJoin: string[];
+      if (autoJoinChannels.length > 0) {
+        // Explicit channels (invite link, connect screen)
+        toJoin = autoJoinChannels;
+      } else if (saslDid) {
+        // Authenticated: server handles auto-rejoin from DB.
+        // Only join #freeq if the server doesn't auto-join anything
+        // (the server will send JOINs which populate the channel list).
+        toJoin = [];
+      } else if (joinedChannels.size > 0) {
+        // Guest reconnect: rejoin channels from current session
+        toJoin = [...joinedChannels];
+      } else {
+        // Fresh guest: join #freeq
+        toJoin = ['#freeq'];
       }
-      // The server auto-joins saved channels for DID users (registration.rs).
-      // Only send JOIN for channels not already joined to avoid duplicate 366/CHATHISTORY.
+      // Ensure #freeq for guests with no channels
+      if (!saslDid && toJoin.length === 0) {
+        toJoin = ['#freeq'];
+      }
       for (const ch of toJoin) {
         const name = ch.trim();
         if (name && !store.channels.has(name.toLowerCase())) {
@@ -603,7 +609,7 @@ async function handleLine(rawLine: string) {
 
     case 'NICK': {
       const newNick = msg.params[0];
-      if (from === nick) {
+      if (from.toLowerCase() === nick.toLowerCase()) {
         nick = newNick;
         store.setNick(nick);
       }
@@ -614,7 +620,7 @@ async function handleLine(rawLine: string) {
     case 'JOIN': {
       const channel = msg.params[0];
       const account = msg.params[1]; // extended-join
-      if (from === nick) {
+      if (from.toLowerCase() === nick.toLowerCase()) {
         store.addChannel(channel);
         store.clearMembers(channel); // Clear stale members before NAMES reply arrives
         // Only auto-switch if no saved channel preference or still on server tab
@@ -643,7 +649,7 @@ async function handleLine(rawLine: string) {
 
     case 'PART': {
       const channel = msg.params[0];
-      if (from === nick) {
+      if (from.toLowerCase() === nick.toLowerCase()) {
         store.removeChannel(channel);
         joinedChannels.delete(channel.toLowerCase());
         saveJoinedChannels();
@@ -922,10 +928,20 @@ async function handleLine(rawLine: string) {
     case 'MODE': {
       const target = msg.params[0];
       if (target.startsWith('#') || target.startsWith('&')) {
-        const mode = msg.params[1] || '';
-        const arg = msg.params[2];
-        store.handleMode(target, mode, arg, from);
-        store.addSystemMessage(target, `${from} set mode ${mode}${arg ? ' ' + arg : ''}`);
+        const modeStr = msg.params[1] || '';
+        // Parse compound mode string: "+ov alice bob" → [+o alice, +v bob]
+        // Modes that take an argument: o, h, v, k, b
+        const argsWithParam = new Set(['o', 'h', 'v', 'k', 'b']);
+        let adding = true;
+        let argIdx = 2; // msg.params index for next arg
+        for (const ch of modeStr) {
+          if (ch === '+') { adding = true; continue; }
+          if (ch === '-') { adding = false; continue; }
+          const modeArg = argsWithParam.has(ch) ? msg.params[argIdx++] : undefined;
+          store.handleMode(target, `${adding ? '+' : '-'}${ch}`, modeArg, from);
+        }
+        const allArgs = msg.params.slice(2).join(' ');
+        store.addSystemMessage(target, `${from} set mode ${modeStr}${allArgs ? ' ' + allArgs : ''}`);
       }
       break;
     }
@@ -1032,10 +1048,14 @@ async function handleLine(rawLine: string) {
     // ── WHOIS ──
     case '311': { // RPL_WHOISUSER: nick user host * :realname
       const whoisNick = msg.params[1] || '';
+      // Reset identity fields — they'll only be re-set if server sends 330/671.
+      // This prevents stale DID/handle from a previous user with the same nick.
       store.updateWhois(whoisNick, {
         user: msg.params[2],
         host: msg.params[3],
         realname: msg.params[5] || msg.params[4],
+        did: undefined,
+        handle: undefined,
       });
       if (!backgroundWhois.has(whoisNick.toLowerCase())) {
         store.addSystemMessage('server', `WHOIS ${whoisNick}: ${msg.params[2]}@${msg.params[3]} (${msg.params[5] || msg.params[4]})`);
@@ -1065,7 +1085,7 @@ async function handleLine(rawLine: string) {
     }
     case '330': { // RPL_WHOISACCOUNT (DID)
       const whoisNick = msg.params[1] || '';
-      const did = msg.params[2] || '';
+      const did = msg.params[2]?.trim() || undefined;
       store.updateWhois(whoisNick, { did });
       if (!backgroundWhois.has(whoisNick.toLowerCase())) {
         store.addSystemMessage('server', `  DID: ${did}`);
@@ -1098,7 +1118,7 @@ async function handleLine(rawLine: string) {
     }
     case '671': { // AT handle
       const whoisNick = msg.params[1] || '';
-      const handle = msg.params[2] || '';
+      const handle = msg.params[2]?.trim() || undefined;
       store.updateWhois(whoisNick, { handle });
       if (!backgroundWhois.has(whoisNick.toLowerCase())) {
         store.addSystemMessage('server', `  Handle: ${handle}`);
@@ -1178,12 +1198,24 @@ function handleAuthenticate(msg: IRCMessage) {
   const param = msg.params[0] || '';
   if (param === '+' || !param) return;
 
-  // Server sent the challenge — respond with our credentials
+  // Server sent the challenge — decode it to extract the nonce, then respond.
+  // The challenge_nonce binds our PDS-verified session to this specific
+  // challenge, preventing token replay across different servers/sessions.
+  let challengeNonce: string | undefined;
+  try {
+    const challengeJson = atob(param.replace(/-/g, '+').replace(/_/g, '/'));
+    const challenge = JSON.parse(challengeJson);
+    challengeNonce = challenge.nonce;
+  } catch {
+    // If we can't decode the challenge, proceed without the nonce.
+    // The server will reject PDS methods that lack it.
+  }
   const response = JSON.stringify({
     did: saslDid,
     method: saslMethod || 'pds-session',
     signature: saslToken,
     pds_url: saslPdsUrl,
+    challenge_nonce: challengeNonce,
   });
   const encoded = btoa(response)
     .replace(/\+/g, '-')

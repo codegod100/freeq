@@ -36,6 +36,7 @@ mod encryption_at_rest {
             1000,
             &HashMap::new(),
             Some("msg001"),
+            None,
         )
         .unwrap();
         let msgs = db.get_messages("#test", 10, None).unwrap();
@@ -55,6 +56,7 @@ mod encryption_at_rest {
             "Secret message",
             1000,
             &HashMap::new(),
+            None,
             None,
         )
         .unwrap();
@@ -78,6 +80,7 @@ mod encryption_at_rest {
             1000,
             &HashMap::new(),
             None,
+            None,
         )
         .unwrap();
         let raw = db.get_raw_message_text("#test", 1000).unwrap();
@@ -95,6 +98,7 @@ mod encryption_at_rest {
             1000,
             &HashMap::new(),
             None,
+            None,
         )
         .unwrap();
 
@@ -110,7 +114,7 @@ mod encryption_at_rest {
         let key2: [u8; 32] = [0x02; 32];
 
         let db1 = Db::open_encrypted_memory(key1).unwrap();
-        db1.insert_message("#test", "alice", "Secret", 1000, &HashMap::new(), None)
+        db1.insert_message("#test", "alice", "Secret", 1000, &HashMap::new(), None, None)
             .unwrap();
 
         // Read raw EAR1 data
@@ -120,7 +124,7 @@ mod encryption_at_rest {
         // Trying to decrypt with wrong key should fail gracefully
         // (decrypt_at_rest returns the raw EAR1 string on failure, not plaintext)
         let db2 = Db::open_encrypted_memory(key2).unwrap();
-        db2.insert_message("#test", "alice", &raw, 1000, &HashMap::new(), None)
+        db2.insert_message("#test", "alice", &raw, 1000, &HashMap::new(), None, None)
             .unwrap();
         let msgs = db2.get_messages("#test", 10, None).unwrap();
         // With wrong key, decrypt fails and returns EAR1-prefixed ciphertext
@@ -132,7 +136,7 @@ mod encryption_at_rest {
     fn unicode_encrypted_roundtrip() {
         let db = make_db();
         let text = "こんにちは 🔐 мир العالم 🌍";
-        db.insert_message("#test", "alice", text, 1000, &HashMap::new(), None)
+        db.insert_message("#test", "alice", text, 1000, &HashMap::new(), None, None)
             .unwrap();
         let msgs = db.get_messages("#test", 10, None).unwrap();
         assert_eq!(msgs[0].text, text);
@@ -141,7 +145,7 @@ mod encryption_at_rest {
     #[test]
     fn empty_message_encrypted_roundtrip() {
         let db = make_db();
-        db.insert_message("#test", "alice", "", 1000, &HashMap::new(), None)
+        db.insert_message("#test", "alice", "", 1000, &HashMap::new(), None, None)
             .unwrap();
         let msgs = db.get_messages("#test", 10, None).unwrap();
         assert_eq!(msgs[0].text, "");
@@ -151,7 +155,7 @@ mod encryption_at_rest {
     fn large_message_encrypted_roundtrip() {
         let db = make_db();
         let text = "A".repeat(8000); // near IRC line limit
-        db.insert_message("#test", "alice", &text, 1000, &HashMap::new(), None)
+        db.insert_message("#test", "alice", &text, 1000, &HashMap::new(), None, None)
             .unwrap();
         let msgs = db.get_messages("#test", 10, None).unwrap();
         assert_eq!(msgs[0].text, text);
@@ -168,6 +172,7 @@ mod encryption_at_rest {
                 1000 + i,
                 &HashMap::new(),
                 None,
+                None,
             )
             .unwrap();
         }
@@ -181,9 +186,9 @@ mod encryption_at_rest {
     #[test]
     fn encrypted_messages_across_channels() {
         let db = make_db();
-        db.insert_message("#chan-a", "alice", "msg in A", 1000, &HashMap::new(), None)
+        db.insert_message("#chan-a", "alice", "msg in A", 1000, &HashMap::new(), None, None)
             .unwrap();
-        db.insert_message("#chan-b", "bob", "msg in B", 1001, &HashMap::new(), None)
+        db.insert_message("#chan-b", "bob", "msg in B", 1001, &HashMap::new(), None, None)
             .unwrap();
 
         let a = db.get_messages("#chan-a", 10, None).unwrap();
@@ -210,6 +215,7 @@ mod encryption_at_rest {
             1000,
             &HashMap::new(),
             Some("msg001"),
+            None,
         )
         .unwrap();
         db.edit_message("msg001", "alice", "edited text", Some("msg002"))
@@ -230,7 +236,7 @@ mod encryption_at_rest {
         let mut tags = HashMap::new();
         tags.insert("+freeq.at/sig".to_string(), "somesig".to_string());
         tags.insert("msgid".to_string(), "test123".to_string());
-        db.insert_message("#test", "alice", "signed msg", 1000, &tags, Some("test123"))
+        db.insert_message("#test", "alice", "signed msg", 1000, &tags, Some("test123"), None)
             .unwrap();
 
         let msgs = db.get_messages("#test", 10, None).unwrap();

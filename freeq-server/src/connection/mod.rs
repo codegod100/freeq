@@ -29,7 +29,7 @@ pub(crate) mod routing;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -390,15 +390,70 @@ where
         }
 
         line_buf.clear();
-        // Cap line length to 8KB to prevent OOM from malicious clients
+        // Cap line length to 8KB to prevent OOM from malicious clients.
+        // SECURITY: We use a bounded read that limits memory before data
+        // is fully buffered, preventing OOM from clients sending gigabytes
+        // without a newline.
         const MAX_LINE_LEN: usize = 8192;
-        let read_result =
-            tokio::time::timeout(ping_interval, reader.read_line(&mut line_buf)).await;
+        let read_result = tokio::time::timeout(ping_interval, async {
+            use tokio::io::AsyncBufReadExt as _;
+            loop {
+                let buf = reader.fill_buf().await?;
+                if buf.is_empty() {
+                    // EOF
+                    return Ok::<usize, std::io::Error>(0);
+                }
+                // Look for newline in the available buffer
+                let len = if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    // Found newline — take up to and including it
+                    let chunk = &buf[..=pos];
+                    line_buf.push_str(&String::from_utf8_lossy(chunk));
+                    pos + 1
+                } else {
+                    // No newline yet — take the whole buffer
+                    let chunk = buf;
+                    line_buf.push_str(&String::from_utf8_lossy(chunk));
+                    chunk.len()
+                };
+                reader.consume(len);
+                // If we found a newline (line_buf ends with \n), we're done
+                if line_buf.ends_with('\n') {
+                    return Ok(line_buf.len());
+                }
+                // If accumulated data exceeds limit, reject
+                if line_buf.len() >= MAX_LINE_LEN {
+                    return Ok(line_buf.len());
+                }
+            }
+        })
+        .await;
         if line_buf.len() > MAX_LINE_LEN {
             tracing::warn!(%session_id, len = line_buf.len(), "Line too long, dropping");
             let reply =
                 Message::from_server(&server_name, "417", vec!["*", "Input line was too long"]);
             send(&state, &session_id, format!("{reply}\r\n"));
+            // Drain remaining bytes up to the next newline to resync.
+            // Use bounded drain to avoid the same OOM issue.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                use tokio::io::AsyncBufReadExt as _;
+                let mut drained: usize = 0;
+                const DRAIN_LIMIT: usize = 1_048_576; // 1MB max drain
+                loop {
+                    let buf = reader.fill_buf().await?;
+                    if buf.is_empty() {
+                        break;
+                    }
+                    let nl_pos = buf.iter().position(|&b| b == b'\n');
+                    let consume_len = nl_pos.map(|p| p + 1).unwrap_or(buf.len());
+                    reader.consume(consume_len);
+                    drained += consume_len;
+                    if nl_pos.is_some() || drained >= DRAIN_LIMIT {
+                        break;
+                    }
+                }
+                Ok::<(), std::io::Error>(())
+            })
+            .await;
             continue;
         }
 
@@ -510,15 +565,19 @@ where
                         .map(|s| s.to_string());
                     let in_use = in_use_by_session.is_some();
 
-                    // Check if the nick is in use by the same DID (multi-device OK)
-                    let in_use_by_same_did = in_use_by_session.as_ref().is_some_and(|sid| {
-                        let session_dids = state.session_dids.lock();
-                        let my_did = conn.authenticated_did.as_deref();
-                        match (session_dids.get(sid), my_did) {
-                            (Some(other_did), Some(my)) => other_did == my,
-                            _ => false,
-                        }
-                    });
+                    // Check if the nick is in use by the same session (case change)
+                    // or same DID (multi-device OK)
+                    let in_use_by_self = in_use_by_session.as_ref()
+                        .is_some_and(|sid| sid == &session_id);
+                    let in_use_by_same_did = in_use_by_self
+                        || in_use_by_session.as_ref().is_some_and(|sid| {
+                            let session_dids = state.session_dids.lock();
+                            let my_did = conn.authenticated_did.as_deref();
+                            match (session_dids.get(sid), my_did) {
+                                (Some(other_did), Some(my)) => other_did == my,
+                                _ => false,
+                            }
+                        });
 
                     let owner_did = state.nick_owners.lock().get(&nick_lower).cloned();
                     let my_did = conn.authenticated_did.as_deref();
@@ -530,7 +589,7 @@ where
                             .is_some_and(|owner| my_did.is_none_or(|my| my != owner))
                     };
 
-                    if in_use && !in_use_by_same_did {
+                    if in_use && !in_use_by_same_did && !in_use_by_self {
                         // During CAP/SASL negotiation, allow the nick if it's owned
                         // by a DID (attach_same_did will handle multi-device at SASL success).
                         let allow_during_negotiation =
@@ -547,7 +606,7 @@ where
                             // attach_same_did will handle at SASL success.
                             conn.nick = Some(nick.clone());
                         }
-                    } else if in_use && in_use_by_same_did {
+                    } else if in_use && in_use_by_same_did && !in_use_by_self {
                         // Same DID, multi-device — allow the nick, just stash it
                         conn.nick = Some(nick.clone());
                     } else if nick_stolen {
@@ -699,7 +758,7 @@ where
                 if let Some(channels) = msg.params.first() {
                     for channel in channels.split(',') {
                         let channel = normalize_channel(channel);
-                        handle_part(&conn, &channel, &state, &session_id);
+                        handle_part(&conn, &channel, &state, &server_name, &session_id, &send);
                     }
                 }
             }
@@ -859,7 +918,8 @@ where
                             drop(channels);
                             // Notify channel with tag for clients to update cache
                             let notice = format!(
-                                "@+freeq.at/pin={msgid} :{nick}!~u@host NOTICE {channel} :\x01ACTION pinned a message\x01\r\n"
+                                "@+freeq.at/pin={} :{nick}!~u@host NOTICE {channel} :\x01ACTION pinned a message\x01\r\n",
+                                irc::escape_tag_value(msgid)
                             );
                             helpers::broadcast_to_channel(&state, &channel, &notice);
                         }
@@ -870,7 +930,8 @@ where
                             drop(channels);
                             // Notify channel with tag for clients to update cache
                             let notice = format!(
-                                "@+freeq.at/unpin={msgid} :{nick}!~u@host NOTICE {channel} :\x01ACTION unpinned a message\x01\r\n"
+                                "@+freeq.at/unpin={} :{nick}!~u@host NOTICE {channel} :\x01ACTION unpinned a message\x01\r\n",
+                                irc::escape_tag_value(msgid)
                             );
                             helpers::broadcast_to_channel(&state, &channel, &notice);
                         } else {
@@ -932,8 +993,14 @@ where
                 if !conn.registered {
                     continue;
                 }
-                if let Some(target_nick) = msg.params.first() {
-                    handle_whois(&conn, target_nick, &state, &server_name, &session_id, &send);
+                // Support comma-separated nicks per RFC 2812
+                if let Some(target) = msg.params.first() {
+                    for nick_target in target.split(',') {
+                        let nick_target = nick_target.trim();
+                        if !nick_target.is_empty() {
+                            handle_whois(&conn, nick_target, &state, &server_name, &session_id, &send);
+                        }
+                    }
                 }
             }
             "MSGSIG" => {
@@ -1256,7 +1323,7 @@ where
                 let _name = &msg.params[0]; // oper name (unused — we just check password)
                 let password = &msg.params[1];
                 let granted = if let Some(ref oper_pw) = state.config.oper_password {
-                    password == oper_pw
+                    constant_time_eq(password.as_bytes(), oper_pw.as_bytes())
                 } else {
                     false
                 };
@@ -1404,7 +1471,7 @@ where
                         }
 
                         // Send governance TAGMSG to the target agent
-                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={r}")).unwrap_or_default();
+                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={}", irc::escape_tag_value(r))).unwrap_or_default();
                         let hostmask = conn.hostmask();
                         let gov_msg = format!(
                             "@+freeq.at/governance={action};+freeq.at/issued-by={}{reason_tag} :{hostmask} TAGMSG {target_nick}\r\n",
@@ -1507,7 +1574,8 @@ where
                                     let target_session = state.nick_to_session.lock().get_session(&target_nick).map(|s| s.to_string());
                                     if let Some(ref ts) = target_session {
                                         let line = format!(
-                                            "@+freeq.at/governance=approval_granted;+freeq.at/capability={capability} :{server_name} TAGMSG {target_nick}\r\n"
+                                            "@+freeq.at/governance=approval_granted;+freeq.at/capability={} :{server_name} TAGMSG {target_nick}\r\n",
+                                            irc::escape_tag_value(&capability)
                                         );
                                         if let Some(tx) = state.connections.lock().get(ts) {
                                             let _ = tx.try_send(line);
@@ -1562,9 +1630,10 @@ where
                                 if denied {
                                     let target_session = state.nick_to_session.lock().get_session(&target_nick).map(|s| s.to_string());
                                     if let Some(ref ts) = target_session {
-                                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={r}")).unwrap_or_default();
+                                        let reason_tag = reason.as_deref().map(|r| format!(";+freeq.at/reason={}", irc::escape_tag_value(r))).unwrap_or_default();
                                         let line = format!(
-                                            "@+freeq.at/governance=approval_denied;+freeq.at/capability={capability}{reason_tag} :{server_name} TAGMSG {target_nick}\r\n"
+                                            "@+freeq.at/governance=approval_denied;+freeq.at/capability={}{reason_tag} :{server_name} TAGMSG {target_nick}\r\n",
+                                            irc::escape_tag_value(&capability)
                                         );
                                         if let Some(tx) = state.connections.lock().get(ts) {
                                             let _ = tx.try_send(line);
@@ -1871,7 +1940,8 @@ where
 
                     // Send structured TAGMSG for rich clients
                     let tagmsg = format!(
-                        "@+freeq.at/event=approval_request;+freeq.at/approval-id={approval_id};+freeq.at/capability={capability} :{} TAGMSG {channel}\r\n",
+                        "@+freeq.at/event=approval_request;+freeq.at/approval-id={approval_id};+freeq.at/capability={} :{} TAGMSG {channel}\r\n",
+                        irc::escape_tag_value(capability),
                         conn.hostmask()
                     );
                     helpers::broadcast_to_channel(&state, &channel, &tagmsg);
@@ -1959,8 +2029,8 @@ where
 
                                 // Send governance signal to agent
                                 let gov_line = format!(
-                                    "@+freeq.at/governance=budget_exceeded;+freeq.at/spent={:.2};+freeq.at/limit={:.2};+freeq.at/unit={unit} :{server_name} TAGMSG {nick}\r\n",
-                                    total_spent, budget.max_amount
+                                    "@+freeq.at/governance=budget_exceeded;+freeq.at/spent={:.2};+freeq.at/limit={:.2};+freeq.at/unit={} :{server_name} TAGMSG {nick}\r\n",
+                                    total_spent, budget.max_amount, irc::escape_tag_value(&unit)
                                 );
                                 send(&state, &session_id, gov_line);
                             }
@@ -2489,6 +2559,18 @@ where
 
     write_handle.abort();
     Ok(())
+}
+
+/// Constant-time byte comparison to prevent timing side-channel attacks (M-16).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
 }
 
 /// Detect the client software from the USER realname field.

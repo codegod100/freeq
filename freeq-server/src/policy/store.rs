@@ -248,7 +248,7 @@ impl PolicyStore {
 
         let db = self.db.lock();
         db.execute(
-            "INSERT INTO authority_sets (authority_set_hash, channel_id, document_json, previous_authority_set_hash)
+            "INSERT OR IGNORE INTO authority_sets (authority_set_hash, channel_id, document_json, previous_authority_set_hash)
              VALUES (?1, ?2, ?3, ?4)",
             params![
                 hash,

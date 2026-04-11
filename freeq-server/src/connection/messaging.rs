@@ -163,6 +163,43 @@ pub(super) fn handle_tagmsg(
 
     // Rich clients get TAGMSG, plain clients get fallback PRIVMSG (if any)
     if target.starts_with('#') || target.starts_with('&') {
+        // Channel TAGMSG — enforce +n (no external messages) and +m (moderated)
+        {
+            let channels = state.channels.lock();
+            if let Some(ch) = channels.get(target) {
+                // +n: must be a member to send
+                if ch.no_ext_msg && !ch.members.contains(&conn.id) {
+                    let nick = conn.nick_or_star();
+                    let reply = Message::from_server(
+                        &state.server_name,
+                        irc::ERR_CANNOTSENDTOCHAN,
+                        vec![nick, target, "Cannot send to channel (+n)"],
+                    );
+                    if let Some(tx) = state.connections.lock().get(&conn.id) {
+                        let _ = tx.try_send(format!("{reply}\r\n"));
+                    }
+                    return;
+                }
+                // +m: must be voiced or op to send
+                if ch.moderated
+                    && !ch.ops.contains(&conn.id)
+                    && !ch.halfops.contains(&conn.id)
+                    && !ch.voiced.contains(&conn.id)
+                {
+                    let nick = conn.nick_or_star();
+                    let reply = Message::from_server(
+                        &state.server_name,
+                        irc::ERR_CANNOTSENDTOCHAN,
+                        vec![nick, target, "Cannot send to channel (+m)"],
+                    );
+                    if let Some(tx) = state.connections.lock().get(&conn.id) {
+                        let _ = tx.try_send(format!("{reply}\r\n"));
+                    }
+                    return;
+                }
+            }
+        }
+
         let members: Vec<String> = state
             .channels
             .lock()
@@ -255,18 +292,21 @@ pub(super) fn handle_privmsg(
         return;
     }
 
-    if target.starts_with('#') || target.starts_with('&') {
-        // Per-session channel flood protection: max 5 messages per 2 seconds
-        {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let mut ts_map = state.msg_timestamps.lock();
-            let ts = ts_map.entry(conn.id.clone()).or_default();
-            // Prune timestamps older than 2 seconds
-            ts.retain(|&t| now.saturating_sub(t) < 2000);
-            if ts.len() >= 5 {
+    let is_channel = target.starts_with('#') || target.starts_with('&');
+    let is_notice = command == "NOTICE";
+
+    // Per-session flood protection: max 5 messages per 2 seconds (channels + DMs).
+    {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let mut ts_map = state.msg_timestamps.lock();
+        let ts = ts_map.entry(conn.id.clone()).or_default();
+        ts.retain(|&t| now.saturating_sub(t) < 2000);
+        if ts.len() >= 5 {
+            // NOTICE must never generate error replies (RFC 2812 3.3.2)
+            if !is_notice {
                 let nick = conn.nick_or_star();
                 let reply = Message::from_server(
                     &state.server_name,
@@ -276,25 +316,30 @@ pub(super) fn handle_privmsg(
                 if let Some(tx) = state.connections.lock().get(&conn.id) {
                     let _ = tx.try_send(format!("{reply}\r\n"));
                 }
-                return;
             }
-            ts.push(now);
+            return;
         }
+        ts.push(now);
+    }
 
+    if is_channel {
         // Channel message — enforce +n (no external messages) and +m (moderated)
         {
             let channels = state.channels.lock();
             if let Some(ch) = channels.get(target) {
                 // +n: must be a member to send
                 if ch.no_ext_msg && !ch.members.contains(&conn.id) {
-                    let nick = conn.nick_or_star();
-                    let reply = Message::from_server(
-                        &state.server_name,
-                        irc::ERR_CANNOTSENDTOCHAN,
-                        vec![nick, target, "Cannot send to channel (+n)"],
-                    );
-                    if let Some(tx) = state.connections.lock().get(&conn.id) {
-                        let _ = tx.try_send(format!("{reply}\r\n"));
+                    // NOTICE must never generate error replies (RFC 2812 3.3.2)
+                    if !is_notice {
+                        let nick = conn.nick_or_star();
+                        let reply = Message::from_server(
+                            &state.server_name,
+                            irc::ERR_CANNOTSENDTOCHAN,
+                            vec![nick, target, "Cannot send to channel (+n)"],
+                        );
+                        if let Some(tx) = state.connections.lock().get(&conn.id) {
+                            let _ = tx.try_send(format!("{reply}\r\n"));
+                        }
                     }
                     return;
                 }
@@ -304,31 +349,35 @@ pub(super) fn handle_privmsg(
                     && !ch.halfops.contains(&conn.id)
                     && !ch.voiced.contains(&conn.id)
                 {
-                    let nick = conn.nick_or_star();
-                    let reply = Message::from_server(
-                        &state.server_name,
-                        irc::ERR_CANNOTSENDTOCHAN,
-                        vec![nick, target, "Cannot send to channel (+m)"],
-                    );
-                    if let Some(tx) = state.connections.lock().get(&conn.id) {
-                        let _ = tx.try_send(format!("{reply}\r\n"));
+                    if !is_notice {
+                        let nick = conn.nick_or_star();
+                        let reply = Message::from_server(
+                            &state.server_name,
+                            irc::ERR_CANNOTSENDTOCHAN,
+                            vec![nick, target, "Cannot send to channel (+m)"],
+                        );
+                        if let Some(tx) = state.connections.lock().get(&conn.id) {
+                            let _ = tx.try_send(format!("{reply}\r\n"));
+                        }
                     }
                     return;
                 }
                 // +E: encrypted-only mode
                 if ch.encrypted_only && !tags.contains_key("+encrypted") {
-                    let nick = conn.nick_or_star();
-                    let reply = Message::from_server(
-                        &state.server_name,
-                        irc::ERR_CANNOTSENDTOCHAN,
-                        vec![
-                            nick,
-                            target,
-                            "Cannot send to channel (+E) — messages must be encrypted",
-                        ],
-                    );
-                    if let Some(tx) = state.connections.lock().get(&conn.id) {
-                        let _ = tx.try_send(format!("{reply}\r\n"));
+                    if !is_notice {
+                        let nick = conn.nick_or_star();
+                        let reply = Message::from_server(
+                            &state.server_name,
+                            irc::ERR_CANNOTSENDTOCHAN,
+                            vec![
+                                nick,
+                                target,
+                                "Cannot send to channel (+E) — messages must be encrypted",
+                            ],
+                        );
+                        if let Some(tx) = state.connections.lock().get(&conn.id) {
+                            let _ = tx.try_send(format!("{reply}\r\n"));
+                        }
                     }
                     return;
                 }
@@ -406,8 +455,9 @@ pub(super) fn handle_privmsg(
                 }
             }
             drop(channels);
+            let sender_did = conn.authenticated_did.as_deref();
             state.with_db(|db| {
-                db.insert_message(target, &hostmask, text, timestamp, tags, Some(&msgid))
+                db.insert_message(target, &hostmask, text, timestamp, tags, Some(&msgid), sender_did)
             });
 
             // Prune old messages if configured
@@ -654,8 +704,9 @@ pub(super) fn handle_privmsg(
         let recipient_did = state.nick_owners.lock().get(&target.to_lowercase()).cloned();
         if let (Some(s_did), Some(r_did)) = (sender_did, recipient_did.as_deref()) {
             let dm_key = crate::db::canonical_dm_key(s_did, r_did);
+            let did_for_db = Some(s_did);
             state.with_db(|db| {
-                db.insert_message(&dm_key, &hostmask, text, timestamp, &pm_tags, Some(&pm_msgid))
+                db.insert_message(&dm_key, &hostmask, text, timestamp, &pm_tags, Some(&pm_msgid), did_for_db)
             });
         }
     }
@@ -1101,10 +1152,19 @@ fn handle_edit(
     };
     match original {
         Some(Some(row)) => {
-            // Extract nick from the stored sender hostmask
-            let original_nick = row.sender.split('!').next().unwrap_or("");
-            let current_nick = nick;
-            if !original_nick.eq_ignore_ascii_case(current_nick) {
+            // Prefer DID-based authorship check to prevent nick-reuse attacks
+            let is_author = if let (Some(msg_did), Some(conn_did)) = (&row.sender_did, &conn.authenticated_did) {
+                msg_did == conn_did
+            } else if row.sender_did.is_some() {
+                // Original message was from an authenticated user but current user has no DID
+                // (or has a different DID) — deny
+                false
+            } else {
+                // Fallback to nick comparison for guest (non-DID) messages
+                let original_nick = row.sender.split('!').next().unwrap_or("");
+                original_nick.eq_ignore_ascii_case(nick)
+            };
+            if !is_author {
                 let reply = Message::from_server(
                     &state.server_name,
                     "FAIL",
@@ -1208,6 +1268,7 @@ fn handle_edit(
     } else {
         target.to_string()
     };
+    let editor_did = conn.authenticated_did.as_deref();
     state.with_db(|db| {
         db.insert_edit(
             &store_channel,
@@ -1217,6 +1278,7 @@ fn handle_edit(
             &store_tags,
             &edit_msgid,
             original_msgid,
+            editor_did,
         )
     });
 
@@ -1378,9 +1440,19 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
     let original = state.with_db(|db| db.get_message_by_msgid(target, original_msgid));
     match original {
         Some(Some(row)) => {
-            let original_nick = row.sender.split('!').next().unwrap_or("");
-            let current_nick = nick;
-            if !original_nick.eq_ignore_ascii_case(current_nick) {
+            // Prefer DID-based authorship check to prevent nick-reuse attacks
+            let is_author = if let (Some(msg_did), Some(conn_did)) = (&row.sender_did, &conn.authenticated_did) {
+                msg_did == conn_did
+            } else if row.sender_did.is_some() {
+                // Original message was from an authenticated user but current user has no DID
+                // (or has a different DID) — deny
+                false
+            } else {
+                // Fallback to nick comparison for guest (non-DID) messages
+                let original_nick = row.sender.split('!').next().unwrap_or("");
+                original_nick.eq_ignore_ascii_case(nick)
+            };
+            if !is_author {
                 // Also allow ops to delete messages (channels only)
                 let is_op = is_channel && state
                     .channels

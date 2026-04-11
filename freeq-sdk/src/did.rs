@@ -210,8 +210,24 @@ impl HttpResolver {
         };
 
         tracing::debug!("Resolving did:web via {url}");
-        let doc: DidDocument = self
-            .client
+
+        // SSRF protection: resolve the hostname and reject private IPs
+        let parsed = url::Url::parse(&url).context("Invalid did:web URL")?;
+        let host = parsed.host_str().context("did:web URL has no host")?;
+        let port = parsed.port().unwrap_or(443);
+        let addrs = crate::ssrf::resolve_and_check(host, port)
+            .await
+            .context("did:web SSRF check failed")?;
+
+        // Use a DNS-pinned client to prevent rebinding between check and fetch
+        let pinned = crate::ssrf::pinned_client(
+            host,
+            &addrs,
+            std::time::Duration::from_secs(10),
+        )
+        .context("Failed to build pinned HTTP client")?;
+
+        let doc: DidDocument = pinned
             .get(&url)
             .send()
             .await
