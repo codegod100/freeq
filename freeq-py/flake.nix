@@ -23,7 +23,7 @@
             slurp          # Wayland region selector
             imagemagick    # import command
             # TUI dependencies
-            textual
+            python312Packages.textual
           ];
         };
       });
