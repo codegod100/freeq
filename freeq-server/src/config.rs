@@ -138,6 +138,23 @@ pub struct ServerConfig {
     #[arg(long, value_delimiter = ',', env = "OPER_DIDS")]
     pub oper_dids: Vec<String>,
 
+    /// Connect-time allowlist (opt-in; for a company running its OWN instance).
+    /// If non-empty, ONLY these DIDs may authenticate. Empty = open (anyone with
+    /// a valid AT identity), the default for a public instance.
+    #[arg(long, value_delimiter = ',', env = "FREEQ_ALLOWED_DIDS")]
+    pub allowed_dids: Vec<String>,
+
+    /// Connect-time allowlist by handle domain (opt-in). If non-empty, only DIDs
+    /// whose handle ends in one of these domains (e.g. `acme.com`) may
+    /// authenticate. Empty = no domain restriction.
+    #[arg(long, value_delimiter = ',', env = "FREEQ_ALLOWED_DID_DOMAINS")]
+    pub allowed_did_domains: Vec<String>,
+
+    /// Refuse guest (unauthenticated) connections entirely. Default: guests
+    /// allowed. A company instance can set this to require AT identity.
+    #[arg(long, env = "FREEQ_NO_GUEST", default_value_t = false)]
+    pub no_guest: bool,
+
     // ── Agent Assistance Interface: LLM provider ───────────────────
     /// LLM provider for the `POST /agent/session` free-form router.
     /// `openai` = any OpenAI-compatible /chat/completions endpoint
@@ -196,6 +213,9 @@ impl Default for ServerConfig {
             broker_shared_secret: None,
             oper_password: None,
             oper_dids: vec![],
+            allowed_dids: vec![],
+            allowed_did_domains: vec![],
+            no_guest: false,
             llm_provider: None,
             llm_base_url: None,
             llm_api_key: None,

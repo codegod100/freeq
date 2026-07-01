@@ -87,6 +87,36 @@ pub struct PinnedMessage {
     pub pinned_at: u64,
 }
 
+/// Pure connect-time allowlist decision (see `SharedState::did_is_allowed`).
+/// Empty allowlists ⇒ open. Matches an exact DID, or a handle whose domain is
+/// (or is a subdomain of) an allowed domain.
+pub(crate) fn did_allowed(
+    allowed_dids: &[String],
+    allowed_domains: &[String],
+    did: &str,
+    handle: Option<&str>,
+) -> bool {
+    if allowed_dids.is_empty() && allowed_domains.is_empty() {
+        return true;
+    }
+    if allowed_dids.iter().any(|d| d == did) {
+        return true;
+    }
+    if let Some(h) = handle {
+        let h = h.trim_start_matches('@').to_lowercase();
+        if allowed_domains.iter().any(|dom| {
+            let dom = dom
+                .trim_start_matches('@')
+                .trim_start_matches('.')
+                .to_lowercase();
+            h == dom || h.ends_with(&format!(".{dom}"))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 impl ChannelState {
     /// True if the channel restricts *access* via a channel mode — invite-only
     /// (`+i`), keyed (`+k`), or encrypted-only (`+E`). Used to decide whether it
@@ -838,6 +868,19 @@ impl SharedState {
         true
     }
 
+    /// Connect-time allowlist (Phase 3.2, opt-in). Returns whether a DID may
+    /// authenticate. Both allowlists empty ⇒ open (the public-instance default).
+    /// `handle` is the user's AT handle, used for domain matching (e.g. an
+    /// `acme.com` domain allows `alice.acme.com`).
+    pub fn did_is_allowed(&self, did: &str, handle: Option<&str>) -> bool {
+        did_allowed(
+            &self.config.allowed_dids,
+            &self.config.allowed_did_domains,
+            did,
+            handle,
+        )
+    }
+
     /// Run a closure with the database, if persistence is enabled.
     /// Logs errors but does not propagate them — persistence failures
     /// should not break the IRC server.
@@ -1573,6 +1616,19 @@ impl Server {
         }
 
         // Start plain listener
+        // Warn if the UNENCRYPTED IRC port is exposed on a public interface —
+        // credentials and messages would travel in cleartext. The default binds
+        // to loopback; operators exposing it publicly should front it with TLS.
+        if !self.config.listen_addr.starts_with("127.")
+            && !self.config.listen_addr.starts_with("localhost")
+            && !self.config.listen_addr.starts_with("[::1]")
+        {
+            tracing::warn!(
+                addr = %self.config.listen_addr,
+                "plaintext IRC listener is bound to a NON-loopback address — traffic is unencrypted. \
+                 Prefer the TLS listener (--tls-bind) and keep --bind on 127.0.0.1 behind a proxy."
+            );
+        }
         let plain_listener = TcpListener::bind(&self.config.listen_addr).await?;
         tracing::info!("Plain listener on {}", self.config.listen_addr);
 
@@ -7075,5 +7131,43 @@ mod discoverability_tests {
         c.topic_locked = true;
         c.moderated = true;
         assert!(!c.is_mode_restricted());
+    }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::did_allowed;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_allowlists_are_open() {
+        assert!(did_allowed(&[], &[], "did:plc:anyone", Some("a.bsky.social")));
+    }
+
+    #[test]
+    fn exact_did_allowed() {
+        let dids = v(&["did:plc:alice"]);
+        assert!(did_allowed(&dids, &[], "did:plc:alice", None));
+        assert!(!did_allowed(&dids, &[], "did:plc:mallory", None));
+    }
+
+    #[test]
+    fn handle_domain_and_subdomain_allowed() {
+        let doms = v(&["acme.com"]);
+        assert!(did_allowed(&[], &doms, "did:plc:x", Some("alice.acme.com")));
+        assert!(did_allowed(&[], &doms, "did:plc:x", Some("acme.com")));
+        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("alice.evil.com")));
+        // Not fooled by a suffix that isn't a domain boundary.
+        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("notacme.com")));
+    }
+
+    #[test]
+    fn no_handle_denies_domain_only_allowlist() {
+        // Challenge SASL has no handle → domain-only allowlists can't match.
+        let doms = v(&["acme.com"]);
+        assert!(!did_allowed(&[], &doms, "did:plc:x", None));
     }
 }

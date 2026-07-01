@@ -223,6 +223,26 @@ pub(super) async fn handle_authenticate(
                         .await
                     };
                     match verify_result {
+                        // Connect-time allowlist (opt-in): reject verified DIDs
+                        // that aren't permitted on this instance. Handle isn't
+                        // resolved on the challenge path, so domain-only
+                        // allowlists gate here by DID only — use the OAuth flow
+                        // for handle-domain matching.
+                        Ok(did) if !state.did_is_allowed(&did, None) => {
+                            conn.sasl_in_progress = false;
+                            conn.sasl_failures += 1;
+                            crate::server::Metrics::bump(&state.metrics.sasl_failure_total);
+                            let fail = Message::from_server(
+                                server_name,
+                                irc::ERR_SASLFAIL,
+                                vec![
+                                    conn.nick_or_star(),
+                                    "Not authorized to connect to this server",
+                                ],
+                            );
+                            send(state, session_id, format!("{fail}\r\n"));
+                            tracing::warn!(%did, "connection denied by connect allowlist (challenge SASL)");
+                        }
                         Ok(did) => {
                             conn.authenticated_did = Some(did.clone());
                             conn.sasl_in_progress = false;
