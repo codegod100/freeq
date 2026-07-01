@@ -1206,7 +1206,13 @@ async fn api_channels(State(state): State<Arc<SharedState>>) -> Json<Vec<Channel
     let channels = state.channels.lock();
     let mut list: Vec<ChannelInfo> = channels
         .iter()
-        .filter(|(_name, ch)| {
+        .filter(|(name, ch)| {
+            // This endpoint is UNAUTHENTICATED — only ever expose channels that
+            // carry no access restriction (+i/+k/+E/policy). Private channels
+            // must not leak their name/topic/count to the open internet.
+            if !state.channel_is_discoverable(name, ch) {
+                return false;
+            }
             // Show channels with members, or with a topic set
             let has_members = !ch.members.is_empty() || !ch.remote_members.is_empty();
             let has_topic = ch.topic.is_some();

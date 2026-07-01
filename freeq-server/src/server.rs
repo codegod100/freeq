@@ -88,6 +88,14 @@ pub struct PinnedMessage {
 }
 
 impl ChannelState {
+    /// True if the channel restricts *access* via a channel mode — invite-only
+    /// (`+i`), keyed (`+k`), or encrypted-only (`+E`). Used to decide whether it
+    /// may be advertised to non-members. Policy-gating is checked separately
+    /// (it needs the policy engine); see `SharedState::channel_is_discoverable`.
+    pub fn is_mode_restricted(&self) -> bool {
+        self.invite_only || self.key.is_some() || self.encrypted_only
+    }
+
     /// Case-insensitive lookup in remote_members.
     /// IRC nicks are case-insensitive, but HashMap keys preserve original case.
     pub fn remote_member(&self, nick: &str) -> Option<&RemoteMember> {
@@ -811,6 +819,25 @@ pub enum BindOutcome {
 }
 
 impl SharedState {
+    /// Whether a channel may be advertised to non-members: shown in `LIST` and
+    /// in the unauthenticated `GET /api/v1/channels`. A channel is discoverable
+    /// only if it carries NO access restriction — not invite-only (`+i`), not
+    /// keyed (`+k`), not encrypted-only (`+E`), and not gated by a join policy.
+    /// Any restriction means it is effectively private, and advertising its
+    /// name/topic to strangers or other tenants only leaks it. Members always
+    /// see their own channels regardless (the callers OR-in membership).
+    pub fn channel_is_discoverable(&self, name: &str, ch: &ChannelState) -> bool {
+        if ch.is_mode_restricted() {
+            return false;
+        }
+        if let Some(ref engine) = self.policy_engine
+            && matches!(engine.get_policy(name), Ok(Some(_)))
+        {
+            return false;
+        }
+        true
+    }
+
     /// Run a closure with the database, if persistence is enabled.
     /// Logs errors but does not propagate them — persistence failures
     /// should not break the IRC server.
@@ -6999,5 +7026,54 @@ mod s2s_adversarial_tests {
             Some("welcome to tchan".to_string()),
             "sync-adopted topic must be seeded into the CRDT"
         );
+    }
+}
+
+#[cfg(test)]
+mod discoverability_tests {
+    use super::*;
+
+    fn ch() -> ChannelState {
+        ChannelState::default()
+    }
+
+    #[test]
+    fn open_channel_is_discoverable() {
+        // No access restriction → advertisable in LIST / api/v1/channels.
+        assert!(!ch().is_mode_restricted());
+    }
+
+    #[test]
+    fn invite_only_hides() {
+        let mut c = ch();
+        c.invite_only = true;
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn keyed_hides() {
+        let mut c = ch();
+        c.key = Some("s3cret".into());
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn encrypted_hides() {
+        // +E channels are hidden too — the name/topic can be as sensitive as
+        // the (encrypted) content.
+        let mut c = ch();
+        c.encrypted_only = true;
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn moderation_flags_do_not_hide() {
+        // +n/+t/+m are quality/moderation flags, not access restrictions — such
+        // a channel is still publicly discoverable.
+        let mut c = ch();
+        c.no_ext_msg = true;
+        c.topic_locked = true;
+        c.moderated = true;
+        assert!(!c.is_mode_restricted());
     }
 }
