@@ -298,6 +298,7 @@ impl Db {
             "ALTER TABLE channels ADD COLUMN moderated INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN founder_did TEXT",
             "ALTER TABLE channels ADD COLUMN did_ops_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE channels ADD COLUMN encrypted_only INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN msgid TEXT",
             "ALTER TABLE messages ADD COLUMN replaces_msgid TEXT",
             "ALTER TABLE messages ADD COLUMN deleted_at INTEGER",
@@ -637,8 +638,8 @@ impl Db {
         let did_ops_json = serde_json::to_string(&ch.did_ops.iter().collect::<Vec<_>>())
             .unwrap_or_else(|_| "[]".to_string());
         self.conn.execute(
-            "INSERT INTO channels (name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, no_ext_msg, moderated, key, founder_did, did_ops_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO channels (name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, no_ext_msg, moderated, key, founder_did, did_ops_json, encrypted_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(name) DO UPDATE SET
                 topic_text=excluded.topic_text,
                 topic_set_by=excluded.topic_set_by,
@@ -649,7 +650,8 @@ impl Db {
                 moderated=excluded.moderated,
                 key=excluded.key,
                 founder_did=excluded.founder_did,
-                did_ops_json=excluded.did_ops_json",
+                did_ops_json=excluded.did_ops_json,
+                encrypted_only=excluded.encrypted_only",
             params![
                 name,
                 ch.topic.as_ref().map(|t| &t.text),
@@ -662,6 +664,7 @@ impl Db {
                 ch.key.as_deref(),
                 ch.founder_did.as_deref(),
                 did_ops_json,
+                ch.encrypted_only as i32,
             ],
         )?;
         Ok(())
@@ -686,7 +689,7 @@ impl Db {
         let mut channels = HashMap::new();
 
         let mut stmt = self.conn.prepare(
-            "SELECT name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, key, no_ext_msg, moderated, founder_did, did_ops_json
+            "SELECT name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, key, no_ext_msg, moderated, founder_did, did_ops_json, encrypted_only
              FROM channels"
         )?;
         let rows = stmt.query_map([], |row| {
@@ -703,6 +706,7 @@ impl Db {
             let did_ops_json: String = row
                 .get::<_, Option<String>>(10)?
                 .unwrap_or_else(|| "[]".to_string());
+            let encrypted_only: bool = row.get::<_, Option<i32>>(11)?.unwrap_or(0) != 0;
 
             let topic = match (topic_text, topic_set_by, topic_set_at) {
                 (Some(text), Some(set_by), Some(set_at)) => Some(TopicInfo {
@@ -725,6 +729,7 @@ impl Db {
                 key,
                 founder_did,
                 did_ops,
+                encrypted_only,
                 ..Default::default()
             };
             Ok((name, ch))

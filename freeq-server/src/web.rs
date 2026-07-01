@@ -1357,23 +1357,10 @@ async fn api_channel_history(
     Path(name): Path<String>,
     Query(params): Query<HistoryQuery>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<MessageResponse>>, StatusCode> {
-    let channel = if name.starts_with('#') {
-        name
-    } else {
-        format!("#{name}")
-    };
-
-    // Restrict history for channels with access controls (+i, +k).
-    // These channels require membership to read history — use IRC CHATHISTORY instead.
-    {
-        let channels = state.channels.lock();
-        if let Some(ch) = channels.get(&channel.to_lowercase())
-            && (ch.invite_only || ch.key.is_some())
-        {
-            return Err(StatusCode::FORBIDDEN);
-        }
-    }
+    // Public channels read anonymously; restricted ones require a member Bearer.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
 
     let limit = params.limit.unwrap_or(50).min(200);
 
@@ -1427,23 +1414,65 @@ async fn api_channel_history(
     }
 }
 
-/// True when REST may serve this channel's history: real channel (not a DM
-/// key) with no +i/+k access controls. Restricted content goes through the
-/// membership-checked IRC commands instead.
-fn rest_readable_channel(state: &SharedState, channel: &str) -> Result<(), StatusCode> {
-    if channel.to_lowercase().starts_with("dm:") || channel.contains("dm:") {
+/// Authorize a REST read of a channel's messages (history / search / export /
+/// permalink). Returns the normalized `#channel` on success.
+///
+/// - **Public** channels (no `+i`/`+k`/`+E`/policy restriction) are readable
+///   anonymously — same as before.
+/// - **Restricted** channels require an authenticated Bearer session whose DID
+///   is a member, DID-op, or founder. This replaces the old all-or-nothing
+///   `+i`/`+k` gate with real member-scoped access, matching IRC `CHATHISTORY`.
+/// - **Fails CLOSED**: a channel not resident in memory returns 404 rather than
+///   serving history openly (channels are loaded from the DB at boot, so a
+///   resident miss means we can't verify access controls). DM keys are refused.
+fn authorize_channel_read(
+    state: &SharedState,
+    name: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, StatusCode> {
+    let channel = if name.starts_with('#') {
+        name.to_string()
+    } else {
+        format!("#{name}")
+    };
+    let key = channel.to_lowercase();
+    if key.contains("dm:") {
         return Err(StatusCode::FORBIDDEN);
     }
-    let channels = state.channels.lock();
-    match channels.get(&channel.to_lowercase()) {
-        Some(ch) => {
-            if ch.invite_only || ch.key.is_some() {
-                Err(StatusCode::FORBIDDEN)
-            } else {
-                Ok(())
-            }
-        }
-        None => Err(StatusCode::NOT_FOUND),
+
+    let caller = caller_did_from_bearer(state, headers);
+    // Snapshot what we need under the channels lock, then release it before
+    // touching session_dids (avoids nested lock-order coupling).
+    let (restricted, members, founder, did_ops) = {
+        let channels = state.channels.lock();
+        let Some(ch) = channels.get(&key) else {
+            return Err(StatusCode::NOT_FOUND); // fail closed
+        };
+        (
+            !state.channel_is_discoverable(&key, ch),
+            ch.members.clone(),
+            ch.founder_did.clone(),
+            ch.did_ops.clone(),
+        )
+    };
+
+    if !restricted {
+        return Ok(channel);
+    }
+    let Some(did) = caller else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if founder.as_deref() == Some(did.as_str()) || did_ops.contains(&did) {
+        return Ok(channel);
+    }
+    let session_dids = state.session_dids.lock();
+    let is_member = members
+        .iter()
+        .any(|sid| session_dids.get(sid).map(|d| d == &did).unwrap_or(false));
+    if is_member {
+        Ok(channel)
+    } else {
+        Err(StatusCode::FORBIDDEN)
     }
 }
 
@@ -1453,12 +1482,13 @@ fn rest_readable_channel(state: &SharedState, channel: &str) -> Result<(), Statu
 async fn api_message_by_id(
     Path(msgid): Path<String>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let row = state
         .with_db(|db| db.find_message_by_msgid(&msgid))
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    rest_readable_channel(&state, &row.channel)?;
+    authorize_channel_read(&state, &row.channel, &headers)?;
     Ok(Json(serde_json::json!({
         "channel": row.channel,
         "msgid": row.msgid,
@@ -1501,14 +1531,10 @@ async fn api_channel_export(
     Path(name): Path<String>,
     Query(params): Query<ExportQuery>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<axum::response::Response, StatusCode> {
     use axum::response::IntoResponse as _;
-    let channel = if name.starts_with('#') {
-        name
-    } else {
-        format!("#{name}")
-    };
-    rest_readable_channel(&state, &channel)?;
+    let channel = authorize_channel_read(&state, &name, &headers)?;
 
     let limit = params.limit.unwrap_or(1000).min(10_000);
     let rows = state
@@ -1611,28 +1637,11 @@ async fn api_metrics(State(state): State<Arc<SharedState>>) -> impl axum::respon
 async fn api_search(
     Query(params): Query<SearchQuery>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<MessageResponse>>, StatusCode> {
-    let channel = if params.channel.starts_with('#') {
-        params.channel.clone()
-    } else {
-        format!("#{}", params.channel)
-    };
-    // Never expose DM history through the unauthenticated REST surface.
-    if channel.to_lowercase().contains("dm:") {
-        return Err(StatusCode::FORBIDDEN);
-    }
-
-    {
-        let channels = state.channels.lock();
-        match channels.get(&channel.to_lowercase()) {
-            Some(ch) => {
-                if ch.invite_only || ch.key.is_some() {
-                    return Err(StatusCode::FORBIDDEN);
-                }
-            }
-            None => return Err(StatusCode::NOT_FOUND),
-        }
-    }
+    // Public channels search anonymously; restricted ones require a member
+    // Bearer (DM keys refused, non-resident channels fail closed).
+    let channel = authorize_channel_read(&state, &params.channel, &headers)?;
 
     let limit = params.limit.unwrap_or(25).min(100);
     let rows = state
