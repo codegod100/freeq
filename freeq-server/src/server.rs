@@ -1872,6 +1872,89 @@ impl Server {
             });
         }
 
+        // Periodic maintenance (opt-in): age-based message retention +
+        // identity re-verification for offboarding. Both default to disabled.
+        {
+            let retention_days = self.config.message_retention_days;
+            let reverify_mins = self.config.reverify_identity_mins;
+            if retention_days > 0 || reverify_mins > 0 {
+                let maint_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let mut ticks: u64 = 0;
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    interval.tick().await; // skip immediate tick
+                    loop {
+                        interval.tick().await;
+                        ticks += 1;
+
+                        // Retention: prune messages older than N days, hourly.
+                        if retention_days > 0 && ticks % 60 == 0 {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let cutoff = now.saturating_sub(retention_days * 86_400);
+                            if let Some(n) =
+                                maint_state.with_db(|db| db.prune_messages_older_than(cutoff))
+                                && n > 0
+                            {
+                                tracing::info!(
+                                    "Retention: pruned {n} messages older than {retention_days}d"
+                                );
+                            }
+                        }
+
+                        // Identity re-verification (offboarding). SAFE: only acts
+                        // when a DID resolves successfully but has NO valid auth
+                        // key; never disconnects on a resolution error (outage).
+                        if reverify_mins > 0 && ticks % reverify_mins == 0 {
+                            let did_sessions: std::collections::HashMap<String, Vec<String>> = {
+                                let sd = maint_state.session_dids.lock();
+                                let mut m: std::collections::HashMap<String, Vec<String>> =
+                                    std::collections::HashMap::new();
+                                for (sid, did) in sd.iter() {
+                                    m.entry(did.clone()).or_default().push(sid.clone());
+                                }
+                                m
+                            };
+                            for (did, sids) in did_sessions {
+                                match maint_state.did_resolver.resolve(&did).await {
+                                    Ok(doc) if doc.authentication_keys().is_empty() => {
+                                        tracing::warn!(
+                                            %did,
+                                            "identity re-verify: DID has no valid auth key — disconnecting sessions"
+                                        );
+                                        for sid in sids {
+                                            if let Some(tx) =
+                                                maint_state.connections.lock().get(&sid)
+                                            {
+                                                let _ = tx.try_send(
+                                                    "ERROR :Identity no longer valid (deactivated or key removed)\r\n"
+                                                        .to_string(),
+                                                );
+                                            }
+                                            if let Some(kill) =
+                                                maint_state.session_kill.lock().get(&sid).cloned()
+                                            {
+                                                kill.notify_one();
+                                            }
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => tracing::debug!(
+                                        %did,
+                                        error = %e,
+                                        "identity re-verify: resolve failed (transient) — keeping session"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         // Heartbeat expiry: check agent liveness every 15 seconds.
         // Agents that miss their TTL transition to degraded, then offline, then disconnect.
         {

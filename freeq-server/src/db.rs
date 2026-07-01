@@ -1033,6 +1033,25 @@ impl Db {
         Ok(())
     }
 
+    /// Retention: delete all messages older than `cutoff_ts` (unix seconds)
+    /// across every channel. Returns the number of rows removed. Keeps the FTS
+    /// index consistent. Used by the age-based retention task (opt-in).
+    pub fn prune_messages_older_than(&self, cutoff_ts: u64) -> SqlResult<usize> {
+        if self.fts_enabled() {
+            self.conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (
+                    SELECT id FROM messages WHERE timestamp < ?1
+                )",
+                params![cutoff_ts as i64],
+            )?;
+        }
+        let n = self.conn.execute(
+            "DELETE FROM messages WHERE timestamp < ?1",
+            params![cutoff_ts as i64],
+        )?;
+        Ok(n)
+    }
+
     /// Find a message by its msgid. Returns the sender (hostmask) for authorship check.
     pub fn get_message_by_msgid(
         &self,
@@ -1661,6 +1680,23 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].msgid.as_deref(), Some("m3"));
         assert_eq!(hits[1].msgid.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn retention_prunes_by_age_across_channels_and_keeps_recent() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "ancient", 100, "a1");
+        msg(&db, "#ops", "also old", 150, "a2");
+        msg(&db, "#dev", "recent", 1_000, "r1");
+
+        // Cut off everything before ts 500: the two old rows go, the recent stays.
+        let removed = db.prune_messages_older_than(500).unwrap();
+        assert_eq!(removed, 2);
+
+        assert!(db.get_messages("#dev", 50, None).unwrap().iter().all(|m| m.msgid.as_deref() == Some("r1")));
+        assert!(db.get_messages("#ops", 50, None).unwrap().is_empty());
+        // Pruned rows also leave the FTS index (no stale search hits).
+        assert!(db.search_messages("#dev", "ancient", 50, None).unwrap().is_empty());
     }
 
     #[test]
