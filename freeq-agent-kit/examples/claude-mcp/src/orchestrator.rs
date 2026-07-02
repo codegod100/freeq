@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use freeq_agent_kit::{VadConfig, VadSegmenter, extract_addressed};
+use freeq_agent_kit::{VadConfig, VadSegmenter, addressing::word_is_name, extract_addressed};
 use freeq_av::{AvConfig, AvParticipant, AvSession, Speaker, VideoHandle, broadcast_path};
 use freeq_eliza::diagram::Diagram;
 use freeq_eliza::identity;
@@ -128,6 +128,10 @@ pub struct Transcript {
 pub struct Orchestrator {
     nick: String,
     channel: String,
+    /// AV session + our instance within it — needed to send a proper
+    /// av-leave on disconnect (ghost-tile prevention).
+    session_id: String,
+    instance_id: String,
     handle: ClientHandle,
     speaker: Speaker,
     transcripts: AsyncMutex<mpsc::Receiver<Transcript>>,
@@ -154,10 +158,13 @@ pub struct Orchestrator {
     /// Last time a `Volunteer`-priority utterance was spoken. Used to
     /// enforce `volunteer_cooldown`.
     last_volunteer_at: AsyncMutex<Option<Instant>>,
-    /// Wall-clock ms of the most recent `say` (any priority). Heartbeat
-    /// also counts as a `say` write so a heartbeat doesn't immediately
-    /// trigger another.
+    /// Wall-clock ms of the most recent real reply — `say` or `post`.
+    /// Heartbeats do NOT write this (an ack is not an answer); they
+    /// pace themselves with their own beat clock.
     last_say_ms: Arc<AtomicI64>,
+    /// Wall-clock ms of the last addressed *question* handed to the
+    /// brain via `recv_batch`. Arms the heartbeat — see `heartbeat_due`.
+    last_delivered_ms: Arc<AtomicI64>,
     _join_handles: Vec<JoinHandle<()>>,
     _av_session: Arc<AsyncMutex<Option<AvSession>>>,
     shutdown: Arc<AtomicBool>,
@@ -199,37 +206,62 @@ impl Orchestrator {
         let signer = Arc::new(KeySigner::new(ident.did.clone(), ident.private_key));
         let (handle, mut events) = client::connect(conn_config, Some(signer));
 
-        wait_for_registration(&mut events).await?;
-        handle.join(&cfg.channel).await.context("joining channel")?;
-        tracing::info!(channel = %cfg.channel, nick = %cfg.nick, "joined channel");
+        // Everything between the raw connect and a live AV session can
+        // fail (registration timeout, join failure, no av-state within
+        // the wait). On ANY of those, quit the IRC connection before
+        // surfacing the error — otherwise the half-joined bot lingers
+        // as a ghost participant the room can see but never hear.
+        let setup = async {
+            wait_for_registration(&mut events).await?;
+            handle.join(&cfg.channel).await.context("joining channel")?;
+            tracing::info!(channel = %cfg.channel, nick = %cfg.nick, "joined channel");
 
-        let http = reqwest::Client::new();
-        let session_id = match discover_active_session(&http, &cfg.server, &cfg.channel).await {
-            Some(sid) => {
-                tracing::info!(%sid, "joining existing AV session");
-                sid
+            // Announce ourselves as a native agent so the server sets
+            // actor_class=agent and clients render the agent badge. Without this
+            // the bot joins as a plain Human and looks like a person in the UI.
+            if let Err(e) = handle.register_agent("agent").await {
+                tracing::warn!(error = %e, "AGENT REGISTER failed; will appear as human");
+            } else {
+                tracing::info!("registered as agent (actor_class=agent)");
             }
-            None if cfg.start_if_idle => {
-                let instance = new_av_instance();
-                handle
-                    .av_start(&cfg.channel, &instance, Some("claude"))
-                    .await
-                    .context("sending av-start")?;
-                tracing::info!(%instance, "sent av-start; waiting for echo");
-                wait_for_av_started(&mut events, &cfg.channel).await?
-            }
-            None => wait_for_av_started(&mut events, &cfg.channel).await?,
+
+            let http = reqwest::Client::new();
+            let session_id = match discover_active_session(&http, &cfg.server, &cfg.channel).await
+            {
+                Some(sid) => {
+                    tracing::info!(%sid, "joining existing AV session");
+                    sid
+                }
+                None if cfg.start_if_idle => {
+                    let instance = new_av_instance();
+                    handle
+                        .av_start(&cfg.channel, &instance, Some("claude"))
+                        .await
+                        .context("sending av-start")?;
+                    tracing::info!(%instance, "sent av-start; waiting for echo");
+                    wait_for_av_started(&mut events, &cfg.channel).await?
+                }
+                None => wait_for_av_started(&mut events, &cfg.channel).await?,
+            };
+
+            let instance_id = new_av_instance();
+            handle
+                .av_join(&cfg.channel, &session_id, &instance_id)
+                .await
+                .context("sending av-join")?;
+
+            let sfu_url: url::Url = match &cfg.sfu_url_override {
+                Some(u) => u.parse().context("parsing --sfu-url")?,
+                None => sfu_url_from_server(&cfg.server)?,
+            };
+            Ok::<_, anyhow::Error>((session_id, instance_id, sfu_url))
         };
-
-        let instance_id = new_av_instance();
-        handle
-            .av_join(&cfg.channel, &session_id, &instance_id)
-            .await
-            .context("sending av-join")?;
-
-        let sfu_url = match &cfg.sfu_url_override {
-            Some(u) => u.parse().context("parsing --sfu-url")?,
-            None => sfu_url_from_server(&cfg.server)?,
+        let (session_id, instance_id, sfu_url) = match setup.await {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = handle.quit(Some("connect failed")).await;
+                return Err(e);
+            }
         };
         let level = Arc::new(AtomicU32::new(0));
         let (speaker, push_source) = Speaker::new(level.clone());
@@ -238,6 +270,7 @@ impl Orchestrator {
             session_id: session_id.clone(),
             our_broadcast: broadcast_path(&session_id, &cfg.nick, &instance_id),
             my_nick: cfg.nick.clone(),
+            audio_only: false,
         };
         let control = ParticleControl::new();
         let make_video = {
@@ -294,6 +327,9 @@ impl Orchestrator {
         let say_active = Arc::new(AtomicBool::new(false));
         let last_addressed_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
         let last_say_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
+        // Wall-ms of the last addressed *question* handed to the brain
+        // via recv_batch — the honest arming signal for the heartbeat.
+        let last_delivered_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
         // Accumulating whiteboard graph — every utterance's triples
         // merge in. The transcribe loops push fresh layouts to the
         // tile overlay whenever new edges land.
@@ -366,11 +402,18 @@ impl Orchestrator {
                     tx,
                 };
                 if let Some(key) = &deepgram_key {
+                    // Bias the recognizer toward the names in this room —
+                    // our own nick + peer agents. Without this, STT
+                    // renders names as phonetic neighbours ("Clyde" →
+                    // "Lighthouse") and addressing silently fails.
+                    let mut keyterms = vec![nick_for_loop.clone()];
+                    keyterms.extend(peers_for_loop.iter().cloned());
                     let cfg = StreamingSttConfig {
                         api_key: key.clone(),
                         model: deepgram_model.clone(),
                         // freeq-av decodes opus to 48 kHz; pass-through.
                         sample_rate: 48_000,
+                        keyterms,
                     };
                     tokio::spawn(transcribe_participant_streaming(args, cfg));
                 } else {
@@ -397,11 +440,14 @@ impl Orchestrator {
             }
         }));
 
-        // Auto-heartbeat: when an addressed utterance has been pending a
-        // reply for >12s without any `say` since, speak a soft ack so
-        // the human knows we're still working. Re-fires every 15s. Stops
-        // entirely once the model finally responds.
-        let last_addr_hb = last_addressed_ms.clone();
+        // Auto-heartbeat: when a delivered question has been pending a
+        // reply for >12s without any say/post since, speak a soft ack so
+        // the human knows we're still working. Repeats once after 15s,
+        // then goes silent — a third "give me a sec" is nagging. Arms
+        // ONLY on questions actually handed to the brain via recv_batch:
+        // a bare name-mention or an unfetched transcript must never
+        // trigger a promise nobody is working on.
+        let last_delivered_hb = last_delivered_ms.clone();
         let last_say_hb = last_say_ms.clone();
         let say_active_hb = say_active.clone();
         let speaker_hb = speaker.clone();
@@ -413,8 +459,6 @@ impl Orchestrator {
         let tts_hb_voice = cfg.elevenlabs_voice_id.clone();
         let tts_hb_model = cfg.elevenlabs_model.clone();
         handles.push(tokio::spawn(async move {
-            const HEARTBEAT_AFTER_MS: i64 = 12_000;
-            const HEARTBEAT_REPEAT_MS: i64 = 15_000;
             let phrases = [
                 "Give me a sec.",
                 "Still working on it.",
@@ -422,6 +466,12 @@ impl Orchestrator {
                 "Almost there.",
             ];
             let mut phrase_idx: usize = 0;
+            // Beats are per-question: the counter resets when a new
+            // question is delivered, and heartbeats never touch
+            // last_say_ms — an ack is not an answer.
+            let mut beats: u32 = 0;
+            let mut beats_for: i64 = 0;
+            let mut last_beat_ms: i64 = 0;
             let mut interval = tokio::time::interval(Duration::from_millis(3_000));
             while !shutdown_hb.load(Ordering::Relaxed) {
                 interval.tick().await;
@@ -432,15 +482,13 @@ impl Orchestrator {
                     continue;
                 };
                 let now = now_ms();
-                let addr = last_addr_hb.load(Ordering::Relaxed);
+                let delivered = last_delivered_hb.load(Ordering::Relaxed);
                 let said = last_say_hb.load(Ordering::Relaxed);
-                if addr == 0 || addr <= said {
-                    continue;
+                if delivered != beats_for {
+                    beats = 0;
+                    beats_for = delivered;
                 }
-                if now - addr < HEARTBEAT_AFTER_MS {
-                    continue;
-                }
-                if now - said < HEARTBEAT_REPEAT_MS {
+                if !heartbeat_due(now, delivered, said, last_beat_ms, beats) {
                     continue;
                 }
                 let phrase = phrases[phrase_idx % phrases.len()];
@@ -464,8 +512,9 @@ impl Orchestrator {
                     continue;
                 }
                 let _ = handle_hb.privmsg(&channel_hb, phrase).await;
-                last_say_hb.store(now_ms(), Ordering::Relaxed);
-                tracing::info!(%phrase, "heartbeat emitted");
+                beats += 1;
+                last_beat_ms = now_ms();
+                tracing::info!(%phrase, beats, "heartbeat emitted");
                 // Local drain monitor: flip say_active + thinking off
                 // 200 ms after the queue empties.
                 let sa = say_active_hb.clone();
@@ -496,6 +545,8 @@ impl Orchestrator {
         Ok(Self {
             nick: cfg.nick,
             channel: cfg.channel,
+            session_id,
+            instance_id,
             handle,
             speaker,
             transcripts: AsyncMutex::new(rx),
@@ -511,6 +562,7 @@ impl Orchestrator {
             volunteer_cooldown: Duration::from_secs(cfg.volunteer_cooldown_secs),
             last_volunteer_at: AsyncMutex::new(None),
             last_say_ms,
+            last_delivered_ms,
             _join_handles: handles,
             _av_session: av_session,
             shutdown,
@@ -594,6 +646,15 @@ impl Orchestrator {
             if Instant::now() >= deadline {
                 break;
             }
+        }
+        // Arm the heartbeat: a real question is now in the brain's
+        // hands. Bare mentions (empty question) don't count — there is
+        // nothing to promise progress on.
+        if out
+            .iter()
+            .any(|t| t.addressed && t.question.as_deref().is_some_and(|q| !q.is_empty()))
+        {
+            self.last_delivered_ms.store(now_ms(), Ordering::Relaxed);
         }
         out
     }
@@ -695,6 +756,9 @@ impl Orchestrator {
     /// ~400-byte PRIVMSG cap, so multi-paragraph artifacts (diffs,
     /// citations, bullets) must arrive pre-split by the caller.
     pub async fn post(&self, text: &str) -> Result<()> {
+        // A post IS a reply — disarm the heartbeat. Answering in text
+        // (a link, a diff) must not be followed by "still working on it".
+        self.last_say_ms.store(now_ms(), Ordering::Relaxed);
         let mut sent = 0usize;
         for line in text.lines() {
             if line.is_empty() {
@@ -721,6 +785,13 @@ impl Orchestrator {
     /// references — the pump tasks check `shutdown` and quiesce.
     pub async fn disconnect(&self) -> Result<()> {
         self.shutdown.store(true, Ordering::Relaxed);
+        // Deregister from the AV session BEFORE quitting IRC — without
+        // av-leave the server keeps announcing our broadcast and
+        // clients render a ghost tile after we're gone.
+        let _ = self
+            .handle
+            .av_leave(&self.channel, &self.session_id, &self.instance_id)
+            .await;
         let _ = self.handle.quit(Some("leaving")).await;
         let mut guard = self._av_session.lock().await;
         guard.take();
@@ -1155,7 +1226,44 @@ fn lenient_address(
             return (true, Some(String::new()));
         }
     }
+    // Vocative fallback: a *misheard* name in the calling position —
+    // the whole utterance being just the name ("Clide?"), or the last
+    // word when the previous word carries a vocative comma ("what do
+    // you think, Clide?"). Fuzzy matching is confined to these two
+    // spots: applied mid-sentence it would trigger on phonetic
+    // neighbours ("glide", "slide") in ordinary talk.
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if let [only] = words[..]
+        && word_is_name(only, my_nick)
+    {
+        return (true, Some(String::new()));
+    }
+    if words.len() >= 2 {
+        let last = words[words.len() - 1];
+        let before = words[words.len() - 2];
+        if before.ends_with(',') && word_is_name(last, my_nick) {
+            return (true, Some(String::new()));
+        }
+    }
     (false, None)
+}
+
+/// Whether the auto-heartbeat should speak a reassurance. Honest by
+/// construction: `delivered` is the wall-ms the last *question* was
+/// handed to the brain via `recv_batch` (0 = never) — a bare name
+/// mention never arms it, and an undelivered transcript (brain not
+/// listening) never arms it. `said` is the last real reply (say or
+/// post). `last_beat`/`beats` throttle repeats: 15s apart, at most 2
+/// per question — after that silence beats nagging.
+fn heartbeat_due(now: i64, delivered: i64, said: i64, last_beat: i64, beats: u32) -> bool {
+    const HEARTBEAT_AFTER_MS: i64 = 12_000;
+    const HEARTBEAT_REPEAT_MS: i64 = 15_000;
+    const HEARTBEAT_MAX_BEATS: u32 = 2;
+    delivered != 0
+        && delivered > said
+        && now - delivered >= HEARTBEAT_AFTER_MS
+        && now - last_beat >= HEARTBEAT_REPEAT_MS
+        && beats < HEARTBEAT_MAX_BEATS
 }
 
 #[cfg(test)]
@@ -1194,6 +1302,90 @@ mod tests {
         let (a, q) = lenient_address("Oblivion, what do you think?", "claude", &[], "chad");
         assert!(!a);
         assert!(q.is_none());
+    }
+
+    #[test]
+    fn vocative_at_end_tolerates_misheard_name() {
+        // Live failure class 2026-07-01: the name lands at the END of
+        // the utterance and STT misspells it — exact bareword matching
+        // missed it and the bot ignored a direct question.
+        for line in [
+            "What do you think, Clide?",
+            "How's the weather today, Glyde?",
+            "can you hear me, clyde",
+        ] {
+            let (a, _) = lenient_address(line, "clyde", &[], "chad");
+            assert!(a, "should address: {line:?}");
+        }
+    }
+
+    #[test]
+    fn single_word_misheard_name_is_addressed() {
+        // Calling the dog's name alone: "Clide?" must turn the head.
+        let (a, q) = lenient_address("Clide?", "clyde", &[], "chad");
+        assert!(a);
+        assert_eq!(q.unwrap(), "");
+    }
+
+    #[test]
+    fn fuzzy_word_mid_sentence_is_not_addressed() {
+        // "glide" is 1 edit from "clyde" — mid-sentence, not vocative:
+        // must NOT match or the bot answers every aviation chat.
+        for line in [
+            "the plane will glide down slowly",
+            "watch the plane glide",
+            "we should slide the meeting",
+        ] {
+            let (a, _) = lenient_address(line, "clyde", &[], "chad");
+            assert!(!a, "must not address: {line:?}");
+        }
+    }
+
+    // ---------- heartbeat_due ----------
+    //
+    // Live failure 2026-07-01: "Give me a sec" spoken when no question
+    // was pending (a bare name-mention armed the timer), and the ack
+    // repeated with no answer ever coming. The heartbeat must be
+    // HONEST: only promise work the brain has actually been handed,
+    // and stop nagging after a couple of beats.
+
+    #[test]
+    fn heartbeat_not_due_when_nothing_delivered() {
+        // Nothing handed to the brain → no promise to make.
+        assert!(!heartbeat_due(100_000, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn heartbeat_not_due_before_grace() {
+        // Question delivered 5s ago — too early to reassure.
+        assert!(!heartbeat_due(105_000, 100_000, 0, 0, 0));
+    }
+
+    #[test]
+    fn heartbeat_due_after_grace_with_no_reply() {
+        // Delivered 13s ago, nothing said since → reassure once.
+        assert!(heartbeat_due(113_000, 100_000, 0, 0, 0));
+    }
+
+    #[test]
+    fn heartbeat_not_due_once_answered() {
+        // The bot replied (say or post) after delivery → disarmed.
+        assert!(!heartbeat_due(113_000, 100_000, 101_000, 0, 0));
+    }
+
+    #[test]
+    fn second_heartbeat_waits_for_repeat_spacing() {
+        // First beat at t=113s; at t=120s (7s later) → too soon.
+        assert!(!heartbeat_due(120_000, 100_000, 0, 113_000, 1));
+        // At t=129s (16s after the beat) → due again.
+        assert!(heartbeat_due(129_000, 100_000, 0, 113_000, 1));
+    }
+
+    #[test]
+    fn heartbeat_goes_silent_after_max_beats() {
+        // Two beats already — a third "give me a sec" is nagging, not
+        // reassurance. Stay quiet no matter how much time passes.
+        assert!(!heartbeat_due(200_000, 100_000, 0, 145_000, 2));
     }
 
     #[test]
@@ -1341,10 +1533,15 @@ fn build_stt(cfg: &OrcConfig) -> Result<SttEngine> {
     if let Some(key) = cfg.groq_api_key.clone()
         && !key.trim().is_empty()
     {
+        // Vocabulary prompt: our own nick AND the peer agents' — every
+        // name in the room that Whisper must not render as a phonetic
+        // neighbour ("Clyde" → "Lighthouse").
+        let mut vocab = vec![cfg.nick.clone()];
+        vocab.extend(cfg.peer_agents.iter().cloned());
         return Ok(SttEngine::groq(
             key,
             "whisper-large-v3-turbo".to_string(),
-            std::slice::from_ref(&cfg.nick),
+            &vocab,
         ));
     }
     tracing::warn!(

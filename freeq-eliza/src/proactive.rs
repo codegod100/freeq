@@ -218,13 +218,19 @@ async fn speak_now(
     _handle: Arc<ClientHandle>,
     _channel: String,
     speaker: Speaker,
-    _video: VideoTile,
+    video: VideoTile,
     text: String,
 ) {
     let Some(el_key) = cfg.elevenlabs_api_key.clone() else {
         tracing::warn!("proactive: no ElevenLabs key, can't speak");
         return;
     };
+    // Unprompted speech must wait for the room to be quiet, same as the
+    // answer path — a proactive observation that lands on top of a human
+    // mid-sentence reads as interruption, the single fastest way to make
+    // the bot feel rude. `solo=false`: always take the anti-collision
+    // jitter; a volunteer comment is never latency-critical.
+    crate::irc::wait_for_room_quiet(&video.peer_level_handle(), false).await;
     let http = cfg.http.clone();
     let voice = cfg.elevenlabs_voice_id.clone();
     let model = cfg.elevenlabs_model.clone();

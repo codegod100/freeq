@@ -2448,7 +2448,7 @@ sharpen the thread. Do NOT address yourself."
 /// agent in the call it is 250–1000 ms of pure pre-speech latency with no
 /// benefit. On the solo path we return as soon as the quiet HOLD passes —
 /// the single biggest win for conversational rhythm.
-async fn wait_for_room_quiet(peer_level: &Arc<std::sync::atomic::AtomicU32>, solo: bool) {
+pub(crate) async fn wait_for_room_quiet(peer_level: &Arc<std::sync::atomic::AtomicU32>, solo: bool) {
     use std::sync::atomic::Ordering;
     const THRESHOLD: f32 = 0.04;
     // 150 ms (was 250): on the answer path the VAD already waited ~450 ms of

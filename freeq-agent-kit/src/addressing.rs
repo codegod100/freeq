@@ -52,12 +52,12 @@ fn name_matches(cand: &str, nick: &str) -> bool {
         return true;
     }
     // Containment branch: STT often hallucinates extra letters around
-    // a name ("u-topia" → "eutopia", "utopia" → "zootopia") rather
+    // a name ("u-topia" → "eutopia", "you-topia" → "youtopia") rather
     // than mis-spelling the name itself. If the nick appears
     // contiguously inside the candidate, treat as a match — provided
     // the nick is long enough (≥5 chars) that random words won't
-    // collide. This unblocks the live demo: "Zootopia" /
-    // "Eutopia" / "you-topia" all reach Utopia.
+    // collide. ("Zootopia" is NOT contained — z-o-o — it lands via
+    // the edit-distance branch only for nicks with tolerance ≥3.)
     if nick.chars().count() >= 5 && cand.len() >= nick.len() && cand.contains(nick) {
         return true;
     }
@@ -72,6 +72,15 @@ fn name_matches(cand: &str, nick: &str) -> bool {
         _ => 3,
     };
     edit_distance(cand, nick) <= tol
+}
+
+/// Whether a single word is (a mishearing of) the agent's name —
+/// punctuation/case-insensitive, with the same containment and
+/// edit-distance tolerance [`extract_addressed`] uses. Public so
+/// callers can scan vocative positions the start-anchored parser
+/// can't reach ("what do you think, Clide?").
+pub fn word_is_name(word: &str, nick: &str) -> bool {
+    name_matches(&normalize_word(word), &normalize_word(nick))
 }
 
 /// If `text` addresses the agent (named `nick`) at the start, return the
@@ -331,5 +340,19 @@ mod tests {
         assert_eq!(normalize_word("@Eliza,"), "eliza");
         assert_eq!(normalize_word("HELLO!"), "hello");
         assert_eq!(normalize_word("...---"), "");
+    }
+
+    #[test]
+    fn word_is_name_tolerates_stt_mishearings() {
+        // The public single-word matcher — used by callers that scan
+        // vocative positions ("what do you think, Clide?") where the
+        // start-anchored extract_addressed can't reach.
+        assert!(word_is_name("Clyde,", "clyde"));
+        assert!(word_is_name("Clide?", "Clyde"), "1-edit mishearing");
+        assert!(word_is_name("CLYDE!", "clyde"));
+        assert!(word_is_name("Eutopia", "utopia"), "containment");
+        assert!(word_is_name("youtopia", "utopia"), "containment");
+        assert!(!word_is_name("chair", "clyde"), "unrelated word");
+        assert!(!word_is_name("bo", "bot"), "too short to trust");
     }
 }
