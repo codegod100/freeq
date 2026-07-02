@@ -148,6 +148,8 @@ extension AppState {
         screenCapture = nil
         micCapture?.stop()
         micCapture = nil
+        localMicLevel = 0
+        isLocalSpeaking = false
         avSession?.leave()
         avSession = nil
         currentAvInstance = nil
@@ -158,6 +160,7 @@ extension AppState {
         isCallExpanded = false
         callParticipants = []
         participantsWithVideo = []
+        participantsWithScreen = []
         currentCallChannel = nil
         currentCallSessionId = nil
     }
@@ -165,6 +168,22 @@ extension AppState {
     func toggleMute() {
         isMuted.toggle()
         avSession?.setMuted(muted: isMuted)
+        // Belt-and-suspenders: stop pushing frames across the FFI too. The
+        // meter keeps running so the UI can hint "talking while muted".
+        micCapture?.muted = isMuted
+    }
+
+    /// Switch the call microphone (nil = system default). Sticky across calls.
+    func setMicDevice(uid: String?) {
+        preferredMicUID = uid
+        micCapture?.setPreferredDevice(uid: uid)
+    }
+
+    /// Switch the call camera (nil = default). Sticky across calls; applies
+    /// live when the camera is on.
+    func setCameraDevice(uid: String?) {
+        preferredCameraUID = uid
+        cameraCapture?.setPreferredDevice(uniqueID: uid)
     }
 
     func toggleCamera() {
@@ -179,21 +198,42 @@ extension AppState {
         if next { startLocalScreenShare() } else { stopLocalScreenShare(disableVideo: !isCameraOn) }
     }
 
+    /// Share a specific display or window (from the picker). Restarts the
+    /// capture when already sharing so switching sources is one click.
+    func startScreenShare(target: ScreenShareTarget?) {
+        guard isInCall else { return }
+        if isScreenSharing {
+            stopLocalScreenShare(disableVideo: false)
+        }
+        startLocalScreenShare(target: target)
+    }
+
     private func startLocalMic() {
         guard avSession != nil else { return }
         let cap = CallMicCapture()
         cap.onSamples = { [weak self] samples in
             self?.avSession?.pushAudioFrame(samples: samples)
         }
+        cap.onLevel = { [weak self] update in
+            guard let self else { return }
+            self.localMicLevel = update.level
+            self.isLocalSpeaking = update.isSpeaking
+        }
+        cap.onPermissionDenied = { [weak self] in
+            self?.errorMessage = "Microphone access is denied. Enable it in "
+                + "System Settings → Privacy & Security → Microphone, then rejoin the call."
+        }
+        cap.onError = { [weak self] message in
+            self?.errorMessage = message
+        }
+        cap.setPreferredDevice(uid: preferredMicUID)
+        cap.muted = isMuted
         micCapture = cap
         cap.start()
     }
 
     private func startLocalCamera() {
         guard let av = avSession else { return }
-        if isScreenSharing {
-            stopLocalScreenShare(disableVideo: false)
-        }
         if cameraCapture == nil {
             let cap = CallCameraCapture()
             cap.onFrame = { [weak self] ptr, length, width, height, ts in
@@ -201,6 +241,13 @@ extension AppState {
                 let bytes = Array(UnsafeBufferPointer(start: ptr, count: length))
                 av.pushVideoFrame(bgra: bytes, width: UInt32(width), height: UInt32(height), timestampUs: ts)
             }
+            cap.onPermissionDenied = { [weak self] in
+                guard let self else { return }
+                self.isCameraOn = false
+                self.errorMessage = "Camera access is denied. Enable it in "
+                    + "System Settings → Privacy & Security → Camera, then try again."
+            }
+            cap.setPreferredDevice(uniqueID: preferredCameraUID)
             cameraCapture = cap
         }
         do {
@@ -222,32 +269,31 @@ extension AppState {
         }
     }
 
-    private func startLocalScreenShare() {
+    /// Screen share publishes a second, video-only MoQ broadcast at
+    /// `{our-path}/screen` (the web client's convention), so it runs
+    /// alongside the camera instead of hijacking its track.
+    private func startLocalScreenShare(target: ScreenShareTarget? = nil) {
         guard let av = avSession else { return }
-        if isCameraOn {
-            cameraCapture?.stop()
-            cameraCapture = nil
-            isCameraOn = false
-        }
         let cap = CallScreenCapture()
+        cap.target = target
         cap.onFrame = { [weak self] ptr, length, width, height, ts in
             guard let av = self?.avSession else { return }
             let bytes = Array(UnsafeBufferPointer(start: ptr, count: length))
-            av.pushVideoFrame(bgra: bytes, width: UInt32(width), height: UInt32(height), timestampUs: ts)
+            av.pushScreenFrame(bgra: bytes, width: UInt32(width), height: UInt32(height), timestampUs: ts)
         }
         cap.onStopped = { [weak self] in
             guard let self else { return }
             self.screenCapture = nil
             if self.isScreenSharing {
-                self.isScreenSharing = false
-                self.stopLocalScreenShare(disableVideo: !self.isCameraOn)
+                self.stopLocalScreenShare()
             }
         }
         screenCapture = cap
         do {
-            try av.setCameraEnabled(enabled: true)
+            try av.setScreenEnabled(enabled: true)
         } catch {
-            print("[av] setCameraEnabled(true) for screen share failed: \(error)")
+            print("[av] setScreenEnabled(true) failed: \(error)")
+            errorMessage = "Screen sharing failed to start."
             screenCapture = nil
             return
         }
@@ -261,12 +307,10 @@ extension AppState {
         cap?.onStopped = nil
         cap?.stop()
         isScreenSharing = false
-        if disableVideo {
-            do {
-                try avSession?.setCameraEnabled(enabled: false)
-            } catch {
-                print("[av] setCameraEnabled(false) for screen share: \(error)")
-            }
+        do {
+            try avSession?.setScreenEnabled(enabled: false)
+        } catch {
+            print("[av] setScreenEnabled(false): \(error)")
         }
     }
 
@@ -277,6 +321,15 @@ extension AppState {
 
     func videoLayer(for nick: String) -> AVSampleBufferDisplayLayer? {
         remoteVideoLayers.object(forKey: nick.lowercased() as NSString)
+    }
+
+    /// Called by `RemoteScreenTile`. Weakly retains the display layer.
+    func bindScreenSink(nick: String, to layer: AVSampleBufferDisplayLayer) {
+        remoteScreenLayers.setObject(layer, forKey: nick.lowercased() as NSString)
+    }
+
+    func screenLayer(for nick: String) -> AVSampleBufferDisplayLayer? {
+        remoteScreenLayers.object(forKey: nick.lowercased() as NSString)
     }
 
     /// Handle an inbound `+freeq.at/av-state` TAGMSG.
@@ -304,6 +357,7 @@ extension AppState {
             if inThisCall {
                 callParticipants.removeAll { $0.lowercased() == actor.lowercased() }
                 participantsWithVideo = participantsWithVideo.filter { $0.lowercased() != actor.lowercased() }
+                participantsWithScreen = participantsWithScreen.filter { $0.lowercased() != actor.lowercased() }
             }
         default:
             break
@@ -342,16 +396,34 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
         case .participantLeft(let nick):
             state.callParticipants.removeAll { $0.lowercased() == nick.lowercased() }
             state.participantsWithVideo = state.participantsWithVideo.filter { $0.lowercased() != nick.lowercased() }
+            state.participantsWithScreen = state.participantsWithScreen.filter { $0.lowercased() != nick.lowercased() }
         case .audioTrackStarted, .audioTrackStopped, .videoTrackStarted:
             break
         case .videoTrackStopped(let nick):
             state.participantsWithVideo = state.participantsWithVideo.filter { $0.lowercased() != nick.lowercased() }
         case .videoFrame(let nick, let bgra, let width, let height):
-            guard state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) else { return }
+            // A frame from a nick we haven't seen means the join events raced
+            // the media path — the SDK is delivering their video, so they're
+            // in the call. Add them instead of dropping their frames.
+            if !state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) {
+                state.callParticipants.append(nick)
+            }
             if let layer = state.videoLayer(for: nick) {
-                VideoSampleBuffer.enqueue(bgra: bgra, width: Int(width), height: Int(height), on: layer)
+                // Pixel work happens on the render queue, not the main thread.
+                VideoSampleBuffer.renderAsync(bgra: bgra, width: Int(width), height: Int(height), on: layer)
             }
             _ = state.participantsWithVideo.insert(nick)
+        case .screenTrackStarted(let nick):
+            _ = state.participantsWithScreen.insert(nick)
+        case .screenTrackStopped(let nick):
+            state.participantsWithScreen = state.participantsWithScreen.filter {
+                $0.lowercased() != nick.lowercased()
+            }
+        case .screenFrame(let nick, let bgra, let width, let height):
+            _ = state.participantsWithScreen.insert(nick)
+            if let layer = state.screenLayer(for: nick) {
+                VideoSampleBuffer.renderAsync(bgra: bgra, width: Int(width), height: Int(height), on: layer)
+            }
         case .error(let message):
             print("[av] Error: \(message)")
         }

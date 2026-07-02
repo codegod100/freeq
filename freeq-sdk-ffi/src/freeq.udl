@@ -211,6 +211,12 @@ interface AvEvent {
     VideoTrackStopped(string nick);
     // BGRA frame from a remote participant. Swift renders via AVSampleBufferDisplayLayer.
     VideoFrame(string nick, sequence<u8> bgra, u32 width, u32 height);
+    // Screen-share broadcasts ride a separate MoQ path ({peer}/screen — the
+    // same convention as the web client), so they get their own events and
+    // can run alongside the camera track.
+    ScreenTrackStarted(string nick);
+    ScreenTrackStopped(string nick);
+    ScreenFrame(string nick, sequence<u8> bgra, u32 width, u32 height);
     Error(string message);
 };
 
@@ -243,6 +249,17 @@ interface FreeqAv {
     // for the Opus encoder. iroh-live's audio input backend isn't viable
     // on iOS, so capture happens in Swift (AVAudioEngine).
     void push_audio_frame(sequence<f32> samples);
+
+    // Publish (true) or retract (false) a second, video-only broadcast at
+    // `{our-path}/screen` — the web client's screen-share convention. This
+    // is independent of the camera track, so camera + screen can run
+    // simultaneously.
+    [Throws=FreeqError]
+    void set_screen_enabled(boolean enabled);
+
+    // Swift-driven screen capture (ScreenCaptureKit). Same contract as
+    // push_video_frame, but feeds the /screen broadcast's encoder.
+    void push_screen_frame(sequence<u8> bgra, u32 width, u32 height, u64 timestamp_us);
 
     boolean is_connected();
 };

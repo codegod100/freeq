@@ -48,6 +48,9 @@ class AppState {
     var closedDMs: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(closedDMs), forKey: "freeq.closedDMs") }
     }
+    /// Passphrase channel E2EE (ENC1). Keys persist in the keychain; the
+    /// policy itself is the unit-tested `ChannelE2eeState`.
+    @ObservationIgnored var channelE2ee = ChannelE2eeState()
 
     // MARK: - Favorites, Muted, Bookmarks
     var favorites: Set<String> = []  // lowercase channel names
@@ -82,6 +85,21 @@ class AppState {
     var currentCallSessionId: String? = nil
     /// Nicks for which at least one video frame has arrived this call.
     var participantsWithVideo: Set<String> = []
+    /// Nicks with a live screen-share broadcast ({peer}/screen path).
+    var participantsWithScreen: Set<String> = []
+    /// Local mic level (0…1) for the in-call meter, ~25 Hz while capturing.
+    var localMicLevel: Float = 0
+    /// Debounced local voice-activity flag (drives the self-tile speaking
+    /// ring and the "talking while muted" hint).
+    var isLocalSpeaking: Bool = false
+    /// Sticky mic selection (CoreAudio UID; nil = system default).
+    var preferredMicUID: String? = UserDefaults.standard.string(forKey: "freeq.av.micUID") {
+        didSet { UserDefaults.standard.set(preferredMicUID, forKey: "freeq.av.micUID") }
+    }
+    /// Sticky camera selection (AVCaptureDevice.uniqueID; nil = default).
+    var preferredCameraUID: String? = UserDefaults.standard.string(forKey: "freeq.av.cameraUID") {
+        didSet { UserDefaults.standard.set(preferredCameraUID, forKey: "freeq.av.cameraUID") }
+    }
     @ObservationIgnored var avSession: FreeqAv? = nil
     /// Channels where we sent `av-start` and are waiting on the server's `started` echo.
     @ObservationIgnored var pendingAvStart: Set<String> = []
@@ -92,6 +110,9 @@ class AppState {
     @ObservationIgnored var micCapture: CallMicCapture? = nil
     /// Per-nick remote video display layers (lowercased nick → layer, weakly held).
     @ObservationIgnored var remoteVideoLayers =
+        NSMapTable<NSString, AVSampleBufferDisplayLayer>.strongToWeakObjects()
+    /// Per-nick remote screen-share layers (lowercased nick → layer, weakly held).
+    @ObservationIgnored var remoteScreenLayers =
         NSMapTable<NSString, AVSampleBufferDisplayLayer>.strongToWeakObjects()
     var localPreviewCapture: CallCameraCapture? { cameraCapture }
 
@@ -414,6 +435,14 @@ class AppState {
             return
         }
 
+        // Channel E2EE: when this channel has a key, relay ciphertext with the
+        // `+encrypted` tag (matches the web client's wire behavior). The echo
+        // cache inside ChannelE2eeState restores our plaintext on server echo.
+        if target.hasPrefix("#"), let wire = channelE2ee.outgoing(text: text, channel: target) {
+            sendRaw("@+encrypted PRIVMSG \(target) :\(wire)")
+            return
+        }
+
         // Server-relayed
         do {
             try client?.sendMessage(target: target, text: text)
@@ -427,7 +456,11 @@ class AppState {
     }
 
     func editMessage(target: String, msgId: String, newText: String) {
-        sendRaw("@+draft/edit=\(msgId) PRIVMSG \(target) :\(newText)")
+        if target.hasPrefix("#"), let wire = channelE2ee.outgoing(text: newText, channel: target) {
+            sendRaw("@+draft/edit=\(msgId);+encrypted PRIVMSG \(target) :\(wire)")
+        } else {
+            sendRaw("@+draft/edit=\(msgId) PRIVMSG \(target) :\(newText)")
+        }
     }
 
     func deleteMessage(target: String, msgId: String) {
@@ -618,6 +651,8 @@ class AppState {
             return ch
         }
         let ch = ChannelState(name: name)
+        restoreChannelKeyIfSaved(name)
+        ch.isEncrypted = channelE2ee.hasKey(channel: name)
         // Pre-populate from local DB
         Task {
             let cached = await MessageStore.shared.loadMessages(channel: name, limit: 100)
@@ -628,6 +663,33 @@ class AppState {
         channels.append(ch)
         channels.sort { $0.name.lowercased() < $1.name.lowercased() }
         return ch
+    }
+
+    // MARK: - Channel E2EE key lifecycle
+
+    private static func channelKeyKeychainKey(_ channel: String) -> String {
+        "e2ee.channel.\(channel.lowercased())"
+    }
+
+    func setChannelKey(_ channel: String, passphrase: String) {
+        channelE2ee.setKey(channel: channel, passphrase: passphrase)
+        if let exported = channelE2ee.exportKey(channel: channel) {
+            KeychainHelper.save(key: Self.channelKeyKeychainKey(channel), value: exported)
+        }
+        getOrCreateChannel(channel).isEncrypted = true
+    }
+
+    func removeChannelKey(_ channel: String) {
+        channelE2ee.removeKey(channel: channel)
+        KeychainHelper.delete(key: Self.channelKeyKeychainKey(channel))
+        channels.first { $0.name.lowercased() == channel.lowercased() }?.isEncrypted = false
+    }
+
+    /// Rehydrate a channel key from the keychain (saved by a prior /encrypt).
+    func restoreChannelKeyIfSaved(_ channel: String) {
+        guard !channelE2ee.hasKey(channel: channel),
+              let b64 = KeychainHelper.load(key: Self.channelKeyKeychainKey(channel)) else { return }
+        channelE2ee.importKey(channel: channel, base64: b64)
     }
 
     func getOrCreateDM(_ nick: String) -> ChannelState {
@@ -930,15 +992,25 @@ extension AppState {
                 profileCache.setDid(did, for: msg.fromNick)
             }
 
+            // Channel E2EE: map ENC1 ciphertext to its display form (decrypted
+            // plaintext, our own echo-cached plaintext, or a placeholder when
+            // we lack the key). DM (ENC3) decryption is E2eeManager's job.
+            var displayText = msg.text
+            var wasEncrypted = false
+            if msg.target.hasPrefix("#") {
+                (displayText, wasEncrypted) = channelE2ee.incoming(text: msg.text, channel: msg.target)
+            }
+
             let message = ChatMessage(
                 id: msg.msgid ?? UUID().uuidString,
                 from: msg.fromNick,
-                text: msg.text,
+                text: displayText,
                 isAction: msg.isAction,
                 timestamp: Date(timeIntervalSince1970: Double(msg.timestampMs) / 1000.0),
                 replyTo: msg.replyTo,
                 isEdited: msg.editOf != nil,
                 isSigned: msg.isSigned,
+                isEncrypted: wasEncrypted,
                 origin: msg.origin
             )
 
@@ -947,7 +1019,7 @@ extension AppState {
                 if let batchId = msg.batchId, var batch = batches[batchId] {
                     batch.learnTarget(from: msg.target)
                     if let idx = batch.messages.firstIndex(where: { $0.id == editOf }) {
-                        batch.messages[idx].text = msg.text
+                        batch.messages[idx].text = displayText
                         batch.messages[idx].isEdited = true
                         if let newId = msg.msgid { batch.messages[idx].id = newId }
                     } else {
@@ -960,13 +1032,13 @@ extension AppState {
                 let target = msg.target
                 if target.hasPrefix("#") {
                     let ch = getOrCreateChannel(target)
-                    ch.applyEdit(originalId: editOf, newId: msg.msgid, newText: msg.text)
-                    Task { await MessageStore.shared.markEdited(msgId: editOf, newText: msg.text) }
+                    ch.applyEdit(originalId: editOf, newId: msg.msgid, newText: displayText)
+                    Task { await MessageStore.shared.markEdited(msgId: editOf, newText: displayText) }
                 } else {
                     let bufName = isSelf ? target : msg.fromNick
                     let dm = getOrCreateDM(bufName)
-                    dm.applyEdit(originalId: editOf, newId: msg.msgid, newText: msg.text)
-                    Task { await MessageStore.shared.markEdited(msgId: editOf, newText: msg.text) }
+                    dm.applyEdit(originalId: editOf, newId: msg.msgid, newText: displayText)
+                    Task { await MessageStore.shared.markEdited(msgId: editOf, newText: displayText) }
                 }
                 return
             }

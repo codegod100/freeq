@@ -273,6 +273,13 @@ struct MessageRow: View {
                                     .help("Cryptographically signed message")
                             }
 
+                            if message.isEncrypted {
+                                Image(systemName: "lock.shield.fill")
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Theme.success)
+                                    .help("End-to-end encrypted")
+                            }
+
                             // Federated: relayed from another server — peer-vouched,
                             // not verified here. Show provenance instead of the local
                             // verified/signed badges (which would overstate trust).

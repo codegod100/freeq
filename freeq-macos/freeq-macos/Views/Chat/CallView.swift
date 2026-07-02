@@ -2,8 +2,12 @@ import AVFoundation
 import SwiftUI
 
 /// Voice/video call panel — shown when the user is in an AV session.
-/// Camera and screen sharing are off by default. Screen share uses the native
-/// video path until the SDK grows web-style `/screen` spotlight broadcasts.
+///
+/// Collapsed: a horizontal strip of small tiles above the composer.
+/// Expanded: an adaptive grid (unit-tested `CallGridLayout` picks the column
+/// count that maximizes tile area) with a spotlight row for screen shares.
+/// Controls include mic/camera device pickers, a screen-source picker
+/// (display or window), a live mic meter, and a "talking while muted" hint.
 struct CallView: View {
     @Environment(AppState.self) private var appState
     let channel: String
@@ -11,12 +15,51 @@ struct CallView: View {
     var body: some View {
         VStack(spacing: 0) {
             if appState.isInCall {
+                if !appState.participantsWithScreen.isEmpty {
+                    screenSpotlight
+                }
                 if appState.isCallExpanded { expandedGrid } else { participantStrip }
+                if appState.isMuted && appState.isLocalSpeaking {
+                    mutedHint
+                }
                 controlsBar
             }
         }
         .background(.bar)
     }
+
+    // MARK: - Screen-share spotlight (remote /screen broadcasts)
+
+    /// Shared screens get a large letterboxed row above the participant
+    /// tiles — `resizeAspect`, never cropped, mirroring the web client's
+    /// spotlight treatment.
+    private var screenSpotlight: some View {
+        HStack(spacing: 8) {
+            ForEach(appState.participantsWithScreen.sorted(), id: \.self) { nick in
+                ZStack(alignment: .bottomLeading) {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.black.opacity(0.85))
+                    RemoteScreenTile(appState: appState, nick: nick)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                    HStack(spacing: 4) {
+                        Image(systemName: "rectangle.on.rectangle.fill").font(.caption2)
+                        Text("\(nick)'s screen").font(.caption.weight(.medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(Capsule())
+                    .padding(8)
+                }
+                .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .frame(maxHeight: appState.isCallExpanded ? .infinity : 260)
+    }
+
+    // MARK: - Collapsed strip
 
     private var participantStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -45,6 +88,7 @@ struct CallView: View {
                     LocalPreviewView(capture: cap)
                         .frame(width: 110, height: 80)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .scaleEffect(x: -1)  // mirror self-view, like every meeting app
                 } else if isLocal, appState.isScreenSharing {
                     VStack(spacing: 6) {
                         Image(systemName: "rectangle.on.rectangle")
@@ -59,12 +103,20 @@ struct CallView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .opacity(hasVideo ? 1 : 0)
                 }
-                if !hasVideo {
+                if !hasVideo && !(isLocal && appState.isScreenSharing) {
                     Text(String(nick.prefix(2).uppercased()))
                         .font(.title2.weight(.bold))
                         .foregroundStyle(Color.accentColor)
                 }
             }
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(
+                        isLocal && appState.isLocalSpeaking && !appState.isMuted
+                            ? Theme.success : Color.clear,
+                        lineWidth: 2
+                    )
+            )
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -72,15 +124,37 @@ struct CallView: View {
         }
     }
 
+    // MARK: - Expanded grid
+
     private var expandedGrid: some View {
-        VStack(spacing: 6) {
-            ForEach(appState.callParticipants, id: \.self) { nick in
-                expandedTile(nick: nick, isLocal: false)
+        GeometryReader { geo in
+            let tiles = gridTiles
+            let cols = CallGridLayout.columns(for: tiles.count, in: geo.size)
+            LazyVGrid(
+                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: cols),
+                spacing: 8
+            ) {
+                ForEach(tiles) { entry in
+                    expandedTile(nick: entry.nick, isLocal: entry.isLocal)
+                        .aspectRatio(CallGridLayout.tileAspect, contentMode: .fit)
+                }
             }
-            expandedTile(nick: appState.nick.isEmpty ? "You" : appState.nick, isLocal: true)
+            .padding(8)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, minHeight: 240, maxHeight: .infinity)
+        .frame(minHeight: 280, maxHeight: .infinity)
+    }
+
+    private struct GridTile: Identifiable {
+        let nick: String
+        let isLocal: Bool
+        var id: String { (isLocal ? "local-" : "remote-") + nick.lowercased() }
+    }
+
+    /// Remote participants first, self last (meeting-app convention).
+    private var gridTiles: [GridTile] {
+        appState.callParticipants.map { GridTile(nick: $0, isLocal: false) }
+            + [GridTile(nick: appState.nick.isEmpty ? "You" : appState.nick, isLocal: true)]
     }
 
     @ViewBuilder
@@ -94,6 +168,7 @@ struct CallView: View {
             if isLocal, appState.isCameraOn, let cap = appState.localPreviewCapture {
                 LocalPreviewView(capture: cap)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .scaleEffect(x: -1)
             } else if isLocal, appState.isScreenSharing {
                 VStack(spacing: 12) {
                     Image(systemName: "rectangle.on.rectangle")
@@ -107,7 +182,7 @@ struct CallView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .opacity(hasVideo ? 1 : 0)
             }
-            if !hasVideo {
+            if !hasVideo && !(isLocal && appState.isScreenSharing) {
                 Text(String(nick.prefix(2).uppercased()))
                     .font(.system(size: 46, weight: .bold))
                     .foregroundStyle(Color.accentColor)
@@ -115,20 +190,52 @@ struct CallView: View {
             VStack {
                 Spacer()
                 HStack {
-                    Text(isLocal ? "You" : nick)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Color.black.opacity(0.55))
-                        .clipShape(Capsule())
+                    HStack(spacing: 4) {
+                        if isLocal && appState.isMuted {
+                            Image(systemName: "mic.slash.fill").font(.caption2)
+                        }
+                        Text(isLocal ? "You" : nick)
+                            .font(.caption.weight(.medium))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Color.black.opacity(0.55))
+                    .clipShape(Capsule())
                     Spacer()
                 }
                 .padding(8)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(
+                    isLocal && appState.isLocalSpeaking && !appState.isMuted
+                        ? Theme.success : Color.clear,
+                    lineWidth: 2.5
+                )
+        )
     }
+
+    // MARK: - Muted-while-talking hint
+
+    private var mutedHint: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "mic.slash.fill")
+            Text("You're talking, but your mic is muted")
+            Button("Unmute") { appState.toggleMute() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(Theme.warning)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Theme.warning.opacity(0.10))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+
+    // MARK: - Controls
 
     private var controlsBar: some View {
         HStack(spacing: 14) {
@@ -147,26 +254,51 @@ struct CallView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }
+
+            MicLevelBar(level: appState.localMicLevel, muted: appState.isMuted)
+                .frame(width: 52, height: 5)
+
             Spacer()
+
             controlButton(systemName: appState.isCallExpanded
                 ? "arrow.down.right.and.arrow.up.left"
-                : "arrow.up.left.and.arrow.down.right", active: false) {
+                : "arrow.up.left.and.arrow.down.right", active: false,
+                help: "Expand or collapse the call") {
                 appState.isCallExpanded.toggle()
             }
-            controlButton(systemName: appState.isMuted ? "mic.slash.fill" : "mic.fill",
-                          active: appState.isMuted, activeColor: .red) {
-                appState.toggleMute()
+
+            // Mute + mic picker
+            splitControl(
+                systemName: appState.isMuted ? "mic.slash.fill" : "mic.fill",
+                active: appState.isMuted, activeColor: .red,
+                help: "Mute (⇧⌘M)",
+                action: { appState.toggleMute() }
+            ) {
+                MicPickerMenu()
             }
-            controlButton(systemName: appState.isCameraOn ? "video.fill" : "video.slash.fill",
-                          active: appState.isCameraOn) {
-                appState.toggleCamera()
+
+            // Camera + camera picker
+            splitControl(
+                systemName: appState.isCameraOn ? "video.fill" : "video.slash.fill",
+                active: appState.isCameraOn, activeColor: .accentColor,
+                help: "Camera (⇧⌘V)",
+                action: { appState.toggleCamera() }
+            ) {
+                CameraPickerMenu()
             }
-            controlButton(systemName: appState.isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle",
-                          active: appState.isScreenSharing,
-                          activeColor: Theme.accent) {
-                appState.toggleScreenShare()
+
+            // Screen share + source picker
+            splitControl(
+                systemName: appState.isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle",
+                active: appState.isScreenSharing, activeColor: Theme.accent,
+                help: "Share screen (⇧⌘S)",
+                action: { appState.toggleScreenShare() }
+            ) {
+                ScreenSourcePickerMenu()
             }
-            controlButton(systemName: "phone.down.fill", active: true, activeColor: .red) {
+
+            controlButton(systemName: "phone.down.fill", active: true, activeColor: .red,
+                          help: "Leave call") {
                 appState.leaveCall()
             }
         }
@@ -178,6 +310,7 @@ struct CallView: View {
     @ViewBuilder
     private func controlButton(systemName: String, active: Bool,
                                activeColor: Color = .accentColor,
+                               help: String = "",
                                action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
@@ -188,6 +321,140 @@ struct CallView: View {
                 .clipShape(Circle())
         }
         .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// A round control with a small chevron menu attached (device pickers),
+    /// mirroring the split mute/camera buttons in Zoom/Meet.
+    @ViewBuilder
+    private func splitControl<M: View>(
+        systemName: String, active: Bool, activeColor: Color, help: String,
+        action: @escaping () -> Void, @ViewBuilder menu: () -> M
+    ) -> some View {
+        HStack(spacing: 1) {
+            controlButton(systemName: systemName, active: active,
+                          activeColor: activeColor, help: help, action: action)
+            Menu {
+                menu()
+            } label: {
+                Image(systemName: "chevron.up")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14, height: 36)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .frame(width: 14)
+        }
+    }
+}
+
+// MARK: - Mic level meter
+
+struct MicLevelBar: View {
+    let level: Float
+    let muted: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.gray.opacity(0.25))
+                Capsule()
+                    .fill(muted ? Color.gray.opacity(0.6) : Theme.success)
+                    .frame(width: max(0, geo.size.width * CGFloat(level)))
+                    .animation(.linear(duration: 0.05), value: level)
+            }
+        }
+        .help(muted ? "Mic level (muted — not transmitting)" : "Mic level")
+    }
+}
+
+// MARK: - Device picker menus
+
+struct MicPickerMenu: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        let devices = AudioInputDevices.list()
+        Section("Microphone") {
+            Button {
+                appState.setMicDevice(uid: nil)
+            } label: {
+                menuRow("System Default", checked: appState.preferredMicUID == nil)
+            }
+            ForEach(devices) { device in
+                Button {
+                    appState.setMicDevice(uid: device.id)
+                } label: {
+                    menuRow(device.name, checked: appState.preferredMicUID == device.id)
+                }
+            }
+        }
+    }
+}
+
+struct CameraPickerMenu: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        let devices = CallCameraCapture.availableCameras()
+        Section("Camera") {
+            Button {
+                appState.setCameraDevice(uid: nil)
+            } label: {
+                menuRow("System Default", checked: appState.preferredCameraUID == nil)
+            }
+            ForEach(devices) { device in
+                Button {
+                    appState.setCameraDevice(uid: device.id)
+                } label: {
+                    menuRow(device.name, checked: appState.preferredCameraUID == device.id)
+                }
+            }
+        }
+    }
+}
+
+struct ScreenSourcePickerMenu: View {
+    @Environment(AppState.self) private var appState
+    @State private var targets: [ScreenShareTarget] = []
+
+    var body: some View {
+        Group {
+            if targets.isEmpty {
+                Text("Loading sources…")
+            } else {
+                let displays = targets.filter { if case .display = $0.kind { return true }; return false }
+                let windows = targets.filter { if case .window = $0.kind { return true }; return false }
+                Section("Share a Display") {
+                    ForEach(displays) { target in
+                        Button(target.title) { appState.startScreenShare(target: target) }
+                    }
+                }
+                Section("Share a Window") {
+                    ForEach(windows) { target in
+                        Button(target.title) { appState.startScreenShare(target: target) }
+                    }
+                }
+                if appState.isScreenSharing {
+                    Divider()
+                    Button("Stop Sharing") { appState.toggleScreenShare() }
+                }
+            }
+        }
+        .task {
+            targets = await CallScreenCapture.availableTargets()
+        }
+    }
+}
+
+@ViewBuilder
+private func menuRow(_ title: String, checked: Bool) -> some View {
+    if checked {
+        Label(title, systemImage: "checkmark")
+    } else {
+        Text(title)
     }
 }
 
@@ -231,6 +498,25 @@ struct LocalPreviewView: NSViewRepresentable {
     }
 }
 
+// MARK: - Remote screen-share tile (AVSampleBufferDisplayLayer, letterboxed)
+
+struct RemoteScreenTile: NSViewRepresentable {
+    let appState: AppState
+    let nick: String
+
+    func makeNSView(context: Context) -> RemoteVideoTile.SampleBufferView {
+        let v = RemoteVideoTile.SampleBufferView()
+        // Screens must never be cropped — text lives at the edges.
+        v.displayLayer.videoGravity = .resizeAspect
+        appState.bindScreenSink(nick: nick, to: v.displayLayer)
+        return v
+    }
+
+    func updateNSView(_ nsView: RemoteVideoTile.SampleBufferView, context: Context) {
+        appState.bindScreenSink(nick: nick, to: nsView.displayLayer)
+    }
+}
+
 // MARK: - Remote participant tile (AVSampleBufferDisplayLayer)
 
 struct RemoteVideoTile: NSViewRepresentable {
@@ -265,9 +551,56 @@ struct RemoteVideoTile: NSViewRepresentable {
 
 // MARK: - BGRA → CMSampleBuffer
 
-/// Decodes a tightly-packed BGRA buffer into a `CMSampleBuffer` and enqueues
-/// it on the given display layer. Called from the AV callback handler.
+/// Converts tightly-packed BGRA frames into `CMSampleBuffer`s and enqueues
+/// them on display layers — off the main thread, from a pooled allocator.
+///
+/// The old path did the CVPixelBuffer alloc + two memcpys on the MAIN thread
+/// per frame per participant (jank at 30 fps × N tiles) with no buffer pool
+/// (allocator churn) and no failure recovery (a decode error froze the tile
+/// forever).
 enum VideoSampleBuffer {
+    /// Serial render queue: keeps frame order per call and keeps all pixel
+    /// work off the main thread. `AVSampleBufferDisplayLayer.enqueue` is
+    /// thread-safe.
+    private static let renderQueue = DispatchQueue(
+        label: "at.freeq.macos.video-render", qos: .userInteractive)
+
+    /// One pixel-buffer pool per frame size (participants can differ).
+    private static var pools: [String: CVPixelBufferPool] = [:]
+
+    /// Async render entrypoint used by the AV callback handler.
+    static func renderAsync(bgra: [UInt8], width: Int, height: Int,
+                            on layer: AVSampleBufferDisplayLayer) {
+        renderQueue.async {
+            // A failed layer never recovers on its own — flush to restart.
+            if layer.status == .failed {
+                layer.flush()
+            }
+            enqueue(bgra: bgra, width: width, height: height, on: layer)
+        }
+    }
+
+    private static func pool(width: Int, height: Int) -> CVPixelBufferPool? {
+        let key = "\(width)x\(height)"
+        if let cached = pools[key] { return cached }
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey: width,
+            kCVPixelBufferHeightKey: height,
+            kCVPixelBufferIOSurfacePropertiesKey: [:],
+        ]
+        var pool: CVPixelBufferPool?
+        CVPixelBufferPoolCreate(
+            kCFAllocatorDefault,
+            [kCVPixelBufferPoolMinimumBufferCountKey: 4] as CFDictionary,
+            attrs as CFDictionary, &pool)
+        if let pool {
+            if pools.count > 8 { pools.removeAll() }  // size-churn safety valve
+            pools[key] = pool
+        }
+        return pool
+    }
+
     @discardableResult
     static func enqueue(bgra: [UInt8], width: Int, height: Int,
                         on layer: AVSampleBufferDisplayLayer) -> Bool {
@@ -277,13 +610,17 @@ enum VideoSampleBuffer {
         }
 
         var pixelBuffer: CVPixelBuffer?
-        let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:]]
-        let status = CVPixelBufferCreate(
-            kCFAllocatorDefault, width, height,
-            kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pixelBuffer
-        )
-        guard status == kCVReturnSuccess, let pb = pixelBuffer else {
-            print("[av] CVPixelBufferCreate failed: \(status)")
+        if let pool = pool(width: width, height: height) {
+            CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer)
+        }
+        if pixelBuffer == nil {
+            let attrs: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:]]
+            CVPixelBufferCreate(
+                kCFAllocatorDefault, width, height,
+                kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pixelBuffer)
+        }
+        guard let pb = pixelBuffer else {
+            print("[av] pixel buffer allocation failed")
             return false
         }
 

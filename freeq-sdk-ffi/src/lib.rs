@@ -1057,6 +1057,18 @@ pub enum AvEvent {
         width: u32,
         height: u32,
     },
+    ScreenTrackStarted {
+        nick: String,
+    },
+    ScreenTrackStopped {
+        nick: String,
+    },
+    ScreenFrame {
+        nick: String,
+        bgra: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
     Error {
         message: String,
     },
@@ -1187,7 +1199,8 @@ mod av_impl {
         // Held to keep audio/video device handles alive for the session.
         pub _audio_backend: iroh_live::media::audio_backend::AudioBackend,
         pub _session: moq_lite::Session,
-        pub _origin: moq_lite::OriginProducer,
+        /// Also used to publish/retract the screen broadcast post-connect.
+        pub origin: moq_lite::OriginProducer,
         pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
         pub connected: bool,
         pub muted: Arc<AtomicBool>,
@@ -1200,6 +1213,15 @@ mod av_impl {
         pub video_format: Arc<Mutex<VideoFormat>>,
         /// Mic samples pushed from Swift, drained by the Opus encoder.
         pub audio_queue: Arc<Mutex<std::collections::VecDeque<f32>>>,
+        /// Our published MoQ path — the screen broadcast publishes at
+        /// `{broadcast_name}/screen` (web-client convention).
+        pub broadcast_name: String,
+        /// Live screen-share broadcast; Some while sharing. Dropping the
+        /// producer retracts the announcement for peers.
+        pub screen_broadcast: Option<LocalBroadcast>,
+        pub screen_enabled: Arc<AtomicBool>,
+        pub screen_pending: Arc<Mutex<Option<VideoFrame>>>,
+        pub screen_format: Arc<Mutex<VideoFormat>>,
     }
 
     pub(super) fn connect(
@@ -1322,39 +1344,42 @@ mod av_impl {
                         match announced {
                             Some((path, Some(broadcast_consumer))) => {
                                 let path_str = path.to_string();
-                                if path_str == our_name { continue; }
+                                if path_str == our_name || path_str == format!("{our_name}/screen") {
+                                    continue;
+                                }
 
-                                // Path is `{session}/{nick}[~{instance}]` —
-                                // strip the per-device instance suffix so
-                                // events surface the display nick. Matches the
-                                // web client: subscribe uses the full path
-                                // (which the MoQ layer already has), UI keys
-                                // off the bare nick.
-                                let last = path_str
-                                    .split('/')
-                                    .last()
-                                    .unwrap_or("unknown");
-                                let nick = last.split('~').next().unwrap_or(last).to_string();
-                                tracing::info!(nick = %nick, path = %path_str, "AV: participant broadcast");
-                                handler_loop
-                                    .on_av_event(AvEvent::ParticipantJoined { nick: nick.clone() });
+                                // Paths: `{session}/{nick}[~{instance}]` for
+                                // the main broadcast, with an optional
+                                // `/screen` suffix for a screen share (the
+                                // web client's convention). Strip the
+                                // per-device instance suffix so events
+                                // surface the display nick.
+                                let (nick, is_screen) = parse_broadcast_path(&path_str);
+                                tracing::info!(nick = %nick, screen = is_screen, path = %path_str, "AV: participant broadcast");
+                                if !is_screen {
+                                    handler_loop
+                                        .on_av_event(AvEvent::ParticipantJoined { nick: nick.clone() });
+                                }
 
                                 let ab = audio_for_playback.clone();
                                 let h = handler_loop.clone();
                                 let nick_for_task = nick.clone();
                                 remote_tasks.spawn(async move {
-                                    handle_remote_broadcast(path_str, broadcast_consumer, ab, h, nick_for_task)
+                                    handle_remote_broadcast(path_str, broadcast_consumer, ab, h, nick_for_task, is_screen)
                                         .await;
                                 });
                             }
                             Some((path, None)) => {
                                 let path_str = path.to_string();
-                                let last = path_str
-                                    .split('/')
-                                    .last()
-                                    .unwrap_or("unknown");
-                                let nick = last.split('~').next().unwrap_or(last).to_string();
-                                handler_loop.on_av_event(AvEvent::ParticipantLeft { nick });
+                                if path_str == our_name || path_str == format!("{our_name}/screen") {
+                                    continue;
+                                }
+                                let (nick, is_screen) = parse_broadcast_path(&path_str);
+                                if is_screen {
+                                    handler_loop.on_av_event(AvEvent::ScreenTrackStopped { nick });
+                                } else {
+                                    handler_loop.on_av_event(AvEvent::ParticipantLeft { nick });
+                                }
                             }
                             None => break,
                         }
@@ -1373,7 +1398,7 @@ mod av_impl {
             _broadcast: broadcast,
             _audio_backend: audio_backend,
             _session: session,
-            _origin: origin,
+            origin,
             shutdown_tx: Some(shutdown_tx),
             connected: true,
             muted,
@@ -1381,7 +1406,25 @@ mod av_impl {
             pending_frame,
             video_format,
             audio_queue,
+            broadcast_name,
+            screen_broadcast: None,
+            screen_enabled: Arc::new(AtomicBool::new(false)),
+            screen_pending: Arc::new(Mutex::new(None)),
+            screen_format: Arc::new(Mutex::new(DEFAULT_VIDEO_FORMAT)),
         })
+    }
+
+    /// `{session}/{nick}[~{instance}][/screen]` → (display nick, is_screen).
+    pub(super) fn parse_broadcast_path(path_str: &str) -> (String, bool) {
+        let segments: Vec<&str> = path_str.split('/').collect();
+        let is_screen = segments.last() == Some(&"screen") && segments.len() >= 2;
+        let nick_segment = if is_screen {
+            segments[segments.len() - 2]
+        } else {
+            segments.last().copied().unwrap_or("unknown")
+        };
+        let nick = nick_segment.split('~').next().unwrap_or(nick_segment);
+        (nick.to_string(), is_screen)
     }
 
     async fn handle_remote_broadcast(
@@ -1390,6 +1433,7 @@ mod av_impl {
         audio_backend: iroh_live::media::audio_backend::AudioBackend,
         handler: Arc<dyn AvEventHandler>,
         nick: String,
+        is_screen: bool,
     ) {
         // iroh-live's default policy is 150ms max_latency with cross-track
         // sync. 150ms is conservative — fine for streaming a published
@@ -1421,7 +1465,7 @@ mod av_impl {
             }
         };
 
-        if tracks.audio.is_some() {
+        if tracks.audio.is_some() && !is_screen {
             tracing::info!(nick = %nick, "AV: playing remote audio");
             handler.on_av_event(AvEvent::AudioTrackStarted { nick: nick.clone() });
         }
@@ -1439,8 +1483,12 @@ mod av_impl {
         loop {
             match video.take() {
                 Some(mut v) => {
-                    tracing::info!(nick = %nick, decoder = %v.decoder_name(), "AV: remote video track present");
-                    handler.on_av_event(AvEvent::VideoTrackStarted { nick: nick.clone() });
+                    tracing::info!(nick = %nick, screen = is_screen, decoder = %v.decoder_name(), "AV: remote video track present");
+                    handler.on_av_event(if is_screen {
+                        AvEvent::ScreenTrackStarted { nick: nick.clone() }
+                    } else {
+                        AvEvent::VideoTrackStarted { nick: nick.clone() }
+                    });
                     while let Some(frame) = v.next_frame().await {
                         let (w, h) = (frame.width(), frame.height());
                         // Decoded frames arrive as I420/NV12/GPU depending on
@@ -1452,15 +1500,28 @@ mod av_impl {
                         for chunk in bgra.chunks_exact_mut(4) {
                             chunk.swap(0, 2);
                         }
-                        handler.on_av_event(AvEvent::VideoFrame {
-                            nick: nick.clone(),
-                            bgra,
-                            width: w,
-                            height: h,
+                        handler.on_av_event(if is_screen {
+                            AvEvent::ScreenFrame {
+                                nick: nick.clone(),
+                                bgra,
+                                width: w,
+                                height: h,
+                            }
+                        } else {
+                            AvEvent::VideoFrame {
+                                nick: nick.clone(),
+                                bgra,
+                                width: w,
+                                height: h,
+                            }
                         });
                     }
-                    tracing::info!(nick = %nick, "AV: remote video track ended; will re-subscribe if it returns");
-                    handler.on_av_event(AvEvent::VideoTrackStopped { nick: nick.clone() });
+                    tracing::info!(nick = %nick, screen = is_screen, "AV: remote video track ended; will re-subscribe if it returns");
+                    handler.on_av_event(if is_screen {
+                        AvEvent::ScreenTrackStopped { nick: nick.clone() }
+                    } else {
+                        AvEvent::VideoTrackStopped { nick: nick.clone() }
+                    });
                     // Track ended — fall through and wait for video to come back.
                 }
                 None => {
@@ -1550,6 +1611,90 @@ mod av_impl {
             Duration::from_micros(ts_us),
         );
         *state.pending_frame.lock().unwrap() = Some(frame);
+    }
+
+    /// Publish the screen broadcast at `{broadcast_name}/screen`. Unlike the
+    /// camera (advertised in the catalog from connect time), the screen
+    /// broadcast only exists while sharing — the web client's ScreenTile
+    /// reveals its spotlight when this path goes live, so publishing eagerly
+    /// would show every macOS participant as a phantom screen share.
+    pub(super) fn enable_screen(state: &mut State) -> Result<(), FreeqError> {
+        if state.screen_broadcast.is_some() {
+            state.screen_enabled.store(true, Ordering::Relaxed);
+            return Ok(());
+        }
+        let broadcast = RUNTIME.block_on(async {
+            let broadcast = LocalBroadcast::new();
+            let push_source = PushVideoSource {
+                pending: state.screen_pending.clone(),
+                format: state.screen_format.clone(),
+                enabled: state.screen_enabled.clone(),
+            };
+            broadcast
+                .video()
+                .set_source(push_source, VideoCodec::H264, [VideoPreset::P720])
+                .map_err(|e| {
+                    tracing::warn!("AV: screen set_source failed: {e}");
+                    FreeqError::ConnectionFailed
+                })?;
+            let path = format!("{}/screen", state.broadcast_name);
+            state.origin.publish_broadcast(&path, broadcast.consume());
+            tracing::info!(path = %path, "AV: screen share published");
+            Ok::<_, FreeqError>(broadcast)
+        })?;
+        state.screen_enabled.store(true, Ordering::Relaxed);
+        state.screen_broadcast = Some(broadcast);
+        Ok(())
+    }
+
+    /// Retract the screen broadcast. Peers see the path unannounced →
+    /// `ScreenTrackStopped` natively, `status != live` on the web.
+    pub(super) fn disable_screen(state: &mut State) {
+        state.screen_enabled.store(false, Ordering::Relaxed);
+        *state.screen_pending.lock().unwrap() = None;
+        if let Some(broadcast) = state.screen_broadcast.take() {
+            // The broadcast owns encoder tasks whose Drop needs a Tokio
+            // reactor (same crash class as the leave() fix).
+            let _guard = RUNTIME.enter();
+            drop(broadcast);
+            tracing::info!("AV: screen share retracted");
+        }
+    }
+
+    pub(super) fn push_screen(state: &State, bgra: Vec<u8>, width: u32, height: u32, ts_us: u64) {
+        if !state.screen_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4));
+        if expected != Some(bgra.len()) {
+            tracing::warn!(
+                got = bgra.len(),
+                expected = ?expected,
+                width,
+                height,
+                "AV: push_screen_frame size mismatch — dropping"
+            );
+            return;
+        }
+        {
+            let mut fmt = state.screen_format.lock().unwrap();
+            if fmt.dimensions != [width, height] {
+                *fmt = VideoFormat {
+                    pixel_format: PixelFormat::Bgra,
+                    dimensions: [width, height],
+                };
+            }
+        }
+        let frame = VideoFrame::new_packed(
+            bgra.into(),
+            width,
+            height,
+            PixelFormat::Bgra,
+            Duration::from_micros(ts_us),
+        );
+        *state.screen_pending.lock().unwrap() = Some(frame);
     }
 
     pub(super) fn push_audio(state: &State, samples: Vec<f32>) {
@@ -1644,6 +1789,24 @@ impl FreeqAv {
         }
     }
 
+    fn set_screen_enabled(&self, enabled: bool) -> Result<(), FreeqError> {
+        let mut guard = self.state.lock().unwrap();
+        let state = guard.as_mut().ok_or(FreeqError::NotConnected)?;
+        if enabled {
+            av_impl::enable_screen(state)
+        } else {
+            av_impl::disable_screen(state);
+            Ok(())
+        }
+    }
+
+    fn push_screen_frame(&self, bgra: Vec<u8>, width: u32, height: u32, timestamp_us: u64) {
+        let guard = self.state.lock().unwrap();
+        if let Some(state) = guard.as_ref() {
+            av_impl::push_screen(state, bgra, width, height, timestamp_us);
+        }
+    }
+
     fn is_connected(&self) -> bool {
         self.state
             .lock()
@@ -1689,6 +1852,10 @@ impl FreeqAv {
     }
     fn push_video_frame(&self, _bgra: Vec<u8>, _w: u32, _h: u32, _ts: u64) {}
     fn push_audio_frame(&self, _samples: Vec<f32>) {}
+    fn set_screen_enabled(&self, _enabled: bool) -> Result<(), FreeqError> {
+        Err(FreeqError::NotConnected)
+    }
+    fn push_screen_frame(&self, _bgra: Vec<u8>, _w: u32, _h: u32, _ts: u64) {}
     fn is_connected(&self) -> bool {
         false
     }
@@ -1758,9 +1925,48 @@ mod tests {
             width: 1,
             height: 1,
         };
+        let _ = AvEvent::ScreenTrackStarted {
+            nick: "heidi".to_string(),
+        };
+        let _ = AvEvent::ScreenTrackStopped {
+            nick: "heidi".to_string(),
+        };
+        let _ = AvEvent::ScreenFrame {
+            nick: "heidi".to_string(),
+            bgra: vec![0; 4],
+            width: 1,
+            height: 1,
+        };
         let _ = AvEvent::Error {
             message: "test error".to_string(),
         };
+    }
+
+    #[cfg(feature = "av")]
+    #[test]
+    fn broadcast_path_parsing() {
+        use super::av_impl::parse_broadcast_path;
+        assert_eq!(
+            parse_broadcast_path("sess-1/alice~ff00aa11"),
+            ("alice".to_string(), false)
+        );
+        assert_eq!(
+            parse_broadcast_path("sess-1/alice~ff00aa11/screen"),
+            ("alice".to_string(), true)
+        );
+        assert_eq!(
+            parse_broadcast_path("sess-1/bob"),
+            ("bob".to_string(), false)
+        );
+        assert_eq!(
+            parse_broadcast_path("sess-1/bob/screen"),
+            ("bob".to_string(), true)
+        );
+        // A bare nick "screen" with no parent segment is not a screen share.
+        assert_eq!(
+            parse_broadcast_path("screen"),
+            ("screen".to_string(), false)
+        );
     }
 
     #[test]

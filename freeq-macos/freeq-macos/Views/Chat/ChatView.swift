@@ -327,17 +327,12 @@ struct TopBarView: View {
                     // E2EE badge for DMs
                     if let did = ProfileCache.shared.did(for: channel?.name ?? ""),
                        E2eeManager.shared.hasSession(remoteDid: did) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "lock.shield.fill")
-                                .font(.caption2)
-                            Text("Encrypted")
-                                .font(.caption2)
-                        }
-                        .foregroundStyle(Theme.success)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Theme.success.opacity(0.10)))
+                        encryptedBadge
                     }
+                } else if channel?.isEncrypted == true {
+                    // Passphrase channel E2EE (/encrypt)
+                    encryptedBadge
+                        .help("Messages you send here are end-to-end encrypted. Others need the same passphrase to read them.")
                 }
             }
 
@@ -421,6 +416,19 @@ struct TopBarView: View {
     private var awayMsg: String? {
         guard let name = channel?.name else { return nil }
         return appState.awayStatus(for: name)
+    }
+
+    private var encryptedBadge: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "lock.shield.fill")
+                .font(.caption2)
+            Text("Encrypted")
+                .font(.caption2)
+        }
+        .foregroundStyle(Theme.success)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Theme.success.opacity(0.10)))
     }
 }
 
