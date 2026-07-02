@@ -86,6 +86,41 @@ struct FreeqApp: App {
                 }
             }
 
+            // In-call controls (Zoom's muscle memory: ⇧⌘M / ⇧⌘V / ⇧⌘S).
+            CommandMenu("Call") {
+                Button(appState.isMuted ? "Unmute" : "Mute") {
+                    appState.toggleMute()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+                .disabled(!appState.isInCall)
+
+                Button(appState.isCameraOn ? "Stop Camera" : "Start Camera") {
+                    appState.toggleCamera()
+                }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
+                .disabled(!appState.isInCall)
+
+                Button(appState.isScreenSharing ? "Stop Sharing Screen" : "Share Screen") {
+                    appState.toggleScreenShare()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(!appState.isInCall)
+
+                Divider()
+
+                Button(appState.isCallExpanded ? "Collapse Call" : "Expand Call") {
+                    appState.isCallExpanded.toggle()
+                }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(!appState.isInCall)
+
+                Button("Leave Call") {
+                    appState.leaveCall()
+                }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
+                .disabled(!appState.isInCall)
+            }
+
             CommandGroup(replacing: .help) {
                 Button("freeq Help") {
                     if let ch = appState.activeChannelState {

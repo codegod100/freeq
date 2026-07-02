@@ -103,6 +103,21 @@ pub struct LoginCompletion {
 pub fn complete_irc_login(state: &Arc<SharedState>, session_id: &str, did: &str, handle: &str) {
     let server_name = &state.server_name;
 
+    // Connect-time allowlist (opt-in). On a restricted instance, reject DIDs
+    // that aren't on the allowlist / whose handle domain isn't permitted.
+    if !state.did_is_allowed(did, Some(handle)) {
+        let fail = Message::from_server(
+            server_name,
+            irc::ERR_SASLFAIL,
+            vec!["*", "Not authorized to connect to this server"],
+        );
+        if let Some(tx) = state.connections.lock().get(session_id) {
+            let _ = tx.try_send(format!("{fail}\r\n"));
+        }
+        tracing::warn!(%did, %handle, "connection denied by --allowed-dids/--allowed-did-domains");
+        return;
+    }
+
     // Store DID and handle in session maps
     state
         .session_dids

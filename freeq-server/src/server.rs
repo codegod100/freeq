@@ -87,7 +87,45 @@ pub struct PinnedMessage {
     pub pinned_at: u64,
 }
 
+/// Pure connect-time allowlist decision (see `SharedState::did_is_allowed`).
+/// Empty allowlists ⇒ open. Matches an exact DID, or a handle whose domain is
+/// (or is a subdomain of) an allowed domain.
+pub(crate) fn did_allowed(
+    allowed_dids: &[String],
+    allowed_domains: &[String],
+    did: &str,
+    handle: Option<&str>,
+) -> bool {
+    if allowed_dids.is_empty() && allowed_domains.is_empty() {
+        return true;
+    }
+    if allowed_dids.iter().any(|d| d == did) {
+        return true;
+    }
+    if let Some(h) = handle {
+        let h = h.trim_start_matches('@').to_lowercase();
+        if allowed_domains.iter().any(|dom| {
+            let dom = dom
+                .trim_start_matches('@')
+                .trim_start_matches('.')
+                .to_lowercase();
+            h == dom || h.ends_with(&format!(".{dom}"))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 impl ChannelState {
+    /// True if the channel restricts *access* via a channel mode — invite-only
+    /// (`+i`), keyed (`+k`), or encrypted-only (`+E`). Used to decide whether it
+    /// may be advertised to non-members. Policy-gating is checked separately
+    /// (it needs the policy engine); see `SharedState::channel_is_discoverable`.
+    pub fn is_mode_restricted(&self) -> bool {
+        self.invite_only || self.key.is_some() || self.encrypted_only
+    }
+
     /// Case-insensitive lookup in remote_members.
     /// IRC nicks are case-insensitive, but HashMap keys preserve original case.
     pub fn remote_member(&self, nick: &str) -> Option<&RemoteMember> {
@@ -811,6 +849,38 @@ pub enum BindOutcome {
 }
 
 impl SharedState {
+    /// Whether a channel may be advertised to non-members: shown in `LIST` and
+    /// in the unauthenticated `GET /api/v1/channels`. A channel is discoverable
+    /// only if it carries NO access restriction — not invite-only (`+i`), not
+    /// keyed (`+k`), not encrypted-only (`+E`), and not gated by a join policy.
+    /// Any restriction means it is effectively private, and advertising its
+    /// name/topic to strangers or other tenants only leaks it. Members always
+    /// see their own channels regardless (the callers OR-in membership).
+    pub fn channel_is_discoverable(&self, name: &str, ch: &ChannelState) -> bool {
+        if ch.is_mode_restricted() {
+            return false;
+        }
+        if let Some(ref engine) = self.policy_engine
+            && matches!(engine.get_policy(name), Ok(Some(_)))
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Connect-time allowlist (Phase 3.2, opt-in). Returns whether a DID may
+    /// authenticate. Both allowlists empty ⇒ open (the public-instance default).
+    /// `handle` is the user's AT handle, used for domain matching (e.g. an
+    /// `acme.com` domain allows `alice.acme.com`).
+    pub fn did_is_allowed(&self, did: &str, handle: Option<&str>) -> bool {
+        did_allowed(
+            &self.config.allowed_dids,
+            &self.config.allowed_did_domains,
+            did,
+            handle,
+        )
+    }
+
     /// Run a closure with the database, if persistence is enabled.
     /// Logs errors but does not propagate them — persistence failures
     /// should not break the IRC server.
@@ -1546,6 +1616,19 @@ impl Server {
         }
 
         // Start plain listener
+        // Warn if the UNENCRYPTED IRC port is exposed on a public interface —
+        // credentials and messages would travel in cleartext. The default binds
+        // to loopback; operators exposing it publicly should front it with TLS.
+        if !self.config.listen_addr.starts_with("127.")
+            && !self.config.listen_addr.starts_with("localhost")
+            && !self.config.listen_addr.starts_with("[::1]")
+        {
+            tracing::warn!(
+                addr = %self.config.listen_addr,
+                "plaintext IRC listener is bound to a NON-loopback address — traffic is unencrypted. \
+                 Prefer the TLS listener (--tls-bind) and keep --bind on 127.0.0.1 behind a proxy."
+            );
+        }
         let plain_listener = TcpListener::bind(&self.config.listen_addr).await?;
         tracing::info!("Plain listener on {}", self.config.listen_addr);
 
@@ -1787,6 +1870,89 @@ impl Server {
                     }
                 }
             });
+        }
+
+        // Periodic maintenance (opt-in): age-based message retention +
+        // identity re-verification for offboarding. Both default to disabled.
+        {
+            let retention_days = self.config.message_retention_days;
+            let reverify_mins = self.config.reverify_identity_mins;
+            if retention_days > 0 || reverify_mins > 0 {
+                let maint_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let mut ticks: u64 = 0;
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    interval.tick().await; // skip immediate tick
+                    loop {
+                        interval.tick().await;
+                        ticks += 1;
+
+                        // Retention: prune messages older than N days, hourly.
+                        if retention_days > 0 && ticks % 60 == 0 {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let cutoff = now.saturating_sub(retention_days * 86_400);
+                            if let Some(n) =
+                                maint_state.with_db(|db| db.prune_messages_older_than(cutoff))
+                                && n > 0
+                            {
+                                tracing::info!(
+                                    "Retention: pruned {n} messages older than {retention_days}d"
+                                );
+                            }
+                        }
+
+                        // Identity re-verification (offboarding). SAFE: only acts
+                        // when a DID resolves successfully but has NO valid auth
+                        // key; never disconnects on a resolution error (outage).
+                        if reverify_mins > 0 && ticks % reverify_mins == 0 {
+                            let did_sessions: std::collections::HashMap<String, Vec<String>> = {
+                                let sd = maint_state.session_dids.lock();
+                                let mut m: std::collections::HashMap<String, Vec<String>> =
+                                    std::collections::HashMap::new();
+                                for (sid, did) in sd.iter() {
+                                    m.entry(did.clone()).or_default().push(sid.clone());
+                                }
+                                m
+                            };
+                            for (did, sids) in did_sessions {
+                                match maint_state.did_resolver.resolve(&did).await {
+                                    Ok(doc) if doc.authentication_keys().is_empty() => {
+                                        tracing::warn!(
+                                            %did,
+                                            "identity re-verify: DID has no valid auth key — disconnecting sessions"
+                                        );
+                                        for sid in sids {
+                                            if let Some(tx) =
+                                                maint_state.connections.lock().get(&sid)
+                                            {
+                                                let _ = tx.try_send(
+                                                    "ERROR :Identity no longer valid (deactivated or key removed)\r\n"
+                                                        .to_string(),
+                                                );
+                                            }
+                                            if let Some(kill) =
+                                                maint_state.session_kill.lock().get(&sid).cloned()
+                                            {
+                                                kill.notify_one();
+                                            }
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => tracing::debug!(
+                                        %did,
+                                        error = %e,
+                                        "identity re-verify: resolve failed (transient) — keeping session"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                });
+            }
         }
 
         // Heartbeat expiry: check agent liveness every 15 seconds.
@@ -7057,5 +7223,92 @@ mod s2s_adversarial_tests {
             Some("welcome to tchan".to_string()),
             "sync-adopted topic must be seeded into the CRDT"
         );
+    }
+}
+
+#[cfg(test)]
+mod discoverability_tests {
+    use super::*;
+
+    fn ch() -> ChannelState {
+        ChannelState::default()
+    }
+
+    #[test]
+    fn open_channel_is_discoverable() {
+        // No access restriction → advertisable in LIST / api/v1/channels.
+        assert!(!ch().is_mode_restricted());
+    }
+
+    #[test]
+    fn invite_only_hides() {
+        let mut c = ch();
+        c.invite_only = true;
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn keyed_hides() {
+        let mut c = ch();
+        c.key = Some("s3cret".into());
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn encrypted_hides() {
+        // +E channels are hidden too — the name/topic can be as sensitive as
+        // the (encrypted) content.
+        let mut c = ch();
+        c.encrypted_only = true;
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn moderation_flags_do_not_hide() {
+        // +n/+t/+m are quality/moderation flags, not access restrictions — such
+        // a channel is still publicly discoverable.
+        let mut c = ch();
+        c.no_ext_msg = true;
+        c.topic_locked = true;
+        c.moderated = true;
+        assert!(!c.is_mode_restricted());
+    }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::did_allowed;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_allowlists_are_open() {
+        assert!(did_allowed(&[], &[], "did:plc:anyone", Some("a.bsky.social")));
+    }
+
+    #[test]
+    fn exact_did_allowed() {
+        let dids = v(&["did:plc:alice"]);
+        assert!(did_allowed(&dids, &[], "did:plc:alice", None));
+        assert!(!did_allowed(&dids, &[], "did:plc:mallory", None));
+    }
+
+    #[test]
+    fn handle_domain_and_subdomain_allowed() {
+        let doms = v(&["acme.com"]);
+        assert!(did_allowed(&[], &doms, "did:plc:x", Some("alice.acme.com")));
+        assert!(did_allowed(&[], &doms, "did:plc:x", Some("acme.com")));
+        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("alice.evil.com")));
+        // Not fooled by a suffix that isn't a domain boundary.
+        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("notacme.com")));
+    }
+
+    #[test]
+    fn no_handle_denies_domain_only_allowlist() {
+        // Challenge SASL has no handle → domain-only allowlists can't match.
+        let doms = v(&["acme.com"]);
+        assert!(!did_allowed(&[], &doms, "did:plc:x", None));
     }
 }

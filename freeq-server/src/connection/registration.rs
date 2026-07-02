@@ -451,6 +451,20 @@ pub(super) fn try_complete_registration(
     // without going through the SASL path.
     attach_same_did(conn, state, session_id, send);
 
+    // Refuse guest (unauthenticated) connections when the instance requires
+    // authentication (opt-in --no-guest). Server operators are DID-authenticated
+    // anyway, so this only turns away truly anonymous connections.
+    if conn.authenticated_did.is_none() && state.config.no_guest {
+        send(
+            state,
+            session_id,
+            "ERROR :This server requires authentication (guest connections disabled)\r\n"
+                .to_string(),
+        );
+        tracing::info!(%session_id, "guest connection refused (--no-guest)");
+        return;
+    }
+
     conn.registered = true;
     let nick = conn.nick.as_deref().unwrap();
 

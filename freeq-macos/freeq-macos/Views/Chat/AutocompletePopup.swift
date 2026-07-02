@@ -54,6 +54,8 @@ struct AutocompletePopup: View {
         ("mode", "Set channel/user mode"),
         ("raw", "Send raw IRC command"),
         ("av", "Start, join, or control a call"),
+        ("encrypt", "Enable channel E2EE with a passphrase"),
+        ("decrypt", "Disable channel E2EE"),
         ("p2p", "P2P commands"),
         ("help", "Show help"),
     ]

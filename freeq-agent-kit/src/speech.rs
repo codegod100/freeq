@@ -18,8 +18,32 @@ pub fn is_hallucination(text: &str) -> bool {
         .trim()
         .trim_matches(|c: char| c.is_ascii_punctuation() || c.is_whitespace())
         .to_lowercase();
+    if phantom_phrase(&t) {
+        return true;
+    }
+    // Whisper loops a phantom while the noise persists — "I'm sorry,
+    // I'm sorry." / "Thank you. Thank you." Split on clause punctuation;
+    // when every segment is itself a phantom phrase, the whole utterance
+    // is one. A phantom followed by real speech ("thank you, that
+    // answers it") stays real.
+    let mut segments = 0usize;
+    for seg in t.split(['.', ',', '!', '?', ';']) {
+        let seg = seg.trim();
+        if seg.is_empty() {
+            continue;
+        }
+        segments += 1;
+        if !phantom_phrase(seg) {
+            return false;
+        }
+    }
+    segments > 0
+}
+
+/// One canonical Whisper phantom phrase, already trimmed + lowercased.
+fn phantom_phrase(t: &str) -> bool {
     matches!(
-        t.as_str(),
+        t,
         "" | "you"
             | "thank you"
             | "thanks for watching"
@@ -28,6 +52,9 @@ pub fn is_hallucination(text: &str) -> bool {
             | "okay"
             | "so"
             | "the"
+            | "i'm sorry"
+            | "im sorry"
+            | "i am sorry"
     )
 }
 
@@ -218,6 +245,52 @@ mod tests {
                 is_hallucination(phantom),
                 "{phantom:?} should be a hallucination"
             );
+        }
+    }
+
+    #[test]
+    fn im_sorry_family_is_a_hallucination() {
+        // Live-observed 2026-07-01 in #alexandria: Whisper emitted
+        // "I'm sorry." / "I'm sorry, I'm sorry." repeatedly on silence.
+        for phantom in [
+            "I'm sorry.",
+            "i'm sorry",
+            "I am sorry.",
+            "Im sorry",
+            "I'm sorry, I'm sorry.",
+            "I'm sorry. I'm sorry.",
+        ] {
+            assert!(
+                is_hallucination(phantom),
+                "{phantom:?} should be a hallucination"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_phantom_phrases_are_a_hallucination() {
+        // Whisper loops a phantom when the noise persists — the repeat
+        // is still a phantom, not two real utterances.
+        for phantom in [
+            "Thank you. Thank you.",
+            "thank you, thank you, thank you",
+            "Bye. Bye.",
+        ] {
+            assert!(
+                is_hallucination(phantom),
+                "{phantom:?} should be a hallucination"
+            );
+        }
+    }
+
+    #[test]
+    fn im_sorry_inside_real_speech_is_not_a_hallucination() {
+        for real in [
+            "I'm sorry about the delay on the release",
+            "I'm sorry, can you repeat the second point?",
+            "thank you, that answers it",
+        ] {
+            assert!(!is_hallucination(real), "{real:?} is real speech");
         }
     }
 

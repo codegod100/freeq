@@ -380,6 +380,7 @@ async fn main() -> anyhow::Result<()> {
         session_id: session_id.clone(),
         our_broadcast: our_broadcast.clone(),
         my_nick: args.nick.clone(),
+        audio_only: false,
     };
     tracing::info!(%sfu_url, broadcast = %our_broadcast, "connecting to SFU + publishing");
 

@@ -2040,6 +2040,12 @@ pub(super) fn handle_list(
     let nick = conn.nick_or_star();
     let channels = state.channels.lock();
     for (name, ch) in channels.iter() {
+        // Don't advertise restricted (+i/+k/+E/policy-gated) channels to
+        // non-members — listing them only leaks a private channel's existence,
+        // name, and topic. Members still see their own channels.
+        if !state.channel_is_discoverable(name, ch) && !ch.members.contains(session_id) {
+            continue;
+        }
         let count = ch.members.len() + ch.remote_members.len();
         let topic = ch.topic.as_ref().map(|t| t.text.as_str()).unwrap_or("");
         let reply = Message::from_server(

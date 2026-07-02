@@ -7,6 +7,93 @@ Status legend: ☐ todo · ◐ in progress · ☑ done · ⛔ blocked
 
 ---
 
+## 2026-07-02 deep dive: AV world-class pass + parity re-audit
+
+Four-way audit (macOS AV internals / web AV inventory / test coverage /
+post-June parity drift) followed by an implementation pass. All Swift logic
+landed test-first; 148 SwiftPM tests green (was 60), 91.9% line coverage on
+the tested core (`scripts/coverage.sh`).
+
+### Parity gaps found & closed
+- ☑ **Passphrase channel E2EE (`/encrypt` `/decrypt`)** — the one real gap vs
+  web (missed by the June audit). Pure-Swift `ChannelCrypto` (CryptoKit
+  HKDF-SHA256 + AES-256-GCM) pinned to the Rust `e2ee.rs` ENC1 format with
+  Rust-generated interop vectors; policy layer `ChannelE2eeState` (echo
+  cache, per-channel keys, placeholder on missing key) 100% unit-covered.
+  Wired: send/reply/edit encrypt, receive decrypt, keychain persistence,
+  restore on join, lock badges (top bar, sidebar, per-message).
+- ☑ Mic/camera device pickers (web had them; macOS had none).
+
+### Audio (was: raw inputNode, no AEC, no devices, no metering)
+- ☑ **Voice processing** — `setVoiceProcessingEnabled(true)` + AGC on the
+  input node: Apple AEC/noise-suppression/auto-gain. Without it, speaker
+  playback from the Rust audio device echoed straight back.
+- ☑ Input device selection (CoreAudio UID, sticky, live-switchable);
+  hotplug/default-change recovery via `AVAudioEngineConfigurationChange`
+  (stale-converter silent-mic bug fixed).
+- ☑ Level metering + speaking detection (`AudioLevelMeter`: RMS → dBFS →
+  attack/release hysteresis, 100% tested) → meter bar in call controls,
+  speaking ring on self tile, **"talking while muted" hint with Unmute**.
+  (Web has none of this.)
+- ☑ Mute now also stops pushing frames across the FFI (meter keeps running).
+- ☑ Permission-denied and capture failures surface as user-facing errors
+  with System Settings guidance (were silent `print`s).
+
+### Video
+- ☑ Camera 1280×720@≤30 (SDK encodes P720; old VGA capture was upscaled),
+  camera picker incl. Continuity, unplug → default fallback.
+- ☑ Inbound render path off the main thread (serial render queue) with a
+  `CVPixelBufferPool` (was: per-frame alloc + memcpy on main per tile) and
+  failed-layer flush recovery (was: tile froze forever).
+- ☑ Expanded call view is a real adaptive grid (`CallGridLayout`, tested) —
+  was a non-wrapping VStack. Self-view mirrored. Mute state on tiles.
+- ☑ In-call keyboard shortcuts (Call menu): ⇧⌘M mute, ⇧⌘V camera, ⇧⌘S
+  share, ⇧⌘E expand, ⇧⌘H leave.
+
+### Screen share (was: first display only, 15 fps, points-not-pixels, hijacked the camera track)
+- ☑ **Dedicated `/screen` MoQ broadcast** (SDK FFI: `set_screen_enabled` /
+  `push_screen_frame` / `ScreenTrackStarted|Stopped|ScreenFrame` events),
+  matching the web client's `{path}/screen` convention. Fixes: web screen
+  shares used to reach macOS as a phantom participant literally named
+  "screen"; macOS shares now land in web's spotlight row; **camera + screen
+  run simultaneously**.
+- ☑ Display *and window* source picker (ScreenCaptureKit), Retina-aware
+  sizing via `ScreenShareConfig` (fit real pixels into 1920×1080, even
+  dims, never upscale — tested), 30 fps.
+- ☑ Remote screens render in a letterboxed spotlight row (`resizeAspect`,
+  never cropped) above the participant grid.
+
+### Testing / tooling
+- ☑ `scripts/coverage.sh` — llvm-cov line coverage for the SwiftPM core
+  (`--html` for a browsable report). New-code files are at 100%.
+- ☑ 88 new tests: ChannelCrypto (18, incl. Rust interop vectors),
+  ChannelE2eeState (14), AudioLevelMeter (13), MediaDeviceSelection (7),
+  ScreenShareConfig (8), CallGridLayout (10), CoreModelTests (18 — closes
+  ChannelState/ChatMessage/ServerConfig gaps).
+- ☑ `project.yml` synced with the hand-edited pbxproj (usage strings, AV
+  frameworks, FFI-freshness build phase, `embed: false` for the static
+  xcframework) so `xcodegen generate` is safe again.
+- Note: `swift test` needs the full Xcode toolchain
+  (`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`) — the
+  CommandLineTools default lacks XCTest.
+
+### Known follow-ups (not blockers)
+- ☐ Remote **active-speaker** highlighting needs per-participant audio-level
+  events from the Rust decoder (remote audio never crosses into Swift).
+  FFI sketch: `AudioLevel(nick, f32)` at ~10 Hz from the playout path.
+- ☐ Speaker/output device picker — playback lives in Rust (cpal); needs an
+  FFI `set_output_device(uid)` + enumeration. (Web lacks this too.)
+- ☐ Screen-share **system audio** (SCStream `.audio` output mixed into the
+  mic track, or a second audio rendition). Web also lacks it.
+- ☐ iOS uses the same FFI: port the `/screen` broadcast UI there.
+- ☐ Live E2E verification of the new `/screen` path against the prod SFU +
+  a web peer (unit/compile verified; needs an unlocked GUI session —
+  `scripts/ui-sweep.sh`).
+- ☐ AV reconnect with backoff after transport drops (call currently ends).
+- ☐ Swift tests are still not run in repo CI (ci.yml is Rust+web only).
+
+---
+
 ## 2026-06-14 deep-dive execution checklist
 
 - ☑ Re-audit macOS against the current iOS/web/protocol reaction, DM, and date-format paths.

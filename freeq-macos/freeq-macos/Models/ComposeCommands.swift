@@ -32,7 +32,11 @@ extension AppState {
             let l = line.trimmingCharacters(in: .whitespaces)
             guard !l.isEmpty else { continue }
             if let replyId {
-                sendRaw("@+reply=\(replyId) PRIVMSG \(target) :\(l)")
+                if target.hasPrefix("#"), let wire = channelE2ee.outgoing(text: l, channel: target) {
+                    sendRaw("@+reply=\(replyId);+encrypted PRIVMSG \(target) :\(wire)")
+                } else {
+                    sendRaw("@+reply=\(replyId) PRIVMSG \(target) :\(l)")
+                }
                 replyingToMessage = nil
             } else {
                 sendMessage(to: target, text: l)
@@ -141,6 +145,23 @@ extension AppState {
             runBufferSearch(arg, target: target)
         case "av":
             handleAvCommand(arg, target: target)
+        case "encrypt", "e2ee":
+            guard target.hasPrefix("#") else {
+                appendSystem("Channel encryption is only available in channels")
+                break
+            }
+            let passphrase = arg.trimmingCharacters(in: .whitespaces)
+            if passphrase.isEmpty {
+                appendSystem("Usage: /encrypt <passphrase> — enables E2EE for this channel")
+            } else {
+                setChannelKey(target, passphrase: passphrase)
+                appendSystem("🔒 End-to-end encryption enabled. All messages you send will be encrypted.")
+                appendSystem("Others need the same passphrase to read your messages.")
+            }
+        case "decrypt", "unencrypt":
+            guard target.hasPrefix("#") else { break }
+            removeChannelKey(target)
+            appendSystem("🔓 Encryption disabled for this channel.")
         case "help":
             for line in Self.helpLines { appendSystem(line) }
         default:
@@ -157,6 +178,7 @@ extension AppState {
         "/edit [id] text · /delete [id] · /react emoji · /reply [id] text",
         "/pin [id] · /unpin id · /pins · /list · /names · /who · /search text",
         "/media · /av start|join|leave|mute|camera|screen · /oper name pass · /reconnect",
+        "/encrypt passphrase · /decrypt — channel E2EE (others need the same passphrase)",
         "/p2p start|id|connect|peers",
         "── Shortcuts ──",
         "⌘K quick switch · ⌘J join · ↑ edit last · Esc cancel edit",

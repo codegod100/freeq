@@ -559,11 +559,15 @@ public protocol FreeqAvProtocol: AnyObject, Sendable {
     
     func pushAudioFrame(samples: [Float]) 
     
+    func pushScreenFrame(bgra: [UInt8], width: UInt32, height: UInt32, timestampUs: UInt64) 
+    
     func pushVideoFrame(bgra: [UInt8], width: UInt32, height: UInt32, timestampUs: UInt64) 
     
     func setCameraEnabled(enabled: Bool) throws 
     
     func setMuted(muted: Bool) 
+    
+    func setScreenEnabled(enabled: Bool) throws 
     
 }
 open class FreeqAv: FreeqAvProtocol, @unchecked Sendable {
@@ -650,6 +654,16 @@ open func pushAudioFrame(samples: [Float])  {try! rustCall() {
 }
 }
     
+open func pushScreenFrame(bgra: [UInt8], width: UInt32, height: UInt32, timestampUs: UInt64)  {try! rustCall() {
+    uniffi_freeq_sdk_ffi_fn_method_freeqav_push_screen_frame(self.uniffiClonePointer(),
+        FfiConverterSequenceUInt8.lower(bgra),
+        FfiConverterUInt32.lower(width),
+        FfiConverterUInt32.lower(height),
+        FfiConverterUInt64.lower(timestampUs),$0
+    )
+}
+}
+    
 open func pushVideoFrame(bgra: [UInt8], width: UInt32, height: UInt32, timestampUs: UInt64)  {try! rustCall() {
     uniffi_freeq_sdk_ffi_fn_method_freeqav_push_video_frame(self.uniffiClonePointer(),
         FfiConverterSequenceUInt8.lower(bgra),
@@ -670,6 +684,13 @@ open func setCameraEnabled(enabled: Bool)throws   {try rustCallWithError(FfiConv
 open func setMuted(muted: Bool)  {try! rustCall() {
     uniffi_freeq_sdk_ffi_fn_method_freeqav_set_muted(self.uniffiClonePointer(),
         FfiConverterBool.lower(muted),$0
+    )
+}
+}
+    
+open func setScreenEnabled(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeFreeqError_lift) {
+    uniffi_freeq_sdk_ffi_fn_method_freeqav_set_screen_enabled(self.uniffiClonePointer(),
+        FfiConverterBool.lower(enabled),$0
     )
 }
 }
@@ -1547,11 +1568,12 @@ public struct IrcMessage {
     public var isSigned: Bool
     public var timestampMs: Int64
     public var account: String?
+    public var origin: String?
     public var reactions: [ReactionTally]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(fromNick: String, target: String, text: String, msgid: String?, replyTo: String?, replacesMsgid: String?, editOf: String?, batchId: String?, pinMsgid: String?, unpinMsgid: String?, isAction: Bool, isSigned: Bool, timestampMs: Int64, account: String?, reactions: [ReactionTally]) {
+    public init(fromNick: String, target: String, text: String, msgid: String?, replyTo: String?, replacesMsgid: String?, editOf: String?, batchId: String?, pinMsgid: String?, unpinMsgid: String?, isAction: Bool, isSigned: Bool, timestampMs: Int64, account: String?, origin: String?, reactions: [ReactionTally]) {
         self.fromNick = fromNick
         self.target = target
         self.text = text
@@ -1566,6 +1588,7 @@ public struct IrcMessage {
         self.isSigned = isSigned
         self.timestampMs = timestampMs
         self.account = account
+        self.origin = origin
         self.reactions = reactions
     }
 }
@@ -1619,6 +1642,9 @@ extension IrcMessage: Equatable, Hashable {
         if lhs.account != rhs.account {
             return false
         }
+        if lhs.origin != rhs.origin {
+            return false
+        }
         if lhs.reactions != rhs.reactions {
             return false
         }
@@ -1640,6 +1666,7 @@ extension IrcMessage: Equatable, Hashable {
         hasher.combine(isSigned)
         hasher.combine(timestampMs)
         hasher.combine(account)
+        hasher.combine(origin)
         hasher.combine(reactions)
     }
 }
@@ -1667,6 +1694,7 @@ public struct FfiConverterTypeIrcMessage: FfiConverterRustBuffer {
                 isSigned: FfiConverterBool.read(from: &buf), 
                 timestampMs: FfiConverterInt64.read(from: &buf), 
                 account: FfiConverterOptionString.read(from: &buf), 
+                origin: FfiConverterOptionString.read(from: &buf), 
                 reactions: FfiConverterSequenceTypeReactionTally.read(from: &buf)
         )
     }
@@ -1686,6 +1714,7 @@ public struct FfiConverterTypeIrcMessage: FfiConverterRustBuffer {
         FfiConverterBool.write(value.isSigned, into: &buf)
         FfiConverterInt64.write(value.timestampMs, into: &buf)
         FfiConverterOptionString.write(value.account, into: &buf)
+        FfiConverterOptionString.write(value.origin, into: &buf)
         FfiConverterSequenceTypeReactionTally.write(value.reactions, into: &buf)
     }
 }
@@ -2093,6 +2122,12 @@ public enum AvEvent {
     )
     case videoFrame(nick: String, bgra: [UInt8], width: UInt32, height: UInt32
     )
+    case screenTrackStarted(nick: String
+    )
+    case screenTrackStopped(nick: String
+    )
+    case screenFrame(nick: String, bgra: [UInt8], width: UInt32, height: UInt32
+    )
     case error(message: String
     )
 }
@@ -2138,7 +2173,16 @@ public struct FfiConverterTypeAvEvent: FfiConverterRustBuffer {
         case 9: return .videoFrame(nick: try FfiConverterString.read(from: &buf), bgra: try FfiConverterSequenceUInt8.read(from: &buf), width: try FfiConverterUInt32.read(from: &buf), height: try FfiConverterUInt32.read(from: &buf)
         )
         
-        case 10: return .error(message: try FfiConverterString.read(from: &buf)
+        case 10: return .screenTrackStarted(nick: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 11: return .screenTrackStopped(nick: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 12: return .screenFrame(nick: try FfiConverterString.read(from: &buf), bgra: try FfiConverterSequenceUInt8.read(from: &buf), width: try FfiConverterUInt32.read(from: &buf), height: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 13: return .error(message: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2196,8 +2240,26 @@ public struct FfiConverterTypeAvEvent: FfiConverterRustBuffer {
             FfiConverterUInt32.write(height, into: &buf)
             
         
-        case let .error(message):
+        case let .screenTrackStarted(nick):
             writeInt(&buf, Int32(10))
+            FfiConverterString.write(nick, into: &buf)
+            
+        
+        case let .screenTrackStopped(nick):
+            writeInt(&buf, Int32(11))
+            FfiConverterString.write(nick, into: &buf)
+            
+        
+        case let .screenFrame(nick,bgra,width,height):
+            writeInt(&buf, Int32(12))
+            FfiConverterString.write(nick, into: &buf)
+            FfiConverterSequenceUInt8.write(bgra, into: &buf)
+            FfiConverterUInt32.write(width, into: &buf)
+            FfiConverterUInt32.write(height, into: &buf)
+            
+        
+        case let .error(message):
+            writeInt(&buf, Int32(13))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -3260,6 +3322,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_audio_frame() != 55965) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_screen_frame() != 34940) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_video_frame() != 30541) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3267,6 +3332,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_muted() != 7170) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_screen_enabled() != 14174) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqclient_connect() != 3331) {

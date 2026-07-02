@@ -289,6 +289,8 @@ fn spawn_bot(
         // the bot itself only watches.
         start_session_in: None,
         sfu_url_override: None,
+        // No Deepgram key in test env → batched-Whisper (noop) path.
+        stt_streaming_key: None,
         // No Groq/ElevenLabs keys in test env → Q&A/TTS disabled; these
         // tests only exercise the IRC/TAGMSG control plane.
         groq_api_key: None,
@@ -307,12 +309,19 @@ fn spawn_bot(
         // control-plane tests stay deterministic and offline.
         proactive_enabled: false,
         ambient_enabled: false,
+        research_enabled: false,
         render_backend: "svg".to_string(),
         ghostly_character: "eliza".to_string(),
         ghostly_pack: None,
         character_system_prompt: None,
         persona_hello_line: None,
         peer_agents: Vec::new(),
+        // Own-brain mode; no yokota socket in these tests.
+        external_brain: false,
+        external_brain_text: false,
+        brain_sock: None,
+        no_video: false,
+        no_voice_dsp: false,
     };
     let handle = tokio::spawn(run(cfg));
     (handle, tmp)

@@ -219,9 +219,10 @@ struct ChannelRow: View {
                 }
             }
         } icon: {
-            Image(systemName: "number")
+            Image(systemName: channel.isEncrypted ? "lock.fill" : "number")
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(isActive ? Theme.accent : Theme.textTertiary)
+                .foregroundStyle(channel.isEncrypted ? Theme.success : (isActive ? Theme.accent : Theme.textTertiary))
+                .help(channel.isEncrypted ? "End-to-end encrypted channel" : "")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)

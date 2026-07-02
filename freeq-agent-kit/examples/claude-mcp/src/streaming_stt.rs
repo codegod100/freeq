@@ -33,6 +33,11 @@ pub struct StreamingSttConfig {
     /// have to infer; we pass through whatever the source provides
     /// (usually 48 kHz on the freeq side).
     pub sample_rate: u32,
+    /// Names the recognizer must get right — the bot's own nick and
+    /// its peer agents. Passed as Deepgram `keyterm` boosts so STT
+    /// stops rendering names as phonetic neighbours ("Clyde" →
+    /// "Lighthouse"), which silently defeats address detection.
+    pub keyterms: Vec<String>,
 }
 
 impl StreamingSttConfig {
@@ -41,17 +46,15 @@ impl StreamingSttConfig {
             api_key,
             model: "nova-3".to_string(),
             sample_rate,
+            keyterms: Vec::new(),
         }
     }
 }
 
-/// Connect a participant-scoped stream. Returns a (writer, reader)
-/// split — the caller feeds PCM into the writer, reads finalised
-/// transcripts off the reader.
-pub async fn connect(
-    cfg: &StreamingSttConfig,
-) -> Result<(SplitSink<WsStream, Message>, SplitStream<WsStream>)> {
-    let url = format!(
+/// Build the websocket URL for a config — pure so the keyterm wiring
+/// is testable without a live Deepgram connection.
+fn build_url(cfg: &StreamingSttConfig) -> String {
+    let mut url = format!(
         "wss://api.deepgram.com/v1/listen\
          ?model={model}\
          &encoding=linear16\
@@ -65,6 +68,40 @@ pub async fn connect(
         model = cfg.model,
         rate = cfg.sample_rate,
     );
+    for term in &cfg.keyterms {
+        let term = term.trim();
+        if term.is_empty() {
+            continue;
+        }
+        url.push_str("&keyterm=");
+        url.push_str(&percent_encode(term));
+    }
+    url
+}
+
+/// Minimal query-value percent-encoder — unreserved characters pass
+/// through, everything else is %XX-escaped. Enough for nicks; avoids
+/// pulling in a URL crate for one parameter.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Connect a participant-scoped stream. Returns a (writer, reader)
+/// split — the caller feeds PCM into the writer, reads finalised
+/// transcripts off the reader.
+pub async fn connect(
+    cfg: &StreamingSttConfig,
+) -> Result<(SplitSink<WsStream, Message>, SplitStream<WsStream>)> {
+    let url = build_url(cfg);
     let url_for_err = url.clone();
     let mut req = url
         .into_client_request()
@@ -177,6 +214,50 @@ pub async fn send_pcm(writer: &mut SplitSink<WsStream, Message>, pcm_le: Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- build_url / keyterm biasing ----------
+    //
+    // Live failure 2026-07-01: STT heard "Clyde, how's the weather" as
+    // "Lighthouse the weather" — no text-level fuzzy match can bridge
+    // that. The fix is vocabulary biasing: tell the recognizer the
+    // names that exist in this room so it stops hallucinating
+    // phonetic neighbours.
+
+    #[test]
+    fn url_contains_keyterm_per_name() {
+        let mut cfg = StreamingSttConfig::nova_3("k".into(), 48_000);
+        cfg.keyterms = vec!["Clyde".into(), "oblivion".into()];
+        let url = build_url(&cfg);
+        assert!(url.contains("keyterm=Clyde"), "missing keyterm: {url}");
+        assert!(url.contains("keyterm=oblivion"), "missing keyterm: {url}");
+    }
+
+    #[test]
+    fn url_has_no_keyterm_when_none_configured() {
+        let cfg = StreamingSttConfig::nova_3("k".into(), 48_000);
+        assert!(!build_url(&cfg).contains("keyterm="));
+    }
+
+    #[test]
+    fn keyterm_values_are_url_encoded() {
+        let mut cfg = StreamingSttConfig::nova_3("k".into(), 48_000);
+        cfg.keyterms = vec!["Marlowe Z6".into()];
+        let url = build_url(&cfg);
+        assert!(
+            url.contains("keyterm=Marlowe%20Z6"),
+            "space not encoded: {url}"
+        );
+        assert!(!url.contains("Marlowe Z6"), "raw space in URL: {url}");
+    }
+
+    #[test]
+    fn url_keeps_core_params() {
+        let cfg = StreamingSttConfig::nova_3("k".into(), 44_100);
+        let url = build_url(&cfg);
+        assert!(url.contains("model=nova-3"));
+        assert!(url.contains("sample_rate=44100"));
+        assert!(url.contains("endpointing=300"));
+    }
 
     #[test]
     fn parse_finalised_text() {

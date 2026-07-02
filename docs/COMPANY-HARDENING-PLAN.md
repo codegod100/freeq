@@ -1,5 +1,17 @@
 # Hardening Public freeq for Company Use — Remediation Plan
 
+> **Implementation status (branch `feat/company-hardening`, not yet deployed):**
+> - ✅ **Phase 0** — 0.1 policy-DB un-tracked; 0.2 key perms already `0o600`; 0.3 plaintext-port warning.
+> - ✅ **Phase 1** — restricted channels (`+i`/`+k`/`+E`/policy) hidden from `LIST` + `/api/v1/channels`.
+> - ✅ **Phase 2** — member-scoped, fail-closed REST reads; `+E` now persisted. (2.2 media member-scoping deferred — needs a media→channel map; capability-URL + at-rest encryption is the interim.)
+> - ✅ **Phase 3.1** — opt-in `--reverify-identity-mins` (safe: never disconnects on resolve error).
+> - ✅ **Phase 3.2** — opt-in `--allowed-dids` / `--allowed-did-domains` / `--no-guest`.
+> - ⏸️ **Phase 3.3 (SQLCipher metadata-at-rest)** — deferred (big dep; only defends host-disk theft).
+> - ✅ **Phase 4.2** — opt-in `--message-retention-days`.
+> - 🚫 **Phase 4.1 (federation)** — untouched by request.
+> Full `freeq-server` test suite green.
+
+
 **Scope.** Make a **public, multi-tenant** freeq instance safe for a company to
 run private channels on — i.e. their channel's existence, membership, history,
 and files never leak to *other tenants* or *the internet*, and host exposure is
