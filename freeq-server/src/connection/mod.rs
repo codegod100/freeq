@@ -552,7 +552,16 @@ where
                 break;
             }
         };
-        if line_buf.len() > MAX_LINE_LEN {
+        // A completed read whose buffer does NOT end in a newline means the
+        // line filled to MAX_LINE_LEN without terminating — it's too long.
+        // Checking `ends_with('\n')` (not `len() > MAX_LINE_LEN`) closes an
+        // off-by-one: the `BufReader` capacity equals MAX_LINE_LEN, so an
+        // oversized line fills to *exactly* the cap, which the old `>` guard
+        // let slip through — the line was then parsed and delivered silently
+        // truncated instead of rejected. Gate on a completed read (`Ok(Ok(n>0))`)
+        // so a slow client's partial line at a ping timeout isn't misread as
+        // too long.
+        if !line_buf.ends_with('\n') && matches!(&read_result, Ok(Ok(n)) if *n > 0) {
             tracing::warn!(%session_id, len = line_buf.len(), "Line too long, dropping");
             let reply =
                 Message::from_server(&server_name, "417", vec!["*", "Input line was too long"]);

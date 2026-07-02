@@ -363,27 +363,27 @@ export class FreeqClient extends EventEmitter {
     // ── Non-E2EE path ──
     if (hasNewline && multilineCap) {
       const chunks = this.chunkMultilineBody(text, perChunkBudget, false);
-      if (
-        chunks.length > this.multilineMaxLines ||
-        text.length > this.multilineMaxBytes
-      ) {
-        // Too big for spec — fall through to the single-PRIVMSG path.
-        this.sendLegacyPlaintext(target, text, extraOpenerTags);
-        this.maybeLocalEcho(target, text, willEncrypt);
-        return null;
+      // A paste larger than one batch (server-advertised max-lines /
+      // max-bytes) is sent as SEVERAL batches — several logical messages
+      // — rather than collapsed into one oversized legacy line. That
+      // legacy fallback was the RFC-paste bug: a ~130-line doc exceeded
+      // max-lines=100, fell back to a single escaped line, and got
+      // silently truncated at the server's 8 KB wire cap. Splitting is
+      // the intended completion of the multiline feature, not a fallback.
+      for (const group of this.groupChunksIntoBatches(chunks)) {
+        // Sign each group's ASSEMBLED body and ride the sig on that
+        // batch's opener. The server verifies sigs over the assembled
+        // body (multiline dispatch calls handle_privmsg with the joined
+        // text) and reads `+freeq.at/sig` from the opener tags. Per-batch
+        // signing keeps each emitted message independently verifiable.
+        const body = this.assembleMultiline(group);
+        signing.signMessage(target, body).then((sig) => {
+          const openerTagsWithSig: Record<string, string> = { ...extraOpenerTags };
+          if (sig) openerTagsWithSig['+freeq.at/sig'] = sig;
+          this.emitMultilineBatch(target, group, openerTagsWithSig);
+        });
+        this.maybeLocalEcho(target, body, willEncrypt);
       }
-      // Sign the ASSEMBLED body and ride the sig on the BATCH opener.
-      // The server verifies sigs over the assembled body (multiline
-      // dispatch calls handle_privmsg with the joined text), and its
-      // verification path reads `+freeq.at/sig` from the opener tags
-      // that become the synthetic PRIVMSG's tags. Per-chunk sigs would
-      // not verify because the canonical signed text is the whole body.
-      signing.signMessage(target, text).then((sig) => {
-        const openerTagsWithSig: Record<string, string> = { ...extraOpenerTags };
-        if (sig) openerTagsWithSig['+freeq.at/sig'] = sig;
-        this.emitMultilineBatch(target, chunks, openerTagsWithSig);
-      });
-      this.maybeLocalEcho(target, text, willEncrypt);
       // Async signing — batch id isn't synchronously available.
       return null;
     }
@@ -1150,6 +1150,44 @@ export class FreeqClient extends EventEmitter {
       pushSplit(sourceLine, false);
     }
     return out;
+  }
+
+  /**
+   * Partition already-sized chunk lines into batches that each respect
+   * the server's `max-lines` and `max-bytes` ceilings. A message that
+   * doesn't fit one batch becomes several — each emitted as its own
+   * BATCH (its own logical message), rather than collapsed into a single
+   * oversized line the server would truncate.
+   *
+   * Group boundaries fall only on a real line start (`concat === false`)
+   * so a hard-split source line (its continuations carry `concat`) is
+   * never severed across two messages. Byte accounting uses string
+   * `.length`, matching the rest of the multiline sizing (`perChunkBudget`,
+   * the `max-bytes` guard) — exact for the ASCII-heavy pastes this fixes.
+   */
+  private groupChunksIntoBatches(
+    chunks: Array<{ body: string; concat: boolean }>,
+  ): Array<Array<{ body: string; concat: boolean }>> {
+    const groups: Array<Array<{ body: string; concat: boolean }>> = [];
+    let cur: Array<{ body: string; concat: boolean }> = [];
+    let curLen = 0;
+    for (const c of chunks) {
+      const sep = cur.length > 0 && !c.concat ? 1 : 0; // '\n' re-added on assembly
+      const startsNewBatch =
+        cur.length > 0 &&
+        !c.concat &&
+        (cur.length + 1 > this.multilineMaxLines ||
+          curLen + sep + c.body.length > this.multilineMaxBytes);
+      if (startsNewBatch) {
+        groups.push(cur);
+        cur = [];
+        curLen = 0;
+      }
+      curLen += (cur.length > 0 && !c.concat ? 1 : 0) + c.body.length;
+      cur.push(c);
+    }
+    if (cur.length) groups.push(cur);
+    return groups;
   }
 
   private async handleLine(rawLine: string): Promise<void> {

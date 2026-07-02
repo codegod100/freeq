@@ -503,30 +503,37 @@ describe('comprehensive: edge cases', () => {
       .toBeDefined();
   });
 
-  it('outbound: exceeding max-lines falls back to legacy single-PRIVMSG', async () => {
+  it('outbound: exceeding max-lines splits into multiple batches', async () => {
     const { client, ws } = await makeMultilineClient('alice');
-    // 101 source lines — server cap is max-lines=100 advertised in CAP LS
+    // 101 source lines — server cap is max-lines=100 advertised in CAP LS.
+    // Must split into >1 batch, never fall back to a legacy oversized line.
     const text = Array.from({ length: 101 }, (_, i) => `line${i + 1}`).join('\n');
     client.sendMessage('#room', text);
     await flushAsync();
-    expect(findOpener(ws.sent)).toBeUndefined();
+    const openers = ws.sent.filter(
+      (l) => l.includes('BATCH +') && l.includes('draft/multiline'),
+    );
+    expect(openers.length).toBeGreaterThanOrEqual(2);
     const legacy = ws.sent.find((l) =>
       l.includes('+freeq.at/multiline') && l.includes('PRIVMSG #room'),
     );
-    expect(legacy).toBeDefined();
+    expect(legacy).toBeUndefined();
   });
 
-  it('outbound: exceeding max-bytes falls back to legacy single-PRIVMSG', async () => {
+  it('outbound: exceeding max-bytes splits into multiple batches', async () => {
     const { client, ws } = await makeMultilineClient('alice');
-    // 50000 bytes — server cap is max-bytes=40000 advertised in CAP LS
-    const text = 'a\n'.repeat(25000); // 50000 chars total
+    // Exceed max-bytes=40000 while staying under max-lines: 90 × 600 chars.
+    const text = Array.from({ length: 90 }, () => 'x'.repeat(600)).join('\n');
     client.sendMessage('#room', text);
     await flushAsync();
-    expect(findOpener(ws.sent)).toBeUndefined();
+    const openers = ws.sent.filter(
+      (l) => l.includes('BATCH +') && l.includes('draft/multiline'),
+    );
+    expect(openers.length).toBeGreaterThanOrEqual(2);
     const legacy = ws.sent.find((l) =>
       l.includes('+freeq.at/multiline') && l.includes('PRIVMSG #room'),
     );
-    expect(legacy).toBeDefined();
+    expect(legacy).toBeUndefined();
   });
 
   it('inbound: legacy +freeq.at/multiline with multi-byte unicode decodes correctly', async () => {
@@ -537,5 +544,63 @@ describe('comprehensive: edge cases', () => {
     await flushAsync();
     expect(seen).toHaveLength(1);
     expect(seen[0].text).toBe('日本語\n🎉\n한국어');
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────
+// Oversize paste: a message past the server's max-lines / max-bytes
+// ceiling must be sent as SEVERAL batches (several logical messages),
+// never collapsed into one legacy oversized PRIVMSG that the server
+// silently truncates. This is the RFC-paste bug: ~130 lines fell back
+// to sendLegacyPlaintext → one 14 KB line → cut at 8192.
+// ────────────────────────────────────────────────────────────────────
+
+describe('comprehensive: oversize multi-line paste splits into batches', () => {
+  it('a >max-lines message becomes multiple BATCHes, not a legacy line', async () => {
+    const { client, ws } = await makeMultilineClient('alice');
+
+    // 250 short lines: 2.5× the advertised max-lines=100 ceiling.
+    const lines = Array.from({ length: 250 }, (_, i) => `line-${i}`);
+    const text = lines.join('\n');
+    client.sendMessage('#room', text);
+    await flushAsync();
+
+    const openers = ws.sent.filter(
+      (l) => l.includes('BATCH +') && l.includes('draft/multiline'),
+    );
+    const closers = ws.sent.filter((l) => /BATCH -\S+/.test(l));
+    const chunks = ws.sent.filter((l) => l.includes('PRIVMSG') && l.includes('batch='));
+
+    // Must NOT have fallen back to a single legacy PRIVMSG carrying the
+    // whole doc as one escaped line.
+    const legacyWhole = ws.sent.filter(
+      (l) =>
+        l.includes('PRIVMSG') &&
+        !l.includes('batch=') &&
+        (l.includes('+freeq.at/multiline') || l.includes('\\n')),
+    );
+    expect(legacyWhole).toEqual([]);
+
+    // ceil(250 / 100) = 3 batches minimum, balanced open/close.
+    expect(openers.length).toBeGreaterThanOrEqual(3);
+    expect(closers.length).toBe(openers.length);
+
+    // Every batch respects the max-lines ceiling.
+    const perBatch = new Map<string, number>();
+    for (const c of chunks) {
+      const m = c.match(/batch=([^\s;]+)/);
+      if (m) perBatch.set(m[1], (perBatch.get(m[1]) ?? 0) + 1);
+    }
+    for (const [id, n] of perBatch) {
+      expect(n, `batch ${id} exceeded max-lines`).toBeLessThanOrEqual(100);
+    }
+
+    // No data loss: every source line survives, in order, across batches.
+    // (A space-less trailing param serializes without the leading colon.)
+    const bodies = chunks.map((l) => {
+      const after = l.slice(l.indexOf('#room ') + '#room '.length);
+      return after.startsWith(':') ? after.slice(1) : after;
+    });
+    expect(bodies).toEqual(lines);
   });
 });

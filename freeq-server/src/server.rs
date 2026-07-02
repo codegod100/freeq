@@ -5002,6 +5002,62 @@ mod s2s_adversarial_tests {
     }
 
     #[tokio::test]
+    #[ignore = "documents the separate, unfixed S2S 4096-char cap (server.rs:2757); \
+                distinct from the local oversize-line truncation that caused the RFC cutoff"]
+    async fn s2s_privmsg_long_body_is_not_truncated_in_history() {
+        // Repro for the RFC-cutoff bug: a federated PRIVMSG longer than
+        // the S2S text cap (4096 chars) gets guillotined mid-word before
+        // it lands in channel history + DB, so scrollback/CHATHISTORY and
+        // non-multiline clients render a truncated copy. The local
+        // multiline assembler allows MAX_BYTES (40_000), so a message
+        // that's legal locally is silently cut once it crosses S2S.
+        //
+        // The real trigger was an ~8.5k-char RFC; we use a 5010-char body
+        // with a trailing sentinel that sits past the 4096 boundary.
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#longmsg");
+
+        let body = format!("{}__END_SENTINEL__", "x".repeat(5000));
+        assert!(body.chars().count() > 4096, "test body must exceed the cap");
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:longmsg"),
+                from: "alice!a@remote".to_string(),
+                target: "#longmsg".to_string(),
+                text: body.clone(),
+                origin: PEER.to_string(),
+                msgid: Some("LONG-MSG-1".to_string()),
+                sig: None,
+                account: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let stored = state
+            .channels
+            .lock()
+            .get("#longmsg")
+            .and_then(|ch| ch.history.back().map(|m| m.text.clone()))
+            .expect("message should be stored in history");
+
+        assert!(
+            stored.ends_with("__END_SENTINEL__"),
+            "federated body was truncated: stored {} chars (expected {})",
+            stored.chars().count(),
+            body.chars().count(),
+        );
+        assert_eq!(stored, body, "stored history must match the full federated body");
+    }
+
+    #[tokio::test]
     async fn s2s_privmsg_account_injected_for_account_tag_client() {
         // A federated PRIVMSG carrying the sender DID (`account`) should be
         // delivered with `account=<did>` to a local client that negotiated
