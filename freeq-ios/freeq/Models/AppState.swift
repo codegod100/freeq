@@ -312,9 +312,7 @@ class AppState: ObservableObject {
     @Published var connectionState: ConnectionState = .disconnected
     @Published var nick: String = ""
     @Published var serverAddress: String = ServerConfig.ircServer
-    // For deployments using embedded auth (no standalone broker), use ServerConfig.apiBaseUrl:
-    // @Published var authBrokerBase: String = ServerConfig.apiBaseUrl
-    @Published var authBrokerBase: String = "https://auth.freeq.at"
+    @Published var authBrokerBase: String = ServerConfig.authBrokerBase
     @Published var channels: [ChannelState] = []
     @Published var activeChannel: String? = nil
     @Published var errorMessage: String? = nil
@@ -899,8 +897,38 @@ class AppState: ObservableObject {
     /// the live instance here. Always read on main.
     static weak var shared: AppState? = nil
 
+    /// Drops saved auth + server-scoped state when the build has been
+    /// retargeted at a different deployment since the last run. The default
+    /// freeq.at build never trips this; it only fires when `IRC_SERVER` /
+    /// `AUTH_BROKER_BASE` change (e.g. a zerosum scheme), where the
+    /// bundle-shared keychain/UserDefaults would otherwise carry a freeq.at
+    /// token and session into the new host.
+    private func reconcileDeploymentChange() {
+        let current = ServerConfig.deploymentID
+        let key = "freeq.deployment"
+        let previous = UserDefaults.standard.string(forKey: key)
+        UserDefaults.standard.set(current, forKey: key)
+        guard let previous, previous != current else { return }
+
+        for credential in ["brokerToken", "did", "webToken", "webTokenExpiry"] {
+            KeychainHelper.delete(key: credential)
+        }
+        for staleKey in [
+            "freeq.brokerBase", "freeq.nick", "freeq.channels", "freeq.closedDMs",
+            "freeq.mutedChannels", "freeq.lastLogin", "freeq.webTokenExpiry",
+            "freeq.readPositions", "freeq.unreadCounts", "freeq.motdSeenHash",
+            // Legacy keychain-migration sources: clear them too, else the
+            // migrateFromUserDefaults pass below re-imports a stale freeq.at
+            // DID/token into the freshly-cleared keychain on retarget.
+            "freeq.did", "freeq.brokerToken",
+        ] {
+            UserDefaults.standard.removeObject(forKey: staleKey)
+        }
+    }
+
     init() {
         AppState.shared = self
+        reconcileDeploymentChange()
         if let savedNick = UserDefaults.standard.string(forKey: "freeq.nick") {
             nick = savedNick
         }
