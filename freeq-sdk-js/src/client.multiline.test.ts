@@ -216,6 +216,44 @@ describe('outbound: sendMessage with multiline cap acked', () => {
     }
   });
 
+  it('preserves blank lines (paragraph breaks) — emits an empty chunk, not dropped', async () => {
+    const { client, ws } = await makeMultilineClient();
+    // A blank line between paragraphs must survive byte-for-byte. Dropping
+    // it breaks the multiline round-trip: rendering loses paragraph spacing,
+    // and commit-reveal hashes over the original (blank lines intact) no
+    // longer match the reassembled reveal body.
+    client.sendMessage('#room', 'para one\n\npara two');
+    await flushAsync();
+    const privmsgs = ws.sent.filter((l) => l.includes('PRIVMSG #room'));
+    expect(privmsgs).toHaveLength(3); // "para one", "" (blank), "para two"
+    expect(privmsgs[0]).toContain('para one');
+    expect(privmsgs[1]).not.toContain('para'); // the blank line, still emitted
+    expect(privmsgs[2]).toContain('para two');
+  });
+
+  it('emitted batch reassembles byte-for-byte like the server (commit-reveal parity)', async () => {
+    const { client, ws } = await makeMultilineClient();
+    const answer =
+      'First paragraph, reasonably long sentence to exercise things.\n\n' +
+      'Second paragraph.\n- bullet one\n- bullet two\n\nClosing thought.';
+    client.sendMessage('#room', answer);
+    await flushAsync();
+    const marker = 'PRIVMSG #room :';
+    const chunks = ws.sent
+      .filter((l) => l.includes(marker))
+      .map((l) => ({
+        concat: l.includes('+draft/multiline-concat'),
+        body: l.slice(l.indexOf(marker) + marker.length).replace(/\r?\n$/, ''),
+      }));
+    // Mirror server assemble_body: '\n' before each non-concat line except the first.
+    let assembled = '';
+    chunks.forEach((c, i) => {
+      if (i > 0 && !c.concat) assembled += '\n';
+      assembled += c.body;
+    });
+    expect(assembled).toBe(answer);
+  });
+
   it('falls through to single PRIVMSG when text has no \\n', async () => {
     const { client, ws } = await makeMultilineClient();
     client.sendMessage('#room', 'single line');

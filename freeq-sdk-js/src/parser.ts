@@ -113,7 +113,15 @@ export function format(
   }
   line += command;
   for (let i = 0; i < params.length; i++) {
-    if (i === params.length - 1 && (params[i].includes(' ') || params[i].startsWith(':'))) {
+    // The trailing param needs a leading `:` if it contains a space, starts
+    // with `:`, OR is empty. Without the colon an empty last param serializes
+    // to `CMD target ` (no trailing) and the peer can't recover a `body=""` —
+    // which silently drops blank lines inside a draft/multiline BATCH and
+    // breaks byte-exact round-trip (e.g. commit-reveal hashes).
+    if (
+      i === params.length - 1 &&
+      (params[i] === '' || params[i].includes(' ') || params[i].startsWith(':'))
+    ) {
       line += ` :${params[i]}`;
     } else {
       line += ` ${params[i]}`;

@@ -1147,7 +1147,18 @@ export class FreeqClient extends EventEmitter {
     // Plaintext multiline: split on `\n`. Each source line opens a new
     // chunk with concat=false so reassembly inserts the `\n` back.
     for (const sourceLine of body.split('\n')) {
-      pushSplit(sourceLine, false);
+      // An empty source line (a blank line / paragraph break) must still
+      // emit a chunk. `pushSplit('')` produces nothing, which would drop
+      // the blank line on reassembly — breaking byte-exact round-trip:
+      // rendering loses paragraph spacing, and commit-reveal hashes over
+      // the original (blank lines intact) no longer match the reassembled
+      // reveal body. Emit an explicit empty, non-concat chunk so assembly
+      // re-inserts the `\n`.
+      if (sourceLine.length === 0) {
+        out.push({ body: '', concat: false });
+      } else {
+        pushSplit(sourceLine, false);
+      }
     }
     return out;
   }
