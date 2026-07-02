@@ -235,7 +235,7 @@ describe('comprehensive: ENC1 ciphertext-chunked multiline round-trip', () => {
     expect(closer).toBeDefined();
     expect(chunks.length).toBeGreaterThanOrEqual(2);
     // Every chunk after the first must carry concat tag (ciphertext-chunking)
-    const concatChunks = chunks.filter((c) => c.includes('+draft/multiline-concat'));
+    const concatChunks = chunks.filter((c) => c.includes('draft/multiline-concat'));
     expect(concatChunks.length).toBe(chunks.length - 1);
     // Every chunk must carry +encrypted
     for (const c of chunks) {
@@ -484,10 +484,10 @@ describe('comprehensive: edge cases', () => {
     client.on('message', (_ch, m) => seen.push(m));
     ws.recv('@msgid=01CM :bob!u@h BATCH +cm1 draft/multiline #room');
     ws.recv('@batch=cm1 :bob!u@h PRIVMSG #room :alpha');
-    ws.recv('@batch=cm1;+draft/multiline-concat= :bob!u@h PRIVMSG #room :beta');
-    ws.recv('@batch=cm1;+draft/multiline-concat= :bob!u@h PRIVMSG #room :gamma');
+    ws.recv('@batch=cm1;draft/multiline-concat= :bob!u@h PRIVMSG #room :beta');
+    ws.recv('@batch=cm1;draft/multiline-concat= :bob!u@h PRIVMSG #room :gamma');
     ws.recv('@batch=cm1 :bob!u@h PRIVMSG #room :delta');
-    ws.recv('@batch=cm1;+draft/multiline-concat= :bob!u@h PRIVMSG #room :epsilon');
+    ws.recv('@batch=cm1;draft/multiline-concat= :bob!u@h PRIVMSG #room :epsilon');
     ws.recv(':srv BATCH -cm1');
     await flushAsync();
     expect(seen).toHaveLength(1);

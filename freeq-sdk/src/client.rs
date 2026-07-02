@@ -142,7 +142,7 @@ pub enum Command {
 }
 
 /// One chunk of a `draft/multiline` send. `concat=true` translates to
-/// `+draft/multiline-concat` on the wire — receivers join with no
+/// `draft/multiline-concat` on the wire — receivers join with no
 /// separator. The first chunk's `concat` is conventionally `false`.
 #[derive(Debug, Clone)]
 pub struct MultilineChunk {
@@ -1998,7 +1998,7 @@ where
                                             body: msg.params[1].clone(),
                                             concat: msg
                                                 .tags
-                                                .contains_key("+draft/multiline-concat"),
+                                                .contains_key("draft/multiline-concat"),
                                         });
                                         line_buf.clear();
                                         continue;
@@ -2126,7 +2126,7 @@ where
 
 /// Assemble a closed `draft/multiline` batch into a single
 /// `Event::Message` per the spec's concat rules — a chunk with
-/// `+draft/multiline-concat` joins its predecessor with no separator;
+/// `draft/multiline-concat` joins its predecessor with no separator;
 /// otherwise the join is `\n`. The opener's tags become the assembled
 /// message's tags (msgid, time, sender's account, etc.).
 async fn dispatch_assembled_multiline(
@@ -2259,11 +2259,11 @@ async fn execute_command<W: AsyncWrite + Unpin>(
                 )
                 .await?;
             // Per-chunk PRIVMSGs carry `batch=<id>` and, if applicable,
-            // `+draft/multiline-concat`. Sigs are on the opener, not here.
+            // `draft/multiline-concat`. Sigs are on the opener, not here.
             for chunk in &chunks {
                 let mut chunk_tags = format!("batch={batch_id}");
                 if chunk.concat {
-                    chunk_tags.push_str(";+draft/multiline-concat");
+                    chunk_tags.push_str(";draft/multiline-concat");
                 }
                 writer
                     .write_all(
@@ -2722,12 +2722,12 @@ mod multiline_tests {
         // First chunk: no concat tag
         assert!(wire.contains(":ENC1:abc"));
         let first_chunk_line = wire.lines().find(|l| l.contains(":ENC1:abc")).unwrap();
-        assert!(!first_chunk_line.contains("+draft/multiline-concat"));
+        assert!(!first_chunk_line.contains("draft/multiline-concat"));
         // Second + third chunks: concat tag present
         let def_line = wire.lines().find(|l| l.ends_with(":def")).unwrap();
         let ghi_line = wire.lines().find(|l| l.ends_with(":ghi")).unwrap();
-        assert!(def_line.contains("+draft/multiline-concat"));
-        assert!(ghi_line.contains("+draft/multiline-concat"));
+        assert!(def_line.contains("draft/multiline-concat"));
+        assert!(ghi_line.contains("draft/multiline-concat"));
     }
 
     #[tokio::test]

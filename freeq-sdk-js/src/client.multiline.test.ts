@@ -216,6 +216,25 @@ describe('outbound: sendMessage with multiline cap acked', () => {
     }
   });
 
+  it('length-splits a >6400B line with draft/multiline-concat (no + prefix — server/spec form)', async () => {
+    const { client, ws } = await makeMultilineClient();
+    // A single source line longer than the per-chunk budget must split into a
+    // first (non-concat) chunk + concat continuation(s). The concat tag MUST be
+    // `draft/multiline-concat` — no `+` client-tag prefix — or the server (and
+    // peers) drop it and inject a raw \n at the split, corrupting the body.
+    const longLine = 'word '.repeat(2000).trim(); // ~9999B single source line
+    client.sendMessage('#room', `A\n${longLine}\nB`); // \n triggers multiline
+    await flushAsync();
+    const chunks = ws.sent.filter((l) => /\bPRIVMSG #room\b/.test(l));
+    // A, the long line (split into >1), and B → more than 3 chunks.
+    expect(chunks.length).toBeGreaterThan(3);
+    // At least one concat continuation (the long line's length-split).
+    const concatCount = chunks.filter((l) => l.includes('draft/multiline-concat')).length;
+    expect(concatCount).toBeGreaterThanOrEqual(1);
+    // And never the buggy `+`-prefixed form.
+    expect(ws.sent.some((l) => l.includes('+draft/multiline-concat'))).toBe(false);
+  });
+
   it('preserves blank lines (paragraph breaks) — emits an empty chunk, not dropped', async () => {
     const { client, ws } = await makeMultilineClient();
     // A blank line between paragraphs must survive byte-for-byte. Dropping
@@ -242,7 +261,7 @@ describe('outbound: sendMessage with multiline cap acked', () => {
     const chunks = ws.sent
       .filter((l) => l.includes(marker))
       .map((l) => ({
-        concat: l.includes('+draft/multiline-concat'),
+        concat: l.includes('draft/multiline-concat'),
         body: l.slice(l.indexOf(marker) + marker.length).replace(/\r?\n$/, ''),
       }));
     // Mirror server assemble_body: '\n' before each non-concat line except the first.
@@ -252,6 +271,22 @@ describe('outbound: sendMessage with multiline cap acked', () => {
       assembled += c.body;
     });
     expect(assembled).toBe(answer);
+  });
+
+  it('multilines a long single-line message (no \\n) instead of truncating', async () => {
+    const { client, ws } = await makeMultilineClient();
+    // No newlines, but bigger than one PRIVMSG. Must still BATCH (length-split
+    // into concat chunks) rather than fall to the truncating legacy path.
+    const bigNoNewlines = 'word '.repeat(2000).trim(); // ~9999B, zero '\n'
+    client.sendMessage('#room', bigNoNewlines);
+    await flushAsync();
+    const opener = ws.sent.find((l) => l.includes('BATCH +') && l.includes('draft/multiline'));
+    const chunks = ws.sent.filter((l) => /\bPRIVMSG #room\b/.test(l));
+    expect(opener).toBeDefined(); // it batched despite no '\n'
+    expect(chunks.length).toBeGreaterThan(1); // length-split
+    expect(chunks.filter((l) => l.includes('draft/multiline-concat')).length).toBe(
+      chunks.length - 1, // one non-concat opener chunk, rest concat
+    );
   });
 
   it('falls through to single PRIVMSG when text has no \\n', async () => {
@@ -360,13 +395,13 @@ describe('inbound: draft/multiline assembly', () => {
     expect(seen[0].msg.from).toBe('bob');
   });
 
-  it('honors +draft/multiline-concat (joins without separator)', async () => {
+  it('honors draft/multiline-concat (joins without separator)', async () => {
     const { client, ws } = await makeMultilineClient();
     const seen: Array<{ ch: string; msg: Message }> = [];
     client.on('message', (ch, msg) => seen.push({ ch, msg }));
     ws.recv('@msgid=01ABC :bob!u@h BATCH +ab2 draft/multiline #room');
     ws.recv('@batch=ab2 :bob!u@h PRIVMSG #room :alpha');
-    ws.recv('@batch=ab2;+draft/multiline-concat= :bob!u@h PRIVMSG #room :beta');
+    ws.recv('@batch=ab2;draft/multiline-concat= :bob!u@h PRIVMSG #room :beta');
     ws.recv('@batch=ab2 :bob!u@h PRIVMSG #room :gamma');
     ws.recv(':srv BATCH -ab2');
     await flushAsync();

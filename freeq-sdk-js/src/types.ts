@@ -189,7 +189,7 @@ export interface Batch {
   openerFrom?: string;
   /**
    * `draft/multiline`-only: accumulated chunks. Each entry is one
-   * PRIVMSG body plus whether the chunk carried `+draft/multiline-concat`
+   * PRIVMSG body plus whether the chunk carried `draft/multiline-concat`
    * (join to predecessor without separator) or not (join with `\n`).
    */
   multilineLines?: Array<{ body: string; concat: boolean }>;

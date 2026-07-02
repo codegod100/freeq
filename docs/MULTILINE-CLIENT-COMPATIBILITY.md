@@ -159,7 +159,7 @@ channels work as follows:
   `+encrypted` — no BATCH frames needed.
 - If the ciphertext exceeds the per-line ceiling, the SDK
   **ciphertext-chunks** it across a `draft/multiline` BATCH with
-  every chunk tagged `+draft/multiline-concat`. The server stores one
+  every chunk tagged `draft/multiline-concat`. The server stores one
   row of concatenated ciphertext (server-side concat assembly is
   cipher-agnostic — it just joins). The receiver SDK concatenates the
   chunks and decrypts the result **once**.

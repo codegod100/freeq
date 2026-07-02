@@ -945,7 +945,7 @@ async fn ciphertext_chunked_edit_preserves_chunking_via_batch() {
         alice.tx("BATCH -cb");
 
         // Bob (multiline-capable) sees BATCH-wrapped edit preserving the
-        // three chunks AND the `+draft/multiline-concat` flag on chunks
+        // three chunks AND the `draft/multiline-concat` flag on chunks
         // 2 and 3 — so the receiver assembles by concatenation, not by
         // `\n`-joining.
         let opener = bob.rx(

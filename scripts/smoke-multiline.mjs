@@ -436,8 +436,8 @@ async function tests() {
     expect(!!opener, 'BATCH opener present');
     expect(!!closer, 'BATCH closer present');
     expect(chunks.length >= 2, `at least 2 ciphertext chunks (got ${chunks.length})`);
-    const concatCount = chunks.filter((l) => l.includes('+draft/multiline-concat')).length;
-    expect(concatCount >= 1, `at least one chunk carries +draft/multiline-concat (got ${concatCount})`);
+    const concatCount = chunks.filter((l) => l.includes('draft/multiline-concat')).length;
+    expect(concatCount >= 1, `at least one chunk carries draft/multiline-concat (got ${concatCount})`);
   });
 
   await runTest('B11: small E2EE edit (single-PRIVMSG ciphertext) round-trip', async () => {

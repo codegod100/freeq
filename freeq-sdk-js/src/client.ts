@@ -361,7 +361,13 @@ export class FreeqClient extends EventEmitter {
     }
 
     // ── Non-E2EE path ──
-    if (hasNewline && multilineCap) {
+    // Route to a multiline BATCH when the text has newlines OR is simply too
+    // big for one PRIVMSG. Length alone must trigger it — a long single-line
+    // message (no `\n`) would otherwise hit the legacy path and truncate at the
+    // wire cap. chunkMultilineBody length-splits a long line into concat chunks
+    // regardless, so this just widens the entry condition.
+    const overBudget = new TextEncoder().encode(text).length > perChunkBudget;
+    if (multilineCap && (hasNewline || overBudget)) {
       const chunks = this.chunkMultilineBody(text, perChunkBudget, false);
       // A paste larger than one batch (server-advertised max-lines /
       // max-bytes) is sent as SEVERAL batches — several logical messages
@@ -388,8 +394,8 @@ export class FreeqClient extends EventEmitter {
       return null;
     }
 
-    // No \n, or no multiline cap → single PRIVMSG (legacy path preserves
-    // \n escaping + +freeq.at/multiline tag for receivers that decode it).
+    // Fits in one PRIVMSG (or no multiline cap) → single PRIVMSG. Legacy path
+    // preserves \n escaping + +freeq.at/multiline for receivers that decode it.
     this.sendLegacyPlaintext(target, text, extraOpenerTags);
     this.maybeLocalEcho(target, text, willEncrypt);
     return null;
@@ -948,7 +954,7 @@ export class FreeqClient extends EventEmitter {
 
   /**
    * Assemble the chunks of a closed `draft/multiline` batch per spec
-   * concat rules: a chunk with `+draft/multiline-concat` is joined to
+   * concat rules: a chunk with `draft/multiline-concat` is joined to
    * the predecessor with no separator; otherwise joined with `\n`.
    */
   private assembleMultiline(lines: Array<{ body: string; concat: boolean }>): string {
@@ -977,7 +983,7 @@ export class FreeqClient extends EventEmitter {
     this.raw(format('BATCH', [`+${batchId}`, 'draft/multiline', target], openerTags));
     for (const c of chunks) {
       const tags: Record<string, string> = { ...perChunkTags, batch: batchId };
-      if (c.concat) tags['+draft/multiline-concat'] = '';
+      if (c.concat) tags['draft/multiline-concat'] = '';
       this.raw(format('PRIVMSG', [target, c.body], tags));
     }
     this.raw(format('BATCH', [`-${batchId}`]));
@@ -1112,7 +1118,7 @@ export class FreeqClient extends EventEmitter {
    * `max-lines` per batch ceiling. Two strategies:
    *
    *   - `concatChunks=false`: chunk on `\n` boundaries; each source line
-   *     becomes one chunk (no `+draft/multiline-concat`). If a single
+   *     becomes one chunk (no `draft/multiline-concat`). If a single
    *     source line exceeds the byte budget it is hard-split with concat
    *     so the assembled body is byte-identical.
    *   - `concatChunks=true`: chunk on byte boundaries only (used for
@@ -1468,7 +1474,11 @@ export class FreeqClient extends EventEmitter {
             batch.multilineLines = batch.multilineLines || [];
             batch.multilineLines.push({
               body: text,
-              concat: '+draft/multiline-concat' in msg.tags,
+              // Per IRCv3 multiline + the freeq server, the concat tag is
+              // `draft/multiline-concat` (no `+` client-tag prefix — the server
+              // processes it). Reading `+draft/...` here silently lost concat
+              // on any line >6400B, injecting a raw \n at the split boundary.
+              concat: 'draft/multiline-concat' in msg.tags,
             });
             break;
           }
