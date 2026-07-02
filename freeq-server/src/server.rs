@@ -2754,7 +2754,12 @@ pub(crate) async fn process_s2s_message(
             // Sanitize all peer-provided strings to prevent IRC protocol injection.
             let from = sanitize_s2s_str(&from, 512);
             let target = sanitize_s2s_str(&target, 200);
-            let text = sanitize_s2s_str(&text, 4096);
+            // Match the local multiline ceiling (MAX_BYTES) so a federated
+            // message isn't truncated in history/CHATHISTORY when it crosses a
+            // server boundary. `\r`/`\n`/`\0` stripping is the injection
+            // defense; the length cap is only a size bound. Tied to the same
+            // constant so the two paths can't drift apart again.
+            let text = sanitize_s2s_str(&text, crate::connection::draft_multiline::MAX_BYTES);
             // Sender DID carried from the origin (the `account` tag value).
             // Stamped by the origin from its authenticated session, never
             // client-set; relayed on the same peer trust as the message body.
@@ -5002,18 +5007,15 @@ mod s2s_adversarial_tests {
     }
 
     #[tokio::test]
-    #[ignore = "documents the separate, unfixed S2S 4096-char cap (server.rs:2757); \
-                distinct from the local oversize-line truncation that caused the RFC cutoff"]
     async fn s2s_privmsg_long_body_is_not_truncated_in_history() {
-        // Repro for the RFC-cutoff bug: a federated PRIVMSG longer than
-        // the S2S text cap (4096 chars) gets guillotined mid-word before
-        // it lands in channel history + DB, so scrollback/CHATHISTORY and
-        // non-multiline clients render a truncated copy. The local
-        // multiline assembler allows MAX_BYTES (40_000), so a message
-        // that's legal locally is silently cut once it crosses S2S.
+        // A federated PRIVMSG longer than the old 4096-char S2S cap used to
+        // be guillotined mid-word before it landed in channel history + DB,
+        // so scrollback/CHATHISTORY and non-multiline clients rendered a
+        // truncated copy. The S2S text cap now matches the local multiline
+        // ceiling (MAX_BYTES), so a message that's legal locally survives
+        // the server boundary.
         //
-        // The real trigger was an ~8.5k-char RFC; we use a 5010-char body
-        // with a trailing sentinel that sits past the 4096 boundary.
+        // 5010-char body with a trailing sentinel past the old 4096 cut.
         let state = test_state();
         let mgr = test_manager();
         setup_authenticated_peer(&state, &mgr).await;
