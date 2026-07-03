@@ -92,7 +92,7 @@ struct LinkPreviewView: View {
         loaded = true
 
         Task {
-            let proxyURL = "https://irc.freeq.at/api/v1/og?url=\(url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url)"
+            let proxyURL = "\(ServerConfig.apiBaseUrl)/api/v1/og?url=\(url.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? url)"
             guard let requestURL = URL(string: proxyURL) else { return }
 
             do {

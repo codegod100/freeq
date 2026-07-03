@@ -231,11 +231,14 @@ struct ShortcutsSettings: View {
                 shortcutRow("Join Channel", "⌘J")
                 shortcutRow("Toggle Detail Panel", "⇧⌘D")
                 shortcutRow("Switch to Buffer 1-9", "⌘1–9")
+                shortcutRow("Previous / Next Channel", "⌥↑ / ⌥↓")
+                shortcutRow("Previous / Next Unread", "⌥⇧↑ / ⌥⇧↓")
             }
             Section("Compose") {
                 shortcutRow("Send Message", "↩")
                 shortcutRow("New Line", "⇧↩")
                 shortcutRow("Edit Last Message", "↑ (empty input)")
+                shortcutRow("Input History", "⌘↑ / ⌘↓")
                 shortcutRow("Tab-complete Nick", "⇥")
                 shortcutRow("Cancel Edit/Reply", "⎋")
             }

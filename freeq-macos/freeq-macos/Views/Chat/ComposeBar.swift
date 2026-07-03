@@ -194,6 +194,8 @@ struct ComposeBar: View {
                         text: $text,
                         onSubmit: send,
                         onUpArrow: editLastMessage,
+                        onHistoryPrev: recallHistoryPrevious,
+                        onHistoryNext: recallHistoryNext,
                         members: appState.activeChannelState?.members.map(\.nick) ?? [],
                         focusToken: focusToken
                     )
@@ -284,6 +286,7 @@ struct ComposeBar: View {
         .onAppear { focusToken &+= 1 }
         .onChange(of: appState.activeChannel) { _, _ in
             focusToken &+= 1
+            composeHistory.cancelRecall()
         }
         .onDisappear {
             voiceTimer?.invalidate()
@@ -291,9 +294,8 @@ struct ComposeBar: View {
         }
     }
 
-    // Input history
-    @State private var history: [String] = []
-    @State private var historyIndex: Int = -1
+    // Input history (⌘↑/⌘↓ recall — plain ↑ stays edit-last)
+    @State private var composeHistory = ComposeHistory()
 
     private func send() {
         // Handle pending upload
@@ -305,18 +307,25 @@ struct ComposeBar: View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let target = appState.activeChannel else { return }
 
-        // Save to history (UI concern)
-        if !trimmed.hasPrefix("/") || trimmed.hasPrefix("/me ") {
-            history.append(trimmed)
-            if history.count > 100 { history.removeFirst() }
-        }
-        historyIndex = -1
+        composeHistory.record(trimmed)
 
         // All command/edit/reply/message handling lives in AppState so the UI
         // and the test-mode bridge share one code path.
         appState.onComposeMediaRequest = { pickFile() }
         appState.submitInput(trimmed, target: target)
         text = ""
+    }
+
+    private func recallHistoryPrevious() {
+        if let recalled = composeHistory.recallPrevious(draft: text) {
+            text = recalled
+        }
+    }
+
+    private func recallHistoryNext() {
+        if let next = composeHistory.recallNext() {
+            text = next
+        }
     }
 
     private func editLastMessage() {
@@ -617,6 +626,8 @@ struct ComposeTextView: NSViewRepresentable {
     @Binding var text: String
     var onSubmit: () -> Void
     var onUpArrow: () -> Void
+    var onHistoryPrev: (() -> Void)? = nil
+    var onHistoryNext: (() -> Void)? = nil
     var members: [String]  // For tab completion
     /// Monotonic token bumped by the parent when the input should grab
     /// keyboard focus — e.g. after the user switches channels or the
@@ -641,6 +652,8 @@ struct ComposeTextView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.submitAction = onSubmit
         textView.upArrowAction = onUpArrow
+        textView.historyPrevAction = onHistoryPrev
+        textView.historyNextAction = onHistoryNext
 
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = false
@@ -657,6 +670,8 @@ struct ComposeTextView: NSViewRepresentable {
         }
         textView.submitAction = onSubmit
         textView.upArrowAction = onUpArrow
+        textView.historyPrevAction = onHistoryPrev
+        textView.historyNextAction = onHistoryNext
         textView.members = members
 
         // Honour focus-token bumps. Defer to the next runloop so the
@@ -696,14 +711,51 @@ struct ComposeTextView: NSViewRepresentable {
 }
 
 class ComposeNSTextView: NSTextView {
+    /// The composer that most recently had keyboard focus — lets the
+    /// format toolbar (plain SwiftUI buttons, which never become first
+    /// responder) reach the real selection.
+    static weak var activeInstance: ComposeNSTextView?
+
     var submitAction: (() -> Void)?
     var upArrowAction: (() -> Void)?
+    var historyPrevAction: (() -> Void)?
+    var historyNextAction: (() -> Void)?
     var members: [String] = []
     private var tabCompletionCandidates: [String] = []
     private var tabCompletionIndex: Int = 0
     private var tabCompletionPrefix: String = ""
 
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { Self.activeInstance = self }
+        return ok
+    }
+
+    /// Wrap the current selection in markdown markers and restore a
+    /// useful selection (see ComposeFormatting for the rules).
+    func applyFormat(prefix: String, suffix: String, placeholder: String? = nil) {
+        let sel = selectedRange()
+        let result = ComposeFormatting.wrap(
+            text: string,
+            selectionLocation: sel.location,
+            selectionLength: sel.length,
+            prefix: prefix, suffix: suffix, placeholder: placeholder)
+        string = result.text
+        setSelectedRange(NSRange(location: result.selectionLocation, length: result.selectionLength))
+        delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: self))
+        window?.makeFirstResponder(self)
+    }
+
     override func keyDown(with event: NSEvent) {
+        // ⌘↑ / ⌘↓ = input history recall
+        if event.modifierFlags.contains(.command) && event.keyCode == 126 {
+            historyPrevAction?()
+            return
+        }
+        if event.modifierFlags.contains(.command) && event.keyCode == 125 {
+            historyNextAction?()
+            return
+        }
         // Enter without Shift = send
         if event.keyCode == 36 && !event.modifierFlags.contains(.shift) {
             resetTabCompletion()

@@ -13,12 +13,31 @@ struct MessageListView: View {
         channel?.messages ?? []
     }
 
-    private var visibleMessages: [ChatMessage] {
-        MessageVisibility.visibleMessages(from: messages)
+    // Deleted messages render as tombstones (reading flow must not
+    // silently lose rows mid-scroll), so the timeline is all messages.
+    private var shouldShowWelcome: Bool {
+        messages.isEmpty
     }
 
-    private var shouldShowWelcome: Bool {
-        MessageVisibility.shouldShowWelcome(messages: messages)
+    /// One row per message plus its separator decision. Identifiable +
+    /// Equatable structs (not enumerated tuples) so LazyVStack row
+    /// content actually refreshes when a message mutates in place
+    /// (edit/delete/reaction).
+    private struct TimelineEntry: Identifiable, Equatable {
+        let message: ChatMessage
+        let showsDateSeparator: Bool
+        var id: String { message.id }
+    }
+
+    private var timeline: [TimelineEntry] {
+        var previous: Date?
+        return messages.map { msg in
+            defer { previous = msg.timestamp }
+            return TimelineEntry(
+                message: msg,
+                showsDateSeparator: MessageTimeline.showsDateSeparator(
+                    before: msg.timestamp, previous: previous))
+        }
     }
 
     /// Stable sentinel ID for the bottom anchor — scrolling to a fixed
@@ -35,7 +54,7 @@ struct MessageListView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         // Load more history button
-                        if !visibleMessages.isEmpty {
+                        if !messages.isEmpty {
                             Button {
                                 loadOlderHistory()
                             } label: {
@@ -58,14 +77,19 @@ struct MessageListView: View {
                             .id("load-more")
                         }
 
-                        ForEach(visibleMessages) { msg in
-                            if msg.from.isEmpty {
-                                SystemMessageRow(message: msg)
-                                    .id(msg.id)
-                            } else {
-                                MessageRow(message: msg)
-                                    .id(msg.id)
+                        // Each ForEach element must produce exactly ONE view:
+                        // emitting the separator and the row as siblings per
+                        // element breaks LazyVStack's in-place row updates
+                        // (reactions/edits/deletes stop repainting) — found
+                        // empirically via A/B against the pre-separator list.
+                        ForEach(timeline) { entry in
+                            VStack(alignment: .leading, spacing: 0) {
+                                if entry.showsDateSeparator {
+                                    DateSeparatorView(date: entry.message.timestamp)
+                                }
+                                messageRow(for: entry.message)
                             }
+                            .id(entry.message.id)
                         }
 
                         // Invisible bottom-of-list anchor. Reserved height
@@ -80,7 +104,7 @@ struct MessageListView: View {
                     }
                     .padding(.top, 8)
                 }
-                .onChange(of: visibleMessages.count) { oldCount, newCount in
+                .onChange(of: messages.count) { oldCount, newCount in
                     // If this count change is the initial load for a newly-
                     // selected channel, snap with no animation — otherwise
                     // the user sees a fast visual scroll from top to bottom
@@ -133,10 +157,68 @@ struct MessageListView: View {
         .background(Theme.chatBackground)
     }
 
+    @ViewBuilder
+    private func messageRow(for msg: ChatMessage) -> some View {
+        if msg.isDeleted {
+            DeletedMessageRow(message: msg)
+        } else if msg.from.isEmpty {
+            SystemMessageRow(message: msg)
+        } else {
+            MessageRow(message: msg)
+        }
+    }
+
     private func loadOlderHistory() {
         guard let target = appState.activeChannel,
               let oldest = messages.first else { return }
         appState.requestHistory(channel: target, before: oldest.timestamp)
+    }
+}
+
+// MARK: - Date Separator
+
+struct DateSeparatorView: View {
+    let date: Date
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Rectangle()
+                .fill(Theme.borderSoft)
+                .frame(height: 1)
+            Text(MessageTimeline.dayLabel(for: date))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(Theme.textTertiary)
+                .fixedSize()
+            Rectangle()
+                .fill(Theme.borderSoft)
+                .frame(height: 1)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+}
+
+// MARK: - Deleted Message Tombstone
+
+struct DeletedMessageRow: View {
+    let message: ChatMessage
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "trash")
+                .font(.caption2)
+                .foregroundStyle(Theme.textTertiary)
+            Text("Message from \(message.from) deleted")
+                .font(.caption)
+                .italic()
+                .foregroundStyle(Theme.textTertiary)
+            Text(formatTime(message.timestamp))
+                .font(.caption2)
+                .foregroundStyle(Theme.textTertiary.opacity(0.75))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -198,6 +280,7 @@ struct MessageRow: View {
               idx > 0 else { return true }
         let prev = ch.messages[idx - 1]
         if prev.from.isEmpty { return true }  // After system message
+        if prev.isDeleted { return true }  // Tombstones break grouping
         if prev.from != message.from { return true }
         // Break across a provenance boundary: a federated message (origin set)
         // must not collapse under a local sender's header.

@@ -85,10 +85,11 @@ struct SidebarView: View {
         HStack(spacing: 8) {
             // User info
             if let did = appState.authenticatedDID {
+                let isAway = appState.selfAwayReason != nil
                 AvatarView(nick: appState.nick, size: 24)
                     .overlay(alignment: .bottomTrailing) {
                         Circle()
-                            .fill(Theme.success)
+                            .fill(isAway ? Theme.warning : Theme.success)
                             .frame(width: 7, height: 7)
                             .overlay(Circle().strokeBorder(Theme.sidebarBackground, lineWidth: 1))
                     }
@@ -97,17 +98,21 @@ struct SidebarView: View {
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                    Text("Signed in")
+                    Text(appState.selfAwayReason.map { "Away — \($0)" } ?? "Signed in")
                         .font(.caption2)
-                        .foregroundStyle(Theme.textTertiary)
+                        .foregroundStyle(isAway ? Theme.warning : Theme.textTertiary)
                         .lineLimit(1)
                 }
-                .help("Signed in as \(did)")
+                .help(isAway
+                    ? "Away: \(appState.selfAwayReason ?? "") — signed in as \(did)"
+                    : "Signed in as \(did)")
             } else if appState.connectionState == .registered {
                 Circle()
                     .fill(Theme.warning)
                     .frame(width: 8, height: 8)
-                Text("\(appState.nick) (guest)")
+                Text(appState.selfAwayReason != nil
+                    ? "\(appState.nick) (guest · away)"
+                    : "\(appState.nick) (guest)")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             } else {
@@ -140,11 +145,14 @@ struct SidebarView: View {
             // User menu
             Menu {
                 if appState.authenticatedDID != nil {
-                    Button("Set Away…") {
-                        appState.setAway("AFK")
-                    }
-                    Button("Remove Away") {
-                        appState.setAway(nil)
+                    if appState.selfAwayReason == nil {
+                        Button("Set Away") {
+                            appState.setAway("AFK")
+                        }
+                    } else {
+                        Button("Remove Away") {
+                            appState.setAway(nil)
+                        }
                     }
                     Divider()
                 }

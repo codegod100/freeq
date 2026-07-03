@@ -48,6 +48,29 @@ struct FreeqApp: App {
                     appState.showDetailPanel.toggle()
                 }
                 .keyboardShortcut("d", modifiers: [.command, .shift])
+
+                Divider()
+
+                // Slack-compatible channel navigation muscle memory.
+                Button("Previous Channel") {
+                    appState.switchToAdjacentChannel(.previous)
+                }
+                .keyboardShortcut(.upArrow, modifiers: .option)
+
+                Button("Next Channel") {
+                    appState.switchToAdjacentChannel(.next)
+                }
+                .keyboardShortcut(.downArrow, modifiers: .option)
+
+                Button("Previous Unread Channel") {
+                    appState.switchToAdjacentChannel(.previous, unreadOnly: true)
+                }
+                .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
+
+                Button("Next Unread Channel") {
+                    appState.switchToAdjacentChannel(.next, unreadOnly: true)
+                }
+                .keyboardShortcut(.downArrow, modifiers: [.option, .shift])
             }
 
             CommandGroup(replacing: .newItem) {

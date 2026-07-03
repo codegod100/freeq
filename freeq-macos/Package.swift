@@ -45,6 +45,10 @@ let package = Package(
                 "ChannelCrypto.swift",
                 "ChannelE2eeState.swift",
                 "ChannelHydration.swift",
+                "ComposeFormatting.swift",
+                "ComposeHistory.swift",
+                "MessageTimeline.swift",
+                "BufferNavigation.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]

@@ -55,6 +55,9 @@ class AppState {
     // MARK: - Favorites, Muted, Bookmarks
     var favorites: Set<String> = []  // lowercase channel names
     var mutedChannels: Set<String> = []  // lowercase channel names
+    /// Our own away state (nil = present). Set optimistically on /away and
+    /// confirmed by the server's away-notify echo.
+    var selfAwayReason: String?
     var bookmarks: [Bookmark] = []
     var lastReadMsgId: [String: String] = [:]  // lowercase channel → last read msgid
 
@@ -332,6 +335,7 @@ class AppState {
         authenticatedDID = nil
         didRequestDmTargets = false
         apiBearerSessionId = nil
+        selfAwayReason = nil
         shutdownP2p()
     }
 
@@ -584,6 +588,31 @@ class AppState {
         } else {
             sendRaw("AWAY")
         }
+        // Optimistic — the server's away-notify echo (if any) confirms it.
+        selfAwayReason = reason
+    }
+
+    /// ⌥↑/⌥↓ and ⌥⇧↑/⌥⇧↓ — move through buffers in sidebar order,
+    /// optionally skipping to the next one with unread activity.
+    func switchToAdjacentChannel(_ direction: BufferNavigation.Direction, unreadOnly: Bool = false) {
+        let order = BufferNavigation.sidebarOrder(
+            channels: channels.map(\.name),
+            favorites: favorites,
+            dms: dmBuffers.sorted(by: { $0.lastActivity > $1.lastActivity }).map(\.name)
+        )
+        let target = BufferNavigation.target(
+            from: activeChannel,
+            order: order,
+            direction: direction,
+            isUnread: unreadOnly
+                ? { [weak self] name in
+                    guard let self else { return false }
+                    let key = name.lowercased()
+                    return (unreadCounts[key] ?? 0) > 0 || (mentionCounts[key] ?? 0) > 0
+                }
+                : nil
+        )
+        if let target { activeChannel = target }
     }
 
     func kickUser(_ channel: String, _ nick: String, reason: String? = nil) {
@@ -1196,6 +1225,9 @@ extension AppState {
             }
 
         case .awayChanged(let awayNick, let awayMsg):
+            if awayNick.lowercased() == nick.lowercased() {
+                selfAwayReason = awayMsg
+            }
             for ch in allBuffers {
                 if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == awayNick.lowercased() }) {
                     let old = ch.members[idx]

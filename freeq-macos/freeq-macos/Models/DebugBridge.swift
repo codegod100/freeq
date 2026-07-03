@@ -97,6 +97,54 @@ final class DebugBridge {
         case "settings":
             // open the standard Settings scene
             NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        // Composer/nav drivers — invoke the same production methods the
+        // menu shortcuts and toolbar buttons call, so screenshot sweeps can
+        // exercise them without GUI-event injection (which needs TCC).
+        case "navnext":
+            app.switchToAdjacentChannel(.next)
+        case "navprev":
+            app.switchToAdjacentChannel(.previous)
+        case "navunread":
+            app.switchToAdjacentChannel(.next, unreadOnly: true)
+        case "histprev":
+            ComposeNSTextView.activeInstance?.historyPrevAction?()
+        case "histnext":
+            ComposeNSTextView.activeInstance?.historyNextAction?()
+        case "type":
+            if let tv = ComposeNSTextView.activeInstance {
+                tv.string = arg
+                tv.delegate?.textDidChange?(
+                    Notification(name: NSText.didChangeNotification, object: tv))
+            }
+        case "selectall":
+            ComposeNSTextView.activeInstance?.selectAll(nil)
+        case "submit":
+            // Fire the composer's own submit (records input history etc.),
+            // unlike plain-text lines which go straight to submitInput.
+            ComposeNSTextView.activeInstance?.submitAction?()
+        case "dumpmsgs":
+            if let ch = app.activeChannelState {
+                for (i, m) in ch.messages.enumerated() {
+                    NSLog("[debug-bridge] msg[\(i)] id=\(m.id.suffix(8)) from=\(m.from) del=\(m.isDeleted) text=\(m.text.prefix(24))")
+                }
+            }
+        case "applydelete":
+            // Drive the receiving-side delete path (same method the
+            // +draft/delete event handler calls) for tombstone sweeps.
+            if let ch = app.activeChannelState {
+                let mid = arg.isEmpty
+                    ? ch.messages.last(where: { !$0.isDeleted && !$0.from.isEmpty })?.id
+                    : arg
+                if let mid { ch.applyDelete(msgId: mid) }
+            }
+        case "format":
+            // "#format <prefix> <suffix> [placeholder]"
+            let p = arg.split(separator: " ").map(String.init)
+            if p.count >= 2 {
+                ComposeNSTextView.activeInstance?.applyFormat(
+                    prefix: p[0], suffix: p[1],
+                    placeholder: p.count > 2 ? p[2] : nil)
+            }
         default:
             NSLog("[debug-bridge] unknown directive: \(line)")
         }

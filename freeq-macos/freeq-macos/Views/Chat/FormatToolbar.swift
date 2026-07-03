@@ -1,32 +1,43 @@
 import SwiftUI
 
 /// Inline formatting toolbar — bold, italic, code, strikethrough, link.
+/// Wraps the composer's actual selection (via the focused ComposeNSTextView);
+/// with no selection the markers are inserted at the caret.
 struct FormatToolbar: View {
     @Binding var text: String
 
     var body: some View {
         HStack(spacing: 2) {
             FormatButton(icon: "bold", tooltip: "Bold") {
-                wrapSelection(prefix: "**", suffix: "**")
+                apply(prefix: "**", suffix: "**")
             }
             FormatButton(icon: "italic", tooltip: "Italic") {
-                wrapSelection(prefix: "_", suffix: "_")
+                apply(prefix: "_", suffix: "_")
             }
             FormatButton(icon: "chevron.left.forwardslash.chevron.right", tooltip: "Code") {
-                wrapSelection(prefix: "`", suffix: "`")
+                apply(prefix: "`", suffix: "`")
             }
             FormatButton(icon: "strikethrough", tooltip: "Strikethrough") {
-                wrapSelection(prefix: "~~", suffix: "~~")
+                apply(prefix: "~~", suffix: "~~")
             }
             FormatButton(icon: "link", tooltip: "Link") {
-                wrapSelection(prefix: "[", suffix: "](url)")
+                apply(prefix: "[", suffix: "](url)", placeholder: "url")
             }
         }
     }
 
-    private func wrapSelection(prefix: String, suffix: String) {
-        // Simple: append format markers at cursor (no selection tracking in SwiftUI)
-        text += "\(prefix)text\(suffix)"
+    private func apply(prefix: String, suffix: String, placeholder: String? = nil) {
+        if let textView = ComposeNSTextView.activeInstance {
+            textView.applyFormat(prefix: prefix, suffix: suffix, placeholder: placeholder)
+        } else {
+            // No live composer (shouldn't happen in practice) — append at the end.
+            let result = ComposeFormatting.wrap(
+                text: text,
+                selectionLocation: (text as NSString).length,
+                selectionLength: 0,
+                prefix: prefix, suffix: suffix, placeholder: placeholder)
+            text = result.text
+        }
     }
 }
 
