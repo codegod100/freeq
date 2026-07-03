@@ -1,5 +1,31 @@
 import SwiftUI
 
+/// User appearance override: follow the system (default), or pin light/dark.
+enum AppearanceSetting: String, CaseIterable {
+    case system, light, dark
+
+    static var current: AppearanceSetting {
+        AppearanceSetting(rawValue: UserDefaults.standard.string(forKey: "freeq.appearance") ?? "") ?? .system
+    }
+
+    /// Applies app-wide (main window, Settings scene, sheets, menus alike).
+    func apply() {
+        switch self {
+        case .system: NSApp.appearance = nil
+        case .light: NSApp.appearance = NSAppearance(named: .aqua)
+        case .dark: NSApp.appearance = NSAppearance(named: .darkAqua)
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+}
+
 @main
 struct FreeqApp: App {
     @State private var appState = AppState()
@@ -7,13 +33,13 @@ struct FreeqApp: App {
     @State private var showBookmarks = false
     @State private var showChannelList = false
     @State private var showOnboarding = !UserDefaults.standard.bool(forKey: "freeq.onboardingComplete")
+    @AppStorage("freeq.appearance") private var appearanceRaw = "system"
 
     var body: some Scene {
         WindowGroup {
             MainView()
                 .environment(appState)
                 .frame(minWidth: 700, minHeight: 400)
-                .preferredColorScheme(.light)
                 .sheet(isPresented: $showQuickSwitcher) {
                     QuickSwitcher()
                         .environment(appState)
@@ -30,10 +56,13 @@ struct FreeqApp: App {
                     OnboardingView()
                 }
                 .onAppear {
-                    NSApplication.shared.appearance = NSAppearance(named: .aqua)
+                    AppearanceSetting.current.apply()
                     if appState.hasSavedSession && appState.connectionState == .disconnected {
                         appState.reconnectIfSaved()
                     }
+                }
+                .onChange(of: appearanceRaw) { _, _ in
+                    AppearanceSetting.current.apply()
                 }
                 .onChange(of: appState.activeChannel) { _, newValue in
                     updateWindowTitle(newValue)

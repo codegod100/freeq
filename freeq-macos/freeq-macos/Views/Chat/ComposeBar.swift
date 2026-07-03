@@ -495,10 +495,15 @@ struct ComposeBar: View {
         voiceTimer?.invalidate()
         voiceTimer = nil
         guard let recorder = voiceRecorder, isRecordingVoice else { return }
+        // Read the duration BEFORE stop(): AVAudioRecorder.currentTime is
+        // only valid while recording and returns 0 afterwards — reading it
+        // post-stop made every recording measure 0s and get rejected as
+        // "too short". The timer-tracked time is the fallback in case the
+        // recorder is already winding down.
+        let duration = max(recorder.currentTime, voiceRecordingTime)
         recorder.stop()
         voiceRecorder = nil
         isRecordingVoice = false
-        let duration = recorder.currentTime
         let url = recorder.url
         if duration < 0.5 {
             try? FileManager.default.removeItem(at: url)

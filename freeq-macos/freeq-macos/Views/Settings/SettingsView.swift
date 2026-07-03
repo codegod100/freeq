@@ -38,10 +38,17 @@ struct GeneralSettings: View {
     @AppStorage("freeq.notificationsEnabled") private var notificationsEnabled = true
     @AppStorage("freeq.compactMode") private var compactMode = false
     @AppStorage("freeq.soundsEnabled") private var soundsEnabled = true
+    @AppStorage("freeq.appearance") private var appearanceRaw = "system"
 
     var body: some View {
         Form {
             Section("Appearance") {
+                Picker("Theme", selection: $appearanceRaw) {
+                    ForEach(AppearanceSetting.allCases, id: \.rawValue) { setting in
+                        Text(setting.label).tag(setting.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
                 Toggle("Compact message display", isOn: $compactMode)
                 Toggle("Show join/part/quit messages", isOn: $showJoinPart)
             }
