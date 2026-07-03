@@ -249,10 +249,17 @@ struct CallView: View {
     private var controlsBar: some View {
         HStack(spacing: 14) {
             HStack(spacing: 6) {
-                Circle().fill(Color.green).frame(width: 8, height: 8)
-                Text(appState.isScreenSharing ? "Screen" : (appState.isCameraOn ? "Video" : "Voice"))
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.green)
+                if let status = appState.callTransportStatus {
+                    ProgressView().controlSize(.mini)
+                    Text(status)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Theme.textSecondary)
+                } else {
+                    Circle().fill(Color.green).frame(width: 8, height: 8)
+                    Text(appState.isScreenSharing ? "Screen" : (appState.isCameraOn ? "Video" : "Voice"))
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.green)
+                }
                 if !channel.isEmpty {
                     Text(channel)
                         .font(.subheadline)

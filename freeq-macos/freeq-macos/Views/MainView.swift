@@ -185,7 +185,10 @@ struct MainView: View {
         case .registered: Theme.success
         case .connected: Theme.warning
         case .connecting: Theme.warning
-        case .disconnected: Theme.danger
+        // Quiet grey, not danger-red: disconnection auto-retries, and the
+        // reconnect banner already says so. Red implies a terminal failure
+        // that needs the user — this state doesn't.
+        case .disconnected: Theme.textTertiary
         }
     }
 
@@ -256,17 +259,26 @@ struct GuestUpgradeBanner: View {
 
 // MARK: - Reconnect Banner
 
+/// Shown while the connection is down and auto-reconnect is running.
+/// Deliberately calm: reconnection is automatic and usually succeeds in
+/// seconds — the surface communicates *activity* (spinner + quiet text),
+/// not emergency. A red wash here bled through the transparent titlebar
+/// and made a routine blip look like an outage.
 struct ReconnectBanner: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "wifi.exclamationmark")
-                .font(.caption)
-            Text("Disconnected — reconnecting…")
+            ProgressView()
+                .controlSize(.small)
+            Text("Reconnecting…")
                 .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.textSecondary)
+            Text("You'll catch up automatically.")
+                .font(.caption)
+                .foregroundStyle(Theme.textTertiary)
             Spacer()
-            Button("Reconnect Now") {
+            Button("Retry Now") {
                 appState.reconnectIfSaved()
             }
             .font(.caption)
@@ -274,8 +286,10 @@ struct ReconnectBanner: View {
             .controlSize(.small)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.red.opacity(0.15))
-        .foregroundStyle(.red)
+        .padding(.vertical, 7)
+        .background(Theme.surfaceElevated)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
     }
 }

@@ -166,6 +166,7 @@ extension AppState {
         participantsWithVideo = []
         participantsWithScreen = []
         remoteAudioLevels = [:]
+        callTransportStatus = nil
         currentCallChannel = nil
         currentCallSessionId = nil
     }
@@ -473,9 +474,12 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             // R1: remote playout level → active-speaker highlighting.
             state.remoteAudioLevels[nick.lowercased()] = level
         case .reconnecting(let attempt):
-            state.errorMessage = "Call connection lost — reconnecting (attempt \(attempt))…"
+            // Inline call-bar status, NOT errorMessage (which is a modal
+            // alert) — automatic recovery shouldn't look like a failure.
+            state.callTransportStatus = attempt <= 1
+                ? "Reconnecting…" : "Reconnecting… (attempt \(attempt))"
         case .reconnected:
-            state.errorMessage = nil
+            state.callTransportStatus = nil
         case .error(let message):
             print("[av] Error: \(message)")
         }

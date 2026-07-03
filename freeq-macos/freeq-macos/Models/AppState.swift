@@ -93,6 +93,9 @@ class AppState {
     /// Remote playout levels (lowercased nick → 0…1) from AvEvent.audioLevel;
     /// drives remote active-speaker rings once the SDK emits them (R1).
     var remoteAudioLevels: [String: Float] = [:]
+    /// Quiet in-call transport status ("Reconnecting…"); shown inline in the
+    /// call bar, never as a modal — reconnection is automatic.
+    var callTransportStatus: String? = nil
     /// Local mic level (0…1) for the in-call meter, ~25 Hz while capturing.
     var localMicLevel: Float = 0
     /// Debounced local voice-activity flag (drives the self-tile speaking
