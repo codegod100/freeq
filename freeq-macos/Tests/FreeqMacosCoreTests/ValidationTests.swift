@@ -628,3 +628,28 @@ final class ValidationTests: XCTestCase {
         XCTAssertEqual(matches.count, 2)
     }
 }
+
+// MARK: - Keychain legacy fallback (sandbox + ad-hoc signature)
+
+extension ValidationTests {
+    func testLegacyQueryOmitsDataProtection() {
+        let query = KeychainHelper.legacyQuery(key: "k")
+        XCTAssertNil(query[kSecUseDataProtectionKeychain as String],
+                     "legacy fallback must not request the data-protection keychain")
+        XCTAssertEqual(query[kSecAttrService as String] as? String, KeychainHelper.service)
+        XCTAssertEqual(query[kSecAttrAccount as String] as? String, "k")
+    }
+
+    func testLegacyLoadQueryAllowsInteraction() {
+        // The legacy path may show a one-time ACL prompt; blocking
+        // interaction there would fail loads instead of prompting.
+        let query = KeychainHelper.loadQuery(key: "k", dataProtection: false)
+        XCTAssertNil(query[kSecUseAuthenticationContext as String])
+        XCTAssertNil(query[kSecUseDataProtectionKeychain as String])
+    }
+
+    func testDataProtectionQueryUnchanged() {
+        let query = KeychainHelper.baseQuery(key: "k")
+        XCTAssertEqual(query[kSecUseDataProtectionKeychain as String] as? Bool, true)
+    }
+}
