@@ -12,6 +12,32 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+// ── Planned: per-session announcement scoping (durable fix for the
+// cross-call media leak found 2026-07-03) ────────────────────────────
+//
+// Today every connection roots its moq_relay auth token at "" (see the
+// long comment in `handle_quic_connection`), so the relay announces ALL
+// broadcasts to ALL subscribers. A client in call A can subscribe to (and
+// play) call B's audio/video. The native FFI now filters foreign sessions
+// client-side (`belongs_to_session`), but that only protects patched
+// clients — iOS and older builds still leak.
+//
+// Durable fix (needs coordinated client+server change, own session):
+//   1. Client dials `/av/moq/s/{session_id}` (native FFI moq_url + web
+//      moqOrigin). Both transports carry the session in the URL path.
+//   2. Server sets `params.path = "s/{session_id}"`, so with the public
+//      "/" prefix the token roots there and the relay scopes announcements
+//      to that subtree — enforced for EVERY client regardless of version.
+//   3. Client publishes/subscribes RELATIVE to that root: broadcast name
+//      becomes `{nick}~{instance}` (and `{nick}~{instance}/screen`), not
+//      `{session_id}/{nick}`. `parse_broadcast_path` drops the session
+//      segment accordingly.
+//   Backward-compat: keep accepting the old un-scoped `/av/moq` root during
+//   rollout (old clients stay global-but-functional) and gate the strict
+//   per-session root behind a flag once native+web+iOS all ship the URL.
+//   Cross-transport interop MUST be re-tested (the root path is the exact
+//   axis that caused the earlier native/web disjoint-namespace bug).
+
 /// Shared SFU state, accessible from the web server for WebSocket MoQ connections.
 #[cfg(feature = "av-native")]
 pub struct SfuState {

@@ -1217,7 +1217,9 @@ mod av_impl {
         // Keeps audio/video device handles alive for the session; also the
         // handle for output-device switching (speaker picker).
         pub audio_backend: iroh_live::media::audio_backend::AudioBackend,
-        pub _session: moq_lite::Session,
+        // The moq transport is owned by the media loop task (it re-dials on
+        // reconnect), not by State. `leave()` signals shutdown and the loop
+        // drops the session inside the runtime.
         /// Also used to publish/retract the screen broadcast post-connect.
         pub origin: moq_lite::OriginProducer,
         pub shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
@@ -1273,7 +1275,8 @@ mod av_impl {
         let audio_queue: Arc<Mutex<std::collections::VecDeque<f32>>> =
             Arc::new(Mutex::new(std::collections::VecDeque::new()));
 
-        let (session, origin, sub_consumer, audio_backend, broadcast) =
+        let dial_url = moq_url.clone();
+        let (session, origin, sub_consumer, audio_backend, broadcast, client) =
             RUNTIME.block_on(async {
                 let broadcast = LocalBroadcast::new();
                 let audio_backend = iroh_live::media::audio_backend::AudioBackend::default();
@@ -1330,101 +1333,98 @@ mod av_impl {
                     .map_err(|_| FreeqError::ConnectionFailed)?;
 
                 let session = client
+                    .clone()
                     .with_publish(origin.consume())
                     .with_consume(sub_origin)
                     .connect(moq_url)
                     .await
                     .map_err(|_| FreeqError::ConnectionFailed)?;
 
-                Ok::<_, FreeqError>((session, origin, sub_consumer, audio_backend, broadcast))
+                Ok::<_, FreeqError>((session, origin, sub_consumer, audio_backend, broadcast, client))
             })?;
 
         tracing::info!(broadcast = %broadcast_name, "AV: connected to MoQ SFU");
         handler.on_av_event(AvEvent::Connected);
 
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let mut sub_consumer = sub_consumer;
 
         let our_name = broadcast_name.clone();
         let session_scope = session_id.clone();
         let audio_for_playback = audio_backend.clone();
         let handler: Arc<dyn AvEventHandler> = Arc::from(handler);
         let handler_loop = handler.clone();
+        let origin_loop = origin.clone();
 
         RUNTIME.spawn(async move {
-            // Per-participant playback tasks live in this set. Aborting
-            // it when the call ends stops inbound audio immediately —
-            // otherwise these tasks run on and you keep hearing people
-            // after you've left the call.
-            let mut remote_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
-            loop {
-                tokio::select! {
-                    _ = &mut shutdown_rx => break,
-                    announced = sub_consumer.announced() => {
-                        match announced {
-                            Some((path, Some(broadcast_consumer))) => {
-                                let path_str = path.to_string();
-                                if path_str == our_name || path_str == format!("{our_name}/screen") {
-                                    continue;
-                                }
-                                if !belongs_to_session(&path_str, &session_scope) {
-                                    tracing::debug!(path = %path_str, "AV: ignoring broadcast from another session");
-                                    continue;
-                                }
+            // The initial transport, moved in here so the loop OWNS
+            // reconnection: on an unexpected drop we re-dial with the same
+            // origin (our broadcast is still published on it) and a fresh
+            // subscribe consumer, rather than ending the call. The session's
+            // Drop needs a reactor — it runs inside this spawned task (in
+            // RUNTIME), so that's satisfied.
+            //
+            // `session` is Some while connected. We drop it before re-dialing
+            // so the dead transport releases promptly.
+            let mut session = Some(session);
+            let mut sub_consumer = sub_consumer;
 
-                                // Paths: `{session}/{nick}[~{instance}]` for
-                                // the main broadcast, with an optional
-                                // `/screen` suffix for a screen share (the
-                                // web client's convention). Strip the
-                                // per-device instance suffix so events
-                                // surface the display nick.
-                                let (nick, is_screen) = parse_broadcast_path(&path_str);
-                                tracing::info!(nick = %nick, screen = is_screen, path = %path_str, "AV: participant broadcast");
-                                if !is_screen {
-                                    handler_loop
-                                        .on_av_event(AvEvent::ParticipantJoined { nick: nick.clone() });
-                                }
+            let end_reason = loop {
+                let outcome = watch_announcements(
+                    &mut sub_consumer,
+                    &mut shutdown_rx,
+                    &our_name,
+                    &session_scope,
+                    &audio_for_playback,
+                    &handler_loop,
+                )
+                .await;
+                if matches!(outcome, WatchOutcome::Shutdown) {
+                    break "session ended";
+                }
 
-                                let ab = audio_for_playback.clone();
-                                let h = handler_loop.clone();
-                                let nick_for_task = nick.clone();
-                                remote_tasks.spawn(async move {
-                                    handle_remote_broadcast(path_str, broadcast_consumer, ab, h, nick_for_task, is_screen)
-                                        .await;
-                                });
-                            }
-                            Some((path, None)) => {
-                                let path_str = path.to_string();
-                                if path_str == our_name || path_str == format!("{our_name}/screen") {
-                                    continue;
-                                }
-                                if !belongs_to_session(&path_str, &session_scope) {
-                                    continue;
-                                }
-                                let (nick, is_screen) = parse_broadcast_path(&path_str);
-                                if is_screen {
-                                    handler_loop.on_av_event(AvEvent::ScreenTrackStopped { nick });
-                                } else {
-                                    handler_loop.on_av_event(AvEvent::ParticipantLeft { nick });
-                                }
-                            }
-                            None => break,
+                // Transport dropped. Release it, then re-dial with backoff.
+                drop(session.take());
+
+                let mut attempt: u32 = 0;
+                let reconnected = loop {
+                    attempt += 1;
+                    if attempt > MAX_RECONNECT_ATTEMPTS {
+                        break None;
+                    }
+                    handler_loop.on_av_event(AvEvent::Reconnecting { attempt });
+
+                    tokio::select! {
+                        _ = tokio::time::sleep(reconnect_backoff(attempt)) => {}
+                        _ = &mut shutdown_rx => break None,
+                    }
+
+                    match redial(&client, &dial_url, &origin_loop).await {
+                        Ok((new_session, new_sub)) => {
+                            sub_consumer = new_sub;
+                            handler_loop.on_av_event(AvEvent::Reconnected);
+                            tracing::info!(attempt, "AV: reconnected to MoQ SFU");
+                            break Some(new_session);
+                        }
+                        Err(e) => {
+                            tracing::warn!(attempt, "AV: reconnect dial failed: {e}");
                         }
                     }
+                };
+
+                match reconnected {
+                    Some(new_session) => session = Some(new_session),
+                    None => break "reconnect failed",
                 }
-            }
-            // Call over — abort every per-participant playback task so
-            // inbound audio stops the instant the user leaves.
-            remote_tasks.abort_all();
+            };
+
             handler_loop.on_av_event(AvEvent::Disconnected {
-                reason: "session ended".to_string(),
+                reason: end_reason.to_string(),
             });
         });
 
         Ok(State {
             _broadcast: broadcast,
             audio_backend,
-            _session: session,
             origin,
             shutdown_tx: Some(shutdown_tx),
             connected: true,
@@ -1448,6 +1448,116 @@ mod av_impl {
     pub(super) fn belongs_to_session(path: &str, session_id: &str) -> bool {
         path.strip_prefix(session_id)
             .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    /// Cap on consecutive reconnect attempts before the call is declared
+    /// dead. With the backoff schedule below this spans ~30s of retries.
+    pub(super) const MAX_RECONNECT_ATTEMPTS: u32 = 8;
+
+    /// Capped exponential backoff for reconnect attempt `n` (1-based):
+    /// 250ms, 500ms, 1s, 2s, 4s, then 5s flat. Keeps the first retries snappy
+    /// (a brief network blip recovers in well under a second) without
+    /// hammering the SFU on a longer outage.
+    pub(super) fn reconnect_backoff(attempt: u32) -> Duration {
+        // Cap the exponent at 6 so 250·2^5 = 8000 then clamps to the 5s
+        // ceiling; earlier attempts (1..=5) give 250ms…4s unclamped.
+        let capped = attempt.clamp(1, 6);
+        let ms = 250u64 << (capped - 1);
+        Duration::from_millis(ms.min(5_000))
+    }
+
+    /// Re-dial the SFU on the same origin (our broadcast is still published
+    /// there, so it re-announces) with a fresh subscribe consumer.
+    async fn redial(
+        client: &moq_native::Client,
+        moq_url: &url::Url,
+        origin: &moq_lite::OriginProducer,
+    ) -> anyhow::Result<(moq_lite::Session, moq_lite::OriginConsumer)> {
+        let sub_origin = moq_lite::Origin::produce();
+        let sub_consumer = sub_origin.consume();
+        let session = client
+            .clone()
+            .with_publish(origin.consume())
+            .with_consume(sub_origin)
+            .connect(moq_url.clone())
+            .await?;
+        Ok((session, sub_consumer))
+    }
+
+    /// Why the announcement watch returned.
+    pub(super) enum WatchOutcome {
+        /// Explicit leave / drop — end the call cleanly, no reconnect.
+        Shutdown,
+        /// The transport ended unexpectedly — caller should reconnect.
+        TransportLost,
+    }
+
+    /// Watch one transport's announcements until it ends. Spawns and reaps the
+    /// per-participant playback tasks; aborts them all before returning so
+    /// inbound audio stops the instant the transport goes (leave or drop).
+    async fn watch_announcements(
+        sub_consumer: &mut moq_lite::OriginConsumer,
+        shutdown_rx: &mut tokio::sync::oneshot::Receiver<()>,
+        our_name: &str,
+        session_scope: &str,
+        audio_for_playback: &iroh_live::media::audio_backend::AudioBackend,
+        handler: &Arc<dyn AvEventHandler>,
+    ) -> WatchOutcome {
+        // Per-participant playback tasks live in this set. Aborting it when
+        // the transport ends stops inbound audio immediately — otherwise
+        // these tasks run on and you keep hearing people after you've left.
+        let mut remote_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        let outcome = loop {
+            tokio::select! {
+                _ = &mut *shutdown_rx => break WatchOutcome::Shutdown,
+                announced = sub_consumer.announced() => {
+                    match announced {
+                        Some((path, Some(broadcast_consumer))) => {
+                            let path_str = path.to_string();
+                            if path_str == our_name || path_str == format!("{our_name}/screen") {
+                                continue;
+                            }
+                            if !belongs_to_session(&path_str, session_scope) {
+                                tracing::debug!(path = %path_str, "AV: ignoring broadcast from another session");
+                                continue;
+                            }
+                            // Paths: `{session}/{nick}[~{instance}]` for the
+                            // main broadcast, `/screen` suffix for a share.
+                            let (nick, is_screen) = parse_broadcast_path(&path_str);
+                            tracing::info!(nick = %nick, screen = is_screen, path = %path_str, "AV: participant broadcast");
+                            if !is_screen {
+                                handler.on_av_event(AvEvent::ParticipantJoined { nick: nick.clone() });
+                            }
+                            let ab = audio_for_playback.clone();
+                            let h = handler.clone();
+                            let nick_for_task = nick.clone();
+                            remote_tasks.spawn(async move {
+                                handle_remote_broadcast(path_str, broadcast_consumer, ab, h, nick_for_task, is_screen).await;
+                            });
+                        }
+                        Some((path, None)) => {
+                            let path_str = path.to_string();
+                            if path_str == our_name || path_str == format!("{our_name}/screen") {
+                                continue;
+                            }
+                            if !belongs_to_session(&path_str, session_scope) {
+                                continue;
+                            }
+                            let (nick, is_screen) = parse_broadcast_path(&path_str);
+                            if is_screen {
+                                handler.on_av_event(AvEvent::ScreenTrackStopped { nick });
+                            } else {
+                                handler.on_av_event(AvEvent::ParticipantLeft { nick });
+                            }
+                        }
+                        // Announcement stream ended = transport gone.
+                        None => break WatchOutcome::TransportLost,
+                    }
+                }
+            }
+        };
+        remote_tasks.abort_all();
+        outcome
     }
 
     /// `{session}/{nick}[~{instance}][/screen]` → (display nick, is_screen).
@@ -2078,6 +2188,22 @@ mod tests {
         let _ = AvEvent::Error {
             message: "test error".to_string(),
         };
+    }
+
+    #[cfg(feature = "av")]
+    #[test]
+    fn reconnect_backoff_is_capped_exponential() {
+        use super::av_impl::reconnect_backoff;
+        use std::time::Duration;
+        assert_eq!(reconnect_backoff(1), Duration::from_millis(250));
+        assert_eq!(reconnect_backoff(2), Duration::from_millis(500));
+        assert_eq!(reconnect_backoff(3), Duration::from_millis(1000));
+        assert_eq!(reconnect_backoff(4), Duration::from_millis(2000));
+        assert_eq!(reconnect_backoff(5), Duration::from_millis(4000));
+        // Capped at 5s flat thereafter — no unbounded growth or overflow.
+        assert_eq!(reconnect_backoff(6), Duration::from_millis(5000));
+        assert_eq!(reconnect_backoff(100), Duration::from_millis(5000));
+        assert_eq!(reconnect_backoff(u32::MAX), Duration::from_millis(5000));
     }
 
     #[cfg(feature = "av")]
