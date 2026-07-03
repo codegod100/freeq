@@ -43,28 +43,38 @@ enum FileUploader {
         request.httpBody = body
 
         let (responseData, response) = try await URLSession.shared.data(for: request)
-        let httpResponse = response as! HTTPURLResponse
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 
-        guard httpResponse.statusCode == 200 else {
-            let errorText = String(data: responseData, encoding: .utf8) ?? "Upload failed"
-            throw UploadError.serverError(errorText)
-        }
-
-        let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any] ?? [:]
-        guard let url = json["url"] as? String else {
-            throw UploadError.serverError("No URL in response")
-        }
-        return url
-    }
-
-    enum UploadError: Error, LocalizedError {
-        case serverError(String)
-        var errorDescription: String? {
-            switch self {
-            case .serverError(let msg): return msg
-            }
+        switch UploadResponse.classify(status: status, body: responseData) {
+        case .success(let url):
+            return url
+        case .failure(let failure):
+            throw failure  // UploadResponse.Failure is LocalizedError below
         }
     }
+
+    /// Open the server's step-up OAuth page in the browser so the user can
+    /// grant PDS write scope (needed only for Bluesky/PDS sharing). macOS
+    /// reuses the browser for OAuth exactly as login does; after granting,
+    /// the user retries the upload.
+    @MainActor
+    static func beginStepUp(purpose: String, path: String, did: String) {
+        var components = URLComponents(string: "\(ServerConfig.apiBaseUrl)\(path)")
+        // Ensure did + purpose are present even if the server gave a bare path.
+        var items = components?.queryItems ?? []
+        if !items.contains(where: { $0.name == "purpose" }) {
+            items.append(URLQueryItem(name: "purpose", value: purpose))
+        }
+        items.append(URLQueryItem(name: "did", value: did))
+        components?.queryItems = items
+        if let url = components?.url {
+            NSWorkspace.shared.open(url)
+        }
+    }
+}
+
+extension UploadResponse.Failure: LocalizedError {
+    public var errorDescription: String? { userMessage }
 }
 
 /// Pending upload state for the compose bar.

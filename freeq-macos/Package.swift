@@ -52,6 +52,7 @@ let package = Package(
                 "MessageTimeline.swift",
                 "BufferNavigation.swift",
                 "CommandRegistry.swift",
+                "UploadResponse.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]

@@ -422,6 +422,14 @@ struct ComposeBar: View {
                     isUploading = false
                     text = ""
                 }
+            } catch let failure as UploadResponse.Failure {
+                await MainActor.run {
+                    if case .stepUpRequired(let purpose, let url) = failure {
+                        FileUploader.beginStepUp(purpose: purpose, path: url, did: did)
+                    }
+                    pendingUpload?.error = failure.userMessage
+                    isUploading = false
+                }
             } catch {
                 await MainActor.run {
                     pendingUpload?.error = error.localizedDescription

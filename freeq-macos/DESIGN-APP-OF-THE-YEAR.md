@@ -69,7 +69,7 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | AT OAuth via broker | ✅ | ✅ | mac smoother (ASWebAuthenticationSession) |
 | Guest mode + upgrade | ✅ | ✅ | three-tier presentation §6.8 |
 | Session restore + backoff | ✅ keychain | ✅ localStorage | keychain re-validated under sandbox (§7.1) |
-| **Step-up OAuth (upload/cross-post)** | ❌ | ✅ | mac uploads 403 dead-end; port |
+| **Step-up OAuth (upload/cross-post)** | ⚠️ ✎ typed errors + browser step-up (UploadResponse.swift) | ✅ | private uploads work for authed DIDs; guest→"sign in", Bluesky-share→step-up; full popup+retry round-trip still web-only |
 | Verified / signed / via badges | ✅ | ✅ | re-styled per §6.8 |
 | Safety numbers | ✅ | ✅ | |
 | Channel E2EE (`/encrypt` ENC1) | ✅ ✎ (ChannelCrypto.swift, ChannelE2eeState.swift) | ✅ | Rust-interop-pinned; added 2026-07-02 |

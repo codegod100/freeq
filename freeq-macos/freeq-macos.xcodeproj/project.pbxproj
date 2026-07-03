@@ -23,6 +23,7 @@
 		40B19B4620E1FFA3196FBFAD /* DetailPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68D19F735EC72757A61B1D6C /* DetailPanel.swift */; };
 		49E784D589512E3A936DA345 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A09A2F1C5515211E8D3BE359 /* OnboardingView.swift */; };
 		4CE6EF71CD4C106B03BD914C /* SidebarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 923CB3DCE2113F08CCB9E8F7 /* SidebarView.swift */; };
+		5086A6E848B828951BFC3044 /* UploadResponse.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F8EFFA45A91FBAF437F7ADF /* UploadResponse.swift */; };
 		530E3783C385009D658962CB /* freeq.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5D672B7A5F1D6E78162DE1 /* freeq.swift */; };
 		53219C77DD566736E0DBD0F1 /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B840984A8780805615D0846A /* CallView.swift */; };
 		54790CCF1094BA4AEFBB3080 /* CallLayoutPolicies.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0BFAA19CD6272B8B0EB81C7 /* CallLayoutPolicies.swift */; };
@@ -92,6 +93,7 @@
 		41E19D6BE7C80AAE06A5EB97 /* MessageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageStore.swift; sourceTree = "<group>"; };
 		49DCC7DD970BA3640B37934D /* BookmarksPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarksPanel.swift; sourceTree = "<group>"; };
 		4BCCB41ADB5F3934945B6E85 /* FreeqSDK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = FreeqSDK.xcframework; sourceTree = "<group>"; };
+		4F8EFFA45A91FBAF437F7ADF /* UploadResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadResponse.swift; sourceTree = "<group>"; };
 		53A3EEB6BC19DB7746A55502 /* ThreadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadView.swift; sourceTree = "<group>"; };
 		53BCB3D151F95995B9DD7E8C /* CameraEffectsProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraEffectsProcessor.swift; sourceTree = "<group>"; };
 		5B36CCCF8041100BDA937EAB /* QuickSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSwitcher.swift; sourceTree = "<group>"; };
@@ -282,6 +284,7 @@
 				94E7AF9D701F15529729BA91 /* MessageTimeline.swift */,
 				00BBD649F1BBDEBFC67FE0CE /* ScreenSharePicker.swift */,
 				E71A46E52B4FC4C2F32D7F34 /* ServerConfig.swift */,
+				4F8EFFA45A91FBAF437F7ADF /* UploadResponse.swift */,
 				D2DFA3935D1A36696CF3DBC0 /* Validation.swift */,
 			);
 			path = Models;
@@ -460,6 +463,7 @@
 				4CE6EF71CD4C106B03BD914C /* SidebarView.swift in Sources */,
 				F13BBF3DAA2C028548D91551 /* Theme.swift in Sources */,
 				D0330D3B94FAB33F96D04BE8 /* ThreadView.swift in Sources */,
+				5086A6E848B828951BFC3044 /* UploadResponse.swift in Sources */,
 				A115ABF32733643ACB3F34DF /* UserProfileSheet.swift in Sources */,
 				FDC15A8F819924DB11EA2B88 /* Validation.swift in Sources */,
 				530E3783C385009D658962CB /* freeq.swift in Sources */,
