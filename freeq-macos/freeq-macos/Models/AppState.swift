@@ -164,6 +164,10 @@ class AppState {
     var pendingWebToken: String?
     var apiBearerSessionId: String?
     var isLoadingSavedSession: Bool = false
+    /// Consecutive broker /session failures during auto-reconnect. Past a
+    /// small threshold the reconnect banner offers a fresh sign-in — a
+    /// wedged broker token must not trap the user in "Reconnecting…".
+    var brokerFailureStreak: Int = 0
 
     // MARK: - Batches (CHATHISTORY)
     var batches: [String: HistoryBatchBuffer] = [:]
@@ -428,6 +432,7 @@ class AppState {
                     brokerToken: token
                 )
                 await MainActor.run {
+                    self.brokerFailureStreak = 0
                     self.pendingWebToken = session.token
                     self.authenticatedDID = AuthSessionState.confirmedDidFromSavedCredentials(session.did)
                     if !KeychainHelper.save(key: "did", value: session.did) {
@@ -452,6 +457,7 @@ class AppState {
                 // without scheduling used to stall reconnection forever
                 // (the "stuck on Reconnecting… until Retry Now" bug).
                 await MainActor.run {
+                    self.brokerFailureStreak += 1
                     self.scheduleReconnect()
                 }
             }

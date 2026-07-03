@@ -18,6 +18,11 @@ enum BrokerAuth {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // A healthy broker answers in well under a second; an unhealthy one
+        // has been observed to HANG on specific tokens (upstream PDS/DPoP
+        // stall). Without a bound, URLSession waits 60s per attempt and the
+        // reconnect loop looks stuck forever.
+        request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["broker_token": brokerToken])
 

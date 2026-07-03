@@ -267,23 +267,49 @@ struct GuestUpgradeBanner: View {
 struct ReconnectBanner: View {
     @Environment(AppState.self) private var appState
 
+    /// Repeated broker failures mean waiting won't help (wedged token or
+    /// sign-in service down) — offer a fresh sign-in instead of spinning.
+    private var brokerLooksStuck: Bool { appState.brokerFailureStreak >= 3 }
+
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Reconnecting…")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(Theme.textSecondary)
-            Text("You'll catch up automatically.")
+            if brokerLooksStuck {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Text("Having trouble restoring your session.")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button("Retry") {
+                    appState.reconnectIfSaved()
+                }
                 .font(.caption)
-                .foregroundStyle(Theme.textTertiary)
-            Spacer()
-            Button("Retry Now") {
-                appState.reconnectIfSaved()
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button("Sign In Again…") {
+                    appState.logout()
+                }
+                .font(.caption)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Reconnecting…")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+                Text("You'll catch up automatically.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Button("Retry Now") {
+                    appState.reconnectIfSaved()
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .font(.caption)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 7)
