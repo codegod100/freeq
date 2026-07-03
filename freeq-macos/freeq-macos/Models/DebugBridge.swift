@@ -122,6 +122,18 @@ final class DebugBridge {
             // Fire the composer's own submit (records input history etc.),
             // unlike plain-text lines which go straight to submitInput.
             ComposeNSTextView.activeInstance?.submitAction?()
+        case "keychain":
+            // Sandbox smoke test: the data-protection keychain with an
+            // ad-hoc signature must keep working after sandboxing, or
+            // session restore silently breaks. Logs a PASS/FAIL verdict.
+            let key = "sandbox-probe"
+            let saved = KeychainHelper.save(key: key, value: "ok-\(ProcessInfo.processInfo.processIdentifier)")
+            let loaded = KeychainHelper.load(key: key)
+            KeychainHelper.delete(key: key)
+            NSLog("[debug-bridge] keychain probe: save=\(saved) load=\(loaded ?? "nil") verdict=\(saved && loaded != nil ? "PASS" : "FAIL")")
+        case "storepath":
+            let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            NSLog("[debug-bridge] cachesDir=\(caches.path)")
         case "dumpmsgs":
             if let ch = app.activeChannelState {
                 for (i, m) in ch.messages.enumerated() {

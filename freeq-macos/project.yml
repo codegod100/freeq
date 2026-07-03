@@ -71,5 +71,14 @@ targets:
     entitlements:
       path: freeq-macos/freeq-macos.entitlements
       properties:
-        com.apple.security.app-sandbox: false
+        # Phase 1: sandbox ON (ADA/MAS prerequisite; late sandboxing would
+        # invalidate everything tested before it).
+        com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
+        # iroh P2P listens for inbound peer connections.
+        com.apple.security.network.server: true
+        # AV calls + voice messages.
+        com.apple.security.device.camera: true
+        com.apple.security.device.audio-input: true
+        # Uploads via open panel / drag-drop; image "Save" via save panel.
+        com.apple.security.files.user-selected.read-write: true
