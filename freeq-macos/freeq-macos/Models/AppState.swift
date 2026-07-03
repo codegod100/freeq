@@ -346,6 +346,9 @@ class AppState {
         } catch {
             connectionState = .disconnected
             errorMessage = "Connection failed: \(error.localizedDescription)"
+            // Auto-reconnect must survive a throwing connect() too, or a
+            // failed attempt strands the retry chain.
+            if hasSavedSession { scheduleReconnect() }
         }
     }
 
@@ -392,6 +395,18 @@ class AppState {
         }
     }
 
+    /// Schedule the next auto-reconnect attempt. First retry is near-instant
+    /// (most drops happen with a healthy network — server restart, idle
+    /// timeout); sustained failure backs off to 30s (`ReconnectPolicy`).
+    func scheduleReconnect() {
+        reconnectAttempts += 1
+        let delay = ReconnectPolicy.delay(afterAttempt: reconnectAttempts)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.connectionState == .disconnected, self.hasSavedSession else { return }
+            self.reconnectIfSaved()
+        }
+    }
+
     func reconnectIfSaved() {
         guard connectionState == .disconnected, hasSavedSession else { return }
         guard let token = brokerToken, !token.isEmpty else {
@@ -431,8 +446,14 @@ class AppState {
                     self.errorMessage = "Your session expired. Please sign in again."
                 }
             } catch {
-                // Transient (network/5xx) — leave the saved session in place
-                // and let the reconnect loop try again.
+                // Transient (network/5xx) — keep the saved session AND
+                // reschedule. Nothing else will: the disconnect event that
+                // drives the retry chain already fired, so returning here
+                // without scheduling used to stall reconnection forever
+                // (the "stuck on Reconnecting… until Retry Now" bug).
+                await MainActor.run {
+                    self.scheduleReconnect()
+                }
             }
         }
     }
@@ -1391,12 +1412,7 @@ extension AppState {
                 tearDownCallLocallyOnDisconnect()
             }
             if !reason.contains("intentional") && hasSavedSession {
-                reconnectAttempts += 1
-                let delay = min(Double(1 << min(reconnectAttempts, 5)), 30.0)
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                    guard let self, self.connectionState == .disconnected, self.hasSavedSession else { return }
-                    self.reconnectIfSaved()
-                }
+                scheduleReconnect()
             }
         }
     }

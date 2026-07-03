@@ -53,6 +53,7 @@ let package = Package(
                 "BufferNavigation.swift",
                 "CommandRegistry.swift",
                 "UploadResponse.swift",
+                "ReconnectPolicy.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]
