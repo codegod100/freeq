@@ -33,6 +33,15 @@ struct BrokerState {
     config: BrokerConfig,
     pending: Mutex<std::collections::HashMap<String, PendingAuth>>,
     db: Mutex<rusqlite::Connection>,
+    /// Per-broker-token refresh serialization. AT Proto refresh tokens are
+    /// single-use (rotating): the PDS invalidates the old one when it issues a
+    /// new one. Concurrent `/session` calls for the same token — which the
+    /// reconnect loop and multiple app instances trigger — would each try to
+    /// use the same token, and all but the first get `invalid_grant`, wedging
+    /// the session. Holding a per-token async lock across the refresh + store
+    /// makes concurrent calls queue and reuse the freshly-rotated token
+    /// instead of racing it. (Root cause of the 2026-07-03 fast session death.)
+    refresh_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -407,6 +416,7 @@ async fn main() {
         },
         pending: Mutex::new(std::collections::HashMap::new()),
         db: Mutex::new(db),
+        refresh_locks: Mutex::new(std::collections::HashMap::new()),
     });
 
     let app = Router::new()
@@ -1016,6 +1026,20 @@ async fn session(
         return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
     }
 
+    // Serialize refresh for this token so concurrent /session calls (reconnect
+    // loop, multiple devices) queue and reuse the rotated refresh token rather
+    // than racing single-use rotation into `invalid_grant`.
+    let token_lock = {
+        let mut locks = state.refresh_locks.lock().await;
+        locks
+            .entry(req.broker_token.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _refresh_guard = token_lock.lock().await;
+
+    // Read the record INSIDE the lock — a caller we queued behind may have just
+    // rotated the refresh token, so the on-disk copy is the one to use.
     let record = get_session(&state, &req.broker_token)
         .await
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid broker token".to_string()))?;
@@ -1023,7 +1047,16 @@ async fn session(
     let (access_token, refresh_token, dpop_nonce, granted_scope) =
         refresh_access_token(&state.config, &record)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Refresh failed: {e}")))?;
+            .map_err(|e| match e {
+                // Dead session → 401 so the client shows sign-in, not a retry loop.
+                RefreshError::InvalidGrant => (
+                    StatusCode::UNAUTHORIZED,
+                    "Session expired — re-authentication required".to_string(),
+                ),
+                RefreshError::Transient(err) => {
+                    (StatusCode::BAD_GATEWAY, format!("Refresh failed: {err}"))
+                }
+            })?;
 
     // Update stored refresh token + nonce (C-5: encrypt before storing)
     let now = chrono::Utc::now().timestamp();
@@ -1133,10 +1166,57 @@ async fn get_session(state: &Arc<BrokerState>, broker_token: &str) -> Option<Bro
 /// pre-existing grant is wide. After this release, every NEW broker
 /// session's first refresh response will carry the narrow scope
 /// explicitly and we'll record it correctly.
+/// Distinguishes a permanently-dead session from a transient failure so the
+/// `/session` handler can return the right status. Mapping every failure to
+/// 502 (as the old code did) made a revoked/expired refresh token
+/// indistinguishable from "PDS briefly down" — clients retried a dead token
+/// forever and never reached sign-in (the 2026-07-03 "Reconnecting… forever"
+/// bug).
+enum RefreshError {
+    /// The refresh token is revoked/expired (OAuth `invalid_grant`). The user
+    /// MUST re-authenticate — surface as 401 so the client drops to sign-in.
+    InvalidGrant,
+    /// Network error, PDS 5xx, malformed response, etc. — retryable; 502.
+    Transient(anyhow::Error),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RefreshError::InvalidGrant => write!(f, "refresh token invalid_grant (re-auth required)"),
+            RefreshError::Transient(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<anyhow::Error> for RefreshError {
+    fn from(e: anyhow::Error) -> Self {
+        RefreshError::Transient(e)
+    }
+}
+
+impl From<reqwest::Error> for RefreshError {
+    fn from(e: reqwest::Error) -> Self {
+        RefreshError::Transient(e.into())
+    }
+}
+
+/// True when an OAuth token-endpoint error body signals a permanently-dead
+/// grant: `{"error":"invalid_grant"}` (RFC 6749 §5.2). Also treats an
+/// explicit `invalid_request`/`unauthorized_client` on the refresh grant as
+/// dead, since retrying won't help.
+fn is_invalid_grant(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .map(|err| matches!(err.as_str(), "invalid_grant" | "unauthorized_client"))
+        .unwrap_or(false)
+}
+
 async fn refresh_access_token(
     config: &BrokerConfig,
     record: &BrokerSessionRecord,
-) -> Result<(String, String, Option<String>, String), anyhow::Error> {
+) -> Result<(String, String, Option<String>, String), RefreshError> {
     let dpop_key = DpopKey::from_base64url(&record.dpop_key_b64)?;
     let redirect_uri = format!("{}/auth/callback", config.public_url.trim_end_matches('/'));
     let client_id = build_client_id(&config.public_url, &redirect_uri);
@@ -1146,7 +1226,7 @@ async fn refresh_access_token(
         ("client_id", client_id.as_str()),
     ];
 
-    let client = reqwest::Client::new();
+    let client = upstream_client()?;
     let dpop_proof = dpop_key.proof("POST", &record.token_endpoint, None, None)?;
     let resp = client
         .post(&record.token_endpoint)
@@ -1173,16 +1253,24 @@ async fn refresh_access_token(
                 .send()
                 .await?;
             if !resp2.status().is_success() {
-                return Err(anyhow::anyhow!(
-                    "Refresh failed: {}",
-                    resp2.text().await.unwrap_or_default()
-                ));
+                let body = resp2.text().await.unwrap_or_default();
+                if is_invalid_grant(&body) {
+                    return Err(RefreshError::InvalidGrant);
+                }
+                return Err(RefreshError::Transient(anyhow::anyhow!("Refresh failed: {body}")));
             }
-            resp2.json().await?
+            resp2.json().await.map_err(|e| RefreshError::Transient(e.into()))?
         } else if status.is_success() {
-            resp.json().await?
+            resp.json().await.map_err(|e| RefreshError::Transient(e.into()))?
         } else {
-            return Err(anyhow::anyhow!("Refresh failed ({status})"));
+            // Read the error body to classify. A dead refresh token comes back
+            // as 400 invalid_grant on the FIRST try when no DPoP nonce dance
+            // is needed (or the nonce was already fresh).
+            let body = resp.text().await.unwrap_or_default();
+            if is_invalid_grant(&body) {
+                return Err(RefreshError::InvalidGrant);
+            }
+            return Err(RefreshError::Transient(anyhow::anyhow!("Refresh failed ({status}): {body}")));
         };
 
     let access_token = token_resp["access_token"]
@@ -1221,7 +1309,7 @@ async fn mint_web_token(
         "{}/auth/broker/web-token",
         config.freeq_server_url.trim_end_matches('/')
     );
-    let client = reqwest::Client::new();
+    let client = upstream_client()?;
     let resp = client
         .post(&url)
         .header("X-Broker-Signature", sig)
@@ -1280,7 +1368,7 @@ async fn push_web_session_with_token(
         "{}/auth/broker/session",
         config.freeq_server_url.trim_end_matches('/')
     );
-    let client = reqwest::Client::new();
+    let client = upstream_client()?;
     let resp = client
         .post(&url)
         .header("X-Broker-Signature", sig)
@@ -1446,5 +1534,34 @@ fn build_client_id(web_origin: &str, redirect_uri: &str) -> String {
         )
     } else {
         format!("{web_origin}/client-metadata.json")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_grant_body_is_detected() {
+        // A dead/revoked refresh token → PDS returns this → must be 401, not 502.
+        assert!(is_invalid_grant(r#"{"error":"invalid_grant","error_description":"token has been revoked"}"#));
+        assert!(is_invalid_grant(r#"{"error":"unauthorized_client"}"#));
+    }
+
+    #[test]
+    fn transient_bodies_are_not_invalid_grant() {
+        // Retryable conditions must NOT trip the sign-in path.
+        assert!(!is_invalid_grant(r#"{"error":"use_dpop_nonce"}"#));
+        assert!(!is_invalid_grant(r#"{"error":"server_error"}"#));
+        assert!(!is_invalid_grant(r#"{"error":"temporarily_unavailable"}"#));
+        assert!(!is_invalid_grant("Bad Gateway"));       // non-JSON upstream error page
+        assert!(!is_invalid_grant(""));                   // empty body
+        assert!(!is_invalid_grant("{}"));                 // JSON without error field
+        assert!(!is_invalid_grant(r#"{"error":123}"#));   // error not a string
+    }
+
+    #[test]
+    fn refresh_error_maps_display() {
+        assert!(RefreshError::InvalidGrant.to_string().contains("re-auth"));
     }
 }
