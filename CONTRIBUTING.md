@@ -5,25 +5,56 @@ infrastructure — contributions should be clear, auditable, and avoid clevernes
 
 ## Getting Started
 
+The repo ships a [devenv](https://devenv.sh) environment that pulls in
+every tool the workspace needs (Rust via rustup, Node 24, Bun, openssl,
+`pkg-config`, `just`, `cargo-nextest`, etc.). The recommended flow:
+
+```bash
+# One-time
+nix profile install nixpkgs#devenv      # if you don't already have it
+direnv version                           # direnv 2.32+ recommended
+
+# In the repo root
+direnv allow                             # auto-activates the env on cd
+
+# Or, if you'd rather not use direnv:
+devenv shell                             # enter the env explicitly
+```
+
+Inside the dev env (either via `direnv` or `devenv shell`):
+
+```bash
+just build      # cargo build --workspace
+just check      # cargo check --workspace --all-targets
+just test       # cargo test --workspace --all-features
+just web-dev    # start the freeq-app dev server
+just server-dev # run freeq-server on :6667 (TCP) / :8080 (HTTP+WS)
+just e2e        # run the full S2S acceptance suite
+just --list     # see every shortcut
+```
+
+If you'd rather skip devenv entirely, the manual flow still works:
+
 ```bash
 git clone https://github.com/chad/freeq
 cd freeq
 cargo build
 cargo test
-```
-
-The web client:
-```bash
 cd freeq-app
 npm install
 npm run dev
 ```
 
-## Development Setup
+### Prerequisites (manual flow only)
 
-- **Rust** (stable, 2024 edition)
-- **Node.js** 20+ (for freeq-app)
-- **SQLite** (bundled via rusqlite)
+- **Rust** (stable, 2024 edition — see `rust-toolchain.toml`; `rustup` is
+  the recommended installer)
+- **Node.js** 24 (for `freeq-app`)
+- **Bun** (for the local dev server and JS test runners)
+- **SQLite** (bundled via rusqlite — no system install needed)
+- **`pkg-config`** + **OpenSSL headers** (`libssl-dev` on Debian/Ubuntu,
+  `openssl-dev` on Alpine) for the Rust workspace
+
 
 ## How to Contribute
 

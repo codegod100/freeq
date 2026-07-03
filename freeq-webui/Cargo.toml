@@ -1,0 +1,66 @@
+[package]
+# Standalone DataStar web UI for freeq. NOT a workspace member — this is
+# an independent proxy that talks to a freeq-server over WS + REST.
+name = "freeq-webui"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "DataStar-based web UI for freeq IRC server (standalone proxy)"
+
+[[bin]]
+name = "freeq-webui"
+path = "src/main.rs"
+
+# Empty [workspace] marks this as the root of its own crate graph, so
+# cargo doesn't try to make it a member of the parent freeq workspace.
+# (Without this, cargo walks up to /home/nandi/code/freeq/Cargo.toml
+# and refuses to build, complaining about `freeq-sdk` not being
+# available — it's listed in the parent workspace's resolver.)
+[workspace]
+
+[dependencies]
+# HTTP server for the browser-facing side.
+axum = { version = "0.8", features = ["ws", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Timestamp formatting for message lines.
+chrono = "0.4"
+
+# DataStar — server-side SSE fragment generation. The `axum` feature
+# enables `write_as_axum_sse_event()` on PatchElements / PatchSignals.
+datastar = { version = "0.3", features = ["axum"] }
+
+# WS client to the upstream freeq-server's /irc endpoint.
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+
+# REST client to the upstream freeq-server's /api/v1/* endpoints.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Tera templates for server-rendered HTML (chat shell).
+# Templates live in templates/ and are rendered at request time;
+# per-request cost is sub-millisecond.
+tera = "2"
+
+# Async helpers.
+async-stream = "0.3"
+futures-util = "0.3"
+async-trait = "0.1"
+
+# Misc.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+parking_lot = "0.12"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>freeq — {{ channel }}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
+<link rel="icon" href="data:,">
+<script src="/datastar.js"></script>
+<style>
+:root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--self:#5cdb95;--c1:#7ab7ff;--c2:#f78b6c;--c3:#c792ea;--c4:#ffd166;--c5:#06d6a0;--c6:#ef476f;--c7:#f4a261;--c8:#90e0ef;--sb:130px}
+*{box-sizing:border-box} html,body{height:100%;margin:0}
+body{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg)}
+
+#app{display:flex;height:100dvh}
+
+#sidebar{width:var(--sb);flex-shrink:0;display:flex;flex-direction:column;background:#0a0d12;border-right:1px solid var(--border)}
+#sidebar header{padding:.5rem .6rem;border-bottom:1px solid var(--border);font-weight:700;font-size:.8rem;color:var(--muted);flex-shrink:0}
+#sidebar header .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--muted);margin-right:.3rem}
+#channel-list{overflow-y:auto;flex:1;padding:.15rem 0}
+.chan-item{display:grid;grid-template-columns:1fr auto;gap:.3rem;padding:.15rem .4rem;color:var(--fg);text-decoration:none;border-left:2px solid transparent;font-size:11px}
+.chan-item:hover{background:#11151b}
+.chan-item.active{background:#11151b;color:var(--c1);border-left-color:var(--c1);font-weight:600}
+.chan-item .name{overflow-wrap:anywhere}
+.chan-item .count{color:var(--muted);font-size:.7rem;padding-top:1px}
+#join-form{display:inline-flex;gap:.15rem;align-items:center;margin-left:.4rem}
+#join-form input{padding:.18rem .3rem;background:#161a1f;color:var(--fg);border:1px solid var(--border);border-radius:3px;font:inherit;font-size:10.5px;width:64px}
+#join-form input:focus{outline:none;border-color:var(--c1)}
+#join-form button{font:inherit;cursor:pointer;border:0;border-radius:3px;padding:.18rem .4rem;font-weight:700;font-size:10.5px;background:var(--c1);color:#000;transition:filter .15s}
+#join-form button:hover{filter:brightness(1.15)}
+
+#main-col{flex:1;display:flex;flex-direction:column;min-width:0}
+#main-col header{padding:.45rem .7rem;border-bottom:1px solid var(--border);display:flex;gap:.6rem;align-items:center;flex-shrink:0}
+#main-col header h1{font-size:.85rem;margin:0;font-weight:700}
+#main-col header .chan{color:var(--c1);font-weight:700;white-space:nowrap;font-size:.85rem}
+#status{color:var(--muted);font-size:.7rem;margin-left:auto;display:flex;align-items:center;gap:.3rem}
+#status .dot{width:6px;height:6px;border-radius:50%;background:var(--muted)}
+#status.connected .dot{background:var(--self);box-shadow:0 0 5px var(--self)}
+#messages{overflow-y:auto;flex:1;padding:.4rem .7rem;font-size:13px}
+#messages .msg{display:grid;grid-template-columns:52px 1fr;gap:.4rem;padding:1px 0}
+#messages .ts{color:var(--muted);font-size:10.5px;padding-top:1px;text-align:right;user-select:none}
+#messages .body{white-space:pre-wrap;overflow-wrap:anywhere}
+#messages .nick{font-weight:600}
+.c1{color:var(--c1)}.c2{color:var(--c2)}.c3{color:var(--c3)}.c4{color:var(--c4)}
+.c5{color:var(--c5)}.c6{color:var(--c6)}.c7{color:var(--c7)}.c8{color:var(--c8)}
+#messages .notice{color:var(--muted);font-style:italic;padding:2px 0}
+#messages .notice .body{color:var(--muted)}
+#messages .join .body{color:var(--c5)}
+#messages .part .body{color:var(--c6)}
+
+
+#member-panel{width:120px;flex-shrink:0;background:#0a0d12;border-left:1px solid var(--border);overflow-y:auto;padding:.3rem .4rem;font-size:11px}
+#member-panel .member{padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#member-panel .member .nick{font-weight:600}
+#member-panel .member .pfx{font-weight:700;margin-right:1px}
+#member-panel .member .pfx.op{color:var(--self)}
+#member-panel .member .pfx.halfop{color:var(--c4)}
+#member-panel .member .pfx.voice{color:var(--c7)}
+#member-panel .member.empty{color:var(--muted)}
+
+#send-form input{flex:1;padding:.45rem .6rem;background:#161a1f;color:var(--fg);border:1px solid var(--border);border-radius:5px;font:inherit;font-size:13px}
+#send-form input:focus{outline:none;border-color:var(--c1)}
+#send-form button{font:inherit;cursor:pointer;border:0;border-radius:4px;padding:.4rem .9rem;font-weight:700;font-size:12px;background:var(--c1);color:#000;transition:filter .15s;white-space:nowrap}
+#send-form button:hover{filter:brightness(1.15)}
+#send-form button.leave{background:#1f232a;color:var(--fg);border:1px solid var(--border);padding:.4rem .8rem;margin-left:.25rem}
+#send-form button.leave:hover{background:#2a2f38;filter:none}
+</style>
+</head>
+<body>
+<div id="app">
+<aside id="sidebar">
+<header><span class="dot"></span>freeq</header>
+<nav id="channel-list">
+{% for ch in channels -%}
+<a class="chan-item{% if ch.name=="#"~channel %} active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span class="name">{{ch.name}}</span><span class="count">{{ch.members}}</span></a>
+{%- endfor %}
+</nav>
+</aside>
+<div id="main-col">
+<header><h1>freeq</h1><span class="chan">#{{channel}}</span><form id="join-form" data-signals="{channel:''}" data-on:submit="@post('/chat/_new/join')" data-signals-merge style="display:flex;gap:.2rem;margin-left:.5rem;flex-shrink:0"><input type="text" name="channel" placeholder="join #…" autocomplete="off" data-bind:channel style="padding:.2rem .4rem;background:#161a1f;color:var(--fg);border:1px solid var(--border);border-radius:3px;font:inherit;font-size:11px;width:90px"><button type="submit" style="font:inherit;cursor:pointer;border:0;border-radius:3px;padding:.2rem .5rem;font-weight:700;font-size:11px;background:var(--c1);color:#000">+</button></form><span id="status" data-signals:_s="'connecting…'" data-class:connected="$_s=='connected'"><span class="dot"></span><span data-text="$_s">connecting…</span></span></header>
+<div id="messages">{{initial_messages_html|safe}}</div>
+<form id="send-form" data-signals="{msg:''}" data-on:submit="@post('/chat/{{channel}}/send')" data-signals-merge>
+<input type="text" name="msg" placeholder="Send to #{{channel}}…" autocomplete="off" autofocus data-bind:msg>
+<button type="submit">Send</button>
+<button type="button" class="leave" data-on:click="@post('/chat/{{channel}}/part')">×</button>
+</form>
+</div>
+<div id="member-panel"><div class="member empty">—</div><div id="member-debug" style="font-size:9px;color:var(--muted);border-top:1px solid var(--border);margin-top:4px;padding-top:2px">waiting…</div></div>
+</div>
+<script>
+(function(){
+  var m=document.getElementById('messages');
+  if(m){requestAnimationFrame(function(){requestAnimationFrame(function(){m.scrollTop=m.scrollHeight})});new MutationObserver(function(){m.scrollTop=m.scrollHeight}).observe(m,{childList:!0})}
+  var url = '/chat/{{channel}}/events';
+  var src = new EventSource(url);
+  var debugEl = document.getElementById('member-debug');
+  function status(msg) { if (debugEl) debugEl.textContent = msg; console.log('[freeq]', msg); }
+  var panel = document.getElementById('member-panel');
+  function memberCount() {
+    var n=0;
+    if (!panel) return 0;
+    for (var c=panel.firstChild; c; c=c.nextSibling)
+      if (c.nodeType===1 && c.classList.contains('member')) n++;
+    return n;
+  }
+  status('EventSource connecting…');
+  src.addEventListener('datastar-patch-signals', function(e) {
+    var lines = e.data.split('\n');
+    for (var i=0;i<lines.length;i++) {
+      var l=lines[i];
+      if (l.startsWith('signals ')) {
+        try {
+          var signals = JSON.parse(l.slice(8));
+          if (signals._s) {
+            var st = document.getElementById('status');
+            if (st) {
+              st.classList.toggle('connected', signals._s === 'connected');
+              var txt = st.querySelector('[data-text]');
+              if (txt) txt.textContent = signals._s;
+            }
+          }
+          if (signals.msg !== undefined) {
+            var inp = document.querySelector('#send-form input[name=msg]');
+            if (inp) inp.value = signals.msg;
+          }
+        } catch(err) { console.error('[freeq] signal parse error:', err); }
+      }
+    }
+  });
+  src.addEventListener('datastar-patch-elements', function(e) {
+    // Split multi-line data by newline
+    var lines = e.data.split('\n');
+    var sel = null, mode = 'outer', elements = null;
+    for (var i=0;i<lines.length;i++) {
+      var l=lines[i];
+      if (l.startsWith('selector ')) sel = l.slice(9);
+      else if (l.startsWith('mode ')) mode = l.slice(5);
+      else if (l.startsWith('elements ')) elements = l.slice(9);
+    }
+    if (!elements) return;
+    // Execute scripts directly
+    if (sel === 'body' || sel === ' body') {
+      var div = document.createElement('div');
+      div.innerHTML = elements;
+      var scripts = div.querySelectorAll('script[data-effect]');
+      for (var i=0;i<scripts.length;i++) {
+        try { (new Function(scripts[i].textContent))(); } catch(err) { console.error('[freeq] script error:', err); }
+      }
+      return;
+    }
+    // For #messages, use DataStar merge
+    var target = sel ? document.querySelector(sel) : null;
+    if (!target) { status('no target for: '+sel); return; }
+    if (mode === 'append') {
+      target.insertAdjacentHTML('beforeend', elements);
+    } else {
+      target.innerHTML = elements;
+    }
+  });
+  src.onerror = function() { status('EventSource error, reconnecting…'); };
+  src.onopen = function() { status('EventSource connected, members='+memberCount()); };
+})();
+</script>
+</body>
+</html>

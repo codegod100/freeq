@@ -1,0 +1,9 @@
+[toolchain]
+# Stable Rust. The Dockerfile pins `rust:1.89-slim` for reproducible
+# container builds; the local dev env (devenv) uses nixpkgs' stable,
+# which is a few releases ahead. Edition 2024 needs >= 1.85, so any
+# modern stable works. Bump Dockerfile + this together if you need a
+# hard pin.
+channel = "stable"
+components = [ "rust-analyzer", "rust-src", "clippy", "rustfmt" ]
+profile = "minimal"

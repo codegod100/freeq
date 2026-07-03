@@ -1,0 +1,19 @@
+# devenv.yaml — flake inputs for the freeq dev environment.
+#
+# Pin nixpkgs to the same unstable branch devenv 2.1.2 itself uses (see
+# devenv's own flake.lock: nixpkgs-src tracks nixpkgs-unstable). Pinning
+# to nixos-24.11 here caused a buildEnv API drift (`ignoreSingleFileOutputs`
+# removed) that the bundled devenv version doesn't know about. When
+# upgrading devenv, this can usually move back to a stable channel —
+# bump in lock-step. `devenv update` refreshes the lock file.
+
+inputs:
+  nixpkgs:
+    url: github:NixOS/nixpkgs/nixpkgs-unstable
+
+# Allow unfree packages if/when we need them (none today, but keeps
+# future us from having to revisit this file for a single new dep).
+allowUnfree: true
+
+# We don't import any per-user secrets here yet. When we add
+# `secretspec` support, the providers block goes here.

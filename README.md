@@ -67,7 +67,7 @@ protocol is transport-agnostic. Each transport is zero-cost when not enabled.
 
 ## Quick Start
 
-### Build
+no history backfill. The TODO list is in `../AGENTS.md`; relevant items:
 
 ```sh
 cargo build --release
