@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		035849CB7A13552E1686B4F8 /* CameraFrameRatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECC9CABA22036B8DCCD1C135 /* CameraFrameRatePolicy.swift */; };
 		111A631DD747383DB85200BF /* DebugBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD56638DA817D921B8F261C /* DebugBridge.swift */; };
 		141F5EE2389E6C8A8801E692 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B144BCAA2F46CB480BF6E2CD /* Assets.xcassets */; };
 		28FCBBC8CA468049919EADA3 /* CallCameraCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 272F2E7627007A625AE37DA8 /* CallCameraCapture.swift */; };
@@ -119,6 +120,7 @@
 		DB1B29BA8601FC220D46B705 /* Logger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Logger.swift; sourceTree = "<group>"; };
 		DB6D944E494A3AE591F53C28 /* MediaViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaViews.swift; sourceTree = "<group>"; };
 		E71A46E52B4FC4C2F32D7F34 /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConfig.swift; sourceTree = "<group>"; };
+		ECC9CABA22036B8DCCD1C135 /* CameraFrameRatePolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFrameRatePolicy.swift; sourceTree = "<group>"; };
 		ED9F5A69D81B1BA80FC4782A /* ChannelState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelState.swift; sourceTree = "<group>"; };
 		F0BFAA19CD6272B8B0EB81C7 /* CallLayoutPolicies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallLayoutPolicies.swift; sourceTree = "<group>"; };
 		F3D1930C0C5B69735D97DA9C /* ChannelCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelCrypto.swift; sourceTree = "<group>"; };
@@ -245,6 +247,7 @@
 				BA939865F12BCD7A51A4E5D0 /* CallController.swift */,
 				F0BFAA19CD6272B8B0EB81C7 /* CallLayoutPolicies.swift */,
 				BF84986DB3E316AB54CFA706 /* CallMicCapture.swift */,
+				ECC9CABA22036B8DCCD1C135 /* CameraFrameRatePolicy.swift */,
 				F3D1930C0C5B69735D97DA9C /* ChannelCrypto.swift */,
 				3846EF940D85D72154A72566 /* ChannelE2eeState.swift */,
 				9E6BC4FEEBACC91D752966CC /* ChannelHydration.swift */,
@@ -395,6 +398,7 @@
 				54790CCF1094BA4AEFBB3080 /* CallLayoutPolicies.swift in Sources */,
 				2DE20508FB26A54D6DC4847B /* CallMicCapture.swift in Sources */,
 				53219C77DD566736E0DBD0F1 /* CallView.swift in Sources */,
+				035849CB7A13552E1686B4F8 /* CameraFrameRatePolicy.swift in Sources */,
 				7A222CE7AD638ABD0A21E0C8 /* ChannelCrypto.swift in Sources */,
 				AA93A5BC96012105B5A999C2 /* ChannelE2eeState.swift in Sources */,
 				34242A7406E61679FA27DFE9 /* ChannelHydration.swift in Sources */,

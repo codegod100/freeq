@@ -99,7 +99,6 @@ final class CallCameraCapture: NSObject {
             }
             session.addInput(input)
             currentInput = input
-            capFrameRate(device)
 
             output.videoSettings = [
                 kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
@@ -110,6 +109,10 @@ final class CallCameraCapture: NSObject {
                 session.addOutput(output)
             }
             session.commitConfiguration()
+            // Cap AFTER commit: applying the session preset can change the
+            // device's activeFormat, and the cap must validate against the
+            // format that will actually run.
+            if let device = currentInput?.device { capFrameRate(device) }
             configured = true
             observeDisconnects()
         }
@@ -120,13 +123,18 @@ final class CallCameraCapture: NSObject {
     }
 
     /// 30 fps cap: sending faster than the encoder consumes just burns FFI
-    /// copies. Best-effort — not all devices allow it.
+    /// copies. Best-effort — not all devices allow it. The duration must
+    /// come from CameraFrameRatePolicy: an out-of-range value makes
+    /// AVFoundation throw an ObjC exception Swift cannot catch (SIGABRT —
+    /// this crashed live on a fixed/fractional-rate camera).
     private func capFrameRate(_ device: AVCaptureDevice) {
-        guard let range = device.activeFormat.videoSupportedFrameRateRanges.first else { return }
-        let fps = min(30, range.maxFrameRate)
+        let ranges = device.activeFormat.videoSupportedFrameRateRanges
+            .map { (min: $0.minFrameDuration, max: $0.maxFrameDuration) }
+        guard let target = CameraFrameRatePolicy.targetMinFrameDuration(
+            desiredFps: 30, ranges: ranges) else { return }
         do {
             try device.lockForConfiguration()
-            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+            device.activeVideoMinFrameDuration = target
             device.unlockForConfiguration()
         } catch {
             print("[cam] frame-rate cap failed: \(error)")
@@ -143,12 +151,13 @@ final class CallCameraCapture: NSObject {
            session.canAddInput(input) {
             session.addInput(input)
             currentInput = input
-            capFrameRate(device)
             print("[cam] switched to \(device.localizedName)")
         } else {
             print("[cam] no usable camera after reconfigure")
         }
         session.commitConfiguration()
+        // After commit, so the cap validates the final activeFormat.
+        if let device = currentInput?.device { capFrameRate(device) }
     }
 
     /// Unplug of the active camera: fall back to the default device instead
