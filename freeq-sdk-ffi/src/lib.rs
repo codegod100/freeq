@@ -1506,6 +1506,15 @@ mod av_impl {
             handler.on_av_event(AvEvent::AudioTrackStarted { nick: nick.clone() });
         }
 
+        // R1: per-participant playout level → AvEvent::AudioLevel. The
+        // output sink already tracks a smoothed peak (0…1); poll it at
+        // 10 Hz and emit on meaningful change so silence costs nothing.
+        let audio_level_handle = if is_screen {
+            None
+        } else {
+            tracks.audio.as_ref().map(|a| a.handle().cloned_boxed())
+        };
+
         // `media()` samples the catalog once. A peer who joined the call
         // before enabling their camera has no video rendition in the
         // catalog at sub time, so `tracks.video` is None permanently.
@@ -1516,6 +1525,33 @@ mod av_impl {
         let remote_for_watch = remote.clone();
         let _tracks = tracks;
 
+        let level_loop = {
+            let handler = handler.clone();
+            let nick = nick.clone();
+            async move {
+                let Some(handle) = audio_level_handle else {
+                    // No audio track — park forever; the select! below keeps
+                    // running the video side.
+                    std::future::pending::<()>().await;
+                    unreachable!()
+                };
+                let mut last = 0.0f32;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let Some(level) = handle.smoothed_peak_normalized() else { continue };
+                    let activity_flipped = (level > 0.01) != (last > 0.01);
+                    if (level - last).abs() > 0.02 || activity_flipped {
+                        last = level;
+                        handler.on_av_event(AvEvent::AudioLevel {
+                            nick: nick.clone(),
+                            level,
+                        });
+                    }
+                }
+            }
+        };
+
+        let video_loop = async move {
         loop {
             match video.take() {
                 Some(mut v) => {
@@ -1575,6 +1611,15 @@ mod av_impl {
                     }
                 }
             }
+        }
+        };
+
+        // Both loops run for the broadcast's lifetime; neither returns.
+        // When the caller aborts this task (participant left / call over),
+        // both stop together — no detached task to leak.
+        tokio::select! {
+            _ = level_loop => {},
+            _ = video_loop => {},
         }
     }
 

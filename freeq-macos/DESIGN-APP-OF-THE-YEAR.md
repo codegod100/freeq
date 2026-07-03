@@ -130,7 +130,7 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | Screen share | ✅ SCK + system picker ✎ (ScreenSharePicker.swift; dedicated /screen broadcast) | ✅ | Presenter Overlay still planned |
 | Mic processing / metering | ✅ / ✅ self | ⚠️ / ❌ | mac leads |
 | **Output device picker** | ✅ ✎ (FFI set_output_device; CallView Speaker menu) | ❌ | mac leads |
-| **Remote active-speaker** | ⚠️ ✎ interface + client wiring frozen (AvEvent.AudioLevel); playout-tap emission pending | ❌ | R1; #1 feels-alive gap |
+| **Remote active-speaker** | ✅ ✎ AvEvent.AudioLevel emitted from the playout sink's smoothed peak (10 Hz, change-gated); speaking rings wired | ❌ | shipped 2026-07-03; multi-party visual check pending |
 | **Frame transport** | ⚠️ [UInt8] FFI copies | n/a | §5.0 prerequisite, R2 |
 | **Green room (when-lost only)** | ❌ | ❌ | §5.1.4 |
 | **Reconnect under SLO** | ❌ dies (Reconnecting/Reconnected FFI events frozen ✎) | ⚠️ | §5.1.3 |
