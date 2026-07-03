@@ -38,6 +38,7 @@ let package = Package(
                 "AudioLevelMeter.swift",
                 "MediaDeviceSelection.swift",
                 "CallLayoutPolicies.swift",
+                "CameraEffects.swift",
                 "CameraFrameRatePolicy.swift",
                 "Validation.swift",
                 "ServerConfig.swift",

@@ -557,6 +557,8 @@ public protocol FreeqAvProtocol: AnyObject, Sendable {
     
     func leave() 
     
+    func listOutputDevices()  -> [AvAudioDevice]
+    
     func pushAudioFrame(samples: [Float]) 
     
     func pushScreenFrame(bgra: [UInt8], width: UInt32, height: UInt32, timestampUs: UInt64) 
@@ -566,6 +568,8 @@ public protocol FreeqAvProtocol: AnyObject, Sendable {
     func setCameraEnabled(enabled: Bool) throws 
     
     func setMuted(muted: Bool) 
+    
+    func setOutputDevice(deviceId: String?) throws 
     
     func setScreenEnabled(enabled: Bool) throws 
     
@@ -647,6 +651,13 @@ open func leave()  {try! rustCall() {
 }
 }
     
+open func listOutputDevices() -> [AvAudioDevice]  {
+    return try!  FfiConverterSequenceTypeAvAudioDevice.lift(try! rustCall() {
+    uniffi_freeq_sdk_ffi_fn_method_freeqav_list_output_devices(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
 open func pushAudioFrame(samples: [Float])  {try! rustCall() {
     uniffi_freeq_sdk_ffi_fn_method_freeqav_push_audio_frame(self.uniffiClonePointer(),
         FfiConverterSequenceFloat.lower(samples),$0
@@ -684,6 +695,13 @@ open func setCameraEnabled(enabled: Bool)throws   {try rustCallWithError(FfiConv
 open func setMuted(muted: Bool)  {try! rustCall() {
     uniffi_freeq_sdk_ffi_fn_method_freeqav_set_muted(self.uniffiClonePointer(),
         FfiConverterBool.lower(muted),$0
+    )
+}
+}
+    
+open func setOutputDevice(deviceId: String?)throws   {try rustCallWithError(FfiConverterTypeFreeqError_lift) {
+    uniffi_freeq_sdk_ffi_fn_method_freeqav_set_output_device(self.uniffiClonePointer(),
+        FfiConverterOptionString.lower(deviceId),$0
     )
 }
 }
@@ -1387,6 +1405,84 @@ public func FfiConverterTypeFreeqP2p_lower(_ value: FreeqP2p) -> UnsafeMutableRa
 }
 
 
+
+
+public struct AvAudioDevice {
+    public var id: String
+    public var name: String
+    public var isDefault: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, name: String, isDefault: Bool) {
+        self.id = id
+        self.name = name
+        self.isDefault = isDefault
+    }
+}
+
+#if compiler(>=6)
+extension AvAudioDevice: Sendable {}
+#endif
+
+
+extension AvAudioDevice: Equatable, Hashable {
+    public static func ==(lhs: AvAudioDevice, rhs: AvAudioDevice) -> Bool {
+        if lhs.id != rhs.id {
+            return false
+        }
+        if lhs.name != rhs.name {
+            return false
+        }
+        if lhs.isDefault != rhs.isDefault {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+        hasher.combine(name)
+        hasher.combine(isDefault)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeAvAudioDevice: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> AvAudioDevice {
+        return
+            try AvAudioDevice(
+                id: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                isDefault: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: AvAudioDevice, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.isDefault, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAvAudioDevice_lift(_ buf: RustBuffer) throws -> AvAudioDevice {
+    return try FfiConverterTypeAvAudioDevice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeAvAudioDevice_lower(_ value: AvAudioDevice) -> RustBuffer {
+    return FfiConverterTypeAvAudioDevice.lower(value)
+}
 
 
 public struct ChannelTopic {
@@ -2128,6 +2224,11 @@ public enum AvEvent {
     )
     case screenFrame(nick: String, bgra: [UInt8], width: UInt32, height: UInt32
     )
+    case audioLevel(nick: String, level: Float
+    )
+    case reconnecting(attempt: UInt32
+    )
+    case reconnected
     case error(message: String
     )
 }
@@ -2182,7 +2283,15 @@ public struct FfiConverterTypeAvEvent: FfiConverterRustBuffer {
         case 12: return .screenFrame(nick: try FfiConverterString.read(from: &buf), bgra: try FfiConverterSequenceUInt8.read(from: &buf), width: try FfiConverterUInt32.read(from: &buf), height: try FfiConverterUInt32.read(from: &buf)
         )
         
-        case 13: return .error(message: try FfiConverterString.read(from: &buf)
+        case 13: return .audioLevel(nick: try FfiConverterString.read(from: &buf), level: try FfiConverterFloat.read(from: &buf)
+        )
+        
+        case 14: return .reconnecting(attempt: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 15: return .reconnected
+        
+        case 16: return .error(message: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2258,8 +2367,23 @@ public struct FfiConverterTypeAvEvent: FfiConverterRustBuffer {
             FfiConverterUInt32.write(height, into: &buf)
             
         
-        case let .error(message):
+        case let .audioLevel(nick,level):
             writeInt(&buf, Int32(13))
+            FfiConverterString.write(nick, into: &buf)
+            FfiConverterFloat.write(level, into: &buf)
+            
+        
+        case let .reconnecting(attempt):
+            writeInt(&buf, Int32(14))
+            FfiConverterUInt32.write(attempt, into: &buf)
+            
+        
+        case .reconnected:
+            writeInt(&buf, Int32(15))
+        
+        
+        case let .error(message):
+            writeInt(&buf, Int32(16))
             FfiConverterString.write(message, into: &buf)
             
         }
@@ -3226,6 +3350,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeAvAudioDevice: FfiConverterRustBuffer {
+    typealias SwiftType = [AvAudioDevice]
+
+    public static func write(_ value: [AvAudioDevice], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeAvAudioDevice.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [AvAudioDevice] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [AvAudioDevice]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeAvAudioDevice.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeIrcMember: FfiConverterRustBuffer {
     typealias SwiftType = [IrcMember]
 
@@ -3319,6 +3468,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_leave() != 39649) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_list_output_devices() != 57362) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_audio_frame() != 55965) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3332,6 +3484,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_muted() != 7170) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_output_device() != 62033) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_screen_enabled() != 14174) {

@@ -1069,9 +1069,27 @@ pub enum AvEvent {
         width: u32,
         height: u32,
     },
+    // R1 interface freeze: shapes are stable; AudioLevel emission lands
+    // with the playout tap, reconnect events with the retry loop.
+    AudioLevel {
+        nick: String,
+        level: f32,
+    },
+    Reconnecting {
+        attempt: u32,
+    },
+    Reconnected,
     Error {
         message: String,
     },
+}
+
+/// An audio output device for the speaker picker (see
+/// `FreeqAv::list_output_devices`).
+pub struct AvAudioDevice {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
 }
 
 pub trait AvEventHandler: Send + Sync + 'static {
@@ -1196,8 +1214,9 @@ mod av_impl {
         /// sources, encoder pipelines) stays alive for the call's lifetime.
         /// Dropping it would tear down the publish path.
         pub _broadcast: LocalBroadcast,
-        // Held to keep audio/video device handles alive for the session.
-        pub _audio_backend: iroh_live::media::audio_backend::AudioBackend,
+        // Keeps audio/video device handles alive for the session; also the
+        // handle for output-device switching (speaker picker).
+        pub audio_backend: iroh_live::media::audio_backend::AudioBackend,
         pub _session: moq_lite::Session,
         /// Also used to publish/retract the screen broadcast post-connect.
         pub origin: moq_lite::OriginProducer,
@@ -1327,6 +1346,7 @@ mod av_impl {
         let mut sub_consumer = sub_consumer;
 
         let our_name = broadcast_name.clone();
+        let session_scope = session_id.clone();
         let audio_for_playback = audio_backend.clone();
         let handler: Arc<dyn AvEventHandler> = Arc::from(handler);
         let handler_loop = handler.clone();
@@ -1345,6 +1365,10 @@ mod av_impl {
                             Some((path, Some(broadcast_consumer))) => {
                                 let path_str = path.to_string();
                                 if path_str == our_name || path_str == format!("{our_name}/screen") {
+                                    continue;
+                                }
+                                if !belongs_to_session(&path_str, &session_scope) {
+                                    tracing::debug!(path = %path_str, "AV: ignoring broadcast from another session");
                                     continue;
                                 }
 
@@ -1374,6 +1398,9 @@ mod av_impl {
                                 if path_str == our_name || path_str == format!("{our_name}/screen") {
                                     continue;
                                 }
+                                if !belongs_to_session(&path_str, &session_scope) {
+                                    continue;
+                                }
                                 let (nick, is_screen) = parse_broadcast_path(&path_str);
                                 if is_screen {
                                     handler_loop.on_av_event(AvEvent::ScreenTrackStopped { nick });
@@ -1396,7 +1423,7 @@ mod av_impl {
 
         Ok(State {
             _broadcast: broadcast,
-            _audio_backend: audio_backend,
+            audio_backend,
             _session: session,
             origin,
             shutdown_tx: Some(shutdown_tx),
@@ -1412,6 +1439,15 @@ mod av_impl {
             screen_pending: Arc::new(Mutex::new(None)),
             screen_format: Arc::new(Mutex::new(DEFAULT_VIDEO_FORMAT)),
         })
+    }
+
+    /// The SFU relays ALL sessions through one MoQ namespace, and announces
+    /// every broadcast to every consumer. Without this filter a client in
+    /// call A subscribes to (and PLAYS) call B's audio and video — observed
+    /// live 2026-07-03: a #freeq participant received a #chadtest broadcast.
+    pub(super) fn belongs_to_session(path: &str, session_id: &str) -> bool {
+        path.strip_prefix(session_id)
+            .is_some_and(|rest| rest.starts_with('/'))
     }
 
     /// `{session}/{nick}[~{instance}][/screen]` → (display nick, is_screen).
@@ -1687,6 +1723,16 @@ mod av_impl {
                 };
             }
         }
+        // Frame heartbeat, mirroring push_frame: proves capture is actually
+        // delivering (TCC-denied ScreenCaptureKit fails without frames).
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static FRAMES: AtomicU64 = AtomicU64::new(0);
+            let n = FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == 1 || n.is_multiple_of(60) {
+                tracing::info!(frame_no = n, width, height, "AV: pushed screen frame");
+            }
+        }
         let frame = VideoFrame::new_packed(
             bgra.into(),
             width,
@@ -1704,6 +1750,37 @@ mod av_impl {
         // resume). Drops oldest to keep real-time latency low.
         let mut q = state.audio_queue.lock().unwrap();
         crate::audio_buffer::push_capped(&mut q, samples, crate::audio_buffer::MAX_BACKLOG_SAMPLES);
+    }
+
+    /// Output devices for the speaker picker (remote audio plays through
+    /// the Rust cpal backend, not AVFoundation).
+    pub(super) fn list_output_devices() -> Vec<crate::AvAudioDevice> {
+        iroh_live::media::audio_backend::AudioBackend::list_outputs()
+            .into_iter()
+            .map(|d| crate::AvAudioDevice {
+                id: d.id.to_string(),
+                name: d.name,
+                is_default: d.is_default,
+            })
+            .collect()
+    }
+
+    /// Route remote-audio playback to a device (None = system default).
+    pub(super) fn set_output_device(state: &State, device_id: Option<String>) -> Result<(), FreeqError> {
+        use std::str::FromStr;
+        let device = match device_id {
+            None => None,
+            Some(id) => Some(
+                iroh_live::media::audio_backend::DeviceId::from_str(&id)
+                    .map_err(|_| FreeqError::InvalidArgument)?,
+            ),
+        };
+        RUNTIME
+            .block_on(state.audio_backend.switch_output(device))
+            .map_err(|e| {
+                tracing::warn!("AV: switch_output failed: {e}");
+                FreeqError::SendFailed
+            })
     }
 }
 
@@ -1807,6 +1884,16 @@ impl FreeqAv {
         }
     }
 
+    fn list_output_devices(&self) -> Vec<AvAudioDevice> {
+        av_impl::list_output_devices()
+    }
+
+    fn set_output_device(&self, device_id: Option<String>) -> Result<(), FreeqError> {
+        let guard = self.state.lock().unwrap();
+        let state = guard.as_ref().ok_or(FreeqError::NotConnected)?;
+        av_impl::set_output_device(state, device_id)
+    }
+
     fn is_connected(&self) -> bool {
         self.state
             .lock()
@@ -1856,6 +1943,12 @@ impl FreeqAv {
         Err(FreeqError::NotConnected)
     }
     fn push_screen_frame(&self, _bgra: Vec<u8>, _w: u32, _h: u32, _ts: u64) {}
+    fn list_output_devices(&self) -> Vec<AvAudioDevice> {
+        Vec::new()
+    }
+    fn set_output_device(&self, _device_id: Option<String>) -> Result<(), FreeqError> {
+        Err(FreeqError::NotConnected)
+    }
     fn is_connected(&self) -> bool {
         false
     }
@@ -1940,6 +2033,19 @@ mod tests {
         let _ = AvEvent::Error {
             message: "test error".to_string(),
         };
+    }
+
+    #[cfg(feature = "av")]
+    #[test]
+    fn session_scoping_filters_foreign_broadcasts() {
+        use super::av_impl::belongs_to_session;
+        assert!(belongs_to_session("sess-a/alice~ff00", "sess-a"));
+        assert!(belongs_to_session("sess-a/alice~ff00/screen", "sess-a"));
+        // Another call's broadcast must never be subscribed.
+        assert!(!belongs_to_session("sess-b/clyde~0144", "sess-a"));
+        // Prefix collisions don't count: "sess-a2/..." is not in "sess-a".
+        assert!(!belongs_to_session("sess-a2/mallory", "sess-a"));
+        assert!(!belongs_to_session("sess-a", "sess-a"));
     }
 
     #[cfg(feature = "av")]

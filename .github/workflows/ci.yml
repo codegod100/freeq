@@ -116,3 +116,15 @@ jobs:
       - name: Build
         working-directory: freeq-app
         run: npm run build
+
+  macos-swift:
+    name: macOS Client (SwiftPM tests)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The SwiftPM harness compiles only the pure-logic core (no FFI, no
+      # Xcode project), so this stays fast and needs no Rust toolchain.
+      - name: Run Swift tests
+        working-directory: freeq-macos
+        run: swift test

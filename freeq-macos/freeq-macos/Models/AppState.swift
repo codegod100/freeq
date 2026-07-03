@@ -90,6 +90,9 @@ class AppState {
     var participantsWithVideo: Set<String> = []
     /// Nicks with a live screen-share broadcast ({peer}/screen path).
     var participantsWithScreen: Set<String> = []
+    /// Remote playout levels (lowercased nick → 0…1) from AvEvent.audioLevel;
+    /// drives remote active-speaker rings once the SDK emits them (R1).
+    var remoteAudioLevels: [String: Float] = [:]
     /// Local mic level (0…1) for the in-call meter, ~25 Hz while capturing.
     var localMicLevel: Float = 0
     /// Debounced local voice-activity flag (drives the self-tile speaking
@@ -102,6 +105,21 @@ class AppState {
     /// Sticky camera selection (AVCaptureDevice.uniqueID; nil = default).
     var preferredCameraUID: String? = UserDefaults.standard.string(forKey: "freeq.av.cameraUID") {
         didSet { UserDefaults.standard.set(preferredCameraUID, forKey: "freeq.av.cameraUID") }
+    }
+    /// Sticky speaker selection for remote audio (Rust cpal device id;
+    /// nil = system default). Applied on call start + live switch.
+    var preferredOutputDeviceId: String? = UserDefaults.standard.string(forKey: "freeq.av.outputId") {
+        didSet { UserDefaults.standard.set(preferredOutputDeviceId, forKey: "freeq.av.outputId") }
+    }
+    /// Camera background effect (none / blur / custom image). Sticky, and
+    /// applies live to a running camera.
+    var cameraBackgroundEffect = VideoBackgroundEffect(
+        encoded: UserDefaults.standard.string(forKey: "freeq.av.bgEffect") ?? "none"
+    ) {
+        didSet {
+            UserDefaults.standard.set(cameraBackgroundEffect.encoded, forKey: "freeq.av.bgEffect")
+            cameraCapture?.effects.effect = cameraBackgroundEffect
+        }
     }
     @ObservationIgnored var avSession: FreeqAv? = nil
     /// Channels where we sent `av-start` and are waiting on the server's `started` echo.

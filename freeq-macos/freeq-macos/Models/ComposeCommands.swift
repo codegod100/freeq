@@ -235,8 +235,14 @@ extension AppState {
             toggleCamera()
         case .screenShare:
             toggleScreenShare()
+        case .screenShareDisplay:
+            if isScreenSharing {
+                toggleScreenShare()
+            } else {
+                startScreenShare(target: nil)  // primary display, no picker
+            }
         case .help:
-            appendSystem("AV: start | join | leave | mute | camera | screen")
+            appendSystem("AV: start | join | leave | mute | camera | screen [display]")
         }
     }
 

@@ -24,6 +24,11 @@ final class CallCameraCapture: NSObject {
 
     let session = AVCaptureSession()
     let previewLayer: AVCaptureVideoPreviewLayer
+    /// Background effects (blur / custom image). Set `.effect` to toggle.
+    let effects = CameraEffectsProcessor()
+    /// Self-view when effects are active: shows the *processed* frames the
+    /// call actually sends (the raw `previewLayer` would lie).
+    let processedPreviewLayer = AVSampleBufferDisplayLayer()
 
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "at.freeq.macos.camera")
@@ -221,8 +226,14 @@ final class CallScreenCapture: NSObject {
     /// (pointer, byteLength, width, height, timestampUs)
     var onFrame: ((UnsafePointer<UInt8>, Int, Int, Int, UInt64) -> Void)?
     var onStopped: (() -> Void)?
-    /// What to share; nil = primary display.
+    /// Capture failed to start or died — user-presentable message.
+    var onError: ((String) -> Void)?
+    /// What to share; nil = primary display. Ignored when `filter` is set.
     var target: ScreenShareTarget?
+    /// A filter handed to us by the system SCContentSharingPicker — the
+    /// preferred path: user-mediated (no Screen Recording pre-grant needed)
+    /// and the user explicitly chose what to share.
+    var pickedFilter: SCContentFilter?
 
     private let queue = DispatchQueue(label: "at.freeq.macos.screen")
     private var stream: SCStream?
@@ -261,6 +272,18 @@ final class CallScreenCapture: NSObject {
 
     @MainActor
     private func startAsync() async {
+        // System-picker path: the filter carries its own geometry, and no
+        // Screen Recording TCC pre-grant is required.
+        if #available(macOS 14.0, *), let picked = pickedFilter {
+            let scale = CGFloat(picked.pointPixelScale)
+            let sourcePixels = (
+                width: Int(picked.contentRect.width * scale),
+                height: Int(picked.contentRect.height * scale)
+            )
+            await startStream(filter: picked, sourcePixels: sourcePixels)
+            return
+        }
+
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(
                 false,
@@ -302,18 +325,33 @@ final class CallScreenCapture: NSObject {
                 sourcePixels = (Int(CGFloat(display.width) * scale), Int(CGFloat(display.height) * scale))
             }
 
-            let size = ScreenShareConfig.outputSize(
-                sourceWidth: sourcePixels.width, sourceHeight: sourcePixels.height)
+            await startStream(filter: filter, sourcePixels: sourcePixels)
+        } catch {
+            print("[screen] shareable-content enumeration failed: \(error)")
+            // The classic cause: Screen Recording permission. Guide the user
+            // instead of failing silently.
+            onError?("Screen sharing couldn't start. If you haven't granted "
+                + "Screen Recording access, enable it in System Settings → "
+                + "Privacy & Security → Screen Recording, then try again.")
+            onStopped?()
+        }
+    }
 
-            let config = SCStreamConfiguration()
-            config.width = size.width
-            config.height = size.height
-            config.pixelFormat = kCVPixelFormatType_32BGRA
-            config.minimumFrameInterval = CMTime(
-                value: 1, timescale: CMTimeScale(ScreenShareConfig.framesPerSecond))
-            config.queueDepth = 4
-            config.showsCursor = true
+    @MainActor
+    private func startStream(filter: SCContentFilter, sourcePixels: (width: Int, height: Int)) async {
+        let size = ScreenShareConfig.outputSize(
+            sourceWidth: sourcePixels.width, sourceHeight: sourcePixels.height)
 
+        let config = SCStreamConfiguration()
+        config.width = size.width
+        config.height = size.height
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.minimumFrameInterval = CMTime(
+            value: 1, timescale: CMTimeScale(ScreenShareConfig.framesPerSecond))
+        config.queueDepth = 4
+        config.showsCursor = true
+
+        do {
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             self.stream = stream
@@ -321,6 +359,7 @@ final class CallScreenCapture: NSObject {
             print("[screen] capture started \(size.width)×\(size.height)@\(ScreenShareConfig.framesPerSecond)")
         } catch {
             print("[screen] capture failed: \(error)")
+            onError?("Screen sharing failed to start: \(error.localizedDescription)")
             onStopped?()
         }
     }
@@ -408,7 +447,14 @@ extension CallCameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard let onFrame, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let onFrame, let rawPb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // Background effects: composite person-over-styled-background; fall
+        // back to the raw frame when off or when segmentation yields nothing.
+        let pb = effects.process(rawPb) ?? rawPb
+        if pb !== rawPb {
+            Self.enqueue(pixelBuffer: pb, on: processedPreviewLayer)
+        }
 
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
@@ -438,5 +484,34 @@ extension CallCameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
         packed.withUnsafeBufferPointer { buf in
             onFrame(buf.baseAddress!, buf.count, width, height, tsUs)
         }
+    }
+
+    /// Wrap a pixel buffer in a display-immediately CMSampleBuffer and
+    /// enqueue it (no pixel copy) — feeds the processed self-view.
+    static func enqueue(pixelBuffer pb: CVPixelBuffer, on layer: AVSampleBufferDisplayLayer) {
+        var formatDesc: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb,
+            formatDescriptionOut: &formatDesc) == noErr, let formatDesc else { return }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb,
+            formatDescription: formatDesc, sampleTiming: &timing,
+            sampleBufferOut: &sample) == noErr, let sample else { return }
+
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sample, createIfNecessary: true) as? [CFMutableDictionary],
+           let first = attachments.first {
+            let key = Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque()
+            let value = Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+            CFDictionarySetValue(first, key, value)
+        }
+        if layer.status == .failed { layer.flush() }
+        layer.enqueue(sample)
     }
 }

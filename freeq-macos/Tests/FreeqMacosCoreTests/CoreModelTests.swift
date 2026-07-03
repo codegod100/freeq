@@ -156,6 +156,25 @@ final class CoreModelTests: XCTestCase {
         XCTAssertEqual(ServerConfig.deploymentID, "irc.freeq.at:6697|https://auth.freeq.at")
     }
 
+    // MARK: - AV screen subcommand
+
+    func testAvScreenAloneOpensPicker() {
+        XCTAssertEqual(AvCommandParser.action(for: "screen"), .screenShare)
+        XCTAssertEqual(AvCommandParser.action(for: "share"), .screenShare)
+    }
+
+    func testAvScreenDisplayBypassesPicker() {
+        // Non-interactive path for automation and muscle-memory users:
+        // share the primary display without the system picker.
+        XCTAssertEqual(AvCommandParser.action(for: "screen display"), .screenShareDisplay)
+        XCTAssertEqual(AvCommandParser.action(for: "screenshare display"), .screenShareDisplay)
+        XCTAssertEqual(AvCommandParser.action(for: "screen DISPLAY"), .screenShareDisplay)
+    }
+
+    func testAvScreenWithOtherArgStaysInteractive() {
+        XCTAssertEqual(AvCommandParser.action(for: "screen banana"), .screenShare)
+    }
+
     // MARK: - ChannelCrypto remaining error branches
 
     func testDecryptNonUTF8PlaintextFails() throws {

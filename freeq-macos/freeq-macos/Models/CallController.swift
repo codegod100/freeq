@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import ScreenCaptureKit
 import Security
 
 // MARK: - AV server endpoints
@@ -111,6 +112,9 @@ extension AppState {
                 handler: handler
             )
             startLocalMic()
+            if let out = preferredOutputDeviceId {
+                try? avSession?.setOutputDevice(deviceId: out)
+            }
             sendRaw("@+freeq.at/av-join;+freeq.at/av-id=\(sessionId);+freeq.at/av-instance=\(instance) TAGMSG \(channel)")
             // Fresh call — don't inherit mute/camera/expand from a prior one.
             isMuted = false
@@ -161,6 +165,7 @@ extension AppState {
         callParticipants = []
         participantsWithVideo = []
         participantsWithScreen = []
+        remoteAudioLevels = [:]
         currentCallChannel = nil
         currentCallSessionId = nil
     }
@@ -186,20 +191,54 @@ extension AppState {
         cameraCapture?.setPreferredDevice(uniqueID: uid)
     }
 
+    /// Route remote audio to an output device (nil = system default).
+    /// Playback lives in the Rust backend, so this goes over the FFI.
+    func setOutputDevice(id: String?) {
+        preferredOutputDeviceId = id
+        do {
+            try avSession?.setOutputDevice(deviceId: id)
+        } catch {
+            errorMessage = "Couldn't switch the speaker: \(error.localizedDescription)"
+        }
+    }
+
+    /// Output devices for the speaker picker (empty when not in a call).
+    func availableOutputDevices() -> [MediaDevice] {
+        guard let av = avSession else { return [] }
+        return MediaDeviceSelection.displayList(
+            av.listOutputDevices().map { MediaDevice(id: $0.id, name: $0.name) }
+        )
+    }
+
     func toggleCamera() {
         let next = !isCameraOn
         if next { startLocalCamera() } else { stopLocalCamera() }
         isCameraOn = next
     }
 
+    /// Share button / `/av screen`: when idle, present the system content
+    /// picker (explicit source choice, no Screen Recording pre-grant needed);
+    /// when sharing, stop.
     func toggleScreenShare() {
         guard isInCall else { return }
-        let next = !isScreenSharing
-        if next { startLocalScreenShare() } else { stopLocalScreenShare(disableVideo: !isCameraOn) }
+        if isScreenSharing {
+            stopLocalScreenShare()
+        } else if #available(macOS 14.0, *) {
+            ScreenSharePickerController.shared.present(
+                onPicked: { [weak self] filter in
+                    self?.startLocalScreenShare(pickedFilter: filter)
+                },
+                onFailed: { [weak self] message in
+                    self?.errorMessage = "Screen sharing failed: \(message)"
+                }
+            )
+        } else {
+            startLocalScreenShare()
+        }
     }
 
-    /// Share a specific display or window (from the picker). Restarts the
-    /// capture when already sharing so switching sources is one click.
+    /// Share a specific display or window (from the quick-pick menu).
+    /// Restarts the capture when already sharing so switching is one click.
     func startScreenShare(target: ScreenShareTarget?) {
         guard isInCall else { return }
         if isScreenSharing {
@@ -248,6 +287,7 @@ extension AppState {
                     + "System Settings → Privacy & Security → Camera, then try again."
             }
             cap.setPreferredDevice(uniqueID: preferredCameraUID)
+            cap.effects.effect = cameraBackgroundEffect
             cameraCapture = cap
         }
         do {
@@ -272,10 +312,15 @@ extension AppState {
     /// Screen share publishes a second, video-only MoQ broadcast at
     /// `{our-path}/screen` (the web client's convention), so it runs
     /// alongside the camera instead of hijacking its track.
-    private func startLocalScreenShare(target: ScreenShareTarget? = nil) {
+    private func startLocalScreenShare(target: ScreenShareTarget? = nil,
+                                       pickedFilter: SCContentFilter? = nil) {
         guard let av = avSession else { return }
         let cap = CallScreenCapture()
         cap.target = target
+        cap.pickedFilter = pickedFilter
+        cap.onError = { [weak self] message in
+            self?.errorMessage = message
+        }
         cap.onFrame = { [weak self] ptr, length, width, height, ts in
             guard let av = self?.avSession else { return }
             let bytes = Array(UnsafeBufferPointer(start: ptr, count: length))
@@ -424,6 +469,13 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             if let layer = state.screenLayer(for: nick) {
                 VideoSampleBuffer.renderAsync(bgra: bgra, width: Int(width), height: Int(height), on: layer)
             }
+        case .audioLevel(let nick, let level):
+            // R1: remote playout level → active-speaker highlighting.
+            state.remoteAudioLevels[nick.lowercased()] = level
+        case .reconnecting(let attempt):
+            state.errorMessage = "Call connection lost — reconnecting (attempt \(attempt))…"
+        case .reconnected:
+            state.errorMessage = nil
         case .error(let message):
             print("[av] Error: \(message)")
         }

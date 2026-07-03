@@ -144,6 +144,9 @@ enum AvCommandAction: Equatable {
     case mute
     case camera
     case screenShare
+    /// `/av screen display` — share the primary display without the
+    /// interactive system picker (automation + muscle memory).
+    case screenShareDisplay
     case help
 }
 
@@ -163,7 +166,9 @@ enum AvCommandParser {
         case "camera", "video":
             return .camera
         case "screen", "share", "screenshare":
-            return .screenShare
+            let arg = argument.split(separator: " ").dropFirst().first
+                .map { String($0).lowercased() }
+            return arg == "display" ? .screenShareDisplay : .screenShare
         default:
             return .help
         }

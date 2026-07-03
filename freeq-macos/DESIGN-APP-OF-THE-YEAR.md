@@ -61,7 +61,7 @@ freeq for Mac
 
 ## 4. Feature Parity Matrix — macOS vs Web
 
-Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-verification. **Bold** = feeds the hero demo or closes a trust gap. *Full re-audit of every row with file:line evidence is a Phase 0 exit gate.*
+Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-verification. **Bold** = feeds the hero demo or closes a trust gap. *Full re-audit of every row with file:line evidence is a Phase 0 exit gate — **completed 2026-07-03**: every ✅/⚠️ claim held (nothing overstated); rows marked ✎ below shipped ahead of the matrix and were flipped with fresh evidence.*
 
 ### Identity & auth
 | Feature | macOS | Web | Notes |
@@ -72,6 +72,7 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | **Step-up OAuth (upload/cross-post)** | ❌ | ✅ | mac uploads 403 dead-end; port |
 | Verified / signed / via badges | ✅ | ✅ | re-styled per §6.8 |
 | Safety numbers | ✅ | ✅ | |
+| Channel E2EE (`/encrypt` ENC1) | ✅ ✎ (ChannelCrypto.swift, ChannelE2eeState.swift) | ✅ | Rust-interop-pinned; added 2026-07-02 |
 
 ### Messaging & formatting
 | Feature | macOS | Web | Notes |
@@ -80,16 +81,16 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | **Full markdown (mime: fences/quotes/lists/tables)** | ❌ | ✅ GFM | agents send these; mac renders mush |
 | **Syntax highlighting + copy** | ❌ | ⚠️ | leapfrog |
 | Mention pills / jumbomoji | ❌ / ❌ | ❌ / ❌ | leapfrog |
-| Edited indicator | ✅ ✎ (MessageListView.swift:298) | ✅ | v1 falsely claimed ❌ |
-| Delete tombstone | ⚠️ row removed | ✅ | |
+| Edited indicator | ✅ ✎ (MessageListView.swift:391) | ✅ | v1 falsely claimed ❌ |
+| Delete tombstone | ✅ ✎ (MessageListView.swift:203 DeletedMessageRow) | ✅ | shipped Phase 0 |
 | **Streaming-edit rendering** | ❌ | ✅ | demo-critical; §6.4 notification rules |
-| **Date separators** | ❌ | ✅ | |
+| **Date separators** | ✅ ✎ (MessageTimeline.swift; MessageListView.swift:180) | ✅ | shipped Phase 0 |
 | **Unread "New" line + read-sync** | ❌ (lastReadMsgId set, never rendered) | ⚠️ local-only in-memory | §6.3 — requires server track S1; **no local-only hack that lies across devices** |
-| Input history / ↑-edit / who-reacted | ❌ ✅ ❌ | ✅ ✅ ✅ | |
+| Input history / ↑-edit / who-reacted | ✅ ✎ ✅ ❌ | ✅ ✅ ✅ | history: ComposeHistory.swift (Phase 0) |
 | Threads | ✅ fixed 320pt | ✅ | resizable split + pop-out; breakpoints §6.1 |
 | Pins / voice messages / media / embeds | ✅ ✅ ✅ ✅ | ✅ ❌ ✅ ✅ | voice = mac lead |
 | Upload / drafts / live composer md | ✅ ❌ ❌ | ✅ ❌ ❌ | drafts + live styling = leapfrog |
-| Format toolbar | ❌ broken (FormatToolbar.swift:27) | ✅ | Phase 0 |
+| Format toolbar | ✅ ✎ (FormatToolbar.swift:29 wraps live selection) | ✅ | shipped Phase 0 |
 
 ### Navigation & search
 | Feature | macOS | Web | Notes |
@@ -98,7 +99,7 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | **Channel browser (real /LIST)** | ❌ fake | ✅ | needs SDK LIST events (R2) |
 | Infinite scroll / ⌘F | ⚠️ button / ✅ | ✅ / ✅ | |
 | **Global search** | ❌ unwired | ⚠️ memory | SQLite + server FTS5, chips; **E2EE scope rule §6.11** |
-| Badge conventions / ⌥ nav / invite links | ⚠️ ❌ ❌ | ✅ ⚠️ ✅ | |
+| Badge conventions / ⌥ nav / invite links | ⚠️ ✅ ✎ ❌ | ✅ ⚠️ ✅ | ⌥ nav: BufferNavigation.swift + App.swift:84 (Phase 0) |
 
 ### Governance & agents (hero surface)
 | Feature | macOS | Web | Notes |
@@ -126,29 +127,30 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | Feature | macOS | Web | Notes |
 |---|---|---|---|
 | Core call controls | ✅ | ✅ | |
-| Screen share | ✅ SCK | ✅ | → SCContentSharingPicker + Presenter Overlay |
+| Screen share | ✅ SCK + system picker ✎ (ScreenSharePicker.swift; dedicated /screen broadcast) | ✅ | Presenter Overlay still planned |
 | Mic processing / metering | ✅ / ✅ self | ⚠️ / ❌ | mac leads |
-| **Output device picker** | ❌ | ❌ | R1 |
-| **Remote active-speaker** | ❌ no FFI event | ❌ | R1; #1 feels-alive gap |
+| **Output device picker** | ✅ ✎ (FFI set_output_device; CallView Speaker menu) | ❌ | mac leads |
+| **Remote active-speaker** | ⚠️ ✎ interface + client wiring frozen (AvEvent.AudioLevel); playout-tap emission pending | ❌ | R1; #1 feels-alive gap |
 | **Frame transport** | ⚠️ [UInt8] FFI copies | n/a | §5.0 prerequisite, R2 |
 | **Green room (when-lost only)** | ❌ | ❌ | §5.1.4 |
-| **Reconnect under SLO** | ❌ dies | ⚠️ | §5.1.3 |
+| **Reconnect under SLO** | ❌ dies (Reconnecting/Reconnected FFI events frozen ✎) | ⚠️ | §5.1.3 |
 | Mini panel / menu-bar controls / pop-out | ❌ | n/a | §6.5 |
 | End-for-all + roster | ❌ | ✅ | |
 | System reactions / Voice Isolation / Continuity auto | ❌ | ❌/n/a | mac-only APIs |
 | System audio share / AV E2EE / captions | ❌ | ❌ | §5.4 |
+| Background blur / custom backgrounds | ✅ ✎ (CameraEffectsProcessor.swift — Vision segmentation) | ❌ | mac leads; added 2026-07-03 |
 
 ### Platform
 | Feature | macOS | Web | Notes |
 |---|---|---|---|
-| Theme | ❌ forced light (App.swift:16) | ✅ | Phase 1 |
+| Theme | ✅ ✎ (App.swift:4 AppearanceSetting system/light/dark) | ✅ | shipped ahead of Phase 1 |
 | App Intents / Spotlight / widgets / menu bar extra / multi-window / Handoff / TipKit | ❌ | n/a | §9 |
 | Accessibility | ❌ zero labels | ⚠️ | §7.3 program |
 | Sandbox / MAS | ❌ off | n/a | Phase 1 |
 | Auto-update | ❌ | ✅ toast | **Sparkle in Phase 1** (dogfood depends on it) |
 | Offline persistence | ✅ SQLite | ⚠️ | mac edge; catch-up seam §6.9 |
 | Multi-account/server readiness | ❌ singleton | ❌ | §6.12 — key by (server, DID) from Phase 1 |
-| Hardcoded hosts | ❌ | ✅ | Phase 0 |
+| Hardcoded hosts | ⚠️ ✎ env-configurable, freeq.at default remains (ServerConfig.swift:7) | ✅ | rest folds into §6.12 |
 
 ---
 
@@ -160,6 +162,7 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 Frames cross UniFFI as copied `[UInt8]` (~250MB/s per 1080p30 participant). Before speaker view/PiP/captions: zero-copy — Rust decodes into IOSurface-backed CVPixelBuffers (or shares IOSurface IDs), Swift renders via AVSampleBufferDisplayLayer/Metal copy-free. **Exit gate: ≤5% CPU per 720p30 tile on M1.** `AvEvent.audioLevel` ships in R1 (interface frozen end of Phase 1 so Swift builds against stubs).
 
 ### 5.1 Reliability & feels-alive (before flash)
+0. **Session scoping — fixed 2026-07-03.** The SFU relays all sessions through one MoQ namespace and announces every broadcast to every consumer; the native FFI subscribed to all of them, so a client in call A played call B's audio/video (observed live: a #freeq participant received a #chadtest broadcast). Fixed client-side with a `{session-id}/` prefix filter in the FFI announce loop (`belongs_to_session`, unit-tested). Server-side per-session announce scoping is the durable fix — S2 candidate.
 1. **Remote active-speaker** (R1) — speaking ring, roster VU, auto speaker view.
 2. **Output device picker** (R1) — route override + chevron.
 3. **Reconnect under SLO** — drop → "Reconnecting…" tile + backoff; teardown after N failures. **SLOs: join ≥99%; reconnect <5s at 5% loss; published glass-to-glass latency.** Link Conditioner matrix + CI soak (Phase 3b deliverable).

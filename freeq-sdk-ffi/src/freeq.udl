@@ -217,7 +217,23 @@ interface AvEvent {
     ScreenTrackStarted(string nick);
     ScreenTrackStopped(string nick);
     ScreenFrame(string nick, sequence<u8> bgra, u32 width, u32 height);
+    // ── R1 interface freeze (DESIGN-APP-OF-THE-YEAR Track R) ──
+    // Per-participant playout level, 0.0–1.0, ~10 Hz while they speak.
+    // Drives remote active-speaker highlighting. Emission lands with the
+    // playout tap; the shape is frozen so clients can build against it.
+    AudioLevel(string nick, float level);
+    // Transport dropped; the SDK is retrying (attempt count, 1-based).
+    Reconnecting(u32 attempt);
+    // Transport restored after Reconnecting.
+    Reconnected();
     Error(string message);
+};
+
+// An audio output device for the speaker picker.
+dictionary AvAudioDevice {
+    string id;
+    string name;
+    boolean is_default;
 };
 
 callback interface AvEventHandler {
@@ -260,6 +276,15 @@ interface FreeqAv {
     // Swift-driven screen capture (ScreenCaptureKit). Same contract as
     // push_video_frame, but feeds the /screen broadcast's encoder.
     void push_screen_frame(sequence<u8> bgra, u32 width, u32 height, u64 timestamp_us);
+
+    // Remote audio plays through the Rust audio backend (cpal), so the
+    // speaker picker lives here, not in AVFoundation.
+    sequence<AvAudioDevice> list_output_devices();
+
+    // Route remote audio to a specific output device (id from
+    // list_output_devices). null = system default.
+    [Throws=FreeqError]
+    void set_output_device(string? device_id);
 
     boolean is_connected();
 };

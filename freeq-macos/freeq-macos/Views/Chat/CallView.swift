@@ -1,5 +1,7 @@
+import AppKit
 import AVFoundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Voice/video call panel — shown when the user is in an AV session.
 ///
@@ -85,7 +87,7 @@ struct CallView: View {
                     .fill(Color(nsColor: .controlBackgroundColor))
                     .frame(width: 110, height: 80)
                 if isLocal, appState.isCameraOn, let cap = appState.localPreviewCapture {
-                    LocalPreviewView(capture: cap)
+                    LocalSelfView(capture: cap, effectActive: appState.cameraBackgroundEffect.isActive)
                         .frame(width: 110, height: 80)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                         .scaleEffect(x: -1)  // mirror self-view, like every meeting app
@@ -112,8 +114,7 @@ struct CallView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
                     .strokeBorder(
-                        isLocal && appState.isLocalSpeaking && !appState.isMuted
-                            ? Theme.success : Color.clear,
+                        isSpeaking(nick: nick, isLocal: isLocal) ? Theme.success : Color.clear,
                         lineWidth: 2
                     )
             )
@@ -166,7 +167,7 @@ struct CallView: View {
             RoundedRectangle(cornerRadius: 14)
                 .fill(Color(nsColor: .controlBackgroundColor))
             if isLocal, appState.isCameraOn, let cap = appState.localPreviewCapture {
-                LocalPreviewView(capture: cap)
+                LocalSelfView(capture: cap, effectActive: appState.cameraBackgroundEffect.isActive)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .scaleEffect(x: -1)
             } else if isLocal, appState.isScreenSharing {
@@ -210,11 +211,19 @@ struct CallView: View {
         .overlay(
             RoundedRectangle(cornerRadius: 14)
                 .strokeBorder(
-                    isLocal && appState.isLocalSpeaking && !appState.isMuted
-                        ? Theme.success : Color.clear,
+                    isSpeaking(nick: nick, isLocal: isLocal) ? Theme.success : Color.clear,
                     lineWidth: 2.5
                 )
         )
+    }
+
+    /// Speaking ring: local uses the mic meter's debounced flag; remote uses
+    /// the SDK's playout levels (AvEvent.audioLevel, R1).
+    private func isSpeaking(nick: String, isLocal: Bool) -> Bool {
+        if isLocal {
+            return appState.isLocalSpeaking && !appState.isMuted
+        }
+        return (appState.remoteAudioLevels[nick.lowercased()] ?? 0) > 0.05
     }
 
     // MARK: - Muted-while-talking hint
@@ -391,6 +400,23 @@ struct MicPickerMenu: View {
                 }
             }
         }
+        let outputs = appState.availableOutputDevices()
+        if !outputs.isEmpty {
+            Section("Speaker") {
+                Button {
+                    appState.setOutputDevice(id: nil)
+                } label: {
+                    menuRow("System Default", checked: appState.preferredOutputDeviceId == nil)
+                }
+                ForEach(outputs) { device in
+                    Button {
+                        appState.setOutputDevice(id: device.id)
+                    } label: {
+                        menuRow(device.name, checked: appState.preferredOutputDeviceId == device.id)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -412,6 +438,37 @@ struct CameraPickerMenu: View {
                     menuRow(device.name, checked: appState.preferredCameraUID == device.id)
                 }
             }
+        }
+        Section("Background") {
+            Button {
+                appState.cameraBackgroundEffect = .none
+            } label: {
+                menuRow("None", checked: appState.cameraBackgroundEffect == .none)
+            }
+            Button {
+                appState.cameraBackgroundEffect = .blur
+            } label: {
+                menuRow("Blur", checked: appState.cameraBackgroundEffect == .blur)
+            }
+            Button {
+                chooseBackgroundImage()
+            } label: {
+                if case .image = appState.cameraBackgroundEffect {
+                    Label("Image…", systemImage: "checkmark")
+                } else {
+                    Text("Image…")
+                }
+            }
+        }
+    }
+
+    private func chooseBackgroundImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose a background image for your camera"
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.cameraBackgroundEffect = .image(url)
         }
     }
 }
@@ -458,7 +515,61 @@ private func menuRow(_ title: String, checked: Bool) -> some View {
     }
 }
 
-// MARK: - Local self-view (AVCaptureVideoPreviewLayer)
+// MARK: - Local self-view
+
+/// Chooses the honest self-view: the raw low-latency preview layer normally,
+/// or the processed (background-effect) frames — what peers actually see —
+/// when an effect is active.
+struct LocalSelfView: View {
+    let capture: CallCameraCapture
+    let effectActive: Bool
+
+    var body: some View {
+        if effectActive {
+            AttachedLayerView(layer: capture.processedPreviewLayer)
+        } else {
+            LocalPreviewView(capture: capture)
+        }
+    }
+}
+
+/// Hosts an externally-owned CALayer, resized to the view's bounds.
+struct AttachedLayerView: NSViewRepresentable {
+    let layer: CALayer
+
+    func makeNSView(context: Context) -> HostView {
+        let v = HostView()
+        v.attach(layer)
+        return v
+    }
+
+    func updateNSView(_ nsView: HostView, context: Context) {
+        nsView.attach(layer)
+    }
+
+    final class HostView: NSView {
+        private weak var hosted: CALayer?
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+        func attach(_ layer: CALayer) {
+            guard hosted !== layer else { return }
+            hosted?.removeFromSuperlayer()
+            self.layer?.addSublayer(layer)
+            hosted = layer
+            layer.frame = bounds
+        }
+        override func layout() {
+            super.layout()
+            hosted?.frame = bounds
+        }
+    }
+}
+
+// MARK: - Raw preview self-view (AVCaptureVideoPreviewLayer)
 
 struct LocalPreviewView: NSViewRepresentable {
     let capture: CallCameraCapture
