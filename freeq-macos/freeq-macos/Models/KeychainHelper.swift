@@ -58,9 +58,60 @@ enum KeychainHelper {
     @discardableResult
     static func save(key: String, value: String) -> Bool {
         guard let data = value.data(using: .utf8) else { return false }
-        if save(key: key, data: data, dataProtection: true) { return true }
+        if save(key: key, data: data, dataProtection: true) {
+            deleteContainerFallback(key: key)  // keychain is authoritative now
+            return true
+        }
         Log.auth.warning("KeychainHelper: data-protection save failed (status=\(lastStatus, privacy: .public)) — trying legacy keychain for key=\(key, privacy: .public)")
-        return save(key: key, data: data, dataProtection: false)
+        if save(key: key, data: data, dataProtection: false) {
+            deleteContainerFallback(key: key)
+            return true
+        }
+        // Both keychains unavailable. Under App Sandbox this happens on
+        // ad-hoc-signed DEV builds: the data-protection keychain is keyed to
+        // the code-signing identity, which changes on every rebuild, so a
+        // token stored by one build can't be read by the next — the user
+        // "can't reconnect after a rebuild" bug. Fall back to a file in the
+        // app's OWN container (sandbox-safe, stable across rebuilds) so dev
+        // sessions persist. Properly-signed (Developer ID / MAS) builds keep
+        // the token in the keychain and never touch this path.
+        Log.auth.warning("KeychainHelper: both keychains unavailable — using container-file fallback for key=\(key, privacy: .public)")
+        return saveContainerFallback(key: key, value: value)
+    }
+
+    // MARK: - Container-file fallback (sandbox dev builds only)
+
+    private static func fallbackURL(key: String) -> URL? {
+        guard let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let base = dir.appendingPathComponent("at.freeq.macos", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("kc.\(key)")
+    }
+
+    @discardableResult
+    private static func saveContainerFallback(key: String, value: String) -> Bool {
+        guard let url = fallbackURL(key: key), let data = value.data(using: .utf8) else { return false }
+        do {
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            return true
+        } catch {
+            Log.auth.error("KeychainHelper: container fallback save failed key=\(key, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    private static func loadContainerFallback(key: String) -> String? {
+        guard let url = fallbackURL(key: key),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func deleteContainerFallback(key: String) {
+        if let url = fallbackURL(key: key) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// Status of the most recent low-level operation (for fallback routing).
@@ -106,7 +157,10 @@ enum KeychainHelper {
         // legacy store is harmless — our own items carry our ACL, so no
         // prompt fires for them.
         if let value = load(key: key, dataProtection: true) { return value }
-        return load(key: key, dataProtection: false)
+        if let value = load(key: key, dataProtection: false) { return value }
+        // Last resort: the container-file fallback written when both
+        // keychains were unavailable (sandbox + ad-hoc dev signing).
+        return loadContainerFallback(key: key)
     }
 
     private static func load(key: String, dataProtection: Bool) -> String? {
@@ -123,5 +177,6 @@ enum KeychainHelper {
         // signing-mode change.
         SecItemDelete(baseQuery(key: key, dataProtection: true) as CFDictionary)
         SecItemDelete(legacyQuery(key: key) as CFDictionary)
+        deleteContainerFallback(key: key)
     }
 }
