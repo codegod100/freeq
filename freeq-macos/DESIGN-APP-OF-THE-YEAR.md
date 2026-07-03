@@ -325,7 +325,8 @@ Phase 1: Command registry — one definition (name/icon/shortcut/availability/ha
 
 **Track S (server/SDK; owner: server team):**
 - S1 (needed by Phase 3a): `draft/read-marker` in freeq-server + SDK + **web + iOS adoption** (read-sync is a network feature or it is nothing).
-- S2: FTS search API hardening for §6.11 scope rules; audit/pins REST already exist.
+- S2: FTS search API hardening for §6.11 scope rules; audit/pins REST already exist. Also: **per-session MoQ announce scoping** (design in `freeq-server/src/av_sfu.rs` header — durable fix for the 2026-07-03 cross-call media leak; client-side filter shipped, iOS/old builds still leak).
+- S3 — **broker: map dead upstream sessions to 401, not 502** (found live 2026-07-03): when the stored session's PDS refresh is permanently dead, `/session` returns 502 (sometimes hanging 30s+), indistinguishable from "broker briefly down" — clients retried a dead token forever and never showed sign-in. Clients now have a timeout + sign-in escape hatch, but the broker should say 401 so recovery is one step, not a heuristic.
 
 **Track R (Rust core; owner: SDK team; FFI interfaces frozen end of Phase 1):**
 - R1 (needed by 3b): `AvEvent.audioLevel`, reconnect events, output-route API.
