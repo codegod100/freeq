@@ -264,7 +264,17 @@ struct MessageRow: View {
     @Environment(AppState.self) private var appState
     @AppStorage("freeq.compactMode") private var compactMode = false
     let message: ChatMessage
-    @State private var isHovered = false
+
+    // Hover is a UNION of row-hover and bar-hover: the action bar can be
+    // taller than a single-line grouped row, so the pointer legitimately
+    // sits on the bar while outside the row. If the bar's visibility keyed
+    // off row-hover alone, reaching for it would hide it under the cursor
+    // (flicker loop, unclickable buttons). Row-unhover is debounced one
+    // beat so the hover can hand off to the bar across the frame boundary.
+    @State private var isRowHovered = false
+    @State private var isBarHovered = false
+    @State private var hoverToken = 0
+    private var isHovered: Bool { isRowHovered || isBarHovered }
 
     private var isSelf: Bool {
         message.from.lowercased() == appState.nick.lowercased()
@@ -509,12 +519,26 @@ struct MessageRow: View {
                 ? Theme.accent.opacity(0.10)
                 : isHovered ? Theme.surfaceSoft.opacity(0.80) : Color.clear
         )
-        .onHover { isHovered = $0 }
+        .onHover { hovering in
+            if hovering {
+                hoverToken &+= 1
+                isRowHovered = true
+            } else {
+                let token = hoverToken
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
+                    if hoverToken == token { isRowHovered = false }
+                }
+            }
+        }
+        // Inside the row's bounds (the old `.offset(y: -12)` pushed the bar's
+        // top half outside the hover region entirely); the bar's own onHover
+        // covers whatever still overhangs short rows.
         .overlay(alignment: .topTrailing) {
             if isHovered && !isSystem {
                 HoverActionBar(message: message)
                     .padding(.trailing, 8)
-                    .offset(y: -12)
+                    .padding(.top, 1)
+                    .onHover { isBarHovered = $0 }
             }
         }
         .contextMenu { messageContextMenu }
