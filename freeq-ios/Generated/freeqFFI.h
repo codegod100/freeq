@@ -321,9 +321,19 @@ int8_t uniffi_freeq_sdk_ffi_fn_method_freeqav_is_connected(void*_Nonnull ptr, Ru
 void uniffi_freeq_sdk_ffi_fn_method_freeqav_leave(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_LIST_OUTPUT_DEVICES
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_LIST_OUTPUT_DEVICES
+RustBuffer uniffi_freeq_sdk_ffi_fn_method_freeqav_list_output_devices(void*_Nonnull ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_PUSH_AUDIO_FRAME
 #define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_PUSH_AUDIO_FRAME
 void uniffi_freeq_sdk_ffi_fn_method_freeqav_push_audio_frame(void*_Nonnull ptr, RustBuffer samples, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_PUSH_SCREEN_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_PUSH_SCREEN_FRAME
+void uniffi_freeq_sdk_ffi_fn_method_freeqav_push_screen_frame(void*_Nonnull ptr, RustBuffer bgra, uint32_t width, uint32_t height, uint64_t timestamp_us, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_PUSH_VIDEO_FRAME
@@ -339,6 +349,16 @@ void uniffi_freeq_sdk_ffi_fn_method_freeqav_set_camera_enabled(void*_Nonnull ptr
 #ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_SET_MUTED
 #define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_SET_MUTED
 void uniffi_freeq_sdk_ffi_fn_method_freeqav_set_muted(void*_Nonnull ptr, int8_t muted, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_SET_OUTPUT_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_SET_OUTPUT_DEVICE
+void uniffi_freeq_sdk_ffi_fn_method_freeqav_set_output_device(void*_Nonnull ptr, RustBuffer device_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_SET_SCREEN_ENABLED
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_METHOD_FREEQAV_SET_SCREEN_ENABLED
+void uniffi_freeq_sdk_ffi_fn_method_freeqav_set_screen_enabled(void*_Nonnull ptr, int8_t enabled, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_FN_CLONE_FREEQCLIENT
@@ -839,9 +859,21 @@ uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_leave(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_LIST_OUTPUT_DEVICES
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_LIST_OUTPUT_DEVICES
+uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_list_output_devices(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_PUSH_AUDIO_FRAME
 #define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_PUSH_AUDIO_FRAME
 uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_audio_frame(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_PUSH_SCREEN_FRAME
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_PUSH_SCREEN_FRAME
+uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_screen_frame(void
     
 );
 #endif
@@ -860,6 +892,18 @@ uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_camera_enabled(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_SET_MUTED
 #define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_SET_MUTED
 uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_muted(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_SET_OUTPUT_DEVICE
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_SET_OUTPUT_DEVICE
+uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_output_device(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_SET_SCREEN_ENABLED
+#define UNIFFI_FFIDEF_UNIFFI_FREEQ_SDK_FFI_CHECKSUM_METHOD_FREEQAV_SET_SCREEN_ENABLED
+uint16_t uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_screen_enabled(void
     
 );
 #endif

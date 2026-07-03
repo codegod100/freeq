@@ -82,9 +82,39 @@ struct CallView: View {
                             .lineLimit(1)
                     }
                 }
+
+                // Screen-share tiles — a separate tile per sharer, keyed
+                // distinctly from the camera tile above so a participant can
+                // share screen and camera at the same time. Letterboxed via
+                // RemoteScreenTile (.resizeAspect).
+                ForEach(screenSharers, id: \.self) { nick in
+                    VStack(spacing: 4) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 8)
+                                .fill(Color.black)
+                                .frame(width: 100, height: 75)
+
+                            RemoteScreenTile(appState: appState, nick: nick)
+                                .frame(width: 100, height: 75)
+                                .clipShape(RoundedRectangle(cornerRadius: 8))
+                        }
+
+                        Label(nick, systemImage: "rectangle.on.rectangle")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+        }
+    }
+
+    /// Nicks currently sharing their screen, ordered stably for the grid.
+    private var screenSharers: [String] {
+        appState.callParticipants.filter {
+            appState.participantsWithScreen.contains($0)
         }
     }
 
@@ -92,6 +122,10 @@ struct CallView: View {
     /// vertically, so the call is big enough to actually use on a phone.
     private var expandedGrid: some View {
         VStack(spacing: 6) {
+            // Screen shares get top billing — they're the reason you expand.
+            ForEach(screenSharers, id: \.self) { nick in
+                expandedScreenTile(nick: nick)
+            }
             ForEach(appState.callParticipants, id: \.self) { nick in
                 expandedTile(nick: nick, isLocal: false)
             }
@@ -99,6 +133,37 @@ struct CallView: View {
         }
         .padding(8)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// One large letterboxed screen-share tile in the expanded layout.
+    @ViewBuilder
+    private func expandedScreenTile(nick: String) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.black)
+
+            RemoteScreenTile(appState: appState, nick: nick)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            VStack {
+                Spacer()
+                HStack {
+                    Label("\(nick) — screen", systemImage: "rectangle.on.rectangle")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.black.opacity(0.55))
+                        .clipShape(Capsule())
+                    Spacer()
+                }
+                .padding(8)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
     /// One large tile in the expanded layout — live video when it's
@@ -152,16 +217,19 @@ struct CallView: View {
 
     private var controlsBar: some View {
         HStack(spacing: 16) {
-            // Status
+            // Status — green while healthy, amber "Reconnecting…" inline
+            // while the transport is recovering (never a modal alert).
             HStack(spacing: 6) {
                 Circle()
-                    .fill(Color.green)
+                    .fill(appState.callTransportStatus == nil ? Color.green : Color.orange)
                     .frame(width: 8, height: 8)
 
-                Text("Voice (\(appState.callParticipants.count + 1))")
+                Text(appState.callTransportStatus
+                    ?? "Voice (\(appState.callParticipants.count + 1))")
                     .font(.subheadline)
                     .fontWeight(.medium)
-                    .foregroundColor(.green)
+                    .foregroundColor(appState.callTransportStatus == nil ? .green : .orange)
+                    .lineLimit(1)
             }
 
             Spacer()

@@ -77,6 +77,47 @@ struct RemoteVideoTile: UIViewRepresentable {
     }
 }
 
+/// Remote participant screen-share tile. Identical plumbing to
+/// `RemoteVideoTile` but binds the *screen* sink (fed by `AvEvent.screenFrame`)
+/// and letterboxes with `.resizeAspect` — screen content is arbitrary aspect
+/// (a landscape desktop on a portrait phone) and must never be cropped, unlike
+/// the camera track which fills its square tile with `.resizeAspectFill`.
+struct RemoteScreenTile: UIViewRepresentable {
+    let appState: AppState
+    let nick: String
+
+    func makeUIView(context: Context) -> SampleBufferView {
+        let v = SampleBufferView()
+        appState.bindScreenSink(nick: nick, to: v.displayLayer)
+        return v
+    }
+
+    func updateUIView(_ uiView: SampleBufferView, context: Context) {
+        appState.bindScreenSink(nick: nick, to: uiView.displayLayer)
+    }
+
+    static func dismantleUIView(_ uiView: SampleBufferView, coordinator: ()) {
+        // Sink lifetime is owned by AppState; nothing to do here.
+    }
+
+    final class SampleBufferView: UIView {
+        let displayLayer = AVSampleBufferDisplayLayer()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            // Letterbox — preserve the shared screen's aspect ratio.
+            displayLayer.videoGravity = .resizeAspect
+            layer.addSublayer(displayLayer)
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            displayLayer.frame = bounds
+        }
+    }
+}
+
 /// Decodes a tightly-packed BGRA buffer into a `CMSampleBuffer` and enqueues
 /// it on the given display layer. Called on the AV callback queue from
 /// `AppState.AvCallbackHandler` (`videoFrame` case).

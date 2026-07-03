@@ -407,9 +407,34 @@ class AppState: ObservableObject {
     fileprivate var remoteVideoLayers: NSMapTable<NSString, AVSampleBufferDisplayLayer> =
         NSMapTable.strongToWeakObjects()
 
+    /// Per-nick remote screen-share display layers, keyed by lower-cased nick.
+    /// Set by `RemoteScreenTile` when it appears; cleared when the view goes
+    /// away (weak values). Kept separate from `remoteVideoLayers` so a peer's
+    /// camera and screen render into independent tiles.
+    fileprivate var remoteScreenLayers: NSMapTable<NSString, AVSampleBufferDisplayLayer> =
+        NSMapTable.strongToWeakObjects()
+
     /// Set of nicks for which we've received at least one frame this call.
     /// Drives the "video active" indicator on the participant tile.
     @Published var participantsWithVideo: Set<String> = []
+
+    /// Nicks with a live screen-share broadcast (the `{peer}/screen` MoQ
+    /// path). Distinct from `participantsWithVideo` (the camera track) so a
+    /// participant can share their screen and their camera at the same time,
+    /// each rendered in its own tile.
+    @Published var participantsWithScreen: Set<String> = []
+
+    /// Remote playout levels (lowercased nick → 0…1) from
+    /// `AvEvent.audioLevel`. Stored for active-speaker highlighting; the iOS
+    /// call UI does not draw a speaking ring yet, so this is currently a data
+    /// sink the UI can start reading whenever that indicator lands.
+    @Published var remoteAudioLevels: [String: Float] = [:]
+
+    /// Quiet in-call transport status ("Reconnecting…"), shown inline in the
+    /// call controls bar — never as a modal alert. Reconnection is automatic,
+    /// so it must not look like a hard failure. nil when the transport is
+    /// healthy.
+    @Published var callTransportStatus: String? = nil
 
     /// Local-preview wrapper for the call UI to bind against. Returns nil
     /// when the camera is off.
@@ -574,6 +599,9 @@ class AppState: ObservableObject {
             self.isCallExpanded = false
             self.callParticipants = []
             self.participantsWithVideo = []
+            self.participantsWithScreen = []
+            self.remoteAudioLevels = [:]
+            self.callTransportStatus = nil
             self.currentCallChannel = nil
             self.currentCallSessionId = nil
             self.endCallActivity()
@@ -628,6 +656,9 @@ class AppState: ObservableObject {
             self.isCallExpanded = false
             self.callParticipants = []
             self.participantsWithVideo = []
+            self.participantsWithScreen = []
+            self.remoteAudioLevels = [:]
+            self.callTransportStatus = nil
             self.currentCallChannel = nil
             self.currentCallSessionId = nil
             self.endCallActivity()
@@ -754,6 +785,16 @@ class AppState: ObservableObject {
     /// Lookup helper used by the AV event handler.
     fileprivate func videoLayer(for nick: String) -> AVSampleBufferDisplayLayer? {
         remoteVideoLayers.object(forKey: nick.lowercased() as NSString)
+    }
+
+    /// Called by `RemoteScreenTile`. Weakly retains the screen display layer.
+    func bindScreenSink(nick: String, to layer: AVSampleBufferDisplayLayer) {
+        remoteScreenLayers.setObject(layer, forKey: nick.lowercased() as NSString)
+    }
+
+    /// Lookup helper used by the AV event handler for screen frames.
+    fileprivate func screenLayer(for nick: String) -> AVSampleBufferDisplayLayer? {
+        remoteScreenLayers.object(forKey: nick.lowercased() as NSString)
     }
 
     /// Start or join a voice session on a channel.
@@ -2246,6 +2287,10 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                         state.participantsWithVideo = state.participantsWithVideo.filter {
                             $0.lowercased() != avActor.lowercased()
                         }
+                        state.participantsWithScreen = state.participantsWithScreen.filter {
+                            $0.lowercased() != avActor.lowercased()
+                        }
+                        state.remoteAudioLevels.removeValue(forKey: avActor.lowercased())
                     }
                 default:
                     break
@@ -2366,6 +2411,9 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             state.isInCall = false
             state.callParticipants = []
             state.participantsWithVideo = []
+            state.participantsWithScreen = []
+            state.remoteAudioLevels = [:]
+            state.callTransportStatus = nil
             state.isCameraOn = false
             state.isMuted = false
             state.isCallExpanded = false
@@ -2396,6 +2444,10 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             state.participantsWithVideo = state.participantsWithVideo.filter {
                 $0.lowercased() != nick.lowercased()
             }
+            state.participantsWithScreen = state.participantsWithScreen.filter {
+                $0.lowercased() != nick.lowercased()
+            }
+            state.remoteAudioLevels.removeValue(forKey: nick.lowercased())
             state.updateCallActivity()
             print("[av] Participant left: \(nick)")
 
@@ -2435,6 +2487,57 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
                 )
             }
             _ = state.participantsWithVideo.insert(nick)
+
+        case .screenTrackStarted(let nick):
+            // A peer began sharing their screen on the `{peer}/screen` path.
+            // Mark them so the UI can offer a screen tile even before the
+            // first frame lands.
+            _ = state.participantsWithScreen.insert(nick)
+            print("[av] Screen started: \(nick)")
+
+        case .screenTrackStopped(let nick):
+            state.participantsWithScreen = state.participantsWithScreen.filter {
+                $0.lowercased() != nick.lowercased()
+            }
+            print("[av] Screen stopped: \(nick)")
+
+        case .screenFrame(let nick, let bgra, let width, let height):
+            // Screen frames flow through a dedicated per-nick display layer
+            // (bound by `RemoteScreenTile`), separate from the camera-track
+            // layer, so a participant can share screen and camera at once.
+            // Same join/frame race tolerance as videoFrame: a frame from a
+            // nick we haven't logged as a participant yet is still real media,
+            // so adopt them rather than dropping it.
+            if !state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) {
+                state.callParticipants.append(nick)
+            }
+            _ = state.participantsWithScreen.insert(nick)
+            if let layer = state.screenLayer(for: nick) {
+                VideoSampleBuffer.enqueue(
+                    bgra: bgra,
+                    width: Int(width),
+                    height: Int(height),
+                    on: layer
+                )
+            }
+
+        case .audioLevel(let nick, let level):
+            // Remote playout level → stored for active-speaker highlighting.
+            // The iOS call UI doesn't render a speaking ring yet, so this is
+            // just a data sink for now; the value is keyed lowercased to match
+            // the other per-nick maps.
+            state.remoteAudioLevels[nick.lowercased()] = level
+
+        case .reconnecting(let attempt):
+            // Inline call-bar status only — NOT an errorMessage/modal alert.
+            // Automatic transport recovery must not read as a hard failure.
+            state.callTransportStatus = attempt <= 1
+                ? "Reconnecting…" : "Reconnecting… (attempt \(attempt))"
+            print("[av] Reconnecting (attempt \(attempt))")
+
+        case .reconnected:
+            state.callTransportStatus = nil
+            print("[av] Reconnected")
 
         case .error(let message):
             print("[av] Error: \(message)")
