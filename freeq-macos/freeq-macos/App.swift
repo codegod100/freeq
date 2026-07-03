@@ -29,26 +29,34 @@ enum AppearanceSetting: String, CaseIterable {
 @main
 struct FreeqApp: App {
     @State private var appState = AppState()
-    @State private var showQuickSwitcher = false
-    @State private var showBookmarks = false
-    @State private var showChannelList = false
     @State private var showOnboarding = !UserDefaults.standard.bool(forKey: "freeq.onboardingComplete")
     @AppStorage("freeq.appearance") private var appearanceRaw = "system"
 
+    /// Menu item projected from the Command registry — same title,
+    /// shortcut, availability, and handler the ⌘K palette uses.
+    private func commandButton(_ id: String) -> some View {
+        Button(CommandActions.title(id, appState)) {
+            CommandActions.run(id, appState)
+        }
+        .keyboardShortcut(CommandActions.keyboardShortcut(id))
+        .disabled(!CommandActions.isEnabled(id, appState))
+    }
+
     var body: some Scene {
         WindowGroup {
+            @Bindable var state = appState
             MainView()
                 .environment(appState)
                 .frame(minWidth: 700, minHeight: 400)
-                .sheet(isPresented: $showQuickSwitcher) {
+                .sheet(isPresented: $state.showQuickSwitcher) {
                     QuickSwitcher()
                         .environment(appState)
                 }
-                .sheet(isPresented: $showBookmarks) {
+                .sheet(isPresented: $state.showBookmarks) {
                     BookmarksPanel()
                         .environment(appState)
                 }
-                .sheet(isPresented: $showChannelList) {
+                .sheet(isPresented: $state.showChannelList) {
                     ChannelListBrowser()
                         .environment(appState)
                 }
@@ -72,61 +80,27 @@ struct FreeqApp: App {
                 }
         }
         .commands {
+            // All menu content projects from the Command registry
+            // (CommandRegistry + CommandActions) — the ⌘K palette shows the
+            // same commands, so the two can never drift.
             CommandGroup(after: .sidebar) {
-                Button("Toggle Detail Panel") {
-                    appState.showDetailPanel.toggle()
-                }
-                .keyboardShortcut("d", modifiers: [.command, .shift])
+                commandButton("view.toggleDetail")
 
                 Divider()
 
                 // Slack-compatible channel navigation muscle memory.
-                Button("Previous Channel") {
-                    appState.switchToAdjacentChannel(.previous)
-                }
-                .keyboardShortcut(.upArrow, modifiers: .option)
-
-                Button("Next Channel") {
-                    appState.switchToAdjacentChannel(.next)
-                }
-                .keyboardShortcut(.downArrow, modifiers: .option)
-
-                Button("Previous Unread Channel") {
-                    appState.switchToAdjacentChannel(.previous, unreadOnly: true)
-                }
-                .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
-
-                Button("Next Unread Channel") {
-                    appState.switchToAdjacentChannel(.next, unreadOnly: true)
-                }
-                .keyboardShortcut(.downArrow, modifiers: [.option, .shift])
+                commandButton("nav.prevChannel")
+                commandButton("nav.nextChannel")
+                commandButton("nav.prevUnread")
+                commandButton("nav.nextUnread")
             }
 
             CommandGroup(replacing: .newItem) {
-                Button("Quick Switcher") {
-                    showQuickSwitcher = true
-                }
-                .keyboardShortcut("k", modifiers: .command)
-
-                Button("Search Messages") {
-                    appState.showSearch.toggle()
-                }
-                .keyboardShortcut("f", modifiers: .command)
-
-                Button("Bookmarks") {
-                    showBookmarks = true
-                }
-                .keyboardShortcut("b", modifiers: [.command, .shift])
-
-                Button("Browse Channels") {
-                    showChannelList = true
-                }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
-
-                Button("Join Channel…") {
-                    appState.showJoinSheet = true
-                }
-                .keyboardShortcut("j", modifiers: .command)
+                commandButton("nav.quickSwitcher")
+                commandButton("nav.search")
+                commandButton("nav.bookmarks")
+                commandButton("nav.browseChannels")
+                commandButton("nav.joinChannel")
 
                 Divider()
 
@@ -138,39 +112,26 @@ struct FreeqApp: App {
                 }
             }
 
-            // In-call controls (Zoom's muscle memory: ⇧⌘M / ⇧⌘V / ⇧⌘S).
-            CommandMenu("Call") {
-                Button(appState.isMuted ? "Unmute" : "Mute") {
-                    appState.toggleMute()
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
-                .disabled(!appState.isInCall)
-
-                Button(appState.isCameraOn ? "Stop Camera" : "Start Camera") {
-                    appState.toggleCamera()
-                }
-                .keyboardShortcut("v", modifiers: [.command, .shift])
-                .disabled(!appState.isInCall)
-
-                Button(appState.isScreenSharing ? "Stop Sharing Screen" : "Share Screen") {
-                    appState.toggleScreenShare()
-                }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                .disabled(!appState.isInCall)
+            CommandMenu("Channel") {
+                commandButton("channel.toggleFavorite")
+                commandButton("channel.toggleMute")
+                commandButton("channel.leave")
 
                 Divider()
 
-                Button(appState.isCallExpanded ? "Collapse Call" : "Expand Call") {
-                    appState.isCallExpanded.toggle()
-                }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
-                .disabled(!appState.isInCall)
+                commandButton("presence.toggleAway")
+            }
 
-                Button("Leave Call") {
-                    appState.leaveCall()
-                }
-                .keyboardShortcut("h", modifiers: [.command, .shift])
-                .disabled(!appState.isInCall)
+            // In-call controls (Zoom's muscle memory: ⇧⌘M / ⇧⌘V / ⇧⌘S).
+            CommandMenu("Call") {
+                commandButton("call.toggleMute")
+                commandButton("call.toggleCamera")
+                commandButton("call.toggleScreen")
+
+                Divider()
+
+                commandButton("call.toggleExpand")
+                commandButton("call.leave")
             }
 
             CommandGroup(replacing: .help) {

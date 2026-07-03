@@ -50,6 +50,7 @@ let package = Package(
                 "ComposeHistory.swift",
                 "MessageTimeline.swift",
                 "BufferNavigation.swift",
+                "CommandRegistry.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]

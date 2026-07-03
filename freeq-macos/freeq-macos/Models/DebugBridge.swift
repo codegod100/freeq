@@ -134,6 +134,65 @@ final class DebugBridge {
         case "storepath":
             let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
             NSLog("[debug-bridge] cachesDir=\(caches.path)")
+        // ── Message-list spike harness ──
+        case "stress":
+            // Inject N synthetic messages into the active channel: mixed
+            // lengths, multiline, inline code, reactions, timestamps
+            // spanning 30 days (exercises date separators + grouping).
+            guard let ch = app.activeChannelState else { return }
+            let n = Int(arg) ?? 1000
+            let nicks = ["alice", "bob", "carol", "dave", "erin"]
+            let now = Date()
+            let start = now.addingTimeInterval(-30 * 86_400)
+            let bodies = [
+                "short one",
+                "a somewhat longer message that wraps across a couple of lines when the window is narrow enough to matter",
+                "line one\nline two\nline three",
+                "with `inline code` and **bold** and _italics_ mixed in",
+                String(repeating: "stress ", count: 60),
+            ]
+            for i in 0..<n {
+                let ts = start.addingTimeInterval(Double(i) / Double(n) * 30 * 86_400)
+                var msg = ChatMessage(
+                    id: String(format: "stress-%06d", i),
+                    from: nicks[i % nicks.count],
+                    text: "#\(i) " + bodies[i % bodies.count],
+                    isAction: false, timestamp: ts, replyTo: nil)
+                if i % 7 == 0 { msg.reactions = ["👍": ["alice", "bob"], "🎉": ["carol"]] }
+                ch.appendIfNew(msg)
+            }
+            NSLog("[debug-bridge] stress injected \(n), channel now \(ch.messages.count)")
+        case "editstorm":
+            // Streaming-edit simulation: rapid text mutations on the last
+            // message, 30/s (the agent-output pattern).
+            guard let ch = app.activeChannelState,
+                  let last = ch.messages.last(where: { !$0.from.isEmpty }) else { return }
+            let count = Int(arg) ?? 100
+            Task { @MainActor in
+                for i in 0..<count {
+                    ch.applyEdit(originalId: last.id, newId: nil,
+                                 newText: "streaming chunk \(i): " + String(repeating: "token ", count: i % 40))
+                    try? await Task.sleep(nanoseconds: 33_000_000)
+                }
+                NSLog("[debug-bridge] editstorm done (\(count) edits)")
+            }
+        case "sweep":
+            // Scroll the full list via the scroll-to-message path,
+            // top → bottom, one hop per 400ms.
+            guard let ch = app.activeChannelState else { return }
+            let ids = ch.messages.enumerated()
+                .filter { $0.offset % 40 == 0 }
+                .map { $0.element.id }
+            Task { @MainActor in
+                for id in ids {
+                    app.scrollToMessageId = id
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                }
+                NSLog("[debug-bridge] sweep done (\(ids.count) hops)")
+            }
+        case "hitch":
+            if arg == "start" { FrameHitchMonitor.shared.start() }
+            else { FrameHitchMonitor.shared.stop() }
         case "dumpmsgs":
             if let ch = app.activeChannelState {
                 for (i, m) in ch.messages.enumerated() {
