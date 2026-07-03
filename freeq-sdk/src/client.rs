@@ -150,6 +150,80 @@ pub struct MultilineChunk {
     pub concat: bool,
 }
 
+/// Per-PRIVMSG byte budget for a multiline chunk. Kept safely under the wire
+/// line cap (matches the JS SDK). A source line longer than this is split into
+/// `concat` continuation chunks.
+const MULTILINE_PER_CHUNK_BYTES: usize = 6400;
+/// Per-BATCH ceilings (freeq server's advertised `draft/multiline` policy). A
+/// send exceeding either is split across SEVERAL batches (several logical
+/// messages) rather than one oversized batch the server would reject.
+const MULTILINE_MAX_LINES: usize = 100;
+const MULTILINE_MAX_BYTES: usize = 40000;
+
+/// Split `text` into `draft/multiline` chunks so the assembled body is
+/// byte-identical to the input. Source lines (`\n`-separated) open a new chunk
+/// with `concat=false`; a line longer than `budget` bytes is hard-split into
+/// `concat=true` continuation chunks (rejoined with no separator). An empty
+/// source line emits an empty non-concat chunk so blank lines survive.
+/// Splits only on UTF-8 char boundaries.
+fn chunk_multiline_body(text: &str, budget: usize) -> Vec<MultilineChunk> {
+    let mut out = Vec::new();
+    for line in text.split('\n') {
+        if line.is_empty() {
+            out.push(MultilineChunk { body: String::new(), concat: false });
+            continue;
+        }
+        let mut first = true;
+        let mut start = 0;
+        while start < line.len() {
+            let mut end = (start + budget).min(line.len());
+            while end > start && !line.is_char_boundary(end) {
+                end -= 1;
+            }
+            // A single char wider than the budget: take at least that char.
+            if end == start {
+                end = start + 1;
+                while end < line.len() && !line.is_char_boundary(end) {
+                    end += 1;
+                }
+            }
+            out.push(MultilineChunk { body: line[start..end].to_string(), concat: !first });
+            first = false;
+            start = end;
+        }
+    }
+    out
+}
+
+/// Group chunks into batches that each stay within the server's per-batch
+/// `max-lines` / `max-bytes` policy. A batch boundary is only taken at a
+/// non-`concat` chunk, so a hard-split line is never severed across batches.
+fn group_chunks_into_batches(
+    chunks: Vec<MultilineChunk>,
+    max_lines: usize,
+    max_bytes: usize,
+) -> Vec<Vec<MultilineChunk>> {
+    let mut groups: Vec<Vec<MultilineChunk>> = Vec::new();
+    let mut cur: Vec<MultilineChunk> = Vec::new();
+    let mut cur_len = 0usize;
+    for c in chunks {
+        let sep = if !cur.is_empty() && !c.concat { 1 } else { 0 };
+        let starts_new = !cur.is_empty()
+            && !c.concat
+            && (cur.len() + 1 > max_lines || cur_len + sep + c.body.len() > max_bytes);
+        if starts_new {
+            groups.push(std::mem::take(&mut cur));
+            cur_len = 0;
+        }
+        cur_len += (if !cur.is_empty() && !c.concat { 1 } else { 0 }) + c.body.len();
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        groups.push(cur);
+    }
+    groups
+}
+
 /// State for one in-flight inbound `draft/multiline` batch — the
 /// opener-derived metadata plus the accumulated chunks. Cleared when
 /// the BATCH closer fires.
@@ -162,11 +236,20 @@ struct InboundMultilineBatch {
     parent_batch_id: Option<String>,
 }
 
-/// Caps the server has ACKed, shared between the read loop (which
-/// populates it on CAP ACK) and the `ClientHandle` (which reads it
+/// Negotiated capability state, shared between the read loop (which
+/// populates it from CAP LS/ACK) and the `ClientHandle` (which reads it
 /// to decide e.g. whether a `\n`-bearing `privmsg` should auto-route
-/// to a `draft/multiline` BATCH).
-pub(crate) type CapsAcked = Arc<parking_lot::Mutex<HashSet<String>>>;
+/// to a `draft/multiline` BATCH, and how big a batch may be).
+#[derive(Default)]
+pub(crate) struct CapsState {
+    /// Cap names the server ACKed.
+    acked: HashSet<String>,
+    /// Server-advertised `draft/multiline` `(max_bytes, max_lines)`, parsed
+    /// from the CAP LS value. `None` until an LS line carries params, in which
+    /// case sends fall back to the built-in `MULTILINE_MAX_*` defaults.
+    multiline_policy: Option<(usize, usize)>,
+}
+pub(crate) type CapsAcked = Arc<parking_lot::Mutex<CapsState>>;
 
 /// A handle to a running IRC client connection.
 #[derive(Clone)]
@@ -193,24 +276,16 @@ impl ClientHandle {
     /// targeting old servers should pre-encode or call
     /// `send_multiline_chunks` with explicit chunks.
     pub async fn privmsg(&self, target: &str, text: &str) -> Result<()> {
-        let multiline_ready = text.contains('\n') && {
-            let caps = self.caps_acked.lock();
-            caps.contains("draft/multiline") && caps.contains("batch")
-        };
+        // Route through multiline when the text spans lines OR is long enough
+        // that a single PRIVMSG would risk server-side truncation.
+        let multiline_ready = (text.contains('\n')
+            || text.len() > MULTILINE_PER_CHUNK_BYTES)
+            && {
+                let caps = self.caps_acked.lock();
+                caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
+            };
         if multiline_ready {
-            let chunks: Vec<MultilineChunk> = text
-                .split('\n')
-                .map(|line| MultilineChunk {
-                    body: line.to_string(),
-                    concat: false,
-                })
-                .collect();
-            self.cmd_tx
-                .send(Command::SendMultiline {
-                    target: target.to_string(),
-                    chunks,
-                    opener_tags: std::collections::HashMap::new(),
-                })
+            self.send_chunked_multiline(target, text, std::collections::HashMap::new())
                 .await?;
         } else {
             self.cmd_tx
@@ -238,15 +313,10 @@ impl ClientHandle {
         text: &str,
         opener_tags: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        let chunks: Vec<MultilineChunk> = text
-            .split('\n')
-            .map(|line| MultilineChunk {
-                body: line.to_string(),
-                concat: false,
-            })
-            .collect();
-        self.send_multiline_chunks(target, chunks, opener_tags)
-            .await
+        // Length-splits long lines into concat chunks and multi-batches when
+        // the send exceeds the server's per-batch policy, so the assembled
+        // body is byte-identical regardless of size.
+        self.send_chunked_multiline(target, text, opener_tags).await
     }
 
     /// Lower-level multiline send: caller supplies the wire chunks
@@ -265,6 +335,39 @@ impl ClientHandle {
                 opener_tags,
             })
             .await?;
+        Ok(())
+    }
+
+    /// Chunk `text` for `draft/multiline` and emit it as one or more batches:
+    /// long lines are hard-split into `concat` continuation chunks, and a send
+    /// exceeding the server's per-batch policy is spread across several
+    /// batches. The assembled body is byte-identical to `text`. `opener_tags`
+    /// are applied to every emitted batch.
+    async fn send_chunked_multiline(
+        &self,
+        target: &str,
+        text: &str,
+        opener_tags: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        // Respect the peer's advertised per-batch policy if it sent one,
+        // else fall back to freeq's defaults. The per-chunk (per-line) budget
+        // stays fixed — it's headroom under the wire cap, not a batch limit.
+        let (max_bytes, max_lines) = self
+            .caps_acked
+            .lock()
+            .multiline_policy
+            .unwrap_or((MULTILINE_MAX_BYTES, MULTILINE_MAX_LINES));
+        let chunks = chunk_multiline_body(text, MULTILINE_PER_CHUNK_BYTES);
+        let groups = group_chunks_into_batches(chunks, max_lines, max_bytes);
+        for group in groups {
+            self.cmd_tx
+                .send(Command::SendMultiline {
+                    target: target.to_string(),
+                    chunks: group,
+                    opener_tags: opener_tags.clone(),
+                })
+                .await?;
+        }
         Ok(())
     }
 
@@ -318,25 +421,14 @@ impl ClientHandle {
         text: &str,
         tags: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        let multiline_ready = text.contains('\n') && {
-            let caps = self.caps_acked.lock();
-            caps.contains("draft/multiline") && caps.contains("batch")
-        };
+        let multiline_ready = (text.contains('\n')
+            || text.len() > MULTILINE_PER_CHUNK_BYTES)
+            && {
+                let caps = self.caps_acked.lock();
+                caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
+            };
         if multiline_ready {
-            let chunks: Vec<MultilineChunk> = text
-                .split('\n')
-                .map(|line| MultilineChunk {
-                    body: line.to_string(),
-                    concat: false,
-                })
-                .collect();
-            self.cmd_tx
-                .send(Command::SendMultiline {
-                    target: target.to_string(),
-                    chunks,
-                    opener_tags: tags,
-                })
-                .await?;
+            self.send_chunked_multiline(target, text, tags).await?;
         } else {
             let msg = crate::irc::Message {
                 tags,
@@ -1131,7 +1223,7 @@ pub fn connect_with_stream(
     let (event_tx, event_rx) = mpsc::channel(4096);
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let echo_registry: EchoRegistry = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new()));
-    let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+    let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
 
     let handle = ClientHandle {
         cmd_tx: cmd_tx.clone(),
@@ -1229,7 +1321,7 @@ pub fn connect(
     let (event_tx, event_rx) = mpsc::channel(4096);
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let echo_registry: EchoRegistry = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new()));
-    let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+    let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
 
     let handle = ClientHandle {
         cmd_tx: cmd_tx.clone(),
@@ -2308,6 +2400,11 @@ async fn handle_cap_response<W: AsyncWrite + Unpin>(
     match subcmd.as_deref() {
         Some("LS") => {
             let caps_str = msg.params.last().map(|s| s.as_str()).unwrap_or("");
+            // Capture the peer's advertised draft/multiline policy so sends
+            // respect its actual limits instead of assuming freeq's defaults.
+            if let Some(policy) = parse_multiline_cap(caps_str) {
+                caps_acked.lock().multiline_policy = Some(policy);
+            }
             let mut req_caps = Vec::new();
             if caps_str.contains("message-tags") {
                 req_caps.push("message-tags");
@@ -2344,9 +2441,9 @@ async fn handle_cap_response<W: AsyncWrite + Unpin>(
             // Record which caps the server ACKed so `ClientHandle::privmsg`
             // can route `\n`-bearing text to a draft/multiline BATCH.
             {
-                let mut acked = caps_acked.lock();
+                let mut state = caps_acked.lock();
                 for cap in caps.split_whitespace() {
-                    acked.insert(cap.to_string());
+                    state.acked.insert(cap.to_string());
                 }
             }
             if caps.contains("sasl") {
@@ -2367,6 +2464,27 @@ async fn handle_cap_response<W: AsyncWrite + Unpin>(
         _ => {}
     }
     Ok(())
+}
+
+/// Parse a `draft/multiline=max-bytes=N,max-lines=M` token out of a CAP LS
+/// value into `(max_bytes, max_lines)`. Unspecified fields fall back to the
+/// built-in defaults. Returns `None` if the cap isn't advertised with params
+/// (bare `draft/multiline`), leaving the caller on its defaults.
+fn parse_multiline_cap(caps_str: &str) -> Option<(usize, usize)> {
+    let value = caps_str
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("draft/multiline="))?;
+    let mut max_bytes = MULTILINE_MAX_BYTES;
+    let mut max_lines = MULTILINE_MAX_LINES;
+    for kv in value.split(',') {
+        let mut it = kv.splitn(2, '=');
+        match (it.next(), it.next().and_then(|n| n.parse::<usize>().ok())) {
+            (Some("max-bytes"), Some(n)) => max_bytes = n,
+            (Some("max-lines"), Some(n)) => max_lines = n,
+            _ => {}
+        }
+    }
+    Some((max_bytes, max_lines))
 }
 
 async fn handle_authenticate_challenge<W: AsyncWrite + Unpin>(
@@ -2535,6 +2653,131 @@ fn rand_jitter(max: u64) -> u64 {
 #[cfg(test)]
 mod multiline_tests {
     use super::*;
+
+    /// Reassemble one batch's chunks per the wire concat rules (mirrors
+    /// `dispatch_assembled_multiline`): a non-concat chunk after the first
+    /// joins with `\n`, a concat chunk joins with nothing.
+    fn reassemble(chunks: &[MultilineChunk]) -> String {
+        let mut out = String::new();
+        for (i, c) in chunks.iter().enumerate() {
+            if i > 0 && !c.concat {
+                out.push('\n');
+            }
+            out.push_str(&c.body);
+        }
+        out
+    }
+
+    #[test]
+    fn short_multiline_is_byte_identical_and_never_splits_lines() {
+        let text = "alpha\nbeta\ngamma";
+        let chunks = chunk_multiline_body(text, MULTILINE_PER_CHUNK_BYTES);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|c| !c.concat));
+        assert_eq!(reassemble(&chunks), text);
+    }
+
+    #[test]
+    fn blank_source_lines_survive_as_empty_chunks() {
+        let text = "a\n\nb\n"; // trailing newline => empty final line
+        let chunks = chunk_multiline_body(text, MULTILINE_PER_CHUNK_BYTES);
+        // "a", "", "b", "" — every one a non-concat chunk.
+        assert_eq!(chunks.len(), 4);
+        assert!(chunks.iter().all(|c| !c.concat));
+        assert_eq!(chunks[1].body, "");
+        assert_eq!(chunks[3].body, "");
+        assert_eq!(reassemble(&chunks), text);
+    }
+
+    #[test]
+    fn long_line_hard_splits_into_concat_continuations() {
+        let line = "x".repeat(20_000);
+        let chunks = chunk_multiline_body(&line, MULTILINE_PER_CHUNK_BYTES);
+        assert!(chunks.len() > 1);
+        assert!(!chunks[0].concat, "first chunk opens the line");
+        assert!(chunks[1..].iter().all(|c| c.concat), "rest are continuations");
+        assert!(chunks.iter().all(|c| c.body.len() <= MULTILINE_PER_CHUNK_BYTES));
+        assert_eq!(reassemble(&chunks), line);
+    }
+
+    #[test]
+    fn mixed_short_and_long_lines_round_trip() {
+        let text = format!("head\n{}\ntail\n\nfoot", "y".repeat(15_000));
+        let chunks = chunk_multiline_body(&text, MULTILINE_PER_CHUNK_BYTES);
+        assert_eq!(reassemble(&chunks), text);
+    }
+
+    #[test]
+    fn splits_only_on_utf8_char_boundaries() {
+        // Budget of 3 bytes against a 2-byte-per-char string: each chunk must
+        // land on a char boundary (no panic, no mojibake on reassembly).
+        let text = "é".repeat(10); // 2 bytes each => 20 bytes
+        let chunks = chunk_multiline_body(&text, 3);
+        assert!(chunks.iter().all(|c| c.body.chars().all(|ch| ch == 'é')));
+        assert_eq!(reassemble(&chunks), text);
+    }
+
+    #[test]
+    fn single_char_wider_than_budget_still_makes_progress() {
+        // A 3-byte char against a 1-byte budget must not loop forever; it
+        // takes the whole char.
+        let text = "€€"; // 3 bytes each
+        let chunks = chunk_multiline_body(text, 1);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(reassemble(&chunks), text);
+    }
+
+    #[test]
+    fn grouping_keeps_one_batch_under_policy() {
+        let chunks = chunk_multiline_body("a\nb\nc", MULTILINE_PER_CHUNK_BYTES);
+        let groups = group_chunks_into_batches(chunks, MULTILINE_MAX_LINES, MULTILINE_MAX_BYTES);
+        assert_eq!(groups.len(), 1);
+    }
+
+    #[test]
+    fn grouping_splits_when_over_max_lines() {
+        // 250 single-char lines against a max of 100 lines/batch => 3 batches.
+        let text = (0..250).map(|_| "z").collect::<Vec<_>>().join("\n");
+        let chunks = chunk_multiline_body(&text, MULTILINE_PER_CHUNK_BYTES);
+        let groups = group_chunks_into_batches(chunks, MULTILINE_MAX_LINES, MULTILINE_MAX_BYTES);
+        assert_eq!(groups.len(), 3);
+        assert!(groups.iter().all(|g| g.len() <= MULTILINE_MAX_LINES));
+        // Every batch opens on a non-concat chunk (boundary never severs a line).
+        assert!(groups.iter().all(|g| !g[0].concat));
+    }
+
+    #[test]
+    fn grouping_never_severs_a_hard_split_line() {
+        // One line long enough to exceed max-bytes on its own: its concat
+        // continuation chunks must all stay in the SAME batch as the opener.
+        let text = "w".repeat(MULTILINE_MAX_BYTES + 5_000);
+        let chunks = chunk_multiline_body(&text, MULTILINE_PER_CHUNK_BYTES);
+        let groups = group_chunks_into_batches(chunks, MULTILINE_MAX_LINES, MULTILINE_MAX_BYTES);
+        // A concat chunk is never the first in a batch.
+        assert!(groups.iter().all(|g| !g[0].concat));
+    }
+
+    #[test]
+    fn parses_advertised_multiline_policy() {
+        let ls = "server-time batch draft/multiline=max-bytes=12000,max-lines=42 sasl";
+        assert_eq!(parse_multiline_cap(ls), Some((12000, 42)));
+    }
+
+    #[test]
+    fn bare_multiline_cap_yields_no_override() {
+        // No params advertised => caller stays on its defaults.
+        assert_eq!(parse_multiline_cap("batch draft/multiline sasl"), None);
+        assert_eq!(parse_multiline_cap("server-time batch sasl"), None);
+    }
+
+    #[test]
+    fn partial_multiline_policy_falls_back_per_field() {
+        // Only max-lines advertised => max-bytes keeps the built-in default.
+        assert_eq!(
+            parse_multiline_cap("draft/multiline=max-lines=7"),
+            Some((MULTILINE_MAX_BYTES, 7))
+        );
+    }
 
     /// Assemble per concat rules — concat=true joins with no separator,
     /// concat=false joins with `\n`. The first chunk's `concat` is
@@ -2872,9 +3115,9 @@ mod multiline_tests {
     #[tokio::test]
     async fn privmsg_auto_routes_to_multiline_when_cap_acked() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
-        caps_acked.lock().insert("draft/multiline".to_string());
-        caps_acked.lock().insert("batch".to_string());
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -2906,7 +3149,7 @@ mod multiline_tests {
     #[tokio::test]
     async fn privmsg_falls_back_to_single_when_cap_not_acked() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
         // No caps acked
         let handle = ClientHandle {
             cmd_tx,
@@ -2930,9 +3173,9 @@ mod multiline_tests {
     #[tokio::test]
     async fn send_tagged_auto_routes_to_multiline_with_opener_tags() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
-        caps_acked.lock().insert("draft/multiline".to_string());
-        caps_acked.lock().insert("batch".to_string());
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -2968,9 +3211,9 @@ mod multiline_tests {
     #[tokio::test]
     async fn privmsg_single_line_never_routes_to_multiline() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
-        caps_acked.lock().insert("draft/multiline".to_string());
-        caps_acked.lock().insert("batch".to_string());
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
@@ -3000,7 +3243,7 @@ mod multiline_tests {
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(32);
         let (_cmd_tx, cmd_rx) = mpsc::channel::<Command>(16);
         let echo_registry: EchoRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
         let config = ConnectConfig {
             server_addr: "test".to_string(),
             nick: "tester".to_string(),
@@ -3113,7 +3356,7 @@ mod multiline_tests {
         let (event_tx, mut event_rx) = mpsc::channel::<Event>(32);
         let (_cmd_tx, cmd_rx) = mpsc::channel::<Command>(16);
         let echo_registry: EchoRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
         let config = ConnectConfig {
             server_addr: "test".to_string(),
             nick: "tester".to_string(),
@@ -3289,7 +3532,7 @@ mod irc_loop_tests {
         let (event_tx, event_rx) = mpsc::channel::<Event>(64);
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(64);
         let echo_registry: EchoRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(HashSet::new()));
+        let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
         let config = test_config(nick);
 
         let (reader, writer) = tokio::io::split(client_side);
