@@ -41,7 +41,15 @@ class AppState {
     // MARK: - Channels & DMs
     var channels: [ChannelState] = []
     var dmBuffers: [ChannelState] = []
-    var activeChannel: String? = nil
+    var activeChannel: String? = nil {
+        didSet {
+            // Persist so the app reopens the last conversation on next launch.
+            if let activeChannel { UserDefaults.standard.set(activeChannel, forKey: LastChannel.key) }
+        }
+    }
+    /// True once we've restored the last-open channel this launch, so a later
+    /// channel joining doesn't re-hijack the user's current selection.
+    @ObservationIgnored private var didRestoreLastChannel = false
     var unreadCounts: [String: Int] = [:]
     var mentionCounts: [String: Int] = [:]
     var autoJoinChannels: [String] = ["#freeq"]
@@ -526,6 +534,16 @@ class AppState {
     }
 
     func deleteMessage(target: String, msgId: String) {
+        // Apply optimistically: the server relays the delete TAGMSG to other
+        // members but never echoes it back to the author (see SelfActionEcho),
+        // so without this the deleter's own view never tombstones the message
+        // — the "delete didn't work" bug. Mirrors the optimistic reaction path.
+        let ch = channels.first { $0.name.lowercased() == target.lowercased() }
+            ?? dmBuffers.first { $0.name.lowercased() == target.lowercased() }
+        if SelfActionEcho.needsOptimisticLocalApply(.delete) {
+            ch?.applyDelete(msgId: msgId)
+            Task { await MessageStore.shared.markDeleted(msgId: msgId) }
+        }
         sendRaw("@+draft/delete=\(msgId) TAGMSG \(target)")
     }
 
@@ -749,7 +767,34 @@ class AppState {
         }
         channels.append(ch)
         channels.sort { $0.name.lowercased() < $1.name.lowercased() }
+        attemptRestoreLastChannel()
         return ch
+    }
+
+    /// Reopen the conversation the user was last in (persisted in `didSet`).
+    /// Called as channels/DMs load after connect: selects the saved target
+    /// once it's present, or falls back to the first channel once all the
+    /// auto-join channels have loaded and the saved one didn't reappear (it
+    /// was left). Runs at most once per launch.
+    private func attemptRestoreLastChannel() {
+        guard !didRestoreLastChannel else { return }
+        let saved = UserDefaults.standard.string(forKey: LastChannel.key)
+        let chanNames = channels.map(\.name)
+        let dmNames = dmBuffers.map(\.name)
+        let savedIsPresent = saved.map { s in
+            (chanNames + dmNames).contains { $0.caseInsensitiveCompare(s) == .orderedSame }
+        } ?? false
+
+        // Wait for the saved target to appear; only fall back once every
+        // expected auto-join channel has loaded (so we don't prematurely
+        // land on the first channel while the real one is still joining).
+        guard savedIsPresent || (!chanNames.isEmpty && chanNames.count >= autoJoinChannels.count) else {
+            return
+        }
+        if let target = LastChannel.restore(saved: saved, channels: chanNames, dms: dmNames) {
+            activeChannel = target
+            didRestoreLastChannel = true
+        }
     }
 
     // MARK: - Channel E2EE key lifecycle
@@ -793,6 +838,7 @@ class AppState {
             }
         }
         dmBuffers.append(dm)
+        attemptRestoreLastChannel()
         return dm
     }
 
@@ -895,11 +941,8 @@ class AppState {
     func lastOwnMessage(in target: String) -> ChatMessage? {
         let ch = channels.first { $0.name.lowercased() == target.lowercased() }
             ?? dmBuffers.first { $0.name.lowercased() == target.lowercased() }
-        // Exclude action/notice lines (e.g. server-generated "pinned a message"
-        // actions are attributed to our nick but carry no editable msgid).
-        return ch?.messages.last {
-            $0.from.lowercased() == nick.lowercased() && !$0.isDeleted && !$0.isAction
-        }
+        guard let ch else { return nil }
+        return MessageActions.lastEditable(messages: ch.messages, nick: nick)
     }
 
     // MARK: - WHOIS for DID discovery

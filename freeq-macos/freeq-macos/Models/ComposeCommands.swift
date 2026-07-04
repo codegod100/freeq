@@ -249,10 +249,7 @@ extension AppState {
     /// `/search <text>` — in-buffer substring search; prints matches as system lines.
     func runBufferSearch(_ query: String, target: String) {
         guard !query.isEmpty, let ch = activeChannelState else { return }
-        let q = query.lowercased()
-        let matches = ch.messages.filter {
-            !$0.isDeleted && ($0.text.lowercased().contains(q) || $0.from.lowercased().contains(q))
-        }
+        let matches = MessageActions.searchMatches(ch.messages, query: query)
         appendSystem(matches.isEmpty
             ? "No matches for \"\(query)\""
             : "── \(matches.count) match(es) for \"\(query)\" ──")

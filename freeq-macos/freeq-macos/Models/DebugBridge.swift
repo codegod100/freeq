@@ -19,7 +19,13 @@ final class DebugBridge {
 
     init(appState: AppState) {
         self.appState = appState
-        self.path = ProcessInfo.processInfo.environment["FREEQ_CMD_FILE"] ?? "/tmp/freeq-cmd"
+        // Under App Sandbox the app cannot read /tmp — only its own container.
+        // Default to the container tmp (NSTemporaryDirectory) so the harness
+        // actually works sandboxed; FREEQ_CMD_FILE still overrides. External
+        // writers (ui-sweep.sh / test drivers) must target this container path:
+        //   ~/Library/Containers/at.freeq.macos/Data/tmp/freeq-cmd
+        self.path = ProcessInfo.processInfo.environment["FREEQ_CMD_FILE"]
+            ?? (NSTemporaryDirectory() as NSString).appendingPathComponent("freeq-cmd")
     }
 
     func start() {

@@ -671,15 +671,23 @@ struct MessageRow: View {
             }
         }
 
-        if isSelf {
+        let amOp = appState.activeChannelState?.memberInfo(for: appState.nick)?.isOp ?? false
+        let canDelete = MessageActions.canDelete(message, by: appState.nick, isOp: amOp)
+        if isSelf || canDelete {
             Divider()
-            Button("Edit") {
-                appState.editingMessageId = message.id
-                appState.editingText = message.text
+            if isSelf {
+                Button("Edit") {
+                    appState.editingMessageId = message.id
+                    appState.editingText = message.text
+                }
             }
-            Button("Delete", role: .destructive) {
-                if let target = appState.activeChannel {
-                    appState.deleteMessage(target: target, msgId: message.id)
+            if canDelete {
+                // Author or channel op — the server authorizes both; the
+                // optimistic tombstone in deleteMessage is therefore safe.
+                Button("Delete", role: .destructive) {
+                    if let target = appState.activeChannel {
+                        appState.deleteMessage(target: target, msgId: message.id)
+                    }
                 }
             }
         }
