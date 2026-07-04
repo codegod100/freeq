@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>freeq — sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
+<style>
+:root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--c1:#7ab7ff;--self:#5cdb95;--err:#ef476f}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}
+#login{width:380px;max-width:90vw;padding:2rem 1.5rem;background:#0a0d12;border:1px solid var(--border);border-radius:8px}
+#login h1{font-size:1.2rem;margin:0 0 .3rem;color:var(--c1)}
+#login .sub{font-size:.8rem;color:var(--muted);margin-bottom:1.2rem}
+#login label{display:block;font-size:.75rem;color:var(--muted);margin:.8rem 0 .3rem}
+#login input{width:100%;padding:.5rem .6rem;background:#161a1f;color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:13px}
+#login input:focus{outline:none;border-color:var(--c1)}
+#login button{width:100%;margin-top:1rem;padding:.5rem;font:inherit;font-size:13px;font-weight:700;cursor:pointer;border:0;border-radius:4px;background:var(--c1);color:#000}
+#login button:hover{filter:brightness(1.15)}
+#login .err{color:var(--err);font-size:.8rem;margin-top:.5rem;min-height:1.2em}
+#login .note{font-size:.7rem;color:var(--muted);margin-top:1.2rem;line-height:1.4}
+#login .note a{color:var(--c1)}
+</style>
+</head>
+<body>
+<div id="login">
+<h1>freeq</h1>
+<div class="sub">Sign in with your AT Protocol handle</div>
+<form method="POST" action="/login">
+<label for="id">Handle</label>
+<input type="text" id="id" name="identifier" placeholder="alice.bsky.social" required autofocus>
+<button type="submit">Sign in</button>
+<div class="err">{{error}}</div>
+</form>
+<div class="note">
+You'll be redirected to your PDS to authorize. Your private key <strong>never</strong> leaves your device. Or <a href="/chat/general">join as guest</a>.
+</div>
+</div>
+</body>
+</html>

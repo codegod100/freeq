@@ -14,7 +14,6 @@ mod state;
 mod upstream;
 
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, State};
@@ -66,6 +65,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/", get(get_root))
+        .route("/login", get(get_login).post(post_login))
         .route("/chat", get(|| async { (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response() }))
         .route("/chat/{channel}", get(get_chat))
         .route("/chat/{channel}/events", get(get_channel_events))
@@ -141,8 +141,46 @@ async fn get_root() -> Response {
     // Default to #general on the public deployment.
     (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response()
 }
+// ── GET /login, POST /login ──────────────────────────────────────────────
 
-// ── GET /datastar.js ───────────────────────────────────────────────────
+#[derive(Deserialize)]
+struct LoginForm {
+    identifier: String,
+}
+
+async fn get_login(State(state): State<AppState>) -> Response {
+    let mut ctx = tera::Context::new();
+    ctx.insert("error", "");
+    match state.tera.render("login.html.tera", &ctx) {
+        Ok(html) => (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("template error: {e}")).into_response(),
+    }
+}
+
+async fn post_login(
+    State(state): State<AppState>,
+    req: axum::http::HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<LoginForm>,
+) -> Response {
+    let handle = form.identifier.trim().to_string();
+    if handle.is_empty() {
+        let mut ctx = tera::Context::new();
+        ctx.insert("error", "Please enter your handle");
+        let html = state.tera.render("login.html.tera", &ctx).unwrap_or_default();
+        return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+    }
+
+    let (sid, _) = session_id_from_request(&req);
+    let session = state.session(&sid);
+    *session.pending_login_handle.lock() = Some(handle.clone());
+    *session.login_handle.lock() = Some(handle);
+    debug!(session = %sid, "login handle stored; redirecting to chat");
+
+    let mut resp = (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response();
+    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    resp
+}
+
 
 /// Serve the DataStar JS bundle from the binary. Loaded via `include_str!`
 /// at compile time so there's no runtime file lookup; the bundle lives at
@@ -237,17 +275,6 @@ async fn get_channel_events(
     let (sid, _is_new) = session_id_from_request(&req);
     let session = state.session(&sid);
 
-    // Prevent duplicate SSE connections from the same session.
-    // DataStar v1.0 sometimes opens two connections to the same
-    // endpoint (timing quirk with data-init on the root element);
-    // rejecting the second one with 409 keeps a single stream alive.
-    if session.sse_active.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        debug!(session = %sid, channel = %channel, "SSE duplicate — sending close");
-        let stream = async_stream::stream! {
-            yield Ok::<Event, std::convert::Infallible>(Event::default().comment("duplicate"));
-        };
-        return Sse::new(stream).into_response();
-    }
     debug!(session = %sid, channel = %channel, "SSE subscriber connected");
 
     let upstream = state.upstream.clone();
@@ -258,13 +285,7 @@ async fn get_channel_events(
 
     spawn_upstream_if_needed(&sid, &session, upstream.clone(), &channel);
 
-    // Reset sse_active on disconnect so a future reconnect works.
-    // SseGuard resets the flag when the stream is dropped (HTTP close).
     let stream = async_stream::stream! {
-        // Move guard into stream so it lives as long as the SSE
-        // connection. Dropped when axum aborts the stream on
-        // HTTP disconnect — resets sse_active for reconnects.
-        let _guard = SseGuard { session: session.clone() };
         let status_patch = PatchSignals::new(r#"{"_s":"connected"}"#);
         yield Ok::<Event, std::convert::Infallible>(status_patch.write_as_axum_sse_event());
         loop {
@@ -350,6 +371,34 @@ async fn get_channel_events(
                             let script = ExecuteScript::new(js);
                             yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         }
+                    }
+                    // --- SASL 903 (authentication success) ---
+                    if is_903(&line) {
+                        info!(session = %sid, "SASL authentication successful");
+                        let handle = session.login_handle.lock().clone().unwrap_or_default();
+                        *session.authenticated_did.lock() = Some(handle.clone());
+                        // Change nick to a sanitized version of the handle.
+                        let nick = sanitize_nick(&handle);
+                        if !nick.is_empty() {
+                            let tx = session.irc_tx.lock().clone();
+                            let _ = tx.try_send(format!("NICK {nick}\r\n"));
+                            info!(session = %sid, %nick, "sending NICK change after auth");
+                        }
+                        let js = format!(
+                            "var s=document.getElementById('status');if(s){{s.classList.add('connected');var t=s.querySelector('[data-text]');if(t)t.textContent='{}'}}",
+                            handle
+                        );
+                        let script = ExecuteScript::new(js);
+                        yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
+                        continue;
+                    }
+                    // --- OAuth login URL detection ---
+                    if let Some(oauth_url) = extract_login_url(&line) {
+                        info!(session = %sid, "OAuth login URL detected; opening in browser");
+                        let js = format!("window.open('{}', '_blank')", oauth_url);
+                        let script = ExecuteScript::new(js);
+                        yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
+                        continue;
                     }
                     // --- messages ---
                     if should_emit(&line) {
@@ -529,7 +578,32 @@ async fn get_channels(State(state): State<AppState>) -> Response {
 
 // ── IRC line formatting ─────────────────────────────────────────────────
 
-/// Decide which inbound IRC lines the browser should see.
+/// Extract OAuth login URL from a server NOTICE line.
+/// Format: :irc.freeq.at NOTICE nick :https://...
+fn extract_login_url(line: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let sp = rest.find(' ')?;
+    let after_prefix = &rest[sp + 1..];
+    if !after_prefix.starts_with("NOTICE ") { return None; }
+    // Find the trailing text (prefixed with :)
+    let last_colon = after_prefix.rfind(" :")?;
+    let url = &after_prefix[last_colon + 2..];
+    if url.starts_with("https://") && url.contains("/auth/login?") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+/// Check if a line is a 903 (RPL_SASLSUCCESS) numeric.
+fn is_903(line: &str) -> bool {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let Some(rest) = line.strip_prefix(':') else { return false };
+    let Some(sp) = rest.find(' ') else { return false };
+    let after_prefix = &rest[sp + 1..];
+    after_prefix.starts_with("903 ")
+}
+
 fn should_emit(line: &str) -> bool {
     let line = line.trim_end_matches(['\r', '\n']);
     if line.starts_with("PING ") || line.starts_with("PONG ") {
@@ -573,7 +647,7 @@ fn render_irc_line(line: &str) -> String {
                 let text = parts.next().unwrap_or("").trim_start_matches(':');
                 let cls = if cmd == "NOTICE" { "notice" } else { "msg" };
                 let color = nick_color_class(nick);
-                let safe_text = html_escape(text);
+                let safe_text = linkify_urls(&html_escape(text));
                 return format!(
                     r#"<div class="{cls}">{ts_html}<span class="body"><span class="nick {color}">{nick}</span> {safe_text}</span></div>"#
                 );
@@ -784,6 +858,40 @@ fn html_escape(s: &str) -> String {
     out
 }
 
+/// Convert a handle into a valid IRC nick: keep only alphanumeric,
+/// dots, hyphens, underscores; truncate to 20 chars.
+fn sanitize_nick(handle: &str) -> String {
+    let mut out = String::with_capacity(handle.len().min(20));
+    for c in handle.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+            out.push(c);
+        }
+        if out.len() >= 20 { break; }
+    }
+    if out.is_empty() { return String::new(); }
+    // Must start with a letter.
+    if !out.starts_with(|c: char| c.is_ascii_alphabetic()) {
+        out.insert(0, 'u');
+        out.truncate(20);
+    }
+    out
+}
+
+/// Wrap `https://` URLs in the already-escaped text with `<a target="_blank">`.
+fn linkify_urls(escaped: &str) -> String {
+    // Text is already HTML-escaped. Find https://... and wrap in <a>.
+    let mut out = String::with_capacity(escaped.len() + 64);
+    let mut rest = escaped;
+    while let Some(pos) = rest.find("https://") {
+        out.push_str(&rest[..pos]);
+        let url_end = rest[pos..].find(|c: char| c.is_whitespace() || c == '<').unwrap_or(rest.len() - pos);
+        let url = &rest[pos..pos + url_end];
+        out.push_str(&format!(r#"<a href="{url}" target="_blank" rel="noopener">{url}</a>"#));
+        rest = &rest[pos + url_end..];
+    }
+    out.push_str(rest);
+    out
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -980,16 +1088,3 @@ mod tests {
     }
 }
 
-/// RAII guard that resets `sse_active` when dropped.
-/// Used so the SSE duplicate check recovers after the browser
-/// closes (or refreshes) the EventSource.
-struct SseGuard {
-    session: std::sync::Arc<state::SessionHandle>,
-}
-
-impl Drop for SseGuard {
-    fn drop(&mut self) {
-        self.session.sse_active.store(false, Ordering::SeqCst);
-        tracing::debug!("SSE guard dropped — sse_active reset");
-    }
-}
