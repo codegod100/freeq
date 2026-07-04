@@ -67,6 +67,15 @@ export interface FreeqEvents {
   /** Fired when a user's away status changes. */
   userAway: (nick: string, reason: string | null) => void;
 
+  /**
+   * Fired when a read marker is set or reported for a target (IRCv3
+   * `draft/read-marker`). Delivered both as the reply to our own
+   * `markRead`/`getReadMarker` and when another of our devices advances the
+   * marker. `timestamp` is an ISO 8601 string (as in server-time), or `null`
+   * when the server reports no marker (`MARKREAD <target> *`).
+   */
+  readMarker: (target: string, timestamp: string | null) => void;
+
   /** Fired when a user starts/stops typing. */
   typing: (channel: string, nick: string, isTyping: boolean) => void;
 

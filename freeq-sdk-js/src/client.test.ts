@@ -866,6 +866,55 @@ describe('inbound: channel membership', () => {
   });
 });
 
+describe('read markers (draft/read-marker)', () => {
+  it('markRead() sends MARKREAD with timestamp=', async () => {
+    const { client, ws } = await makeRegistered();
+    client.markRead('#room', '2026-07-02T10:00:00.000Z');
+    expect(ws.sent).toContain('MARKREAD #room timestamp=2026-07-02T10:00:00.000Z');
+  });
+
+  it('getReadMarker() sends bare MARKREAD', async () => {
+    const { client, ws } = await makeRegistered();
+    client.getReadMarker('#room');
+    expect(ws.sent).toContain('MARKREAD #room');
+  });
+
+  it('MARKREAD <target> timestamp=<iso> emits readMarker with the timestamp', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('readMarker', (target, ts) => seen.push({ target, ts }));
+    ws.recv('MARKREAD #room timestamp=2026-07-02T10:00:00.000Z');
+    await flushAsync();
+    expect(seen).toContainEqual({ target: '#room', ts: '2026-07-02T10:00:00.000Z' });
+  });
+
+  it('MARKREAD <target> * emits readMarker with null timestamp', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('readMarker', (target, ts) => seen.push({ target, ts }));
+    ws.recv('MARKREAD #room *');
+    await flushAsync();
+    expect(seen).toContainEqual({ target: '#room', ts: null });
+  });
+
+  it('requests draft/read-marker during CAP negotiation', async () => {
+    const { FreeqClient } = await import('./client.js');
+    const client = new FreeqClient({
+      url: 'wss://test/irc',
+      nick: 'caps',
+      skipInitialBrokerRefresh: true,
+    });
+    client.connect();
+    await flushAsync();
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1]!;
+    ws.recv(':srv CAP * LS :message-tags server-time draft/read-marker');
+    await flushAsync();
+    const reqLine = ws.sent.find((l) => l.startsWith('CAP REQ'));
+    expect(reqLine).toBeDefined();
+    expect(reqLine).toContain('draft/read-marker');
+  });
+});
+
 describe('inbound: identity and MOTD', () => {
   it('330 (WHOIS DID numeric) emits memberDid', async () => {
     const { client, ws } = await makeRegistered();

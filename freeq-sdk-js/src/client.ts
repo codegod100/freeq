@@ -550,6 +550,28 @@ export class FreeqClient extends EventEmitter {
     this.raw(reason ? `AWAY :${reason}` : 'AWAY');
   }
 
+  /**
+   * Set the cross-device read marker for `target` (IRCv3 `draft/read-marker`).
+   *
+   * `timestamp` must be ISO 8601 with millisecond precision and a `Z` suffix,
+   * exactly as in the `server-time` extension (`YYYY-MM-DDThh:mm:ss.sssZ`).
+   * The server only ever moves the marker forward: a stale timestamp is
+   * ignored and the server replies with the current (newer) value. Either way
+   * the reply arrives via the `readMarker` event, and — for DID-authenticated
+   * sessions — the update is pushed to your other connected devices.
+   */
+  markRead(target: string, timestamp: string): void {
+    this.raw(`MARKREAD ${target} timestamp=${timestamp}`);
+  }
+
+  /**
+   * Query the current read marker for `target`. The answer arrives via the
+   * `readMarker` event with `timestamp = null` when no marker has been set.
+   */
+  getReadMarker(target: string): void {
+    this.raw(`MARKREAD ${target}`);
+  }
+
   /** Fire a WHOIS and resolve with parsed info when 318 (RPL_ENDOFWHOIS)
    *  arrives. Renamed from `whois()` — that name remains as a deprecated
    *  alias for one release. */
@@ -1804,6 +1826,22 @@ export class FreeqClient extends EventEmitter {
         break;
       }
 
+      case 'MARKREAD': {
+        // draft/read-marker: reply to our own get/set, or a push from
+        // another of our devices. `MARKREAD <target> timestamp=<iso>` or
+        // `MARKREAD <target> *`.
+        const target = msg.params[0];
+        if (target) {
+          const raw = msg.params[1];
+          const timestamp =
+            raw && raw !== '*' && raw.startsWith('timestamp=')
+              ? raw.slice('timestamp='.length)
+              : null;
+          this.emit('readMarker', target, timestamp);
+        }
+        break;
+      }
+
       case '306':
         this.emit('userAway', this._nick, this.pendingAwayReason || 'away');
         this.pendingAwayReason = null;
@@ -2086,7 +2124,7 @@ export class FreeqClient extends EventEmitter {
       const caps = [
         'message-tags', 'server-time', 'batch', 'multi-prefix',
         'echo-message', 'account-notify', 'extended-join', 'away-notify',
-        'draft/chathistory', 'draft/multiline',
+        'draft/chathistory', 'draft/multiline', 'draft/read-marker',
       ];
       for (const c of caps) {
         // `draft/multiline` advertises with params (`=max-bytes=…,max-lines=…`)
