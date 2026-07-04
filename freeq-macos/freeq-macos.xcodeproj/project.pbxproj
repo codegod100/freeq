@@ -33,6 +33,7 @@
 		7A222CE7AD638ABD0A21E0C8 /* ChannelCrypto.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3D1930C0C5B69735D97DA9C /* ChannelCrypto.swift */; };
 		80AAB9C3511F63855AFF87FF /* AudioLevelMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F52BF9F99E9D9772373AA39 /* AudioLevelMeter.swift */; };
 		814109482C3020E4DFB6F5DC /* FreeqSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4BCCB41ADB5F3934945B6E85 /* FreeqSDK.xcframework */; };
+		82F06962C82E36993AC3F92C /* AppKitMessageList.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */; };
 		87278B03BA72D53ADC27DB97 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61EB9E0F12CF280B8BADFA41 /* MainView.swift */; };
 		95713207153A9DD7BAB5955A /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3E838FFB8176761B9DAA50 /* ChatMessage.swift */; };
 		9A656A1FED0DA78997CD68B4 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20ABEF839D9D9D42C9D1BF08 /* App.swift */; };
@@ -118,6 +119,7 @@
 		CECE4CB96A2A81AB72EC2324 /* freeq-macos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "freeq-macos.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D1561609D65E3676C79D46E2 /* LinkPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreview.swift; sourceTree = "<group>"; };
 		D2DFA3935D1A36696CF3DBC0 /* Validation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Validation.swift; sourceTree = "<group>"; };
+		D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKitMessageList.swift; sourceTree = "<group>"; };
 		D90D45494AECECE10448CB0E /* ComposeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeCommands.swift; sourceTree = "<group>"; };
 		DA3E838FFB8176761B9DAA50 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
 		DB0BA22F0AF547102314C733 /* CallAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAudioDevices.swift; sourceTree = "<group>"; };
@@ -167,6 +169,7 @@
 		38C6F4ECE1B53363B9F87425 /* Chat */ = {
 			isa = PBXGroup;
 			children = (
+				D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */,
 				2B98D35F34492C2C6B3E504F /* AutocompletePopup.swift */,
 				B840984A8780805615D0846A /* CallView.swift */,
 				1B11355062BDD7B9062AC22F /* ChatView.swift */,
@@ -394,6 +397,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9A656A1FED0DA78997CD68B4 /* App.swift in Sources */,
+				82F06962C82E36993AC3F92C /* AppKitMessageList.swift in Sources */,
 				721B0A530115B270B487BF92 /* AppState.swift in Sources */,
 				80AAB9C3511F63855AFF87FF /* AudioLevelMeter.swift in Sources */,
 				AF76EC565DC3FE7EB618879F /* AutocompletePopup.swift in Sources */,

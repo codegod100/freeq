@@ -39,6 +39,7 @@ struct GeneralSettings: View {
     @AppStorage("freeq.compactMode") private var compactMode = false
     @AppStorage("freeq.soundsEnabled") private var soundsEnabled = true
     @AppStorage("freeq.appearance") private var appearanceRaw = "system"
+    @AppStorage("freeq.useLegacyMessageList") private var useLegacyMessageList = false
 
     var body: some View {
         Form {
@@ -62,6 +63,14 @@ struct GeneralSettings: View {
             Section("Auto-join Channels") {
                 Text(appState.autoJoinChannels.joined(separator: ", "))
                     .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Section("Advanced") {
+                Toggle("Use legacy message list (debug)", isOn: $useLegacyMessageList)
+                Text("The default list is AppKit-backed (NSTableView) for smooth "
+                     + "scrolling and streaming edits. Enable this to fall back to "
+                     + "the older SwiftUI list for comparison.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }

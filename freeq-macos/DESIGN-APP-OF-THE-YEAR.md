@@ -76,13 +76,14 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 ### Messaging & formatting
 | Feature | macOS | Web | Notes |
 |---|---|---|---|
+| **Message-list architecture (§7.5 hitch budget)** | ✅ ✎ (AppKitMessageListView.swift — NSTableView + NSHostingView rows) | ⚠️ virtualized | Phase 2 exit-gate rewrite: replaced the SwiftUI `LazyVStack` (spike verdict: missed the <1% hitch budget by 40–100× — scroll sweep **43.4%**, streaming-edit storm **100%**). AppKit row-reuse makes per-hop work viewport-bounded and streaming edits a one-row reload (projected ≪1%; see `SPIKE-MESSAGE-LIST.md`). Legacy list kept behind `freeq.useLegacyMessageList` for the harness A/B. Row content (avatars/badges/reactions/block-markdown/media/tombstones/separators) reused verbatim via `NSHostingView` |
 | Inline markdown | ✅ | ✅ | |
 | **Full markdown (mime: fences/quotes/lists/tables)** | ❌ | ✅ GFM | agents send these; mac renders mush |
 | **Syntax highlighting + copy** | ❌ | ⚠️ | leapfrog |
 | Mention pills / jumbomoji | ❌ / ❌ | ❌ / ❌ | leapfrog |
 | Edited indicator | ✅ ✎ (MessageListView.swift:298) | ✅ | v1 falsely claimed ❌ |
 | Delete tombstone | ⚠️ row removed | ✅ | |
-| **Streaming-edit rendering** | ❌ | ✅ | demo-critical; §6.4 notification rules |
+| **Streaming-edit rendering** | ⚠️ list-ready | ✅ | demo-critical; §6.4 notification rules. **Unblocked by the Phase 2 list rewrite** — the AppKit list reloads only the edited row, so agent-rate streaming no longer saturates the main thread (the reason the SwiftUI list couldn't ship it). The card/animation surface still lands in Phase 4 |
 | **Date separators** | ❌ | ✅ | |
 | **Unread "New" line + read-sync** | ❌ (lastReadMsgId set, never rendered) | ⚠️ local-only in-memory | §6.3 — requires server track S1; **no local-only hack that lies across devices** |
 | Input history / ↑-edit / who-reacted | ❌ ✅ ❌ | ✅ ✅ ✅ | |
