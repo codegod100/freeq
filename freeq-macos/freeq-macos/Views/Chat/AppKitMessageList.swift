@@ -356,14 +356,18 @@ private final class HostingCellView: NSTableCellView {
         }
         let h = NSHostingView(rootView: view)
         h.translatesAutoresizingMaskIntoConstraints = false
-        // Let SwiftUI define the height; width is pinned to the cell (column).
+        // Width is pinned to the cell (column); the hosting view's
+        // intrinsic-content-size HEIGHT constraint alone drives the row
+        // height. Do NOT also pin the bottom edge — that adds a second,
+        // conflicting height constraint, and when content grows (e.g. a
+        // reaction badge appears) `_makeOrUpdateContentSizeConstraints`
+        // throws an uncaught NSException mid-layout and crashes the app.
         h.sizingOptions = [.intrinsicContentSize]
         addSubview(h)
         NSLayoutConstraint.activate([
             h.leadingAnchor.constraint(equalTo: leadingAnchor),
             h.trailingAnchor.constraint(equalTo: trailingAnchor),
             h.topAnchor.constraint(equalTo: topAnchor),
-            h.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
         hosting = h
     }
