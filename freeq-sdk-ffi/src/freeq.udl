@@ -68,6 +68,9 @@ interface FreeqEvent {
     BatchStart(string id, string batch_type, string target);
     BatchEnd(string id);
     ChatHistoryTarget(string nick, string? timestamp);
+    // draft/read-marker (S1): reply to our mark/get, or another of our
+    // devices advancing the marker. timestamp null = server reports none.
+    ReadMarker(string target, string? timestamp);
     WhoisReply(string nick, string info);
     Notice(string text);
     Disconnected(string reason);

@@ -38,6 +38,32 @@ use std::sync::{
 //   Cross-transport interop MUST be re-tested (the root path is the exact
 //   axis that caused the earlier native/web disjoint-namespace bug).
 
+/// Extract the MoQ auth ROOT path shared by BOTH transports from a dialed
+/// URL path. This is the session-scoping mechanism (S2):
+///
+/// - Today's clients dial `/av/moq` → `""` → the token roots at the cluster
+///   root → all broadcasts announced to all subscribers (backward compatible).
+/// - Scoped clients dial `/av/moq/s/{session}` → `"s/{session}"` → the relay
+///   only announces broadcasts under that session, so a client in call A can
+///   no longer subscribe to (and play) call B's media — enforced server-side
+///   for EVERY client regardless of version, closing the 2026-07-03 leak.
+///
+/// Both transports MUST normalize identically or they root at different paths
+/// and become mutually invisible (the earlier native/web disjoint-namespace
+/// bug). WS gets the suffix from the axum `{*path}` capture; QUIC gets the
+/// full URL path, so this strips the `/av/moq` mount prefix to match.
+///
+/// Not feature-gated (pure string logic, no AV deps) so it stays unit-testable
+/// under default features.
+pub fn moq_scope_path(url_path: &str) -> String {
+    let trimmed = url_path.trim_start_matches('/');
+    trimmed
+        .strip_prefix("av/moq")
+        .unwrap_or(trimmed)
+        .trim_matches('/')
+        .to_string()
+}
+
 /// Shared SFU state, accessible from the web server for WebSocket MoQ connections.
 #[cfg(feature = "av-native")]
 pub struct SfuState {
@@ -148,20 +174,18 @@ async fn handle_quic_connection(
     use moq_relay::AuthParams;
 
     let transport = request.transport();
-    // Root EVERY connection at the cluster root (""), regardless of the URL
-    // path the client dialed (e.g. "/av/moq"). The WebSocket entry point
-    // (`handle_ws_moq`) already roots at "". If QUIC instead rooted at the
-    // URL path, native (QUIC) and web (WebSocket) clients would publish into
-    // DISJOINT namespaces inside the SAME `moq_relay::Cluster` and never see
-    // each other — observed live: an iOS QUIC client and a web WS client in
-    // one `#chadtest` session, mutually invisible (no audio, no video, not
-    // even in each other's participant list). `AuthParams::from_url` still
-    // parses any jwt/register query params; we only force the root path so
-    // both transports share one broadcast namespace.
+    // Root the connection at the SESSION-SCOPE path derived from the dialed
+    // URL, normalized the SAME way the WebSocket entry point normalizes its
+    // `{*path}` capture (`moq_scope_path`). Both transports must agree, or
+    // native (QUIC) and web (WebSocket) clients root at different paths and
+    // become mutually invisible — the disjoint-namespace bug. `/av/moq` →
+    // "" (unchanged global behavior for today's clients); `/av/moq/s/{sess}`
+    // → per-session isolation (S2). `AuthParams::from_url` still parses any
+    // jwt/register query params.
     let params = match request.url() {
         Some(url) => {
             let mut p = AuthParams::from_url(url);
-            p.path = String::new();
+            p.path = moq_scope_path(url.path());
             p
         }
         None => AuthParams::default(),
@@ -201,8 +225,10 @@ pub async fn handle_ws_moq(
 
     let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
 
+    // Normalize the axum {*path} capture the same way the QUIC handler
+    // normalizes its URL path, so both transports root identically.
     let params = moq_relay::AuthParams {
-        path,
+        path: moq_scope_path(&path),
         jwt: None,
         register: None,
     };
@@ -319,4 +345,41 @@ fn tungstenite_to_axum(
             }
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moq_scope_path;
+
+    #[test]
+    fn unscoped_mount_is_global_root() {
+        // Today's clients dial /av/moq → "" → cluster root (backward compat).
+        assert_eq!(moq_scope_path("/av/moq"), "");
+        assert_eq!(moq_scope_path("av/moq"), "");
+        assert_eq!(moq_scope_path("/av/moq/"), "");
+        assert_eq!(moq_scope_path(""), "");
+        assert_eq!(moq_scope_path("/"), "");
+    }
+
+    #[test]
+    fn scoped_mount_roots_at_session() {
+        // Scoped clients dial /av/moq/s/{session} → isolated per session.
+        assert_eq!(moq_scope_path("/av/moq/s/01KWSESSION"), "s/01KWSESSION");
+        assert_eq!(moq_scope_path("av/moq/s/01KWSESSION"), "s/01KWSESSION");
+        assert_eq!(moq_scope_path("/av/moq/s/01KWSESSION/"), "s/01KWSESSION");
+    }
+
+    #[test]
+    fn ws_route_capture_is_idempotent() {
+        // The WS handler passes the axum {*path} capture (already the suffix);
+        // normalizing it again must not double-strip or corrupt it.
+        assert_eq!(moq_scope_path("s/01KWSESSION"), "s/01KWSESSION");
+        assert_eq!(moq_scope_path("s/01KWSESSION/"), "s/01KWSESSION");
+        assert_eq!(moq_scope_path(""), "");
+    }
+
+    #[test]
+    fn distinct_sessions_get_distinct_roots() {
+        assert_ne!(moq_scope_path("/av/moq/s/aaa"), moq_scope_path("/av/moq/s/bbb"));
+    }
 }

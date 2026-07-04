@@ -189,6 +189,10 @@ pub enum FreeqEvent {
         nick: String,
         timestamp: Option<String>,
     },
+    ReadMarker {
+        target: String,
+        timestamp: Option<String>,
+    },
     WhoisReply {
         nick: String,
         info: String,
@@ -634,6 +638,10 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
         Event::WhoisReply { nick, info } => FreeqEvent::WhoisReply {
             nick: nick.clone(),
             info: info.clone(),
+        },
+        Event::ReadMarker { target, timestamp } => FreeqEvent::ReadMarker {
+            target: target.clone(),
+            timestamp: timestamp.clone(),
         },
         Event::RawLine(_) => FreeqEvent::Notice {
             text: String::new(),
@@ -1254,17 +1262,33 @@ mod av_impl {
     ) -> Result<State, FreeqError> {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+        // S2 session scoping (coordinated rollout — see `SCOPED_SESSIONS`).
+        // When scoped, we dial `/av/moq/s/{session}` so the relay roots this
+        // connection at the session and never announces OTHER sessions'
+        // broadcasts to us (server-enforced isolation for every client). Our
+        // own broadcast path is then RELATIVE to that root — `{nick}~{inst}`,
+        // NOT `{session}/{nick}~{inst}` — or it would double-prefix. When
+        // unscoped (today), everything is global + absolute as before.
+        //
         // Broadcast path includes a per-call instance suffix so two devices
-        // signed in as the same DID/nick get distinct MoQ paths. Matches the
-        // `+freeq.at/av-instance` tag the client sent on av-join — the
-        // server records that suffix in its participants list, so peers
-        // know the right path to subscribe to.
-        let broadcast_name = if instance_id.is_empty() {
-            format!("{session_id}/{nick}")
+        // signed in as the same DID/nick get distinct MoQ paths (matches the
+        // `+freeq.at/av-instance` av-join tag).
+        let leaf = if instance_id.is_empty() {
+            nick.clone()
         } else {
-            format!("{session_id}/{nick}~{instance_id}")
+            format!("{nick}~{instance_id}")
         };
-        let moq_url: url::Url = format!("{server_url}/av/moq")
+        let broadcast_name = if SCOPED_SESSIONS {
+            leaf
+        } else {
+            format!("{session_id}/{leaf}")
+        };
+        let moq_url_str = if SCOPED_SESSIONS {
+            format!("{server_url}/av/moq/s/{session_id}")
+        } else {
+            format!("{server_url}/av/moq")
+        };
+        let moq_url: url::Url = moq_url_str
             .parse()
             .map_err(|_| FreeqError::InvalidArgument)?;
 
@@ -1441,11 +1465,29 @@ mod av_impl {
         })
     }
 
-    /// The SFU relays ALL sessions through one MoQ namespace, and announces
-    /// every broadcast to every consumer. Without this filter a client in
-    /// call A subscribes to (and PLAYS) call B's audio and video — observed
-    /// live 2026-07-03: a #freeq participant received a #chadtest broadcast.
+    /// S2 rollout flag. FALSE = today's behavior (dial `/av/moq`, absolute
+    /// `{session}/{nick}` paths, global namespace + client-side session
+    /// filter). TRUE = dial `/av/moq/s/{session}`, relative `{nick}` paths,
+    /// server-enforced per-session isolation.
+    ///
+    /// MUST stay false until the scoping-capable server is DEPLOYED — a scoped
+    /// client against an un-deployed server would root at a path the relay
+    /// doesn't special-case and see no peers. Flip to true only after the
+    /// server is live, and flip web + iOS in the SAME release (a scoped and an
+    /// unscoped client in one call root differently and can't see each other).
+    /// See docs/QUEUE-FOR-CHAD.md #3 and freeq-server/src/av_sfu.rs.
+    pub(super) const SCOPED_SESSIONS: bool = false;
+
+    /// Whether a peer broadcast path belongs to our call. Unscoped: the SFU
+    /// relays ALL sessions through one namespace and announces everything, so
+    /// we must filter by the `{session}/` prefix (without this, a client in
+    /// call A plays call B's media — observed live 2026-07-03). Scoped: the
+    /// relay only ever announces our session's broadcasts, so every announced
+    /// path already belongs to us (paths are relative, no session prefix).
     pub(super) fn belongs_to_session(path: &str, session_id: &str) -> bool {
+        if SCOPED_SESSIONS {
+            return true;
+        }
         path.strip_prefix(session_id)
             .is_some_and(|rest| rest.starts_with('/'))
     }
