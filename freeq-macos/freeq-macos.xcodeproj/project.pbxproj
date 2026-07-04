@@ -47,6 +47,7 @@
 		9A656A1FED0DA78997CD68B4 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20ABEF839D9D9D42C9D1BF08 /* App.swift */; };
 		9F958D5ED5FB22C5E40774A7 /* ChannelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7340BE5C80B24DD16B066ABC /* ChannelSettingsSheet.swift */; };
 		A115ABF32733643ACB3F34DF /* UserProfileSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = B151A6B667B7AC30647A4811 /* UserProfileSheet.swift */; };
+		A11F5A568FDB0826A635682A /* ComposeTextExtraction.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */; };
 		A4F9C4AA63982ABFC87031B0 /* ComposeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = D90D45494AECECE10448CB0E /* ComposeCommands.swift */; };
 		A9145BA4866695884EE7B4B9 /* FrameHitchMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0D2221C3627158CF392EC73 /* FrameHitchMonitor.swift */; };
 		A94BB04F1EFEF742981293E0 /* CommandActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF97FF66F9ADAFA5CF386971 /* CommandActions.swift */; };
@@ -62,6 +63,7 @@
 		C427D104D59E12468C135DAC /* MenuBarModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEE68D36BE8C58FE6D1A14BA /* MenuBarModel.swift */; };
 		C480A25B440D0373E17082D8 /* ComposeFormatting.swift in Sources */ = {isa = PBXBuildFile; fileRef = AFDA007C5D2E0294D534B5A4 /* ComposeFormatting.swift */; };
 		C724476B94820275BA16E55F /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B11355062BDD7B9062AC22F /* ChatView.swift */; };
+		CAF04BC63962B2AD1BCB86FE /* FreeqAppIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99635569CD2711503B3DCF7E /* FreeqAppIntents.swift */; };
 		D0330D3B94FAB33F96D04BE8 /* ThreadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53A3EEB6BC19DB7746A55502 /* ThreadView.swift */; };
 		D29F998C6DF599EA13C38C85 /* ConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 313F00E499C37E94C9855F4F /* ConnectView.swift */; };
 		D2DC1C78722C6743877143B7 /* MessageTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E7AF9D701F15529729BA91 /* MessageTimeline.swift */; };
@@ -124,11 +126,13 @@
 		923CB3DCE2113F08CCB9E8F7 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		932AFF9B3AF0BCF257A2DCE2 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		94E7AF9D701F15529729BA91 /* MessageTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTimeline.swift; sourceTree = "<group>"; };
+		99635569CD2711503B3DCF7E /* FreeqAppIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreeqAppIntents.swift; sourceTree = "<group>"; };
 		9B238AA9ACDF3723BB74BB45 /* ChannelListBrowser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelListBrowser.swift; sourceTree = "<group>"; };
 		9E6BC4FEEBACC91D752966CC /* ChannelHydration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelHydration.swift; sourceTree = "<group>"; };
 		9FEA777B589463007FF478DC /* MessageListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageListView.swift; sourceTree = "<group>"; };
 		A09A2F1C5515211E8D3BE359 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferNavigation.swift; sourceTree = "<group>"; };
+		AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeTextExtraction.swift; sourceTree = "<group>"; };
 		AFDA007C5D2E0294D534B5A4 /* ComposeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeFormatting.swift; sourceTree = "<group>"; };
 		B144BCAA2F46CB480BF6E2CD /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B151A6B667B7AC30647A4811 /* UserProfileSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserProfileSheet.swift; sourceTree = "<group>"; };
@@ -298,9 +302,11 @@
 				D90D45494AECECE10448CB0E /* ComposeCommands.swift */,
 				AFDA007C5D2E0294D534B5A4 /* ComposeFormatting.swift */,
 				06360D5F1B334245B936F78F /* ComposeHistory.swift */,
+				AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */,
 				0BD56638DA817D921B8F261C /* DebugBridge.swift */,
 				20B3BED9F9A6237942DD0971 /* E2eeManager.swift */,
 				F0D2221C3627158CF392EC73 /* FrameHitchMonitor.swift */,
+				99635569CD2711503B3DCF7E /* FreeqAppIntents.swift */,
 				9194BD66D242EE2DD6C3BA20 /* GlobalHotKey.swift */,
 				6D0D657E5F637E5EFD232E19 /* KeychainHelper.swift */,
 				DB1B29BA8601FC220D46B705 /* Logger.swift */,
@@ -467,6 +473,7 @@
 				A4F9C4AA63982ABFC87031B0 /* ComposeCommands.swift in Sources */,
 				C480A25B440D0373E17082D8 /* ComposeFormatting.swift in Sources */,
 				F166A44537B071CBCB90128C /* ComposeHistory.swift in Sources */,
+				A11F5A568FDB0826A635682A /* ComposeTextExtraction.swift in Sources */,
 				D29F998C6DF599EA13C38C85 /* ConnectView.swift in Sources */,
 				111A631DD747383DB85200BF /* DebugBridge.swift in Sources */,
 				40B19B4620E1FFA3196FBFAD /* DetailPanel.swift in Sources */,
@@ -474,6 +481,7 @@
 				3ACCE0099E0E97EC7A321EDC /* FileUpload.swift in Sources */,
 				6DDB3CED329F29FC4C691EAD /* FormatToolbar.swift in Sources */,
 				A9145BA4866695884EE7B4B9 /* FrameHitchMonitor.swift in Sources */,
+				CAF04BC63962B2AD1BCB86FE /* FreeqAppIntents.swift in Sources */,
 				E04A550CE7A7BD40DA6CFD36 /* GlobalHotKey.swift in Sources */,
 				B8AB7DBFF62520564B9DDE52 /* JoinChannelSheet.swift in Sources */,
 				ECC92464E4422B5DCFDC770B /* KeychainHelper.swift in Sources */,

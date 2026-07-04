@@ -656,6 +656,18 @@ struct ComposeTextView: NSViewRepresentable {
         textView.isRichText = false
         textView.font = .systemFont(ofSize: NSFont.systemFontSize)
         textView.allowsUndo = true
+
+        // Apple Intelligence Writing Tools in the composer (macOS 15+):
+        // inline proofread / rewrite / tone on the drafted message. `.complete`
+        // gives the inline experience; it operates on the plain text we send,
+        // so no wire-format change is needed. (Genmoji-in-messages is a
+        // separate, larger effort — it needs an adaptive-image-glyph wire
+        // format across the server and all clients; the composer's sendable-
+        // text extraction already strips stray glyph placeholders so nothing
+        // breaks in the meantime.)
+        if #available(macOS 15.0, *) {
+            textView.writingToolsBehavior = .complete
+        }
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.drawsBackground = false
@@ -718,7 +730,7 @@ struct ComposeTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+            parent.text = ComposeTextExtraction.sendable(textView.string)
         }
     }
 }

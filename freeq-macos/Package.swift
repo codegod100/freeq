@@ -57,6 +57,7 @@ let package = Package(
                 "UploadResponse.swift",
                 "ReconnectPolicy.swift",
                 "MenuBarModel.swift",
+                "ComposeTextExtraction.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]
