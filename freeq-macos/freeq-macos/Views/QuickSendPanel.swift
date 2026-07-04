@@ -25,12 +25,25 @@ final class QuickSendController {
         }
     }
 
+    /// Prefill for the next presentation (from a `freeq://share` open).
+    private var prefill: ShareURL.Payload?
+
     func toggle() {
         if panel?.isVisible == true {
             dismiss()
         } else {
+            prefill = nil
             present()
         }
+    }
+
+    /// Summon the panel pre-filled from a Share Extension / share URL.
+    func presentShare(_ payload: ShareURL.Payload) {
+        prefill = payload
+        // Rebuild content so the SwiftUI view picks up the new initial values.
+        panel?.orderOut(nil)
+        panel = nil
+        present()
     }
 
     func dismiss() {
@@ -67,6 +80,8 @@ final class QuickSendController {
         panel.animationBehavior = .utilityWindow
 
         let view = QuickSendView(
+            initialText: prefill?.body ?? "",
+            initialTarget: prefill?.target,
             onSend: { [weak self] in self?.dismiss() },
             onCancel: { [weak self] in self?.dismiss() })
         panel.contentView = NSHostingView(rootView: view)
@@ -83,6 +98,8 @@ private final class KeyablePanel: NSPanel {
 
 /// The panel's content: target picker + message field.
 private struct QuickSendView: View {
+    var initialText: String = ""
+    var initialTarget: String? = nil
     let onSend: () -> Void
     let onCancel: () -> Void
 
@@ -130,7 +147,10 @@ private struct QuickSendView: View {
         .padding(16)
         .frame(width: 560)
         .onAppear {
-            if target.isEmpty { target = AppState.current?.activeChannel ?? targets.first ?? "" }
+            if text.isEmpty { text = initialText }
+            if target.isEmpty {
+                target = initialTarget ?? AppState.current?.activeChannel ?? targets.first ?? ""
+            }
             fieldFocused = true
         }
     }

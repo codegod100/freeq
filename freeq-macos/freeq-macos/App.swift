@@ -73,6 +73,13 @@ struct FreeqApp: App {
                 .onChange(of: appearanceRaw) { _, _ in
                     AppearanceSetting.current.apply()
                 }
+                .onOpenURL { url in
+                    // freeq://share?text=…&url=…&channel=… — from the Share
+                    // Extension or any automation. Pre-fill the quick-send panel.
+                    if let payload = ShareURL.parse(url) {
+                        QuickSendController.shared.presentShare(payload)
+                    }
+                }
                 .onChange(of: appState.activeChannel) { _, newValue in
                     updateWindowTitle(newValue)
                 }

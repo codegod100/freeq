@@ -58,6 +58,7 @@ let package = Package(
                 "ReconnectPolicy.swift",
                 "MenuBarModel.swift",
                 "ComposeTextExtraction.swift",
+                "ShareURL.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]
