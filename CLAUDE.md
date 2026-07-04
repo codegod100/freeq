@@ -1,3 +1,14 @@
+> **⚠️ Pending developer-account work — do not lose track.**
+> A batch of signing/distribution tasks for macOS, iOS, and Android is
+> **blocked on Apple Developer Program + Google Play Console approval**.
+> When those accounts are approved, work through
+> **`docs/DEVELOPER-ACCOUNT-TODO.md`** (Developer ID + notarization + Sparkle
+> for Mac; Live Activity/Watch provisioning + APNs/CallKit + TestFlight for
+> iOS; release keystore + Play App Signing + FCM for Android; plus the
+> coordinated S2 session-scoping flip and store-compliance items). The code is
+> already ready — these are the identity/provisioning steps ad-hoc signing
+> can't do. See also `docs/QUEUE-FOR-CHAD.md` for other participation items.
+
 **Requirements:**
 - `session_id` must be unique per TCP connection
 - `nonce` must be cryptographically random
