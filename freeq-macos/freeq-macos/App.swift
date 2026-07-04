@@ -151,6 +151,22 @@ struct FreeqApp: App {
             SettingsView()
                 .environment(appState)
         }
+
+        // Ambient presence: a persistent menu bar item so the call + unread
+        // state live at the OS level and survive closing the window.
+        MenuBarExtra {
+            MenuBarView()
+                .environment(appState)
+        } label: {
+            let unread = appState.totalUnread > 0
+            let mention = appState.mentionCounts.values.contains { $0 > 0 }
+            Image(systemName: MenuBarModel.iconName(
+                inCall: appState.isInCall,
+                muted: appState.isMuted,
+                unread: unread,
+                mention: mention
+            ))
+        }
     }
 
     private func updateWindowTitle(_ channel: String?) {

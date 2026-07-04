@@ -56,6 +56,7 @@ let package = Package(
                 "CommandRegistry.swift",
                 "UploadResponse.swift",
                 "ReconnectPolicy.swift",
+                "MenuBarModel.swift",
                 "Logger.swift",
                 "KeychainHelper.swift",
             ]

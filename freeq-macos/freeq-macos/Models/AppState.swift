@@ -220,9 +220,15 @@ class AppState {
         brokerToken != nil && !nick.isEmpty
     }
 
+    /// The running app's state, for OS-integration surfaces (menu bar extra,
+    /// global hotkey, App Intents) that live outside the SwiftUI environment
+    /// and need to reach the one live instance. Set in `init`.
+    @ObservationIgnored static weak var current: AppState?
+
     // MARK: - Init
 
     init() {
+        AppState.current = self
         loadSavedState()
         requestNotificationPermission()
         // In test mode the SwiftUI view lifecycle may never run `.onAppear`
