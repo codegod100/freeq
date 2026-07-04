@@ -22,6 +22,9 @@ targets:
         LSRequiresIPhoneOS: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # Keep call audio alive when the screen locks / app backgrounds.
+        UIBackgroundModes:
+          - audio
         NSCameraUsageDescription: "freeq needs camera access to take photos and videos to share in chat."
         NSMicrophoneUsageDescription: "freeq needs microphone access to record voice messages and video with audio."
         NSPhotoLibraryUsageDescription: "freeq needs photo library access to share photos and videos in chat."

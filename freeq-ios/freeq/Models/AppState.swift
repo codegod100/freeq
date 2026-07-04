@@ -498,6 +498,13 @@ class AppState: ObservableObject {
                 self.currentCallChannel = channel
                 self.currentCallSessionId = sessionId
                 self.startCallActivity(channel: channel, sessionId: sessionId)
+                // Surface as a system call (Recents, lock screen, green pill).
+                CallKitManager.shared.onEnd = { [weak self] in self?.leaveCall() }
+                CallKitManager.shared.onSetMuted = { [weak self] muted in
+                    guard let self, self.isMuted != muted else { return }
+                    self.toggleMute()
+                }
+                CallKitManager.shared.reportStarted(channel: channel)
             }
         } catch {
             print("[av] Failed to start call: \(error)")
@@ -582,6 +589,7 @@ class AppState: ObservableObject {
         avSession = nil
         currentAvInstance = nil
         Self.deactivateVoiceCallSession()
+        CallKitManager.shared.reportEnded()
         runOnMain {
             self.isInCall = false
             self.isMuted = false
@@ -602,6 +610,7 @@ class AppState: ObservableObject {
         isMuted.toggle()
         avSession?.setMuted(muted: isMuted)
         updateCallActivity()
+        CallKitManager.shared.reflectMuted(isMuted)
     }
 
     /// Toggle call audio between the loud speaker and the handset
@@ -639,6 +648,7 @@ class AppState: ObservableObject {
         avSession = nil
         currentAvInstance = nil
         Self.deactivateVoiceCallSession()
+        CallKitManager.shared.reportEnded()
         runOnMain {
             self.isInCall = false
             self.isMuted = false

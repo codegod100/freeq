@@ -86,6 +86,7 @@
 		F5578CDEA68BCCE1C35408EF /* DiscoverTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8114EBF122CE613364A0CAE7 /* DiscoverTab.swift */; };
 		F7C61B31B1D336F554B9F657 /* BufferListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D97CC3F5A8E1F52F2C940FF /* BufferListView.swift */; };
 		F984D50CE55E26A76B8B7B8D /* ChatsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4A25735A9E045465A3F1BAD /* ChatsTab.swift */; };
+		FACB4B51AB62E6D09EB8121A /* CallKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C362339EDE04DE16E1064E /* CallKitManager.swift */; };
 		FF41A75897B0A7362F61B210 /* CallLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A725C856D7878BE6382208F3 /* CallLiveActivity.swift */; };
 /* End PBXBuildFile section */
 
@@ -139,6 +140,7 @@
 		7C22534FE12207F730D56732 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7D7683ED921B13F8CF675C3D /* VoiceTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTranscriber.swift; sourceTree = "<group>"; };
 		8114EBF122CE613364A0CAE7 /* DiscoverTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverTab.swift; sourceTree = "<group>"; };
+		81C362339EDE04DE16E1064E /* CallKitManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallKitManager.swift; sourceTree = "<group>"; };
 		81C517F4469AC28926160BA7 /* PhotoPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoPicker.swift; sourceTree = "<group>"; };
 		83E16EC2E4202D7B88D8DEDE /* ThreadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadView.swift; sourceTree = "<group>"; };
 		88E010DFF61E21BE28AF989C /* FreeqIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreeqIntents.swift; sourceTree = "<group>"; };
@@ -316,6 +318,7 @@
 				FEED28B3F67BF6EC64040A04 /* AvatarCache.swift */,
 				B5C23A0B4E13C09B1E12EA8F /* BlueskyGraph.swift */,
 				78CD9FF3B40DF51F4177AA84 /* CallCameraCapture.swift */,
+				81C362339EDE04DE16E1064E /* CallKitManager.swift */,
 				17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */,
 				F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */,
 				25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */,
@@ -564,6 +567,7 @@
 				C188CB44680B51C598EEDA18 /* BlueskyGraph.swift in Sources */,
 				B2DF4E800D832B107555FD28 /* CallActivityAttributes.swift in Sources */,
 				ECAFF392124C53BB4F56182B /* CallCameraCapture.swift in Sources */,
+				FACB4B51AB62E6D09EB8121A /* CallKitManager.swift in Sources */,
 				B851BB1F9C23ED67884D5621 /* CallMicCapture.swift in Sources */,
 				0D90DB6A860ED297CC10A2CF /* CallView.swift in Sources */,
 				8051F4C388919E36E3F7D21B /* ChannelSettingsSheet.swift in Sources */,
