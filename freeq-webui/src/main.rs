@@ -36,7 +36,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, trace, warn};
 use url::Url;
 
-use crate::state::{AppState, MemberEntry};
+use crate::state::{AppState, AuthState, MemberEntry};
 use crate::upstream::{fetch_channels, fetch_history, spawn_upstream_if_needed, UpstreamHistoryMessage};
 
 // ── main ────────────────────────────────────────────────────────────────
@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         .route("/chat/{channel}/join", post(post_channel_join))
         .route("/chat/{channel}/part", post(post_channel_part))
         .route("/datastar.js", get(get_datastar_js))
+        .route("/upload", post(post_upload))
         .route("/api/channels", get(get_channels))
         .layer(
             CorsLayer::new()
@@ -172,8 +173,7 @@ async fn post_login(
 
     let (sid, _) = session_id_from_request(&req);
     let session = state.session(&sid);
-    *session.pending_login_handle.lock() = Some(handle.clone());
-    *session.login_handle.lock() = Some(handle);
+    *session.auth.lock() = AuthState::LoggingIn { handle: handle.clone() };
     debug!(session = %sid, "login handle stored; redirecting to chat");
 
     let mut resp = (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response();
@@ -242,14 +242,17 @@ async fn get_chat(
 
     // Auth state for the navbar.
     let session = state.session(&sid);
-    let login_handle = session.login_handle.lock().clone();
-    let is_authenticated = session.authenticated_did.lock().is_some();
-    let show_oauth = !is_authenticated && login_handle.is_some();
+    let auth = session.auth.lock().clone();
+    let (login_handle, is_authenticated, show_login, show_oauth_prompt) = match &auth {
+        AuthState::Authenticated { handle, .. } => (handle.clone(), true, false, false),
+        AuthState::AwaitingOAuth { handle, .. } | AuthState::LoggingIn { handle } => (handle.clone(), false, false, true),
+        AuthState::Guest => (String::new(), false, true, false),
+    };
     let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
-    ctx.insert("login_handle", &login_handle.as_deref().unwrap_or(""));
+    ctx.insert("login_handle", &login_handle);
     ctx.insert("is_authenticated", &is_authenticated);
-    ctx.insert("show_login", &(!is_authenticated && login_handle.is_none()));
-    ctx.insert("show_oauth_prompt", &show_oauth);
+    ctx.insert("show_login", &show_login);
+    ctx.insert("show_oauth_prompt", &show_oauth_prompt);
     ctx.insert("joined_channels", &joined);
     let body = match state.tera.render("chat.html.tera", &ctx) {
         Ok(html) => html,
@@ -276,15 +279,80 @@ async fn get_chat(
     resp
 }
 
+// ── POST /upload ──────────────────────────────────────────────────────
+
+async fn post_upload(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    let mut file_data: Option<Vec<u8>> = None;
+    let mut content_type = "application/octet-stream".to_string();
+    let mut filename = "upload".to_string();
+    let mut channel = String::new();
+    let mut did = String::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name() {
+            Some("file") => {
+                content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+                filename = field.file_name().unwrap_or("upload").to_string();
+                if let Ok(bytes) = field.bytes().await {
+                    file_data = Some(bytes.to_vec());
+                }
+            }
+            Some("channel") => {
+                if let Ok(v) = field.text().await { channel = v; }
+            }
+            Some("did") => {
+                if let Ok(v) = field.text().await { did = v; }
+            }
+            _ => {}
+        }
+    }
+    // Enrich DID from session if available
+    let (sid, _) = session_id_from_request(&headers);
+    let session = state.session(&sid);
+    let session_did = session.auth.lock().did().map(|d| d.to_string()).unwrap_or_default();
+    let effective_did = if !session_did.is_empty() && session_did.starts_with("did:") { session_did } else { did };
+    let file_data = match file_data {
+        Some(d) => d,
+        None => return (StatusCode::BAD_REQUEST, "No file provided").into_response(),
+    };
+    tracing::info!(did = %effective_did, "upload proxy forwarding");
+    let upstream_url = state.upstream.base.join("api/v1/upload").unwrap();
+    let form = reqwest::multipart::Form::new()
+        .part("file", reqwest::multipart::Part::bytes(file_data).file_name(filename).mime_str(&content_type).unwrap())
+        .text("did", effective_did)
+        .text("channel", channel);
+    match state.http.post(upstream_url).multipart(form).send().await {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+    }
+}
+
 // ── GET /chat/{channel}/events ──────────────────────────────────────────
 
 async fn get_channel_events(
     State(state): State<AppState>,
     Path(channel): Path<String>,
     req: axum::http::HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let (sid, _is_new) = session_id_from_request(&req);
     let session = state.session(&sid);
+
+    // Auto-auth: if handle passed in URL, transition to LoggingIn
+    if let Some(handle) = params.get("handle") {
+        let mut auth = session.auth.lock();
+        if matches!(&*auth, AuthState::Guest) {
+            *auth = AuthState::LoggingIn { handle: handle.clone() };
+            debug!(session = %sid, %handle, "auto-auth via query param");
+        }
+    }
 
     debug!(session = %sid, channel = %channel, "SSE subscriber connected");
 
@@ -320,11 +388,27 @@ async fn get_channel_events(
                         yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         continue;
                     }
+                    // --- Extract full DID from 333 (topic setter) lines ---
+                    if let Some(did) = parse_333_did(&line) {
+                        let mut auth = session.auth.lock();
+                        if !matches!(&*auth, AuthState::Authenticated { .. }) {
+                            let handle = auth.handle().unwrap_or("unknown").to_string();
+                            *auth = AuthState::Authenticated { handle, did: did.clone(), nick: String::new() };
+                            info!(session = %sid, %did, "authenticated DID extracted from 333");
+                        }
+                        continue;
+                    }
+                    // --- Extract real DID from ACCOUNT messages ---
+                    if let Some(did) = parse_account_did(&line) {
+                        let mut auth = session.auth.lock();
+                        if !matches!(&*auth, AuthState::Authenticated { .. }) {
+                            let handle = auth.handle().unwrap_or("unknown").to_string();
+                            *auth = AuthState::Authenticated { handle, did: did.clone(), nick: String::new() };
+                            info!(session = %sid, %did, "authenticated DID extracted from ACCOUNT");
+                        }
+                        continue;
+                    }
                     // --- live member tracking (JOIN/PART/QUIT/MODE) ---
-                    // Only events for *this* channel mutate the panel; QUIT has
-                    // no channel and is applied to the current view. We render
-                    // only when membership actually changed to avoid spurious
-                    // patches (e.g. a QUIT from someone not in this channel).
                     if let Some(change) = parse_member_change(&line) {
                         let member_html: Option<String> = {
                             let mut members = session.channel_members.lock();
@@ -386,17 +470,27 @@ async fn get_channel_events(
                     // --- SASL 903 (authentication success) ---
                     if is_903(&line) {
                         info!(session = %sid, "SASL authentication successful");
-                        let handle = session.login_handle.lock().clone().unwrap_or_default();
-                        *session.authenticated_did.lock() = Some(handle.clone());
-                        // Change nick to a sanitized version of the handle.
+                        let handle = session.auth.lock().handle().unwrap_or("unknown").to_string();
                         let nick = sanitize_nick(&handle);
                         if !nick.is_empty() {
                             let tx = session.irc_tx.lock().clone();
                             let _ = tx.try_send(format!("NICK {nick}\r\n"));
                             info!(session = %sid, %nick, "sending NICK change after auth");
                         }
+                        // Re-JOIN channels since NICK change loses membership
+                        {
+                            let joined = session.joined.lock().clone();
+                            let tx = session.irc_tx.lock().clone();
+                            for ch in &joined {
+                                let _ = tx.try_send(format!("JOIN {ch}\r\n"));
+                            }
+                            if !joined.is_empty() {
+                                info!(session = %sid, count = joined.len(), "re-JOINing channels after NICK change");
+                            }
+                        }
+                        *session.auth.lock() = AuthState::Authenticated { handle: handle.clone(), did: handle.clone(), nick };
                         let js = format!(
-                            "localStorage.setItem('freeq_handle','{handle}');sessionStorage.removeItem('freeq_retry');var m=document.getElementById('oauth-modal');if(m)m.classList.remove('is-active');document.getElementById('status').classList.add('connected')",
+                            "localStorage.setItem('freeq_handle','{handle}');localStorage.setItem('freeq_did','{handle}');document.getElementById('status').classList.add('connected');var nb=document.querySelector('.navbar-end .navbar-item');if(nb)nb.outerHTML='<span class=\"navbar-item has-text-success is-size-7 py-1\">&#x1f512; {handle}</span>'",
                             handle = handle
                         );
                         let script = ExecuteScript::new(js);
@@ -405,11 +499,22 @@ async fn get_channel_events(
                     }
                     // --- OAuth login URL detection ---
                     if let Some(oauth_url) = extract_login_url(&line) {
-                        info!(session = %sid, "OAuth login URL detected; showing modal");
-                        let escaped = oauth_url.replace('\'', "\\'");
-                        let js = format!("var m=document.getElementById('oauth-modal');m.classList.add('is-active');document.getElementById('oauth-link').href='{escaped}'");
+                        info!(session = %sid, "OAuth login URL detected; showing authorize link");
+                        let escaped = oauth_url.replace('\\', "\\\\").replace('\'', "\\'");
+                        let js = format!("var el=document.getElementById('auth-status');if(el)el.outerHTML='<a class=\"navbar-item has-text-warning is-size-7 py-1\" href=\"{escaped}\" target=\"_blank\" rel=\"noopener\">\u{26A0} Authorize \u{2192}</a>'");
                         let script = ExecuteScript::new(js);
                         yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
+                        continue;
+                    }
+                    // --- Extract DID from auth NOTICE ("authenticated as did:plc:...") ---
+                    if let Some(did) = parse_auth_notice_did(&line) {
+                        let mut auth = session.auth.lock();
+                        if let AuthState::Authenticated { ref handle, ref nick, .. } = &*auth {
+                            let handle = handle.clone();
+                            let nick = nick.clone();
+                            *auth = AuthState::Authenticated { handle, did: did.clone(), nick };
+                            info!(session = %sid, %did, "authenticated DID updated from NOTICE");
+                        }
                         continue;
                     }
                     // --- messages ---
@@ -805,6 +910,45 @@ fn is_353(line: &str) -> bool {
     rest[sp + 1..].starts_with("353 ")
 }
 
+/// Parse a DID from a 333 (RPL_TOPICWHOTIME) line: `:server 333 nick #chan did:plc:FULL 12345`
+fn parse_333_did(line: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let (_prefix, rest) = rest.split_once(' ')?;
+    // rest = "333 nick #chan did:plc:xxx timestamp"
+    let parts: Vec<&str> = rest.splitn(4, ' ').collect();
+    // parts = ["333", "nick", "#chan", "did:plc:xxx timestamp"]
+    if parts.len() < 4 || parts[0] != "333" { return None; }
+    let rest2 = parts[3];
+    let did = rest2.split(' ').next()?;
+    if did.starts_with("did:plc:") {
+        Some(did.to_string())
+    } else {
+        None
+    }
+}
+
+/// Parse DID from auth NOTICE: `:server NOTICE nick :...authenticated as did:plc:XXX...`
+fn parse_auth_notice_did(line: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if !line.contains("authenticated as did:plc:") { return None; }
+    let start = line.find("did:plc:")?;
+    let rest = &line[start..];
+    let end = rest.find(|c: char| c.is_whitespace() || c == ')').unwrap_or(rest.len());
+    Some(rest[..end].to_string())
+}
+
+
+/// Parse a DID from an IRCv3 ACCOUNT message: `:nick ACCOUNT did:plc:xxx`
+fn parse_account_did(line: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let (_prefix, rest) = line.strip_prefix(':')?.split_once(' ')?;
+    let (cmd, did) = rest.split_once(' ')?;
+    if cmd != "ACCOUNT" { return None; }
+    if did == "*" { return None; } // logged out
+    Some(did.to_string())
+}
+
 /// Parse nicks from a 353 (RPL_NAMREPLY) line, stripping IRC mode
 /// prefixes (`@` op, `%` halfop, `+` voice, plus `~`/`&` owner/admin)
 /// and dropping empty tokens (e.g. from a trailing space). Returns one
@@ -819,17 +963,14 @@ fn parse_353_members(line: &str) -> Vec<MemberEntry> {
         .split(' ')
         .filter(|t| !t.is_empty())
         .map(|token| {
-            let pfx_len = token
-                .chars()
-                .take_while(|c| matches!(*c, '@' | '%' | '+' | '~' | '&'))
-                .count();
-            // Prefix chars are ASCII, so char count == byte count; safe for split_at.
-            let (prefixes, nick) = token.split_at(pfx_len);
+            let pfx_len = token.chars().take_while(|c| matches!(c, '@' | '%' | '+' | '~' | '&')).count();
+            let nick = &token[pfx_len..];
+            let pfx = &token[..pfx_len];
             MemberEntry {
                 nick: nick.to_string(),
-                op: prefixes.contains('@') || prefixes.contains('~') || prefixes.contains('&'),
-                halfop: prefixes.contains('%'),
-                voiced: prefixes.contains('+'),
+                op: pfx.contains('@') || pfx.contains('~') || pfx.contains('&'),
+                halfop: pfx.contains('%'),
+                voiced: pfx.contains('+'),
             }
         })
         .collect()

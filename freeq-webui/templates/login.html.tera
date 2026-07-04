@@ -36,5 +36,5 @@ body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--
 You'll be redirected to your PDS to authorize. Your private key <strong>never</strong> leaves your device. Or <a href="/chat/general">join as guest</a>.
 </div>
 </div>
+<script>var h=localStorage.getItem('freeq_handle');if(h&&!sessionStorage.getItem('freeq_retry')){sessionStorage.setItem('freeq_retry','1');var f=document.querySelector('form');f.querySelector('input').value=h;f.submit()}</script>
 </body>
-</html>

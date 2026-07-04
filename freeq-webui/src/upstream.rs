@@ -10,7 +10,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-use crate::state::{AppState, SessionHandle, Upstream};
+use crate::state::{AppState, AuthState, SessionHandle, Upstream};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamChannel {
@@ -65,9 +65,16 @@ pub fn spawn_upstream_if_needed(
             let _ = tx.try_send(format!("NAMES {target}\r\n"));
             debug!(session = %sid, channel = %target, "requesting NAMES");
         }
-        // Check for pending login
-        let pending = session.pending_login_handle.lock().take();
-        if let Some(handle) = pending {
+        // Check for pending login: send LOGIN if in LoggingIn state
+        let login_handle = {
+            let auth = session.auth.lock();
+            match &*auth {
+                AuthState::LoggingIn { handle } => Some(handle.clone()),
+                AuthState::AwaitingOAuth { handle, .. } => Some(handle.clone()),
+                _ => None,
+            }
+        };
+        if let Some(handle) = login_handle {
             let tx = session.irc_tx.lock().clone();
             let _ = tx.try_send(format!("LOGIN {handle}\r\n"));
             info!(session = %sid, handle = %handle, "sending LOGIN over existing WS");
@@ -75,11 +82,15 @@ pub fn spawn_upstream_if_needed(
         return;
     }
 
-    let irc_rx = match session.irc_rx_slot.lock().take() {
+    let irc_rx = session.irc_rx_slot.lock().take();
+    let irc_rx = match irc_rx {
         Some(rx) => rx,
         None => {
-            warn!("irc_rx already taken — double-spawn guard");
-            return;
+            drop(irc_rx); // release the lock guard
+            let (tx, rx) = tokio::sync::mpsc::channel(256);
+            *session.irc_tx.lock() = tx;
+            *session.irc_rx_slot.lock() = Some(rx);
+            session.irc_rx_slot.lock().take().expect("new channel")
         }
     };
 
@@ -102,9 +113,8 @@ pub fn spawn_upstream_if_needed(
     let session_id = sid.to_string();
     let target_for_task = target.clone();
 
-    // Check for pending login handle (set by POST /login)
-    let pending_login = session.pending_login_handle.lock().take();
-
+    // Get the login handle from auth state
+    let pending_login = session.auth.lock().handle().map(|h| h.to_string());
     *task_guard = Some(tokio::spawn(async move {
         info!(session = %session_id, ws = %ws_url, channel = %target_for_task, "connecting to upstream /irc");
         let result = run_upstream_ws(ws_url, lines_tx, irc_rx, target_for_task, pending_login).await;
@@ -128,10 +138,19 @@ pub async fn run_upstream_ws(
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url.as_str())
         .await.context("WS connect failed")?;
 
-    let nick = format!("webui{:x}", rand::random::<u32>());
+    let nick = if let Some(ref handle) = pending_login {
+        super::sanitize_nick(handle)
+    } else {
+        format!("webui{:x}", rand::random::<u32>())
+    };
     debug!(%nick, "upstream IRC registration");
     ws.send(WsMessage::Text(format!("NICK {nick}\r\n").into())).await?;
     ws.send(WsMessage::Text("USER webui 0 * :freeq-webui\r\n".into())).await?;
+
+    // IRCv3 capability negotiation: request account-notify to learn real DID
+    ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
+    ws.send(WsMessage::Text("CAP REQ :account-notify\r\n".into())).await?;
+    ws.send(WsMessage::Text("CAP END\r\n".into())).await?;
 
     // Send LOGIN if there's a pending handle
     if let Some(ref handle) = pending_login {
@@ -140,7 +159,6 @@ pub async fn run_upstream_ws(
     }
 
     ws.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await?;
-    ws.send(WsMessage::Text(format!("NAMES {channel}\r\n").into())).await?;
 
     let (mut write, mut read): (futures_util::stream::SplitSink<_, WsMessage>, SplitStream<_>) = ws.split();
 
@@ -164,6 +182,19 @@ pub async fn run_upstream_ws(
                                 warn!("WS write failed on PONG: {e}"); break;
                             }
                             continue;
+                        }
+                        // Retry with a random nick on 433 (Nickname in use)
+                        if trimmed.contains(" 433 ") {
+                            let fallback = format!("webui{:x}", rand::random::<u32>());
+                            let _ = write.send(WsMessage::Text(format!("NICK {fallback}\r\n").into())).await;
+                            info!("433 received; retrying NICK as {fallback}");
+                        }
+                        // Re-send LOGIN after registration completes (if nick was changed)
+                        if trimmed.contains(" 001 ") {
+                            if let Some(ref handle) = pending_login {
+                                let _ = write.send(WsMessage::Text(format!("LOGIN {handle}\r\n").into())).await;
+                                info!("001 received; re-sending LOGIN as {handle}");
+                            }
                         }
                         let _ = lines_tx.send(line);
                     }

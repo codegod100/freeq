@@ -9,6 +9,56 @@ use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc};
 use url::Url;
 
+// ── Auth state machine ─────────────────────────────────────────────────
+
+/// The auth state machine. Only valid states are representable.
+#[derive(Clone, Debug)]
+pub enum AuthState {
+    /// No handle known, not authenticated.
+    Guest,
+    /// Handle known, LOGIN sent to server, waiting for OAuth URL.
+    LoggingIn { handle: String },
+    /// OAuth URL received from server, waiting for user to complete.
+    AwaitingOAuth { handle: String, login_url: String },
+    /// Fully authenticated with DID and nick.
+    Authenticated { handle: String, did: String, nick: String },
+}
+
+impl Default for AuthState {
+    fn default() -> Self { AuthState::Guest }
+}
+
+impl AuthState {
+    pub fn handle(&self) -> Option<&str> {
+        match self {
+            AuthState::Guest => None,
+            AuthState::LoggingIn { handle }
+            | AuthState::AwaitingOAuth { handle, .. }
+            | AuthState::Authenticated { handle, .. } => Some(handle),
+        }
+    }
+
+    pub fn did(&self) -> Option<&str> {
+        match self {
+            AuthState::Authenticated { did, .. } => Some(did),
+            _ => None,
+        }
+    }
+
+    pub fn is_authenticated(&self) -> bool {
+        matches!(self, AuthState::Authenticated { .. })
+    }
+
+    pub fn login_url(&self) -> Option<&str> {
+        match self {
+            AuthState::AwaitingOAuth { login_url, .. } => Some(login_url),
+            _ => None,
+        }
+    }
+}
+
+// ── App state ──────────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct AppState {
     pub upstream: Arc<Upstream>,
@@ -60,6 +110,8 @@ impl AppState {
     }
 }
 
+// ── Member tracking ────────────────────────────────────────────────────
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MemberEntry {
     pub nick: String,
@@ -68,6 +120,8 @@ pub struct MemberEntry {
     pub voiced: bool,
 }
 
+// ── Session ────────────────────────────────────────────────────────────
+
 pub struct SessionHandle {
     pub irc_tx: Mutex<mpsc::Sender<String>>,
     pub lines_tx: broadcast::Sender<String>,
@@ -75,9 +129,8 @@ pub struct SessionHandle {
     pub channel_members: Mutex<HashMap<String, HashMap<String, MemberEntry>>>,
     pub irc_rx_slot: Mutex<Option<mpsc::Receiver<String>>>,
     pub ws_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    pub pending_login_handle: Mutex<Option<String>>,
-    pub login_handle: Mutex<Option<String>>,
-    pub authenticated_did: Mutex<Option<String>>,
+    /// Auth state machine — the single source of truth.
+    pub auth: Mutex<AuthState>,
 }
 
 impl SessionHandle {
@@ -90,9 +143,7 @@ impl SessionHandle {
             channel_members: Mutex::new(HashMap::new()),
             irc_rx_slot: Mutex::new(Some(irc_rx)),
             ws_task: Mutex::new(None),
-            pending_login_handle: Mutex::new(None),
-            login_handle: Mutex::new(None),
-            authenticated_did: Mutex::new(None),
+            auth: Mutex::new(AuthState::default()),
         }
     }
 }
