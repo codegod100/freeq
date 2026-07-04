@@ -447,8 +447,15 @@ struct MessageRow: View {
                 let cleanText = mediaURLs.isEmpty ? message.text : textWithoutImages(message.text, imageURLs: mediaURLs)
 
                 if !cleanText.isEmpty {
-                    Text(parseMessageText(cleanText))
-                        .textSelection(.enabled)
+                    // Block markdown (fences/quotes/lists/tables) → structured
+                    // renderer; everything else stays on the exact inline path.
+                    // Same inline renderer feeds both, so styling is identical.
+                    if MessageBlockParser.containsBlockSyntax(cleanText) {
+                        MessageBlocksView(text: cleanText, inlineRenderer: parseMessageText)
+                    } else {
+                        Text(parseMessageText(cleanText))
+                            .textSelection(.enabled)
+                    }
                 }
 
                 // Inline images

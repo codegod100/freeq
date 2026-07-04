@@ -78,8 +78,8 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | Feature | macOS | Web | Notes |
 |---|---|---|---|
 | Inline markdown | ✅ | ✅ | |
-| **Full markdown (mime: fences/quotes/lists/tables)** | ❌ | ✅ GFM | agents send these; mac renders mush |
-| **Syntax highlighting + copy** | ❌ | ⚠️ | leapfrog |
+| **Full markdown (mime: fences/quotes/lists/tables)** | ✅ ✎ (MessageBlocks.swift parser + MessageBlocksView.swift renderer; routed at MessageListView.swift:453) | ✅ GFM | fences/quotes/`-*+`&`1.`lists/pipe-tables; block parser is pure + unit-tested (39 tests, MessageBlocksTests.swift); plain messages stay on the fast inline path |
+| **Syntax highlighting + copy** | ⚠️ ✎ (SyntaxHighlighter.swift + CodeFenceView, MessageBlocksView.swift:56; copy MessageBlocksView.swift:97) | ⚠️ | copy = ✅ (hover-reveal, NSPasteboard, h-scroll, SF Mono 88%, lang label); highlighting = ⚠️ heuristic tokenizer (keyword/string/comment/number) for ~8 language families (swift/js-ts/py/rust/go/json/bash/c-cpp), lossless + unit-tested (26 tests, SyntaxHighlighterTests.swift); unknown languages render plain-but-beautiful. Not a full grammar |
 | Mention pills / jumbomoji | ❌ / ❌ | ❌ / ❌ | leapfrog |
 | Edited indicator | ✅ ✎ (MessageListView.swift:391) | ✅ | v1 falsely claimed ❌ |
 | Delete tombstone | ✅ ✎ (MessageListView.swift:203 DeletedMessageRow) | ✅ | shipped Phase 0 |

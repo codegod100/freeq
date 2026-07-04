@@ -50,6 +50,8 @@ let package = Package(
                 "ComposeFormatting.swift",
                 "ComposeHistory.swift",
                 "MessageTimeline.swift",
+                "MessageBlocks.swift",
+                "SyntaxHighlighter.swift",
                 "BufferNavigation.swift",
                 "CommandRegistry.swift",
                 "UploadResponse.swift",
