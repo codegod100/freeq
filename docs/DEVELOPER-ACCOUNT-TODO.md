@@ -27,6 +27,11 @@ Currently ad-hoc signed — this is the root of the "rebuild loses keychain /
 session" bug and why the Share Extension may not load. Proper signing fixes
 both permanently.
 
+**Tooling is ready** — full runbook in `freeq-macos/docs/DISTRIBUTION.md`;
+`scripts/package.sh` (env-driven signing, verified) + `notarize.sh` +
+`sparkle-keys.sh` + `generate-appcast.sh` are turnkey. The items below are the
+account-gated inputs those scripts need.
+
 - [ ] **Developer ID Application** certificate → set `CODE_SIGN_IDENTITY` +
       `DEVELOPMENT_TEAM` in `freeq-macos/project.yml` (add a `settings.base`
       block; today there is none). Re-run `xcodegen generate`.

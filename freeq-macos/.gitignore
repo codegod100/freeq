@@ -12,3 +12,4 @@ xcuserdata/
 
 # macOS noise
 .DS_Store
+build/dist/
