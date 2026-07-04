@@ -136,50 +136,95 @@ struct PeopleSearchView: View {
     @State private var searching = false
     @State private var selected: BskyActor? = nil
     @State private var searchTask: Task<Void, Never>? = nil
+    @FocusState private var focused: Bool
 
     var body: some View {
-        ZStack {
-            Theme.bgPrimary.ignoresSafeArea()
+        VStack(spacing: 0) {
+            // Explicit, always-visible search bar (same idiom as channel search).
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 15))
+                    .foregroundColor(Theme.textMuted)
+                TextField("", text: $query,
+                          prompt: Text("Search people…").foregroundColor(Theme.textMuted))
+                    .foregroundColor(Theme.textPrimary)
+                    .font(.fqCallout)
+                    .autocapitalization(.none)
+                    .disableAutocorrection(true)
+                    .keyboardType(.twitter)
+                    .submitLabel(.search)
+                    .focused($focused)
+                    .onChange(of: query) { runSearch() }
+                if searching {
+                    ProgressView().scaleEffect(0.7).tint(Theme.textMuted)
+                } else if !query.isEmpty {
+                    Button { query = ""; results = [] } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(Theme.textMuted)
+                    }
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(Theme.bgSecondary, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 4)
 
-            if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                EmptyStateView(
-                    icon: "person.crop.circle.badge.magnifyingglass",
-                    title: "Find people",
-                    message: "Search anyone on the AT Protocol network by name or handle — every result is a real, verified identity."
-                )
-            } else if searching && results.isEmpty {
+            content
+        }
+        .background(Theme.bgPrimary)
+        .sheet(item: $selected) { actor in
+            UserProfileSheet(nick: actor.handle, directActor: actor.did)
+        }
+    }
+
+    @ViewBuilder private var content: some View {
+        if query.trimmingCharacters(in: .whitespaces).isEmpty {
+            Spacer(minLength: 0)
+            EmptyStateView(
+                icon: "person.crop.circle.badge.magnifyingglass",
+                title: "Find people",
+                message: "Search anyone on the AT Protocol network by name or handle — every result is a real, verified identity."
+            )
+            Spacer(minLength: 0)
+        } else if results.isEmpty {
+            Spacer(minLength: 0)
+            if searching {
                 ProgressView().tint(Theme.accent)
-            } else if results.isEmpty {
+            } else {
                 EmptyStateView(icon: "magnifyingglass",
                                title: "No people found",
                                message: "Try a different name or handle.")
-            } else {
-                List {
+            }
+            Spacer(minLength: 0)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
                     ForEach(results) { actor in
                         Button { selected = actor } label: { BskyActorRow(actor: actor) }
                             .buttonStyle(.plain)
-                            .listRowBackground(Theme.bgSecondary)
-                            .listRowSeparatorTint(Theme.border)
+                            .padding(.horizontal, 16)
+                        Divider().background(Theme.border).padding(.leading, 74)
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
+                .padding(.top, 4)
             }
-        }
-        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
-                    prompt: "Search people")
-        .onChange(of: query) { runSearch() }
-        .sheet(item: $selected) { actor in
-            UserProfileSheet(nick: actor.handle, directActor: actor.did)
+            .scrollDismissesKeyboard(.interactively)
         }
     }
 
     private func runSearch() {
         searchTask?.cancel()
         let q = query.trimmingCharacters(in: .whitespaces)
-        guard q.count >= 2 else { results = []; searching = false; return }
+        guard q.count >= 2 else {
+            results = []
+            searching = false
+            return
+        }
         searching = true
-        searchTask = Task {
+        searchTask = Task { @MainActor in
             // Small debounce so we don't fire a request per keystroke.
             try? await Task.sleep(nanoseconds: 280_000_000)
             if Task.isCancelled { return }
