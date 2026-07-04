@@ -664,6 +664,17 @@ pub struct SharedState {
     /// Sessions that have negotiated account-tag capability (IRCv3).
     /// When set, outbound PRIVMSG/NOTICE includes `account=<did>` if sender is authenticated.
     pub cap_account_tag: Mutex<HashSet<String>>,
+    /// Sessions that have negotiated the `draft/read-marker` capability —
+    /// they can set/query cross-device read markers via MARKREAD and receive
+    /// marker broadcasts from their other connections.
+    /// See https://ircv3.net/specs/extensions/read-marker.
+    pub cap_read_marker: Mutex<HashSet<String>>,
+    /// Session-local read markers for guests (no DID). Keyed by
+    /// `session_id -> (target -> ISO timestamp)`. DID-authenticated users
+    /// persist to the `read_markers` table instead; this map only holds the
+    /// ephemeral markers of unauthenticated connections and is dropped on
+    /// disconnect.
+    pub session_read_markers: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Sessions that have OPER (server operator) status.
     pub server_opers: Mutex<HashSet<String>>,
     /// Actor class per session (default: Human, omitted from map).
@@ -1483,6 +1494,8 @@ impl Server {
             cap_extended_join: Mutex::new(HashSet::new()),
             cap_away_notify: Mutex::new(HashSet::new()),
             cap_account_tag: Mutex::new(HashSet::new()),
+            cap_read_marker: Mutex::new(HashSet::new()),
+            session_read_markers: Mutex::new(HashMap::new()),
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
@@ -1881,8 +1894,7 @@ impl Server {
                 let maint_state = Arc::clone(&state);
                 tokio::spawn(async move {
                     let mut ticks: u64 = 0;
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                     interval.tick().await; // skip immediate tick
                     loop {
                         interval.tick().await;
@@ -2965,9 +2977,7 @@ pub(crate) async fn process_s2s_message(
                 if let Some(ref sig) = sig {
                     tags.insert("+freeq.at/sig".to_string(), sig.clone());
                 }
-                if with_account
-                    && let Some(ref acct) = account
-                {
+                if with_account && let Some(ref acct) = account {
                     tags.insert("account".to_string(), acct.clone());
                 }
                 let tag_msg = crate::irc::Message {
@@ -4779,6 +4789,8 @@ mod s2s_adversarial_tests {
             cap_extended_join: Mutex::new(HashSet::new()),
             cap_away_notify: Mutex::new(HashSet::new()),
             cap_account_tag: Mutex::new(HashSet::new()),
+            cap_read_marker: Mutex::new(HashSet::new()),
+            session_read_markers: Mutex::new(HashMap::new()),
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
@@ -5222,7 +5234,10 @@ mod s2s_adversarial_tests {
             stored.chars().count(),
             body.chars().count(),
         );
-        assert_eq!(stored, body, "stored history must match the full federated body");
+        assert_eq!(
+            stored, body,
+            "stored history must match the full federated body"
+        );
     }
 
     #[tokio::test]
@@ -5244,7 +5259,10 @@ mod s2s_adversarial_tests {
             .unwrap()
             .members
             .insert("acct-recv".to_string());
-        state.cap_message_tags.lock().insert("acct-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("acct-recv".to_string());
         state.cap_account_tag.lock().insert("acct-recv".to_string());
 
         process_s2s_message(
@@ -5285,7 +5303,10 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#acct2");
 
         let (tx, mut rx) = mpsc::channel(16);
-        state.connections.lock().insert("plain-recv".to_string(), tx);
+        state
+            .connections
+            .lock()
+            .insert("plain-recv".to_string(), tx);
         state
             .channels
             .lock()
@@ -5349,7 +5370,10 @@ mod s2s_adversarial_tests {
             .unwrap()
             .members
             .insert("prov-recv".to_string());
-        state.cap_message_tags.lock().insert("prov-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("prov-recv".to_string());
 
         process_s2s_message(
             &state,
@@ -5389,7 +5413,10 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#prov2");
 
         let (tx, mut rx) = mpsc::channel(16);
-        state.connections.lock().insert("prov2-recv".to_string(), tx);
+        state
+            .connections
+            .lock()
+            .insert("prov2-recv".to_string(), tx);
         state
             .channels
             .lock()
@@ -5397,7 +5424,10 @@ mod s2s_adversarial_tests {
             .unwrap()
             .members
             .insert("prov2-recv".to_string());
-        state.cap_message_tags.lock().insert("prov2-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("prov2-recv".to_string());
 
         // Note: no peer_names entry for PEER.
         process_s2s_message(
@@ -7285,7 +7315,12 @@ mod allowlist_tests {
 
     #[test]
     fn empty_allowlists_are_open() {
-        assert!(did_allowed(&[], &[], "did:plc:anyone", Some("a.bsky.social")));
+        assert!(did_allowed(
+            &[],
+            &[],
+            "did:plc:anyone",
+            Some("a.bsky.social")
+        ));
     }
 
     #[test]
@@ -7300,7 +7335,12 @@ mod allowlist_tests {
         let doms = v(&["acme.com"]);
         assert!(did_allowed(&[], &doms, "did:plc:x", Some("alice.acme.com")));
         assert!(did_allowed(&[], &doms, "did:plc:x", Some("acme.com")));
-        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("alice.evil.com")));
+        assert!(!did_allowed(
+            &[],
+            &doms,
+            "did:plc:x",
+            Some("alice.evil.com")
+        ));
         // Not fooled by a suffix that isn't a domain boundary.
         assert!(!did_allowed(&[], &doms, "did:plc:x", Some("notacme.com")));
     }

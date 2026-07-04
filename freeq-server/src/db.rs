@@ -288,6 +288,20 @@ impl Db {
                 channel TEXT NOT NULL,
                 PRIMARY KEY (did, channel)
             );
+
+            -- Cross-device read markers (IRCv3 draft/read-marker). One row per
+            -- (DID, target) — the last-read timestamp a user's clients have
+            -- converged on. The marker only ever moves forward (enforced by the
+            -- MARKREAD handler); `updated_at` records when the server last wrote
+            -- it. Guests (no DID) never land here — their markers are
+            -- session-local and never persisted.
+            CREATE TABLE IF NOT EXISTS read_markers (
+                did        TEXT NOT NULL,
+                target     TEXT NOT NULL,
+                timestamp  TEXT NOT NULL,      -- ISO 8601, as in server-time
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (did, target)
+            );
             ",
         )?;
 
@@ -1563,6 +1577,43 @@ impl Db {
         rows.collect()
     }
 
+    // ── Read markers (IRCv3 draft/read-marker) ─────────────────────────
+
+    /// Fetch the last-read timestamp a user's clients have converged on for a
+    /// target, if any. `None` means no marker has ever been set (`MARKREAD`
+    /// replies with `*`).
+    pub fn get_read_marker(&self, did: &str, target: &str) -> SqlResult<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT timestamp FROM read_markers WHERE did = ?1 AND target = ?2")?;
+        let mut rows = stmt.query_map(params![did, target], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Set (or advance) the read marker for `(did, target)`. Callers are
+    /// responsible for the forward-only check; this write is unconditional so
+    /// the handler stays the single authority on monotonicity.
+    pub fn set_read_marker(
+        &self,
+        did: &str,
+        target: &str,
+        timestamp: &str,
+        updated_at: u64,
+    ) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO read_markers (did, target, timestamp, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(did, target) DO UPDATE SET
+                 timestamp = excluded.timestamp,
+                 updated_at = excluded.updated_at",
+            params![did, target, timestamp, updated_at as i64],
+        )?;
+        Ok(())
+    }
+
     // ── Identities (DID-nick bindings) ─────────────────────────────────
 
     /// Bind a DID to a nick. Overwrites any previous binding for that DID.
@@ -1693,10 +1744,19 @@ mod tests {
         let removed = db.prune_messages_older_than(500).unwrap();
         assert_eq!(removed, 2);
 
-        assert!(db.get_messages("#dev", 50, None).unwrap().iter().all(|m| m.msgid.as_deref() == Some("r1")));
+        assert!(
+            db.get_messages("#dev", 50, None)
+                .unwrap()
+                .iter()
+                .all(|m| m.msgid.as_deref() == Some("r1"))
+        );
         assert!(db.get_messages("#ops", 50, None).unwrap().is_empty());
         // Pruned rows also leave the FTS index (no stale search hits).
-        assert!(db.search_messages("#dev", "ancient", 50, None).unwrap().is_empty());
+        assert!(
+            db.search_messages("#dev", "ancient", 50, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

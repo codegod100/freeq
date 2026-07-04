@@ -23,7 +23,7 @@ pub(super) fn handle_cap(
             conn.cap_negotiating = true;
             // Build capability list, including iroh endpoint ID if available
             let mut caps = String::from(
-                "sasl message-tags multi-prefix echo-message server-time batch draft/chathistory account-notify account-tag extended-join away-notify",
+                "sasl message-tags multi-prefix echo-message server-time batch draft/chathistory account-notify account-tag extended-join away-notify draft/read-marker",
             );
             // Advertise draft/multiline with our policy limits (spec requires
             // max-bytes; max-lines is recommended). See `draft_multiline` module
@@ -121,6 +121,11 @@ pub(super) fn handle_cap(
                             conn.cap_away_notify = true;
                             state.cap_away_notify.lock().insert(session_id.to_string());
                             acked.push("away-notify");
+                        }
+                        "draft/read-marker" => {
+                            conn.cap_read_marker = true;
+                            state.cap_read_marker.lock().insert(session_id.to_string());
+                            acked.push("draft/read-marker");
                         }
                         _ => {
                             all_ok = false;

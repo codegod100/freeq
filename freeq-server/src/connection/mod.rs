@@ -25,6 +25,7 @@ pub(crate) mod messaging;
 mod policy_cmd;
 mod provenance;
 mod queries;
+pub(crate) mod read_marker;
 mod registration;
 pub(crate) mod routing;
 
@@ -167,6 +168,9 @@ pub struct Connection {
     pub(crate) cap_extended_join: bool,
     pub(crate) cap_away_notify: bool,
     pub(crate) cap_account_tag: bool,
+    /// Client supports IRCv3 `draft/read-marker` — cross-device read markers
+    /// via MARKREAD. See https://ircv3.net/specs/extensions/read-marker.
+    pub(crate) cap_read_marker: bool,
     /// Client understands E2EE messages (won't get synthetic notices instead).
     #[allow(dead_code)]
     pub(crate) cap_e2ee: bool,
@@ -207,6 +211,7 @@ impl Connection {
             cap_extended_join: false,
             cap_away_notify: false,
             cap_account_tag: false,
+            cap_read_marker: false,
             cap_e2ee: false,
             is_oper: false,
             client_info: None,
@@ -1360,6 +1365,12 @@ where
                 }
                 let away_msg = msg.params.first().map(|s| s.as_str());
                 handle_away(&conn, away_msg, &state, &server_name, &session_id, &send);
+            }
+            "MARKREAD" => {
+                if !conn.registered {
+                    continue;
+                }
+                read_marker::handle_markread(&conn, &msg, &state, &server_name, &session_id, &send);
             }
             "MOTD" => {
                 if !conn.registered {
@@ -3513,6 +3524,8 @@ fn cleanup_session_state(state: &Arc<SharedState>, session_id: &str) {
     state.cap_extended_join.lock().remove(session_id);
     state.cap_away_notify.lock().remove(session_id);
     state.cap_account_tag.lock().remove(session_id);
+    state.cap_read_marker.lock().remove(session_id);
+    state.session_read_markers.lock().remove(session_id);
     state.server_opers.lock().remove(session_id);
     state.session_actor_class.lock().remove(session_id);
     state.agent_presence.lock().remove(session_id);

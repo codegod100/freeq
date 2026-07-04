@@ -861,6 +861,8 @@ mod tests {
             cap_extended_join: Mutex::new(HashSet::new()),
             cap_away_notify: Mutex::new(HashSet::new()),
             cap_account_tag: Mutex::new(HashSet::new()),
+            cap_read_marker: Mutex::new(HashSet::new()),
+            session_read_markers: Mutex::new(HashMap::new()),
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
