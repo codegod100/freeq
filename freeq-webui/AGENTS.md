@@ -4,17 +4,23 @@ Standalone DataStar web UI proxy for the freeq IRC server. Connects to `irc.free
 
 ## Build
 
+Part of the root Cargo workspace. Build from the repo root:
+
 ```bash
 cd ~/code/freeq
-devenv shell                  # provides rustup, gcc, openssl
-cd freeq-webui
-cargo build                   # ring compiles once, cached in target/
-# template-only changes only need restart:
-./target/debug/freeq-webui
+devenv shell webui-dev          # provides rustc, gcc, openssl; sets RUST_LOG=freeq_webui=debug
+cargo build -p freeq-webui       # workspace member, compiles once, cached in target/
+```
+
+Or build from the crate directory:
+
+```bash
+cd ~/code/freeq/freeq-webui
+devenv shell webui-dev
+cargo build
 ```
 
 **Do NOT use `nix shell nixpkgs#gcc`** — the temp cc path invalidates cargo's fingerprint cache, causing `ring` (and all C deps) to recompile every build.
-
 ## Run
 
 ```bash

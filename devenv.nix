@@ -117,18 +117,15 @@
     # `FREEQ_UPSTREAM=https://your-server` to point at a different one.
     # The proxy derives `wss://` from the scheme, so https upstream
     # becomes wss://irc.freeq.at/irc.
-    # Default bind is the host's current Tailscale IPv4 (detected
-    # dynamically so it survives Tailscale re-auths). Falls back to
-    # localhost if `tailscale` is missing or the daemon is down.
-    # Override with `FREEQ_WEBUI_BIND` for all-interfaces (`0.0.0.0:8090`)
-    # or localhost-only (`127.0.0.1:8090`).
+    # Binds to 127.0.0.1 — tailscale funnel proxies localhost:8090
+    # to the public FQDN. Override with `FREEQ_WEBUI_BIND` for
+    # all-interfaces (`0.0.0.0:8090`) or a specific Tailscale IP.
     webui-dev.exec = ''
       cd freeq-webui
       RUST_LOG="''${RUST_LOG:-freeq_webui=debug,info}" \
       FREEQ_UPSTREAM="''${FREEQ_UPSTREAM:-https://irc.freeq.at}" \
-      FREEQ_WEBUI_BIND="''${FREEQ_WEBUI_BIND:-$(
-        tailscale ip -4 2>/dev/null | head -n1 || echo 127.0.0.1
-      ):8090}" \
+      FREEQ_WEBUI_BIND="''${FREEQ_WEBUI_BIND:-127.0.0.1:8090}" \
+      FREEQ_PUBLIC_URL="''${FREEQ_PUBLIC_URL:-https://$(hostname -s).tailfe3ae2.ts.net}" \
         cargo run --bin freeq-webui
     '';
 
@@ -171,14 +168,10 @@
     │   devenv shell web-build  production build of web client │
     │   devenv shell server-dev run freeq-server on :6667      │
     │   devenv shell e2e        run the S2S acceptance suite   │
-    │                                                         │
     │   Browse the DataStar webui at                          │
-    │   http://$(tailscale ip -4 2>/dev/null || echo localhost):8090/chat│
+    │   https://$(hostname -s).tailfe3ae2.ts.net/chat            │
+    │   (run `tailscale funnel 8090` first if not already on)  │
     │   once webui-dev is running.                            │
-    │                                                         │
-    │   scripts/test-local-e2e.sh for the full S2S suite     │
-    │   scripts/hotspots.sh      to spot high-gamma files     │
-    ╰─────────────────────────────────────────────────────────╯
     EOF
   '';
 

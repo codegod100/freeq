@@ -1,0 +1,6 @@
+# rust-analyzer (and cargo) env overrides.
+# The LSP process may run outside the devenv shell, so we inject the Nix
+# pkg-config path that openssl-sys, alsa-sys, etc. need at build time.
+
+[env]
+PKG_CONFIG_PATH = { value = "/home/nandi/.nix-profile/lib/pkgconfig", relative = false }

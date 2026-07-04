@@ -142,6 +142,7 @@ pub fn spawn_upstream_if_needed(
     let ws_url = upstream.ws.clone();
     let session_id = sid.to_string();
     let target_for_task = target.clone();
+    let session_for_task = Arc::clone(&session);
 
     *task_guard = Some(tokio::spawn(async move {
         info!(session = %session_id, ws = %ws_url, channel = %target_for_task, "connecting to upstream /irc");
@@ -151,6 +152,8 @@ pub fn spawn_upstream_if_needed(
             irc_rx,
             target_for_task,
             auth_creds,
+            session_for_task,
+            session_id.clone(),
         ).await;
         if let Err(e) = result {
             error!(session = %session_id, "upstream WS error: {e:#}");
@@ -176,6 +179,8 @@ pub async fn run_upstream_ws(
     mut irc_rx: mpsc::Receiver<String>,
     channel: String,
     auth: Option<AuthCredentials>,
+    session: Arc<SessionHandle>,
+    session_id: String,
 ) -> Result<()> {
     use futures_util::stream::SplitStream;
 
@@ -186,7 +191,7 @@ pub async fn run_upstream_ws(
         .as_ref()
         .map(|a| super::sanitize_nick(&a.nick))
         .unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
-    debug!(%nick, authenticated = auth.is_some(), "upstream IRC registration");
+    debug!(session = %session_id, %nick, authenticated = auth.is_some(), "upstream IRC registration");
     ws.send(WsMessage::Text(format!("NICK {nick}\r\n").into())).await?;
     ws.send(WsMessage::Text("USER webui 0 * :freeq-webui\r\n".into())).await?;
 
@@ -212,7 +217,7 @@ pub async fn run_upstream_ws(
     'bridge: loop {
         tokio::select! {
             Some(cmd) = irc_rx.recv() => {
-                debug!(dir = ">>", line = %cmd.trim_end_matches(['\r', '\n']), "upstream IRC");
+                debug!(session = %session_id, dir = ">>", line = %cmd.trim_end_matches(['\r', '\n']), "upstream IRC");
                 match phase {
                     RegPhase::Ready => {
                         if let Err(e) = write.send(WsMessage::Text(cmd)).await {
@@ -233,7 +238,7 @@ pub async fn run_upstream_ws(
                     Some(Ok(WsMessage::Text(t))) => {
                         let line = t.to_string();
                         let trimmed = line.trim_end_matches(['\r', '\n']);
-                        debug!(dir = "<<", line = %trimmed, "upstream IRC");
+                        debug!(session = %session_id, dir = "<<", line = %trimmed, "upstream IRC");
 
                         if let Some(token) = ping_token(trimmed) {
                             let pong = format!("PONG {token}\r\n");
@@ -267,8 +272,24 @@ pub async fn run_upstream_ws(
                                     // No SASL (guest mode or server didn't ACK sasl) — finish reg.
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    debug!(session = %session_id, "ws_ready → true");
+                                    session.ws_ready.store(true, Ordering::SeqCst);
                                     phase = RegPhase::Ready;
-                                    if flush_pending(&mut pending, &mut write).await.is_err() {
+                                    if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
+                                        break 'bridge;
+                                    }
+                                    continue;
+                                }
+                                // No CAP ACK yet — but if the server sent a 001 (RPL_WELCOME)
+                                // or any 00x numeric, it doesn't support CAP. Proceed as guest.
+                                if trimmed.contains(" 001 ") || trimmed.contains(" 002 ") || trimmed.contains(" 003 ") || trimmed.contains(" 004 ") {
+                                    info!("server sent numeric registration reply without CAP ACK — proceeding as guest");
+                                    let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
+                                    let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    debug!(session = %session_id, "ws_ready → true");
+                                    session.ws_ready.store(true, Ordering::SeqCst);
+                                    phase = RegPhase::Ready;
+                                    if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
                                     }
                                     continue;
@@ -287,8 +308,10 @@ pub async fn run_upstream_ws(
                                             auth_creds = None;
                                             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                             let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    debug!(session = %session_id, "ws_ready → true");
+                                            session.ws_ready.store(true, Ordering::SeqCst);
                                             phase = RegPhase::Ready;
-                                            if flush_pending(&mut pending, &mut write).await.is_err() {
+                                            if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                                 break 'bridge;
                                             }
                                             continue;
@@ -311,8 +334,10 @@ pub async fn run_upstream_ws(
                                             auth_creds = None;
                                             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                             let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    debug!(session = %session_id, "ws_ready → true");
+                                            session.ws_ready.store(true, Ordering::SeqCst);
                                             phase = RegPhase::Ready;
-                                            if flush_pending(&mut pending, &mut write).await.is_err() {
+                                            if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                                 break 'bridge;
                                             }
                                             continue;
@@ -342,8 +367,10 @@ pub async fn run_upstream_ws(
                                     info!("SASL authentication successful");
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    debug!(session = %session_id, "ws_ready → true");
+                                    session.ws_ready.store(true, Ordering::SeqCst);
                                     phase = RegPhase::Ready;
-                                    if flush_pending(&mut pending, &mut write).await.is_err() {
+                                    if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
                                     }
                                     continue;
@@ -353,8 +380,10 @@ pub async fn run_upstream_ws(
                                     auth_creds = None;
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    debug!(session = %session_id, "ws_ready → true");
+                                    session.ws_ready.store(true, Ordering::SeqCst);
                                     phase = RegPhase::Ready;
-                                    if flush_pending(&mut pending, &mut write).await.is_err() {
+                                    if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
                                     }
                                     continue;
@@ -375,6 +404,8 @@ pub async fn run_upstream_ws(
             }
         }
     }
+    debug!(session = %session_id, "ws_ready → false");
+    session.ws_ready.store(false, Ordering::SeqCst);
     Ok(())
 }
 
@@ -385,13 +416,12 @@ fn parse_challenge(challenge_b64: &str) -> Result<Challenge> {
     serde_json::from_slice(&bytes).context("invalid challenge JSON")
 }
 
-/// Flush buffered outbound commands after the handshake completes.
-async fn flush_pending<W>(pending: &mut Vec<String>, write: &mut W) -> Result<(), tokio_tungstenite::tungstenite::Error>
+async fn flush_pending<W>(pending: &mut Vec<String>, write: &mut W, session_id: &str) -> Result<(), tokio_tungstenite::tungstenite::Error>
 where
     W: futures_util::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send,
 {
     for cmd in pending.drain(..) {
-        debug!(dir = ">>", line = %cmd.trim_end_matches(['\r', '\n']), "upstream IRC (flushed)");
+        debug!(session = %session_id, dir = ">>", line = %cmd.trim_end_matches(['\r', '\n']), "upstream IRC (flushed)");
         if let Err(e) = write.send(WsMessage::Text(cmd)).await {
             warn!("WS write failed during flush: {e}");
             return Err(e);
@@ -532,7 +562,7 @@ mod tests {
         let (lines_tx, mut lines_rx) = broadcast::channel(16);
         let (irc_tx, irc_rx) = mpsc::channel(16);
         let client = tokio::spawn(async move {
-            run_upstream_ws(ws_url, lines_tx, irc_rx, "#test".to_string(), None).await
+            run_upstream_ws(ws_url, lines_tx, irc_rx, "#test".to_string(), None, Arc::new(SessionHandle::new()), "test".into()).await
         });
 
         // Queue a user command before the handshake completes.

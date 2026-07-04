@@ -354,7 +354,8 @@ pub struct PreparedLogin {
     token_endpoint: String,
     pds_url: String,
     dpop_key: DpopKey,
-    listener: TcpListener,
+    /// TCP listener for loopback OAuth callback. None for web-based flow.
+    listener: Option<TcpListener>,
     did: String,
     handle: String,
 }
@@ -380,9 +381,8 @@ impl PreparedLogin {
 
         let auth_meta = discover_auth_server(&pds_url).await?;
         tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
-
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let port = listener.local_addr()?.port();
+        let listener = Some(TcpListener::bind("127.0.0.1:0").await?);
+        let port = listener.as_ref().unwrap().local_addr()?.port();
 
         // Loopback OAuth client. The authorization server infers client
         // metadata from these query parameters.
@@ -442,12 +442,31 @@ impl PreparedLogin {
 
     /// Wait for the browser to be redirected back to the loopback listener,
     /// then exchange the authorization code for tokens.
-    pub async fn wait(self) -> Result<OAuthSession> {
-        let auth_code = wait_for_callback(self.listener, &self.state).await?;
+    ///
+    /// Only valid for loopback (localhost) logins. Panics if called on a
+    /// web-based `PreparedLogin` created with [`for_web`](Self::for_web).
+    pub async fn wait(mut self) -> Result<OAuthSession> {
+        let listener = self.listener.take().expect("wait() called on web-based PreparedLogin; use handle_callback() instead");
+        let auth_code = wait_for_callback(listener, &self.state).await?;
+        self.exchange_and_finish(&auth_code).await
+    }
 
+    /// Exchange an authorization code received via a web redirect callback.
+    ///
+    /// Validates that `callback_state` matches `self.state()`, then
+    /// exchanges the code for tokens. Returns the completed `OAuthSession`.
+    pub async fn handle_callback(self, code: &str, callback_state: &str) -> Result<OAuthSession> {
+        if callback_state != self.state {
+            bail!("State mismatch in OAuth callback: expected {}, got {}", self.state, callback_state);
+        }
+        self.exchange_and_finish(code).await
+    }
+
+    /// Shared token exchange + session construction.
+    async fn exchange_and_finish(self, auth_code: &str) -> Result<OAuthSession> {
         let (access_token, token_did) = exchange_code(
             &self.token_endpoint,
-            &auth_code,
+            auth_code,
             &self.code_verifier,
             &self.redirect_uri,
             &self.client_id,
@@ -467,6 +486,78 @@ impl PreparedLogin {
             pds_url: self.pds_url,
             dpop_key: self.dpop_key,
             dpop_nonce,
+        })
+    }
+
+    /// Create a web-based OAuth login using a public redirect URI.
+    ///
+    /// Use this when freeq-webui is reachable at a public FQDN (e.g. via
+    /// `tailscale funnel`). Unlike [`new`](Self::new), this does NOT bind
+    /// a loopback TCP listener. The caller must:
+    ///
+    /// 1. Serve `/.well-known/oauth-client-metadata` at `public_url`
+    /// 2. Serve `GET {public_url}/auth/callback` to receive the auth code
+    /// 3. Call [`handle_callback`](Self::handle_callback) with the code + state
+    ///
+    /// `public_url` is the origin (scheme + host + optional port), e.g.
+    /// `https://myhost.tailnet.ts.net`.
+    pub async fn for_web(handle: &str, public_url: &str) -> Result<Self> {
+        let resolver = DidResolver::http();
+
+        tracing::info!("Resolving handle: {handle}");
+        let did = resolver
+            .resolve_handle(handle)
+            .await
+            .context("Failed to resolve handle")?;
+        let did_doc = resolver
+            .resolve(&did)
+            .await
+            .context("Failed to resolve DID document")?;
+        let pds_url =
+            pds::pds_endpoint(&did_doc).context("No PDS service endpoint in DID document")?;
+        tracing::info!(did = %did, pds = %pds_url, "Resolved identity");
+
+        let auth_meta = discover_auth_server(&pds_url).await?;
+        tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
+
+        // Web client: the PDS discovers client metadata from
+        // {client_id}/.well-known/oauth-client-metadata.
+        let redirect_uri = format!("{public_url}/auth/callback");
+        let client_id = public_url.to_string();
+
+        let (code_verifier, code_challenge) = generate_pkce();
+        let dpop_key = DpopKey::generate();
+        let state = generate_random_string(16);
+
+        let par_endpoint = auth_meta
+            .pushed_authorization_request_endpoint
+            .as_deref()
+            .context("Authorization server does not support PAR")?;
+
+        let auth_url = push_authorization_request(
+            par_endpoint,
+            &auth_meta.authorization_endpoint,
+            &client_id,
+            &redirect_uri,
+            &code_challenge,
+            &state,
+            handle,
+            &dpop_key,
+        )
+        .await?;
+
+        Ok(Self {
+            auth_url,
+            redirect_uri,
+            client_id,
+            state,
+            code_verifier,
+            token_endpoint: auth_meta.token_endpoint,
+            pds_url,
+            dpop_key,
+            listener: None,
+            did,
+            handle: handle.to_string(),
         })
     }
 }
@@ -586,7 +677,7 @@ async fn push_authorization_request(
 
     // If we got a use_dpop_nonce error, retry with the nonce
     if status.as_u16() == 400
-        && let Some(ref nonce) = dpop_nonce
+        && let Some(nonce) = &dpop_nonce
     {
         let dpop_proof_retry = dpop_key.proof("POST", par_endpoint, Some(nonce), None)?;
         let resp2 = client

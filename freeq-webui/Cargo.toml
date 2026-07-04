@@ -9,8 +9,6 @@ description = "DataStar-based web UI for freeq IRC server (standalone proxy)"
 name = "freeq-webui"
 path = "src/main.rs"
 
-[workspace]
-
 [dependencies]
 axum = { version = "0.8", features = ["ws", "macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
@@ -41,8 +39,3 @@ sha2 = "0.10"
 bs58 = "0.5"
 
 freeq-sdk = { path = "../freeq-sdk", default-features = false }
-
-[profile.release]
-lto = "thin"
-codegen-units = 1
-strip = "symbols"

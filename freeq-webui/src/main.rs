@@ -14,9 +14,10 @@ mod state;
 mod upstream;
 
 use std::net::SocketAddr;
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header;
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
@@ -60,10 +61,11 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
     let bind = std::env::var("FREEQ_WEBUI_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8090".to_string());
+    let public_url = std::env::var("FREEQ_PUBLIC_URL").ok();
     let upstream_url: Url = upstream.parse().context("FREEQ_UPSTREAM must be a URL")?;
 
-    let state = AppState::new(upstream_url.clone())?;
-    info!(upstream = %upstream_url, bind = %bind, "freeq-webui starting");
+    let state = AppState::new(upstream_url.clone(), public_url.clone())?;
+    info!(upstream = %upstream_url, bind = %bind, public_url = ?public_url, "freeq-webui starting");
 
     let app = Router::new()
         .route("/", get(get_root))
@@ -79,6 +81,8 @@ async fn main() -> Result<()> {
         .route("/datastar.js", get(get_datastar_js))
         .route("/upload", post(post_upload))
         .route("/api/channels", get(get_channels))
+        .route("/.well-known/oauth-client-metadata", get(get_oauth_client_metadata))
+        .route("/auth/callback", get(get_auth_callback))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -162,6 +166,64 @@ async fn get_login(State(state): State<AppState>) -> Response {
     }
 }
 
+
+/// Return an HTML page that opens the given `auth_url` in a popup and
+/// polls `/auth/status` until authentication completes, then redirects
+/// to `/chat/general`.
+fn oauth_polling_page(auth_url: &str) -> String {
+    let url = auth_url.replace('\'', "%27");
+    format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>freeq — sign in</title>
+<style>
+:root{{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--c1:#7ab7ff}}
+*{{box-sizing:border-box}} html,body{{height:100%;margin:0}}
+body{{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}}
+#box{{width:100%;max-width:340px;padding:1.5rem;border:1px solid var(--border);border-radius:8px;background:#11151b;text-align:center}}
+h1{{font-size:1rem;margin:0 0 0.6rem;color:var(--c1)}}
+p{{margin:0;color:var(--muted);font-size:12px;line-height:1.5}}
+.error{{color:#ef476f}}
+a{{color:var(--c1)}}
+</style>
+</head>
+<body>
+<div id="box">
+<h1>Sign in with Bluesky</h1>
+<p id="status">Waiting for authorization…</p>
+<p style="margin-top:1rem"><a href="{url}" target="_blank" rel="noopener">Open authorization page</a></p>
+</div>
+<script>
+(function() {{
+  const url = '{url}';
+  window.open(url, '_blank');
+  const el = document.getElementById('status');
+  let done = false;
+  async function check() {{
+    if (done) return;
+    try {{
+      const r = await fetch('/auth/status');
+      const j = await r.json();
+      if (j.authenticated) {{
+        done = true;
+        window.location.replace('/chat/general');
+        return;
+      }}
+    }} catch (e) {{}}
+    setTimeout(check, 1500);
+  }}
+  setTimeout(check, 1500);
+}})();
+</script>
+</body>
+</html>
+"##,
+        url = url,
+    )
+}
 async fn post_login(
     State(state): State<AppState>,
     req: axum::http::HeaderMap,
@@ -177,6 +239,46 @@ async fn post_login(
 
     let (sid, _) = session_id_from_request(&req);
     let session = state.session(&sid);
+
+    // Determine OAuth flow: web-based if FREEQ_PUBLIC_URL is set,
+    // loopback (localhost) otherwise.
+    let is_web = state.public_url.is_some();
+
+    if is_web {
+        let public_url = state.public_url.as_ref().unwrap();
+        let prepared = match PreparedLogin::for_web(&handle, public_url).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(session = %sid, %handle, "failed to prepare web OAuth login: {e:#}");
+                let mut ctx = tera::Context::new();
+                ctx.insert("error", &format!("Failed to start OAuth login: {e:#}"));
+                let html = state.tera.render("login.html.tera", &ctx).unwrap_or_default();
+                return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+            }
+        };
+
+        let auth_url = prepared.auth_url().to_string();
+        let state_param = prepared.state().to_string();
+
+        // Store pending login — the callback at /auth/callback will
+        // look it up by state and exchange the code.
+        state.pending_web_logins.lock().insert(state_param.clone(), (sid.clone(), prepared));
+
+        debug!(session = %sid, %handle, %state_param, %auth_url, "web OAuth authorization URL ready");
+
+        // Return the same polling page — it opens the auth URL and
+        // polls /auth/status until the callback completes.
+        let html = oauth_polling_page(&auth_url);
+        let mut resp = (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        ).into_response();
+        resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+        return resp;
+    }
+
+    // ── Loopback flow (localhost) ────────────────────────────────────
 
     // Start a local loopback OAuth login. The browser will be sent to the
     // PDS authorization URL; after authorization, the PDS redirects back to
@@ -241,61 +343,11 @@ async fn post_login(
         });
     }
 
-    debug!(session = %sid, %handle, %state_param, %auth_url, "OAuth authorization URL ready");
+    debug!(session = %sid, %handle, %state_param, %auth_url, "loopback OAuth authorization URL ready");
 
     // Return a small polling page that opens the PDS auth URL and waits for
     // the loopback login to complete.
-    let html = format!(
-        r##"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>freeq — sign in</title>
-<style>
-:root{{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--c1:#7ab7ff}}
-{{box-sizing:border-box}} html,body{{height:100%;margin:0}}
-body{{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}}
-#box{{width:100%;max-width:340px;padding:1.5rem;border:1px solid var(--border);border-radius:8px;background:#11151b;text-align:center}}
-h1{{font-size:1rem;margin:0 0 0.6rem;color:var(--c1)}}
-p{{margin:0;color:var(--muted);font-size:12px;line-height:1.5}}
-.error{{color:#ef476f}}
-a{{color:var(--c1)}}
-</style>
-</head>
-<body>
-<div id="box">
-<h1>Sign in with Bluesky</h1>
-<p id="status">Waiting for authorization…</p>
-<p style="margin-top:1rem"><a href="{url}" target="_blank" rel="noopener">Open authorization page</a></p>
-</div>
-<script>
-(function() {{
-  const url = '{url}';
-  window.open(url, '_blank');
-  const el = document.getElementById('status');
-  let done = false;
-  async function check() {{
-    if (done) return;
-    try {{
-      const r = await fetch('/auth/status');
-      const j = await r.json();
-      if (j.authenticated) {{
-        done = true;
-        window.location.replace('/chat/general');
-        return;
-      }}
-    }} catch (e) {{}}
-    setTimeout(check, 1500);
-  }}
-  setTimeout(check, 1500);
-}})();
-</script>
-</body>
-</html>
-"##,
-        url = auth_url.replace('\'', "%27")
-    );
+    let html = oauth_polling_page(&auth_url);
     let mut resp = (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -337,6 +389,112 @@ async fn get_auth_status(
         body.to_string(),
     )
         .into_response();
+    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    resp
+}
+
+// ── GET /.well-known/oauth-client-metadata ────────────────────────────
+
+/// Serves the OAuth client metadata that Bluesky's PDS fetches to
+/// discover redirect URIs and client capabilities for a web-based
+/// OAuth flow (used when running behind `tailscale funnel`).
+async fn get_oauth_client_metadata(
+    State(state): State<AppState>,
+) -> Response {
+    let public_url = match &state.public_url {
+        Some(url) => url.clone(),
+        None => return (StatusCode::NOT_FOUND, "web OAuth not configured").into_response(),
+    };
+
+    let metadata = serde_json::json!({
+        "client_id": public_url,
+        "client_name": "freeq Web UI",
+        "client_uri": public_url,
+        "redirect_uris": [format!("{public_url}/auth/callback")],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+        "application_type": "web",
+        "dpop_bound_access_tokens": true,
+        "scope": "atproto",
+    });
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        metadata.to_string(),
+    ).into_response()
+}
+
+// ── GET /auth/callback ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct CallbackParams {
+    code: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    #[serde(rename = "error_description")]
+    error_description: Option<String>,
+}
+
+/// Receives the OAuth redirect from Bluesky's PDS after the user
+/// authorizes. Looks up the pending login by `state`, exchanges the
+/// code for tokens, and updates the session's auth state.
+async fn get_auth_callback(
+    State(state): State<AppState>,
+    Query(params): Query<CallbackParams>,
+) -> Response {
+    // Handle authorization errors from the PDS
+    if let Some(error) = &params.error {
+        let desc = params.error_description.as_deref().unwrap_or("unknown error");
+        warn!(%error, %desc, "OAuth callback error");
+        return (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            format!("<html><body><h1>Authorization Failed</h1><p>{error}: {desc}</p><p><a href=\"/login\">Try again</a></p></body></html>")
+        ).into_response();
+    }
+
+    let (Some(code), Some(callback_state)) = (&params.code, &params.state) else {
+        return (StatusCode::BAD_REQUEST, "Missing code or state parameter").into_response();
+    };
+
+    // Find and remove the pending login
+    let (sid, prepared) = match state.pending_web_logins.lock().remove(callback_state) {
+        Some(v) => v,
+        None => {
+            warn!(state = %callback_state, "callback with unknown state");
+            return (StatusCode::BAD_REQUEST, "Unknown or expired state parameter. Please try logging in again.").into_response();
+        }
+    };
+
+    // Exchange the code for tokens
+    let oauth = match prepared.handle_callback(code, callback_state).await {
+        Ok(o) => o,
+        Err(e) => {
+            error!(%e, "OAuth token exchange failed");
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                format!("<html><body><h1>Sign in failed</h1><p>Token exchange failed: {e:#}</p><p><a href=\"/login\">Try again</a></p></body></html>"),
+            ).into_response();
+        }
+    };
+
+    // Update session auth state
+    let session = state.session(&sid);
+    let handle = oauth.handle.clone();
+    let did = oauth.did.clone();
+    let nick = crate::sanitize_nick(&handle);
+    info!(session = %sid, %did, %handle, "OAuth web callback completed; stored session");
+    *session.auth.lock() = AuthState::Authenticated { handle, did: did.clone(), nick, oauth };
+    session.extracted_did.lock().replace(did);
+    session.request_reconnect();
+
+    // Redirect to chat
+    let mut resp = (
+        StatusCode::FOUND,
+        [("Location", "/chat/general")],
+        "",
+    ).into_response();
     resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
     resp
 }
@@ -618,6 +776,9 @@ async fn get_channel_events(
                             let script = ExecuteScript::new(js);
                             yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         }
+                        // Don't fall through to generic message emission —
+                        // JOIN/PART/QUIT/MODE are handled above.
+                        continue;
                     }
                     // --- SASL 903 (authentication success) ---
                     if is_903(&line) {
@@ -643,8 +804,8 @@ async fn get_channel_events(
                         }
                         continue;
                     }
-                    // --- messages ---
-                    if should_emit(&line) {
+                    // --- messages (channel-filtered) ---
+                    if should_emit(&line, &channel) {
                         let html = render_irc_line(&line);
                         let patch = PatchElements::new(html).selector("#messages").mode(ElementPatchMode::Append);
                         yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
@@ -697,10 +858,11 @@ async fn post_channel_send(
 
     let target = canonical_channel(&channel);
 
-    debug!(session = %sid, channel = %target, len = msg.len(), "send requested");
-    trace!(session = %sid, channel = %target, msg = %msg, "send message text");
-
     let irc_tx = session.irc_tx.lock().clone();
+    let ws_ready = session.ws_ready.load(Ordering::SeqCst);
+    let is_joined = session.joined.lock().contains(&target);
+    debug!(session = %sid, channel = %target, len = msg.len(), ws_ready, is_joined, "send requested");
+
     if let Err(e) = irc_tx
         .send(format!("PRIVMSG {target} :{msg}\r\n"))
         .await
@@ -821,10 +983,7 @@ async fn get_channels(State(state): State<AppState>) -> Response {
 
 // ── IRC line formatting ─────────────────────────────────────────────────
 
-/// Check if a line is a 903 (RPL_SASLSUCCESS) numeric.
-
-
-fn should_emit(line: &str) -> bool {
+fn should_emit(line: &str, current_channel: &str) -> bool {
     let line = line.trim_end_matches(['\r', '\n']);
     if line.starts_with("PING ") || line.starts_with("PONG ") {
         return false;
@@ -845,9 +1004,42 @@ fn should_emit(line: &str) -> bool {
     {
         return false;
     }
+    // Channel-scoped messages: only emit if the target matches the
+    // channel this SSE subscriber is viewing.
+    if let Some(target) = extract_irc_target(after_prefix) {
+        let canon_cur = canonical_channel(current_channel);
+        if !target.eq_ignore_ascii_case(&canon_cur) {
+            return false;
+        }
+    }
     true
 }
 
+/// Extract the target channel/nick from an IRC command line (after the
+/// prefix). Returns `None` for commands without a channel target.
+fn extract_irc_target(after_prefix: &str) -> Option<&str> {
+    // PRIVMSG #chan :msg  /  NOTICE #chan :msg  /  TOPIC #chan :new  /  etc.
+    let cmd_end = after_prefix.find(' ')?;
+    let command = &after_prefix[..cmd_end];
+    match command {
+        "PRIVMSG" | "NOTICE" | "TOPIC" | "MODE" | "KICK" | "INVITE" => {
+            let rest = &after_prefix[cmd_end + 1..];
+            let target_end = rest.find(' ').unwrap_or(rest.len());
+            let target = &rest[..target_end];
+            // Only filter if the target looks like a channel (starts with
+            // # / & / + / !). Server-wide NOTICE * or PRIVMSG to a nick
+            // should pass through unfiltered.
+            if target.starts_with('#') || target.starts_with('&')
+                || target.starts_with('+') || target.starts_with('!')
+            {
+                Some(target)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
 /// Render an IRC line as an HTML row with timestamp + nick color.
 fn render_irc_line(line: &str) -> String {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -1341,5 +1533,102 @@ mod tests {
         let html = render_member_list(&map);
         assert!(html.contains("a&lt;b&gt;&amp;c"));
         assert!(!html.contains("a<b>&c"));
+    }
+
+    // ── should_emit / extract_irc_target ────────────────────────────────────
+
+    #[test]
+    fn should_emit_filters_privmsg_to_other_channel() {
+        // PRIVMSG to #other should not emit when viewing #test
+        assert!(!should_emit(":alice!u@h PRIVMSG #other :hello", "#test"));
+    }
+
+    #[test]
+    fn should_emit_passes_privmsg_to_same_channel() {
+        assert!(should_emit(":alice!u@h PRIVMSG #test :hello", "#test"));
+    }
+
+    #[test]
+    fn should_emit_case_insensitive_channel_match() {
+        assert!(should_emit(":alice!u@h PRIVMSG #TEST :hello", "#test"));
+    }
+
+    #[test]
+    fn should_emit_filters_notice_to_other_channel() {
+        assert!(!should_emit(":srv NOTICE #other :something", "#test"));
+    }
+
+    #[test]
+    fn should_emit_passes_notice_to_same_channel() {
+        assert!(should_emit(":srv NOTICE #test :welcome", "#test"));
+    }
+
+    #[test]
+    fn should_emit_filters_topic_to_other_channel() {
+        assert!(!should_emit(":op!u@h TOPIC #other :new topic", "#test"));
+    }
+
+    #[test]
+    fn should_emit_passes_topic_to_same_channel() {
+        assert!(should_emit(":op!u@h TOPIC #test :new topic", "#test"));
+    }
+
+    #[test]
+    fn should_emit_passes_non_channel_scoped_message() {
+        // Server notice without a channel target should pass through
+        assert!(should_emit(":srv NOTICE * :Server shutting down", "#test"));
+    }
+
+    #[test]
+    fn should_emit_skips_ping() {
+        assert!(!should_emit("PING :server", "#test"));
+    }
+
+    #[test]
+    fn should_emit_skips_numerics() {
+        assert!(!should_emit(":srv 001 alice :Welcome to freeq", "#test"));
+    }
+
+    #[test]
+    fn extract_target_privmsg() {
+        assert_eq!(
+            extract_irc_target("PRIVMSG #chan :hello"),
+            Some("#chan")
+        );
+    }
+
+    #[test]
+    fn extract_target_notice_channel() {
+        assert_eq!(
+            extract_irc_target("NOTICE #chan :msg"),
+            Some("#chan")
+        );
+    }
+
+    #[test]
+    fn extract_target_notice_star_returns_none() {
+        // Server broadcast NOTICE * is not channel-scoped
+        assert_eq!(extract_irc_target("NOTICE * :Server shutting down"), None);
+    }
+
+    #[test]
+    fn extract_target_privmsg_nick_returns_none() {
+        // PRIVMSG to a nick is not channel-scoped
+        assert_eq!(extract_irc_target("PRIVMSG alice :hello"), None);
+    }
+
+    #[test]
+    fn extract_target_mode() {
+        assert_eq!(
+            extract_irc_target("MODE #chan +o bob"),
+            Some("#chan")
+        );
+    }
+
+    #[test]
+    fn extract_target_non_channel_command_returns_none() {
+        assert_eq!(extract_irc_target("QUIT :bye"), None);
+        assert_eq!(extract_irc_target("JOIN :#chan"), None);
+        assert_eq!(extract_irc_target("PART #chan"), None);
     }
 }

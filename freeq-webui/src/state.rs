@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use freeq_sdk::oauth::OAuthSession;
+use freeq_sdk::oauth::{OAuthSession, PreparedLogin};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use url::Url;
@@ -64,6 +64,13 @@ pub struct AppState {
     /// sender is used to cancel a previous login attempt when a new one
     /// is started for the same session.
     pub pending_logins: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
+    /// In-flight web-based OAuth logins keyed by state parameter.
+    /// Value is (session_id, PreparedLogin). When the callback arrives
+    /// at /auth/callback, we look up the state and exchange the code.
+    pub pending_web_logins: Arc<Mutex<HashMap<String, (String, PreparedLogin)>>>,
+    /// Public URL (origin) when running behind tailscale funnel or a
+    /// reverse proxy. None means use loopback OAuth.
+    pub public_url: Option<String>,
     pub http: reqwest::Client,
     pub tera: Arc<tera::Tera>,
 }
@@ -84,7 +91,7 @@ impl Upstream {
 }
 
 impl AppState {
-    pub fn new(upstream_base: Url) -> Result<Self> {
+    pub fn new(upstream_base: Url, public_url: Option<String>) -> Result<Self> {
         let upstream = Arc::new(Upstream::from_base(upstream_base)?);
         let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
         let mut tera = tera::Tera::default();
@@ -104,6 +111,8 @@ impl AppState {
             upstream,
             sessions: Arc::new(Mutex::new(HashMap::new())),
             pending_logins: Arc::new(Mutex::new(HashMap::new())),
+            pending_web_logins: Arc::new(Mutex::new(HashMap::new())),
+            public_url,
             http,
             tera: Arc::new(tera),
         })
@@ -144,6 +153,8 @@ pub struct SessionHandle {
     /// Set to true when auth state changes and the upstream WS task should be
     /// respawned with the new credentials.
     pub reconnect: AtomicBool,
+    /// Whether the upstream WS handshake has completed (RegPhase::Ready).
+    pub ws_ready: AtomicBool,
 }
 
 impl SessionHandle {
@@ -158,6 +169,7 @@ impl SessionHandle {
             ws_task: Mutex::new(None),
             auth: Mutex::new(AuthState::default()),
             extracted_did: Mutex::new(None),
+            ws_ready: AtomicBool::new(false),
             reconnect: AtomicBool::new(false),
         }
     }
