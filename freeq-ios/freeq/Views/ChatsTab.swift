@@ -13,8 +13,15 @@ struct ChatsTab: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var networkMonitor: NetworkMonitor
     @State private var showingJoinSheet = false
+    @State private var showDigest = false
     @State private var searchText = ""
     @State private var navigationPath = NavigationPath()
+
+    /// Channels carrying unread messages — the input to the cross-channel
+    /// "catch me up" digest.
+    private var unreadChannels: [ChannelState] {
+        appState.channels.filter { (appState.unreadCounts[$0.name] ?? 0) > 0 }
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
@@ -87,6 +94,17 @@ struct ChatsTab: View {
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 if mode == .channels {
+                    // Catch me up — on-device digest across all unread channels.
+                    if IntelligenceService.shared.isAvailable && !unreadChannels.isEmpty {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(action: { showDigest = true }) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(Theme.signalGradient)
+                            }
+                            .accessibilityLabel("Catch me up across channels")
+                        }
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button(action: { showingJoinSheet = true }) {
                             Image(systemName: "square.and.pencil")
@@ -96,6 +114,10 @@ struct ChatsTab: View {
                     }
                 }
             }
+            .sheet(isPresented: $showDigest) {
+                CatchUpDigestSheet()
+                    .presentationDetents([.medium, .large])
+            }
             .navigationDestination(for: String.self) { channelName in
                 ChatDetailView(channelName: channelName)
             }
@@ -103,6 +125,16 @@ struct ChatsTab: View {
                 JoinChannelSheet()
                     .presentationDetents([.medium])
                     .presentationDragIndicator(.visible)
+            }
+            .onChange(of: appState.pendingChannelNav) {
+                // Only the Channels pane consumes channel navigations (from the
+                // catch-up digest).
+                guard mode == .channels, let ch = appState.pendingChannelNav else { return }
+                appState.pendingChannelNav = nil
+                navigationPath = NavigationPath()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    navigationPath.append(ch)
+                }
             }
             .onChange(of: appState.pendingDMNick) {
                 // Only the DMs pane consumes pending-DM navigations; the

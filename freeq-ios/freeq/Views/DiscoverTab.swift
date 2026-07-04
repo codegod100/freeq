@@ -19,7 +19,14 @@ struct DiscoverTab: View {
     @State private var serverChannels: [ServerChannel] = []
     @State private var loading = true
     @State private var searchText = ""
+    @State private var peopleChannels: [ChannelPeople] = []
     @FocusState private var joinFocused: Bool
+
+    struct ChannelPeople: Identifiable {
+        let channel: String
+        let people: [FreeqPerson]
+        var id: String { channel }
+    }
 
     private var filteredChannels: [ServerChannel] {
         let channels = serverChannels
@@ -146,6 +153,12 @@ struct DiscoverTab: View {
                     } else {
                         ScrollView {
                             LazyVStack(spacing: 0) {
+                                // "Where your people are" — channels your freeq
+                                // follows are in. The graph, pointing you at rooms.
+                                if searchText.isEmpty && !peopleChannels.isEmpty {
+                                    peopleChannelsSection
+                                }
+
                                 // Result count
                                 if !searchText.isEmpty {
                                     HStack {
@@ -159,13 +172,16 @@ struct DiscoverTab: View {
                                     .padding(.bottom, 4)
                                 }
 
+                                if searchText.isEmpty && !peopleChannels.isEmpty {
+                                    sectionLabel("All channels")
+                                }
                                 ForEach(filteredChannels) { ch in
                                     channelRow(ch)
                                 }
                             }
                             .padding(.bottom, 16)
                         }
-                        .refreshable { await fetchChannels() }
+                        .refreshable { await fetchChannels(); await loadPeopleChannels() }
                     }
                     } // end mode == .channels
                 }
@@ -176,6 +192,91 @@ struct DiscoverTab: View {
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .task { await fetchChannels() }
+        .task { await loadPeopleChannels() }
+    }
+
+    // MARK: - Where your people are
+
+    private var peopleChannelsSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            sectionLabel("Where your people are")
+            ForEach(peopleChannels) { cp in
+                Button {
+                    channelInput = cp.channel
+                    joinCustom()
+                } label: {
+                    HStack(spacing: 12) {
+                        facepile(cp.people)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(cp.channel)
+                                .font(.fqSubheadline.weight(.semibold))
+                                .foregroundColor(Theme.textPrimary)
+                            Text(peopleSummary(cp.people))
+                                .font(.fqCaption)
+                                .foregroundColor(Theme.textMuted)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "arrow.right.circle")
+                            .font(.system(size: 18))
+                            .foregroundColor(Theme.accent)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private func facepile(_ people: [FreeqPerson]) -> some View {
+        HStack(spacing: -10) {
+            ForEach(Array(people.prefix(3))) { p in
+                BskyAvatar(urlString: p.actor.avatar, seed: p.actor.handle, size: 32)
+                    .overlay(Circle().strokeBorder(Theme.bgPrimary, lineWidth: 2))
+            }
+        }
+    }
+
+    private func peopleSummary(_ people: [FreeqPerson]) -> String {
+        let names = people.prefix(2).map { $0.actor.title }
+        let extra = people.count - names.count
+        let base = names.joined(separator: ", ")
+        if extra > 0 { return "\(base) +\(extra) you follow" }
+        return "\(base) you follow"
+    }
+
+    private func sectionLabel(_ text: String) -> some View {
+        HStack {
+            Text(text.uppercased())
+                .font(.fqCaption2.weight(.bold))
+                .foregroundColor(Theme.textMuted)
+                .kerning(0.6)
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+    }
+
+    private func loadPeopleChannels() async {
+        guard let myDID = appState.authenticatedDID else { return }
+        let follows = await BlueskyGraph.follows(of: myDID, limit: 100)
+        let people = await PeopleResolver.resolve(follows).filter { $0.onFreeq }
+        // Accumulate: channel -> the people I follow who are in it.
+        var byChannel: [String: [FreeqPerson]] = [:]
+        for person in people {
+            for ch in person.identity?.channels ?? [] where ch.hasPrefix("#") {
+                byChannel[ch, default: []].append(person)
+            }
+        }
+        // Rank by how many of my people are there; surface the top handful.
+        let ranked = byChannel
+            .map { ChannelPeople(channel: $0.key, people: $0.value) }
+            .sorted { $0.people.count > $1.people.count }
+            .prefix(6)
+        peopleChannels = Array(ranked)
     }
 
     private func channelRow(_ ch: ServerChannel) -> some View {

@@ -6,6 +6,7 @@ struct MessageListView: View {
     @ObservedObject var channel: ChannelState
     @State private var emojiPickerMessage: ChatMessage? = nil
     @State private var profileTarget: ProfileNickTarget? = nil
+    @State private var proofTarget: ProofTarget? = nil
     @State private var threadMessage: ChatMessage? = nil
     @StateObject private var avatarCache = AvatarCache.shared
 
@@ -230,6 +231,9 @@ struct MessageListView: View {
             ThreadView(rootMessage: msg, channelName: channel.name)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $proofTarget) { target in
+            VerifiedProofSheet(did: target.did, handle: target.handle, msgId: target.msgId)
         }
     }
 
@@ -545,10 +549,18 @@ struct MessageListView: View {
                                 .foregroundColor(Theme.textMuted)
 
                             if msg.origin == nil && msg.isSigned {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 9, weight: .semibold))
-                                    .foregroundColor(Theme.verify)
-                                    .help("Signed by sender")
+                                let senderDID = channel.memberInfo(for: msg.from)?.did
+                                Button {
+                                    if let did = senderDID {
+                                        proofTarget = ProofTarget(did: did, handle: nil, msgId: msg.id)
+                                    }
+                                } label: {
+                                    Image(systemName: "lock.fill")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundColor(Theme.verify)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(senderDID == nil)
                             }
 
                             if msg.isEdited {
@@ -1113,6 +1125,14 @@ private struct ProfileNickTarget: Identifiable {
     let nick: String
     let origin: String?
     var id: String { nick }
+}
+
+// Helper for the verified-identity proof sheet binding
+private struct ProofTarget: Identifiable {
+    let did: String
+    let handle: String?
+    let msgId: String?
+    var id: String { (msgId ?? "") + did }
 }
 
 // Preference key for scroll offset detection

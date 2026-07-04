@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsTab: View {
     @EnvironmentObject var appState: AppState
+    @State private var showStatusEditor = false
 
     var body: some View {
         NavigationStack {
@@ -35,6 +36,25 @@ struct SettingsTab: View {
                                         .font(.fqFootnote)
                                         .foregroundColor(Theme.textSecondary)
                                 }
+                            }
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+
+                        // Custom status — freeq-native presence.
+                        Button { showStatusEditor = true } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: appState.selfStatus == nil ? "face.smiling" : "circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(appState.selfStatus == nil ? Theme.textMuted : Theme.verify)
+                                    .frame(width: 24)
+                                Text(appState.selfStatus ?? "Set a status")
+                                    .font(.fqSubheadline)
+                                    .foregroundColor(appState.selfStatus == nil ? Theme.textSecondary : Theme.textPrimary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(Theme.textMuted)
                             }
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -172,6 +192,10 @@ struct SettingsTab: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+        }
+        .sheet(isPresented: $showStatusEditor) {
+            StatusEditorSheet()
+                .presentationDetents([.medium, .large])
         }
     }
 

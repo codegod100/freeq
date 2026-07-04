@@ -340,6 +340,9 @@ class AppState: ObservableObject {
 
     /// Pending DM navigation — set by profile "Message" button, consumed by ChatsTab
     @Published var pendingDMNick: String? = nil
+    /// Pending channel navigation — set by the catch-up digest, consumed by the
+    /// Channels pane of ChatsTab to push that channel.
+    @Published var pendingChannelNav: String? = nil
 
     // ── AV (voice/video calls) ──
     @Published var isInCall: Bool = false
@@ -1856,6 +1859,32 @@ class AppState: ObservableObject {
         }
     }
 
+    /// The user's own custom status (emoji + text), carried over IRC AWAY so it
+    /// broadcasts to everyone in shared channels natively. Persists across
+    /// launches and is re-broadcast after each (re)connect.
+    @Published var selfStatus: String? = UserDefaults.standard.string(forKey: "freeq.status")
+
+    func setStatus(_ text: String?) {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let t = trimmed, !t.isEmpty {
+            selfStatus = t
+            UserDefaults.standard.set(t, forKey: "freeq.status")
+            sendRaw("AWAY :\(t)")
+        } else {
+            selfStatus = nil
+            UserDefaults.standard.removeObject(forKey: "freeq.status")
+            sendRaw("AWAY")
+        }
+        // Reflect immediately on our own roster entries so the UI updates before
+        // the away-notify echo returns.
+        updateAwayStatus(nick: nick, awayMsg: selfStatus)
+    }
+
+    /// Re-broadcast a saved status after (re)connect so others see it again.
+    func reapplyStatusIfNeeded() {
+        if let s = selfStatus, !s.isEmpty { sendRaw("AWAY :\(s)") }
+    }
+
     func awayMessage(for nick: String) -> String? {
         for ch in channels {
             if let m = ch.members.first(where: { $0.nick.lowercased() == nick.lowercased() }) {
@@ -1967,6 +1996,8 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             if state.authenticatedDID != nil {
                 state.sendRaw("CHATHISTORY TARGETS * * 50")
             }
+            // Re-broadcast a saved custom status so peers see it again.
+            state.reapplyStatusIfNeeded()
 
         case .authenticated(let did):
             state.authenticatedDID = did

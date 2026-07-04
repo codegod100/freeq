@@ -20,9 +20,27 @@ struct UserProfileSheet: View {
     /// The AT identifier we actually resolved/used — powers the tappable
     /// follower/following graph lists.
     @State private var resolvedActor: String? = nil
+    /// What freeq knows about this identity — presence, nick, shared channels.
+    @State private var freeqIdentity: FreeqIdentity? = nil
+    @State private var showProof = false
 
     /// True when this is a stranger from the graph, not a freeq member.
     private var isDirect: Bool { directActor != nil }
+
+    /// The freeq nick we can actually Message, if this identity is on freeq and
+    /// isn't us.
+    private var messageableNick: String? {
+        guard let n = freeqIdentity?.nick, !n.isEmpty,
+              n.lowercased() != appState.nick.lowercased() else { return nil }
+        return n
+    }
+
+    /// Channels we share with this person (intersection of theirs and ours).
+    private var sharedChannels: [String] {
+        guard let theirs = freeqIdentity?.channels else { return [] }
+        let mine = Set(appState.channels.map { $0.name.lowercased() })
+        return theirs.filter { mine.contains($0.lowercased()) }
+    }
 
     var body: some View {
         NavigationView {
@@ -59,7 +77,10 @@ struct UserProfileSheet: View {
                                     .foregroundColor(Theme.textPrimary)
 
                                 if profile != nil && origin == nil {
-                                    VerifiedBadge(size: 16)
+                                    Button { showProof = true } label: {
+                                        VerifiedBadge(size: 16)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
                             }
 
@@ -126,12 +147,18 @@ struct UserProfileSheet: View {
                             .padding(.vertical, 8)
                         }
 
+                        // freeq presence — the freeq-native half of the profile.
+                        if let fid = freeqIdentity, fid.isOnFreeq {
+                            freeqCard(fid)
+                        }
+
                         // Actions
                         VStack(spacing: 12) {
-                            // DM button — freeq members only (a graph stranger may
-                            // not be on freeq at all).
-                            if !isDirect && nick.lowercased() != appState.nick.lowercased() {
-                                Button(action: startDM) {
+                            // Message — works for anyone freeq can reach, whether
+                            // you opened them from a channel or found them in the
+                            // graph. Resolved to their freeq nick.
+                            if let target = messageableNick {
+                                Button(action: { startDM(target) }) {
                                     HStack(spacing: 8) {
                                         Image(systemName: "bubble.left.fill")
                                             .font(.system(size: 13))
@@ -139,10 +166,11 @@ struct UserProfileSheet: View {
                                             .font(.fqSubheadline.weight(.semibold))
                                     }
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 12)
-                                    .background(Theme.accent)
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                                    .padding(.vertical, 13)
+                                    .background(Theme.signalGradient)
+                                    .foregroundColor(Color(hex: "04121a"))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .shadow(color: Theme.accent.opacity(0.3), radius: 10, y: 3)
                                 }
                             }
 
@@ -209,6 +237,11 @@ struct UserProfileSheet: View {
         }
         .preferredColorScheme(.dark)
         .task { await fetchProfile() }
+        .sheet(isPresented: $showProof) {
+            if let actor = resolvedActor, actor.hasPrefix("did:") {
+                VerifiedProofSheet(did: actor, handle: profile?.handle, displayName: profile?.displayName)
+            }
+        }
     }
 
     /// The big name at the top: the resolved Bluesky name when browsing the
@@ -241,10 +274,46 @@ struct UserProfileSheet: View {
         return "\(n)"
     }
 
-    private func startDM() {
-        let _ = appState.getOrCreateDM(nick)
-        appState.pendingDMNick = nick
+    private func startDM(_ target: String) {
+        let _ = appState.getOrCreateDM(target)
+        appState.pendingDMNick = target
         dismiss()
+    }
+
+    /// freeq presence card — where this person is right now, and the rooms you
+    /// share. The part no other chat app can show, because it's tied to a real
+    /// verified identity.
+    private func freeqCard(_ fid: FreeqIdentity) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                PresenceDot(presence: fid.online ? .online : .offline, size: 9)
+                Text(fid.online ? "Online on freeq" : "On freeq")
+                    .font(.fqFootnote.weight(.semibold))
+                    .foregroundColor(fid.online ? Theme.verify : Theme.textSecondary)
+                if fid.isAgent {
+                    Text("· agent")
+                        .font(.fqMonoCaption)
+                        .foregroundColor(Theme.iris)
+                }
+                Spacer()
+            }
+            let shared = sharedChannels
+            if !shared.isEmpty {
+                Text("You're both in \(shared.prefix(3).joined(separator: ", "))\(shared.count > 3 ? " +\(shared.count - 3)" : "")")
+                    .font(.fqCaption)
+                    .foregroundColor(Theme.textMuted)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let first = fid.channels.first {
+                Text("In \(first)\(fid.channels.count > 1 ? " +\(fid.channels.count - 1)" : "")")
+                    .font(.fqCaption)
+                    .foregroundColor(Theme.textMuted)
+                    .lineLimit(1)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard(.thin)
+        .padding(.horizontal, 24)
     }
 
     private func fetchProfile() async {
@@ -297,6 +366,12 @@ struct UserProfileSheet: View {
     /// then load its recent posts. Shared by nick-resolution and direct-actor
     /// (graph) paths.
     private func loadProfile(actor: String) async {
+        // Resolve what freeq knows about this identity in parallel — presence,
+        // nick (so Message works), shared channels.
+        if actor.hasPrefix("did:") {
+            let fid = await FreeqDirectory.shared.identity(for: actor)
+            await MainActor.run { freeqIdentity = fid }
+        }
         let urlStr = "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=\(actor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? actor)"
         guard let url = URL(string: urlStr) else {
             await MainActor.run { loading = false }
