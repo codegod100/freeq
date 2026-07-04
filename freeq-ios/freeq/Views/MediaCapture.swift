@@ -255,19 +255,19 @@ struct AudioRecorderSheet: View {
 
                     // Timer
                     Text(formatDuration(recordingTime))
-                        .font(.system(size: 48, weight: .light, design: .monospaced))
+                        .font(.fqMono.weight(.light))
                         .foregroundColor(isRecording ? Theme.danger : Theme.textPrimary)
 
                     if permissionDenied {
                         Text("Microphone access required.\nGo to Settings → freeq → Microphone")
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.danger)
                             .multilineTextAlignment(.center)
                     }
 
                     if let error = error {
                         Text(error)
-                            .font(.system(size: 13))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.danger)
                     }
 
@@ -286,7 +286,7 @@ struct AudioRecorderSheet: View {
                                         .background(Theme.bgTertiary)
                                         .clipShape(Circle())
                                     Text("Discard")
-                                        .font(.system(size: 12))
+                                        .font(.fqCaption)
                                 }
                                 .foregroundColor(Theme.textMuted)
                             }
@@ -307,7 +307,7 @@ struct AudioRecorderSheet: View {
                                         }
                                     }
                                     Text("Send")
-                                        .font(.system(size: 12))
+                                        .font(.fqCaption)
                                         .foregroundColor(Theme.accent)
                                 }
                             }
@@ -335,7 +335,7 @@ struct AudioRecorderSheet: View {
                         .disabled(permissionDenied)
 
                         Text(isRecording ? "Tap to stop" : "Tap to record")
-                            .font(.system(size: 13))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                     }
 
@@ -353,7 +353,7 @@ struct AudioRecorderSheet: View {
                     .foregroundColor(Theme.accent)
                 }
             }
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
@@ -566,7 +566,7 @@ struct MediaPreviewSheet: View {
                                         HStack {
                                             Spacer()
                                             Text(dur)
-                                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                                .font(.fqMonoCaption.weight(.medium))
                                                 .foregroundColor(.white)
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 4)
@@ -586,7 +586,7 @@ struct MediaPreviewSheet: View {
                                 .font(.system(size: 48))
                                 .foregroundColor(Theme.textMuted)
                             Text(media.sizeString)
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textMuted)
                         }
                         .frame(height: 200)
@@ -599,11 +599,11 @@ struct MediaPreviewSheet: View {
                             .font(.system(size: 12))
                             .foregroundColor(Theme.textMuted)
                         Text(media.sizeString)
-                            .font(.system(size: 12))
+                            .font(.fqCaption)
                             .foregroundColor(Theme.textMuted)
                         if let dur = media.durationString {
                             Text(dur)
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                                 .foregroundColor(Theme.textMuted)
                         }
                         Spacer()
@@ -618,7 +618,7 @@ struct MediaPreviewSheet: View {
                                     .font(.system(size: 11))
                                     .foregroundColor(Theme.textMuted)
                                 Text("Private to \(channel) by default")
-                                    .font(.system(size: 12))
+                                    .font(.fqCaption)
                                     .foregroundColor(Theme.textMuted)
                             }
                             Toggle(isOn: Binding(
@@ -630,7 +630,7 @@ struct MediaPreviewSheet: View {
                                         .font(.system(size: 16))
                                         .foregroundColor(Color(hex: "0085ff"))
                                     Text("Save a public copy to my PDS")
-                                        .font(.system(size: 14, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                         .foregroundColor(Theme.textPrimary)
                                 }
                             }
@@ -642,7 +642,7 @@ struct MediaPreviewSheet: View {
                                         .font(.system(size: 16))
                                         .foregroundColor(Color(hex: "0085ff"))
                                     Text("Also post to Bluesky feed")
-                                        .font(.system(size: 14, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                         .foregroundColor(Theme.textPrimary)
                                 }
                             }
@@ -664,7 +664,7 @@ struct MediaPreviewSheet: View {
                                     .font(.system(size: 12))
                                     .foregroundColor(Theme.danger)
                                 Text(error)
-                                    .font(.system(size: 13))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.danger)
                                     .lineLimit(2)
                                 Spacer()
@@ -672,7 +672,7 @@ struct MediaPreviewSheet: View {
                                     uploadError = nil
                                     upload()
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.accent)
                             }
                             .padding(.horizontal, 16)
@@ -684,7 +684,7 @@ struct MediaPreviewSheet: View {
                             HStack(spacing: 12) {
                                 ProgressView().tint(Theme.accent)
                                 Text("Uploading \(media.sizeString)...")
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                                 Spacer()
                             }
@@ -695,7 +695,7 @@ struct MediaPreviewSheet: View {
                             HStack(alignment: .bottom, spacing: 10) {
                                 TextField("Add a caption...", text: $caption, axis: .vertical)
                                     .foregroundColor(Theme.textPrimary)
-                                    .font(.system(size: 16))
+                                    .font(.fqCallout)
                                     .lineLimit(1...4)
                                     .focused($captionFocused)
                                     .tint(Theme.accent)
@@ -720,7 +720,7 @@ struct MediaPreviewSheet: View {
             }
             .navigationTitle(media.isVideo ? "Send Video" : "Send Photo")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

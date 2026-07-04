@@ -40,18 +40,16 @@ struct FreeqLogo: View {
 }
 
 /// Small inline verified badge — checkmark in accent circle.
+/// Earned identity trust — a verified AT Protocol DID. Painted in the "verify"
+/// green (never the accent), so verification reads as its own distinct signal
+/// throughout the app.
 struct VerifiedBadge: View {
     let size: CGFloat
 
     var body: some View {
         Image(systemName: "checkmark.seal.fill")
-            .font(.system(size: size))
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [Color(hex: "6c63ff"), Color(hex: "4f46e5")],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                )
-            )
+            .font(.system(size: size, weight: .semibold))
+            .foregroundStyle(Theme.verify)
+            .accessibilityLabel("Verified identity")
     }
 }

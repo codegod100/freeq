@@ -109,7 +109,7 @@ struct ComposeView: View {
                             axis: .vertical
                         )
                         .foregroundColor(Theme.textPrimary)
-                        .font(.system(size: 16))
+                        .font(.fqCallout)
                         .lineLimit(1...6)
                         .focused($isFocused)
                         .submitLabel(.return)
@@ -123,20 +123,25 @@ struct ComposeView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Theme.bgTertiary)
-                    .cornerRadius(20)
+                    .background(Theme.bgTertiary, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(Theme.border, lineWidth: 1)
+                    )
 
                     if canSend {
                         Button(action: send) {
                             ZStack {
                                 Circle()
-                                    .fill(Theme.accent)
+                                    .fill(Theme.signalGradient)
                                     .frame(width: 36, height: 36)
+                                    .shadow(color: Theme.accent.opacity(0.4), radius: 8, y: 2)
                                 Image(systemName: appState.editingMessage != nil ? "checkmark" : "arrow.up")
                                     .font(.system(size: 15, weight: .bold))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(Color(hex: "04121a"))
                             }
                         }
+                        .transition(.scale.combined(with: .opacity))
                     } else if appState.authenticatedDID != nil {
                         micButton
                             .accessibilityLabel("Hold to record voice message")
@@ -153,7 +158,9 @@ struct ComposeView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(Theme.bgSecondary)
+                .animation(.spring(response: 0.32, dampingFraction: 0.7), value: canSend)
+                .background(.ultraThinMaterial)
+                .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
                 .opacity(isRecording ? 0 : 1)
 
                 // Recording bar overlaid on top when recording

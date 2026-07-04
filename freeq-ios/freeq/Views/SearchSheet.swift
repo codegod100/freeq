@@ -34,7 +34,7 @@ struct SearchSheet: View {
                             .foregroundColor(Theme.textMuted)
                         TextField("", text: $query, prompt: Text("Search messages...").foregroundColor(Theme.textMuted))
                             .foregroundColor(Theme.textPrimary)
-                            .font(.system(size: 16))
+                            .font(.fqCallout)
                             .focused($focused)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
@@ -53,14 +53,14 @@ struct SearchSheet: View {
                                 .font(.system(size: 32))
                                 .foregroundColor(Theme.textMuted)
                             Text("No results found")
-                                .font(.system(size: 15))
+                                .font(.fqSubheadline)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         Spacer()
                     } else if query.count < 2 {
                         Spacer()
                         Text("Type at least 2 characters to search")
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                         Spacer()
                     } else {
@@ -90,7 +90,7 @@ struct SearchSheet: View {
                         .foregroundColor(Theme.accent)
                 }
             }
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .onAppear { focused = true }
@@ -101,23 +101,23 @@ struct SearchSheet: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
                 Text(result.channel)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.fqCaption.weight(.medium))
                     .foregroundColor(Theme.accent)
 
                 Spacer()
 
                 Text(formatTime(result.message.timestamp))
-                    .font(.system(size: 11))
+                    .font(.fqCaption2)
                     .foregroundColor(Theme.textMuted)
             }
 
             HStack(spacing: 8) {
                 Text(result.message.from)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.fqFootnote.weight(.bold))
                     .foregroundColor(Theme.nickColor(for: result.message.from))
 
                 Text(highlightedText(result.message.text, query: query))
-                    .font(.system(size: 13))
+                    .font(.fqFootnote)
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(2)
             }

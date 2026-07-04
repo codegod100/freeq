@@ -41,10 +41,10 @@ struct ChatDetailView: View {
                         }
                         Text(appState.connectionState == .disconnected ? "Disconnected — pull down to reconnect" :
                              appState.connectionState == .connecting ? "Connecting..." : "Registering...")
-                            .font(.system(size: 13, weight: .medium))
+                            .font(.fqFootnote.weight(.medium))
                         Spacer()
                         Button("Sign out") { appState.logout() }
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.fqFootnote.weight(.semibold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 2)
@@ -102,28 +102,28 @@ struct ChatDetailView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+        .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
                     Text(channelName)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(.fqCallout.weight(.semibold))
                         .foregroundColor(Theme.textPrimary)
 
                     if let channel = channelState {
                         if !channel.activeTypers.isEmpty {
                             Text(typingText(channel.activeTypers))
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.accent)
                         } else if !channel.topic.isEmpty {
                             Text(channel.topic)
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
                                 .lineLimit(1)
                         } else if isChannel {
                             Text("\(channel.members.count) members")
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
                         }
                     }

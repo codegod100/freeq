@@ -11,7 +11,7 @@ struct ToastView: View {
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.white)
             Text(message)
-                .font(.system(size: 14, weight: .medium))
+                .font(.fqFootnote.weight(.medium))
                 .foregroundColor(.white)
                 .lineLimit(2)
         }

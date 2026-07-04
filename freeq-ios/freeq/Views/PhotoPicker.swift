@@ -87,7 +87,7 @@ struct ImagePreviewSheet: View {
                                     .font(.system(size: 11))
                                     .foregroundColor(Theme.textMuted)
                                 Text("Private to \(channel) by default")
-                                    .font(.system(size: 12))
+                                    .font(.fqCaption)
                                     .foregroundColor(Theme.textMuted)
                             }
                             Toggle(isOn: Binding(
@@ -99,7 +99,7 @@ struct ImagePreviewSheet: View {
                                         .font(.system(size: 16))
                                         .foregroundColor(Color(hex: "0085ff"))
                                     Text("Save a public copy to my PDS")
-                                        .font(.system(size: 14, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                         .foregroundColor(Theme.textPrimary)
                                 }
                             }
@@ -111,7 +111,7 @@ struct ImagePreviewSheet: View {
                                         .font(.system(size: 16))
                                         .foregroundColor(Color(hex: "0085ff"))
                                     Text("Also post to Bluesky feed")
-                                        .font(.system(size: 14, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                         .foregroundColor(Theme.textPrimary)
                                 }
                             }
@@ -134,7 +134,7 @@ struct ImagePreviewSheet: View {
                                     .font(.system(size: 12))
                                     .foregroundColor(Theme.danger)
                                 Text(error)
-                                    .font(.system(size: 13))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.danger)
                                     .lineLimit(2)
                                 Spacer()
@@ -142,7 +142,7 @@ struct ImagePreviewSheet: View {
                                     uploadError = nil
                                     upload()
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.accent)
                             }
                             .padding(.horizontal, 16)
@@ -155,13 +155,13 @@ struct ImagePreviewSheet: View {
                                 ProgressView()
                                     .tint(Theme.accent)
                                 Text("Uploading \(ByteCountFormatter.string(fromByteCount: Int64(imageData.count), countStyle: .file))...")
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                                 Spacer()
                                 Button("Cancel") {
                                     uploading = false
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.textMuted)
                             }
                             .padding(.horizontal, 16)
@@ -171,7 +171,7 @@ struct ImagePreviewSheet: View {
                             HStack(alignment: .bottom, spacing: 10) {
                                 TextField("Add a caption...", text: $caption, axis: .vertical)
                                     .foregroundColor(Theme.textPrimary)
-                                    .font(.system(size: 16))
+                                    .font(.fqCallout)
                                     .lineLimit(1...4)
                                     .focused($captionFocused)
                                     .tint(Theme.accent)
@@ -196,7 +196,7 @@ struct ImagePreviewSheet: View {
             }
             .navigationTitle("Send Photo")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

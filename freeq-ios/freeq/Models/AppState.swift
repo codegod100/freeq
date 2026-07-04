@@ -11,27 +11,9 @@ import SwiftUI
 /// flapped past the 3-strike threshold for transient reasons.
 private let authLog = Logger(subsystem: "at.freeq.ios", category: "auth")
 
-/// A single chat message.
-struct ChatMessage: Identifiable, Equatable {
-    var id: String  // msgid or UUID
-    let from: String
-    var text: String
-    let isAction: Bool
-    let timestamp: Date
-    let replyTo: String?
-    var isEdited: Bool = false
-    var isDeleted: Bool = false
-    var isSigned: Bool = false
-    // Origin server name when relayed from a federated peer (+freeq.at/origin).
-    // nil = locally-originated. Drives "via {origin}" + suppresses the local
-    // verified/signed badges, which would overstate trust for a peer-vouched msg.
-    var origin: String? = nil
-    var reactions: [String: Set<String>] = [:]  // emoji -> set of nicks
-
-    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
-    }
-}
+// `ChatMessage` now lives in ChatMessage.swift (extracted so the pure model +
+// its MessageActions decisions can be unit-tested under SwiftPM without the
+// AppState UIKit/ActivityKit dependencies).
 
 // MARK: - Local buffer cache
 //
@@ -314,7 +296,15 @@ class AppState: ObservableObject {
     @Published var serverAddress: String = ServerConfig.ircServer
     @Published var authBrokerBase: String = ServerConfig.authBrokerBase
     @Published var channels: [ChannelState] = []
-    @Published var activeChannel: String? = nil
+    @Published var activeChannel: String? = nil {
+        didSet {
+            // Persist so the app reopens the last conversation on next launch.
+            if let activeChannel { UserDefaults.standard.set(activeChannel, forKey: LastChannel.key) }
+        }
+    }
+    /// True once we've restored the last-open channel this launch, so a later
+    /// channel joining doesn't re-hijack the user's current selection.
+    private var didRestoreLastChannel = false
     @Published var errorMessage: String? = nil
     @Published var authenticatedDID: String? = nil
     @Published var dmBuffers: [ChannelState] = []
@@ -1780,7 +1770,35 @@ class AppState: ObservableObject {
         let channel = ChannelState(name: trimmed)
         channels.append(channel)
         SpotlightIndexer.reindex(self)
+        attemptRestoreLastChannel()
         return channel
+    }
+
+    /// Reopen the conversation the user was last in (persisted in `activeChannel`'s
+    /// `didSet`). Called as channels/DMs load after connect: selects the saved
+    /// target once it's present, or falls back to the first channel once all the
+    /// auto-join channels have loaded and the saved one didn't reappear (it was
+    /// left). Runs at most once per launch so a late JOIN can't hijack the user's
+    /// current selection.
+    func attemptRestoreLastChannel() {
+        guard !didRestoreLastChannel else { return }
+        let saved = UserDefaults.standard.string(forKey: LastChannel.key)
+        let chanNames = channels.map(\.name)
+        let dmNames = dmBuffers.map(\.name)
+        let savedIsPresent = saved.map { s in
+            (chanNames + dmNames).contains { $0.caseInsensitiveCompare(s) == .orderedSame }
+        } ?? false
+
+        // Wait for the saved target to appear; only fall back once every
+        // expected auto-join channel has loaded (so we don't prematurely land
+        // on the first channel while the real one is still joining).
+        guard savedIsPresent || (!chanNames.isEmpty && chanNames.count >= autoJoinChannels.count) else {
+            return
+        }
+        if let target = LastChannel.restore(saved: saved, channels: chanNames, dms: dmNames) {
+            activeChannel = target
+            didRestoreLastChannel = true
+        }
     }
 
     /// DMs are keyed by peer nick. Refuse anything that looks like a channel —
@@ -1803,6 +1821,7 @@ class AppState: ObservableObject {
         dmBuffers.append(dm)
         requestHistory(channel: trimmed)
         SpotlightIndexer.reindex(self)
+        attemptRestoreLastChannel()
         return dm
     }
 

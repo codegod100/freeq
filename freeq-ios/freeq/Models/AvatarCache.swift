@@ -115,22 +115,27 @@ struct UserAvatar: View {
 
     private var initialCircle: some View {
         ZStack {
+            // Subtle top-lit gradient of the member's signature color — matches
+            // the colored name in the transcript, with a little depth.
             Circle()
-                .fill(nickColor)
+                .fill(
+                    LinearGradient(
+                        colors: [nickColor, nickColor.opacity(0.72)],
+                        startPoint: .top, endPoint: .bottom)
+                )
                 .frame(width: size, height: size)
+                .overlay(
+                    Circle().strokeBorder(.white.opacity(0.14), lineWidth: 1)
+                )
             Text(String(nick.prefix(1)).uppercased())
-                .font(.system(size: size * 0.4, weight: .semibold))
-                .foregroundColor(.white)
+                .font(.system(size: size * 0.42, weight: .semibold, design: .rounded))
+                .foregroundColor(Color(hex: "04121a").opacity(0.88))
         }
     }
 
+    /// One consistent color system for a member — the same hash the transcript
+    /// uses for their name (Theme.nickColor), so avatar and name always agree.
     private var nickColor: Color {
-        let colors: [Color] = [
-            Color(hex: "e74c3c"), Color(hex: "3498db"), Color(hex: "2ecc71"),
-            Color(hex: "f39c12"), Color(hex: "9b59b6"), Color(hex: "1abc9c"),
-            Color(hex: "e67e22"), Color(hex: "e91e63"),
-        ]
-        let hash = nick.lowercased().unicodeScalars.reduce(0) { $0 + Int($1.value) }
-        return colors[hash % colors.count]
+        Theme.nickColor(for: nick)
     }
 }

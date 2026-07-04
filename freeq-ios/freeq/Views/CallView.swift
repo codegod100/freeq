@@ -189,7 +189,7 @@ struct CallView: View {
 
             if !hasVideo {
                 Text(String(nick.prefix(2).uppercased()))
-                    .font(.system(size: 46, weight: .bold))
+                    .font(.fqLargeTitle.weight(.bold))
                     .foregroundColor(.accentColor)
             }
 

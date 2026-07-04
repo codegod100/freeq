@@ -17,7 +17,7 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 5) {
                                     Text(appState.nick)
-                                        .font(.system(size: 17, weight: .semibold))
+                                        .font(.fqBody.weight(.semibold))
                                         .foregroundColor(Theme.textPrimary)
 
                                     if appState.authenticatedDID != nil {
@@ -27,12 +27,12 @@ struct SettingsTab: View {
 
                                 if let did = appState.authenticatedDID {
                                     Text(did)
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .font(.fqMonoCaption)
                                         .foregroundColor(Theme.textMuted)
                                         .lineLimit(1)
                                 } else {
                                     Text("Guest")
-                                        .font(.system(size: 13))
+                                        .font(.fqFootnote)
                                         .foregroundColor(Theme.textSecondary)
                                 }
                             }
@@ -66,7 +66,7 @@ struct SettingsTab: View {
                                 .foregroundColor(Theme.textPrimary)
                             Spacer()
                             Text(appState.serverAddress)
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -80,7 +80,7 @@ struct SettingsTab: View {
                                     .fill(statusColor)
                                     .frame(width: 8, height: 8)
                                 Text(statusText)
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                             }
                         }
@@ -91,7 +91,7 @@ struct SettingsTab: View {
                                 .foregroundColor(Theme.textPrimary)
                             Spacer()
                             Text("\(appState.channels.count)")
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -107,7 +107,7 @@ struct SettingsTab: View {
                                 .foregroundColor(Theme.textPrimary)
                             Spacer()
                             Text("1.0.0")
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -146,7 +146,7 @@ struct SettingsTab: View {
                             HStack {
                                 Spacer()
                                 Text("Disconnect")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(.fqCallout.weight(.medium))
                                     .foregroundColor(Theme.textSecondary)
                                 Spacer()
                             }
@@ -157,7 +157,7 @@ struct SettingsTab: View {
                             HStack {
                                 Spacer()
                                 Text("Log Out")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(.fqCallout.weight(.medium))
                                     .foregroundColor(Theme.danger)
                                 Spacer()
                             }
@@ -170,7 +170,7 @@ struct SettingsTab: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
     }

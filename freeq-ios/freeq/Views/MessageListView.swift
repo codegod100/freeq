@@ -50,7 +50,7 @@ struct MessageListView: View {
                             Image(systemName: "arrow.up.circle")
                                 .font(.system(size: 13))
                             Text("Load older messages")
-                                .font(.system(size: 13))
+                                .font(.fqFootnote)
                         }
                         .foregroundColor(Theme.textMuted)
                         .frame(maxWidth: .infinity)
@@ -151,10 +151,10 @@ struct MessageListView: View {
                                     UserAvatar(nick: last.from, size: 22)
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(last.from)
-                                            .font(.system(size: 11, weight: .bold))
+                                            .font(.fqCaption2.weight(.bold))
                                             .foregroundColor(Theme.nickColor(for: last.from))
                                         Text(last.text.prefix(60) + (last.text.count > 60 ? "…" : ""))
-                                            .font(.system(size: 12))
+                                            .font(.fqCaption)
                                             .foregroundColor(Theme.textSecondary)
                                             .lineLimit(1)
                                     }
@@ -162,7 +162,7 @@ struct MessageListView: View {
                                     let unread = appState.unreadCounts[channel.name] ?? 0
                                     if unread > 0 {
                                         Text("\(unread)")
-                                            .font(.system(size: 11, weight: .bold))
+                                            .font(.fqCaption2.weight(.bold))
                                             .foregroundColor(.white)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
@@ -180,7 +180,7 @@ struct MessageListView: View {
                                     Image(systemName: "chevron.down")
                                         .font(.system(size: 12, weight: .bold))
                                     Text("Scroll to bottom")
-                                        .font(.system(size: 13, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                 }
                                 .foregroundColor(Theme.accent)
                                 .padding(.horizontal, 16)
@@ -302,7 +302,10 @@ struct MessageListView: View {
             }
         }
 
-        if msg.from.lowercased() == appState.nick.lowercased() {
+        let isAuthor = msg.from.lowercased() == appState.nick.lowercased()
+        let selfIsOp = channel.memberInfo(for: appState.nick)?.isOp ?? false
+
+        if isAuthor {
             Divider()
 
             Button(action: {
@@ -310,12 +313,17 @@ struct MessageListView: View {
             }) {
                 Label("Edit", systemImage: "pencil")
             }
+        }
 
+        // Author may always delete their own; an op may delete anyone's
+        // (moderation). Single source of truth: MessageActions.canDelete.
+        if MessageActions.canDelete(msg, by: appState.nick, isOp: selfIsOp) {
+            if !isAuthor { Divider() }
             Button(role: .destructive, action: {
                 appState.deleteMessage(target: channel.name, msgId: msg.id)
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }) {
-                Label("Delete", systemImage: "trash")
+                Label(isAuthor ? "Delete" : "Delete (mod)", systemImage: "trash")
             }
         }
 
@@ -355,15 +363,15 @@ struct MessageListView: View {
             let typers = channel.activeTypers
             if typers.count == 1 {
                 Text("\(typers[0]) is typing...")
-                    .font(.system(size: 12))
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             } else if typers.count == 2 {
                 Text("\(typers[0]) and \(typers[1]) are typing...")
-                    .font(.system(size: 12))
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             } else if typers.count > 2 {
                 Text("\(typers.count) people are typing...")
-                    .font(.system(size: 12))
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             }
         }
@@ -376,7 +384,7 @@ struct MessageListView: View {
         HStack(spacing: 8) {
             Rectangle().fill(Color.red.opacity(0.4)).frame(height: 1)
             Text("NEW")
-                .font(.system(size: 10, weight: .heavy))
+                .font(.fqCaption2.weight(.heavy))
                 .foregroundColor(.red.opacity(0.7))
                 .tracking(1)
             Rectangle().fill(Color.red.opacity(0.4)).frame(height: 1)
@@ -429,7 +437,7 @@ struct MessageListView: View {
         HStack {
             Rectangle().fill(Theme.border).frame(height: 1)
             Text(formatDate(date))
-                .font(.system(size: 11, weight: .semibold))
+                .font(.fqCaption2.weight(.semibold))
                 .foregroundColor(Theme.textMuted)
                 .padding(.horizontal, 8)
             Rectangle().fill(Theme.border).frame(height: 1)
@@ -444,7 +452,7 @@ struct MessageListView: View {
                 .font(.system(size: 9))
                 .foregroundColor(Theme.textMuted)
             Text(msg.text)
-                .font(.system(size: 12))
+                .font(.fqCaption)
                 .foregroundColor(Theme.textMuted)
         }
         .padding(.horizontal, 20)
@@ -462,7 +470,7 @@ struct MessageListView: View {
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textMuted)
             Text("Message deleted")
-                .font(.system(size: 13))
+                .font(.fqFootnote)
                 .foregroundColor(Theme.textMuted)
                 .italic()
         }
@@ -482,8 +490,12 @@ struct MessageListView: View {
 
     @ViewBuilder
     private func messageRow(_ msg: ChatMessage, showHeader: Bool) -> some View {
-        let mention = isMention(msg) && msg.from.lowercased() != appState.nick.lowercased()
+        let isSelf = msg.from.lowercased() == appState.nick.lowercased()
+        let mention = isMention(msg) && !isSelf
         let pinned = channel.pins.contains(msg.id)
+        // Verification is DID-anchored (identity we resolved), not "has an
+        // avatar" — one consistent definition of verified across the app.
+        let verified = msg.origin == nil && channel.memberInfo(for: msg.from)?.did != nil
 
         VStack(alignment: .leading, spacing: 0) {
             // Reply context — tap to open thread
@@ -509,10 +521,10 @@ struct MessageListView: View {
                             Button(action: { profileTarget = ProfileNickTarget(nick: msg.from, origin: msg.origin) }) {
                                 HStack(spacing: 4) {
                                     Text((channel.memberInfo(for: msg.from)?.prefix ?? "") + msg.from)
-                                        .font(.system(size: 15, weight: .bold))
+                                        .font(.fqSubheadline.weight(.bold))
                                         .foregroundColor(Theme.nickColor(for: msg.from))
 
-                                    if msg.origin == nil && avatarCache.avatarURL(for: msg.from.lowercased()) != nil {
+                                    if verified {
                                         VerifiedBadge(size: 12)
                                     }
                                 }
@@ -524,29 +536,29 @@ struct MessageListView: View {
                             // verified/signed badges (which would overstate trust).
                             if let origin = msg.origin {
                                 Text("via \(origin)")
-                                    .font(.system(size: 11))
+                                    .font(.fqMonoCaption)
                                     .foregroundColor(Theme.textMuted)
                             }
 
                             Text(formatTime(msg.timestamp))
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
 
                             if msg.origin == nil && msg.isSigned {
                                 Image(systemName: "lock.fill")
                                     .font(.system(size: 9, weight: .semibold))
-                                    .foregroundColor(Theme.success)
+                                    .foregroundColor(Theme.verify)
                                     .help("Signed by sender")
                             }
 
                             if msg.isEdited {
                                 Text("edited")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.fqCaption2.weight(.semibold))
                                     .foregroundColor(Theme.accent)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(Theme.accent.opacity(0.12))
-                                    .cornerRadius(6)
+                                    .clipShape(Capsule())
                             }
                         }
 
@@ -560,12 +572,13 @@ struct MessageListView: View {
                 .padding(.bottom, 2)
             } else {
                 HStack(alignment: .top, spacing: 0) {
-                    // Subtle timestamp for continuation messages
+                    // Subtle timestamp for continuation messages, revealed on the
+                    // row (kept faint so the transcript reads as one voice).
                     Text(shortTime(msg.timestamp))
-                        .font(.system(size: 9))
+                        .font(.fqMonoCaption)
                         .foregroundColor(Theme.textMuted.opacity(0.5))
                         .frame(width: 56, alignment: .center)
-                        .padding(.top, 4)
+                        .padding(.top, 3)
 
                     messageBody(msg)
                         .padding(.trailing, 16)
@@ -581,13 +594,22 @@ struct MessageListView: View {
                     .padding(.top, 4)
             }
         }
-        // Mention/pin highlight
-        .background(mention || pinned ? Theme.accent.opacity(0.08) : Color.clear)
+        // Row emphasis, in priority order: pin > mention > your own message.
+        // Own messages get a whisper-quiet signal tint so you can find your
+        // voice in a busy channel without breaking the scannable left rail.
+        .background(
+            pinned ? Theme.warning.opacity(0.08)
+            : mention ? Theme.accent.opacity(0.10)
+            : isSelf ? Theme.accent.opacity(0.045)
+            : Color.clear
+        )
         .overlay(alignment: .leading) {
             if pinned {
-                Rectangle().fill(Color.orange).frame(width: 3)
+                Rectangle().fill(Theme.warning).frame(width: 3)
             } else if mention {
                 Rectangle().fill(Theme.accent).frame(width: 3)
+            } else if isSelf {
+                Rectangle().fill(Theme.accent.opacity(0.5)).frame(width: 2)
             }
         }
         // Double-tap to react with ❤️
@@ -606,27 +628,26 @@ struct MessageListView: View {
 
     private func replyContext(_ original: ChatMessage) -> some View {
         HStack(spacing: 6) {
-            Rectangle()
+            Capsule()
                 .fill(Theme.accent)
                 .frame(width: 2)
 
             Image(systemName: "arrowshape.turn.up.left.fill")
-                .font(.system(size: 9))
+                .font(.fqCaption2)
                 .foregroundColor(Theme.textMuted)
 
             Text(original.from)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.fqCaption.weight(.semibold))
                 .foregroundColor(Theme.nickColor(for: original.from))
 
             Text(original.text)
-                .font(.system(size: 12))
+                .font(.fqCaption)
                 .foregroundColor(Theme.textMuted)
                 .lineLimit(1)
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(Theme.bgTertiary.opacity(0.5))
-        .cornerRadius(4)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 9)
+        .background(Theme.bgTertiary.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous))
     }
 
     // MARK: - Reactions
@@ -650,23 +671,24 @@ struct MessageListView: View {
                 }) {
                     HStack(spacing: 3) {
                         Text(emoji)
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                         if nicks.count > 1 {
                             Text("\(nicks.count)")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.fqCaption2.weight(.semibold))
                                 .foregroundColor(isMine ? Theme.accent : Theme.textSecondary)
+                                .contentTransition(.numericText())
                         }
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(isMine ? Theme.accent.opacity(0.15) : Theme.bgTertiary)
-                    .cornerRadius(6)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(isMine ? Theme.accent.opacity(0.15) : Theme.bgTertiary, in: Capsule())
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(isMine ? Theme.accent.opacity(0.4) : Color.clear, lineWidth: 1)
+                        Capsule().strokeBorder(isMine ? Theme.accent.opacity(0.45) : Theme.border, lineWidth: 1)
                     )
+                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: nicks.count)
                 }
                 .buttonStyle(.plain)
+                .sensoryFeedback(.impact(weight: .light), trigger: isMine)
             }
         }
     }
@@ -686,7 +708,7 @@ struct MessageListView: View {
     private func messageBody(_ msg: ChatMessage) -> some View {
         if msg.isAction {
             Text("*\(msg.from) \(msg.text)*")
-                .font(.system(size: 15))
+                .font(.fqSubheadline)
                 .italic()
                 .foregroundColor(Theme.textSecondary)
         } else if let (url, durationLabel) = extractVoiceMessage(msg.text) {
@@ -766,7 +788,7 @@ struct MessageListView: View {
     private func styledText(_ text: String) -> some View {
         let isMention = text.lowercased().contains(appState.nick.lowercased())
         return Text(attributedMessage(text))
-            .font(.system(size: 15))
+            .font(.fqSubheadline)
             .foregroundColor(Theme.textPrimary)
             .textSelection(.enabled)
             .padding(.horizontal, isMention ? 4 : 0)
@@ -781,7 +803,7 @@ struct MessageListView: View {
                 Image(systemName: "link")
                     .font(.system(size: 11))
                 Text(url.host ?? url.absoluteString)
-                    .font(.system(size: 13))
+                    .font(.fqFootnote)
                     .lineLimit(1)
             }
             .foregroundColor(Theme.accent)
@@ -1020,17 +1042,17 @@ struct EmojiPickerSheet: View {
     var body: some View {
         VStack(spacing: 16) {
             Text("React to message")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.fqSubheadline.weight(.semibold))
                 .foregroundColor(Theme.textPrimary)
                 .padding(.top, 8)
 
             // Original message preview
             HStack(spacing: 8) {
                 Text(message.from)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.fqFootnote.weight(.bold))
                     .foregroundColor(Theme.nickColor(for: message.from))
                 Text(message.text)
-                    .font(.system(size: 13))
+                    .font(.fqFootnote)
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(2)
             }
@@ -1149,7 +1171,7 @@ struct InlineVideoPlayer: View {
                                 .font(.system(size: 24))
                                 .foregroundColor(.white)
                             Text("Tap to retry")
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                                 .foregroundColor(.white.opacity(0.8))
                         }
                         .frame(width: 80, height: 64)
@@ -1287,7 +1309,7 @@ struct InlineAudioPlayer: View {
                         .font(.system(size: 11))
                         .foregroundColor(Theme.accent)
                     Text("Voice message")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.fqFootnote.weight(.medium))
                         .foregroundColor(Theme.textPrimary)
                 }
 
@@ -1308,11 +1330,11 @@ struct InlineAudioPlayer: View {
                 // Duration
                 HStack {
                     Text(formatTime(isPlaying ? progress : 0))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.fqMonoCaption)
                         .foregroundColor(Theme.textMuted)
                     Spacer()
                     Text(label ?? formatTime(duration))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.fqMonoCaption)
                         .foregroundColor(Theme.textMuted)
                 }
             }

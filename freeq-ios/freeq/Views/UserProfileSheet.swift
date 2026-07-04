@@ -27,7 +27,7 @@ struct UserProfileSheet: View {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .font(.system(size: 13))
                                 Text("Relayed via \(origin) — this server did not verify this identity.")
-                                    .font(.system(size: 12))
+                                    .font(.fqCaption)
                                 Spacer()
                             }
                             .foregroundColor(Theme.warning)
@@ -45,7 +45,7 @@ struct UserProfileSheet: View {
                         VStack(spacing: 4) {
                             HStack(spacing: 6) {
                                 Text(nick)
-                                    .font(.system(size: 22, weight: .bold))
+                                    .font(.fqTitle3.weight(.bold))
                                     .foregroundColor(Theme.textPrimary)
 
                                 if profile != nil && origin == nil {
@@ -59,12 +59,12 @@ struct UserProfileSheet: View {
                                         .fill(Theme.warning)
                                         .frame(width: 8, height: 8)
                                     Text("Away")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(.fqCaption.weight(.semibold))
                                         .foregroundColor(Theme.warning)
                                 }
                                 if !away.isEmpty {
                                     Text(away)
-                                        .font(.system(size: 13))
+                                        .font(.fqFootnote)
                                         .foregroundColor(Theme.textMuted)
                                 }
                             }
@@ -72,11 +72,11 @@ struct UserProfileSheet: View {
                             if let p = profile {
                                 if let displayName = p.displayName, !displayName.isEmpty {
                                     Text(displayName)
-                                        .font(.system(size: 15))
+                                        .font(.fqSubheadline)
                                         .foregroundColor(Theme.textSecondary)
                                 }
                                 Text("@\(p.handle)")
-                                    .font(.system(size: 13))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textMuted)
                             }
                         }
@@ -84,7 +84,7 @@ struct UserProfileSheet: View {
                         // Bio
                         if let bio = profile?.description, !bio.isEmpty {
                             Text(bio)
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 32)
@@ -109,7 +109,7 @@ struct UserProfileSheet: View {
                                         Image(systemName: "bubble.left.fill")
                                             .font(.system(size: 13))
                                         Text("Message")
-                                            .font(.system(size: 15, weight: .semibold))
+                                            .font(.fqSubheadline.weight(.semibold))
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 12)
@@ -126,7 +126,7 @@ struct UserProfileSheet: View {
                                         Image(systemName: "arrow.up.right")
                                             .font(.system(size: 13))
                                         Text("View on Bluesky")
-                                            .font(.system(size: 15, weight: .medium))
+                                            .font(.fqSubheadline.weight(.medium))
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 12)
@@ -148,7 +148,7 @@ struct UserProfileSheet: View {
                         if !recentPosts.isEmpty {
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("Recent Posts")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(.fqFootnote.weight(.semibold))
                                     .foregroundColor(Theme.textMuted)
                                     .padding(.horizontal, 16)
 
@@ -187,10 +187,10 @@ struct UserProfileSheet: View {
     private func statItem(count: Int, label: String) -> some View {
         VStack(spacing: 2) {
             Text(formatCount(count))
-                .font(.system(size: 16, weight: .bold))
+                .font(.fqCallout.weight(.bold))
                 .foregroundColor(Theme.textPrimary)
             Text(label)
-                .font(.system(size: 11))
+                .font(.fqCaption2)
                 .foregroundColor(Theme.textMuted)
         }
     }

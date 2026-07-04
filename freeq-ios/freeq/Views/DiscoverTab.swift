@@ -41,7 +41,7 @@ struct DiscoverTab: View {
 
                         TextField("", text: $searchText, prompt: Text("Search channels...").foregroundColor(Theme.textMuted))
                             .foregroundColor(Theme.textPrimary)
-                            .font(.system(size: 16))
+                            .font(.fqCallout)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                             .submitLabel(.search)
@@ -65,12 +65,12 @@ struct DiscoverTab: View {
                     // Quick join bar
                     HStack(spacing: 8) {
                         Text("#")
-                            .font(.system(size: 16, weight: .medium, design: .monospaced))
+                            .font(.fqMono.weight(.medium))
                             .foregroundColor(Theme.textMuted)
 
                         TextField("", text: $channelInput, prompt: Text("Join by name...").foregroundColor(Theme.textMuted))
                             .foregroundColor(Theme.textPrimary)
-                            .font(.system(size: 15))
+                            .font(.fqSubheadline)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                             .submitLabel(.join)
@@ -80,7 +80,7 @@ struct DiscoverTab: View {
                         if !channelInput.isEmpty {
                             Button(action: joinCustom) {
                                 Text("Join")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(.fqFootnote.weight(.semibold))
                                     .foregroundColor(.white)
                                     .padding(.horizontal, 14)
                                     .padding(.vertical, 6)
@@ -101,7 +101,7 @@ struct DiscoverTab: View {
                         VStack(spacing: 12) {
                             ProgressView().tint(Theme.accent).scaleEffect(1.1)
                             Text("Loading channels...")
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textMuted)
                         }
                         Spacer()
@@ -113,17 +113,17 @@ struct DiscoverTab: View {
                                 .foregroundColor(Theme.textMuted)
                             if searchText.isEmpty {
                                 Text("No active channels")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(.fqCallout.weight(.medium))
                                     .foregroundColor(Theme.textSecondary)
                             } else {
                                 Text("No channels matching \"\(searchText)\"")
-                                    .font(.system(size: 15))
+                                    .font(.fqSubheadline)
                                     .foregroundColor(Theme.textSecondary)
                                 Button("Create #\(searchText)") {
                                     channelInput = searchText
                                     joinCustom()
                                 }
-                                .font(.system(size: 14, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.accent)
                             }
                         }
@@ -135,7 +135,7 @@ struct DiscoverTab: View {
                                 if !searchText.isEmpty {
                                     HStack {
                                         Text("\(filteredChannels.count) result\(filteredChannels.count == 1 ? "" : "s")")
-                                            .font(.system(size: 12))
+                                            .font(.fqCaption)
                                             .foregroundColor(Theme.textMuted)
                                         Spacer()
                                     }
@@ -156,7 +156,7 @@ struct DiscoverTab: View {
             }
             .navigationTitle("Discover")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .task { await fetchChannels() }
@@ -187,21 +187,21 @@ struct DiscoverTab: View {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
                         Text(ch.name)
-                            .font(.system(size: 16, weight: .medium))
+                            .font(.fqCallout.weight(.medium))
                             .foregroundColor(Theme.textPrimary)
 
                         HStack(spacing: 3) {
                             Image(systemName: "person.2.fill")
                                 .font(.system(size: 9))
                             Text("\(ch.memberCount)")
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                         }
                         .foregroundColor(Theme.textMuted)
                     }
 
                     if !ch.topic.isEmpty {
                         Text(ch.topic)
-                            .font(.system(size: 13))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textSecondary)
                             .lineLimit(2)
                     }
@@ -215,7 +215,7 @@ struct DiscoverTab: View {
                         .foregroundColor(Theme.success)
                 } else {
                     Text("Join")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.fqFootnote.weight(.semibold))
                         .foregroundColor(Theme.accent)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 7)

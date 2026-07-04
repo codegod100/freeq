@@ -129,6 +129,19 @@ jobs:
         working-directory: freeq-macos
         run: swift test
 
+  ios-swift:
+    name: iOS Client (SwiftPM tests)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mirrors macos-swift: the SwiftPM harness compiles only the pure-logic
+      # core (ChatMessage + MessageActions) — no FFI, no Xcode project — so it
+      # stays fast and needs no Rust toolchain or simulator.
+      - name: Run Swift tests
+        working-directory: freeq-ios
+        run: swift test
+
   macos-smoke:
     name: macOS Client (interaction smoke test)
     runs-on: macos-15

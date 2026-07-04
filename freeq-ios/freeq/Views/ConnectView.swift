@@ -15,15 +15,15 @@ struct ConnectView: View {
 
     var body: some View {
         ZStack {
-            // Background
-            LinearGradient(
-                colors: [Theme.bgPrimary, Color(hex: "0f0f1e")],
-                startPoint: .top,
-                endPoint: .bottom
+            // Background — cool graphite with a signal glow blooming from the top.
+            Theme.bgPrimary.ignoresSafeArea()
+            RadialGradient(
+                colors: [Theme.accent.opacity(0.18), Theme.iris.opacity(0.06), .clear],
+                center: .top, startRadius: 0, endRadius: 460
             )
             .ignoresSafeArea()
 
-            // Grid
+            // Faint protocol grid texture
             GeometryReader { geo in
                 Path { path in
                     let spacing: CGFloat = 40
@@ -66,7 +66,7 @@ struct ConnectView: View {
                                     .foregroundColor(Theme.textPrimary)
 
                                 Text("Decentralized chat")
-                                    .font(.system(size: 15))
+                                    .font(.fqSubheadline)
                                     .foregroundColor(Theme.textSecondary)
                                     .opacity(keyboardActive ? 0 : 1)
                                     .frame(height: keyboardActive ? 0 : nil)
@@ -76,24 +76,43 @@ struct ConnectView: View {
                         .animation(.easeInOut(duration: 0.3), value: keyboardActive)
                         .padding(.bottom, keyboardActive ? 16 : 40)
 
+                        // Value prop — what freeq is, for a first-timer. Collapses
+                        // out of the way once they start typing.
+                        if !keyboardActive && !showGuestLogin {
+                            VStack(spacing: 14) {
+                                valueRow(icon: "checkmark.seal.fill", tint: Theme.verify,
+                                         title: "Verified identity",
+                                         detail: "Every message is provably from a real person.")
+                                valueRow(icon: "point.3.filled.connected.trianglepath.dotted", tint: Theme.accent,
+                                         title: "Bring your graph",
+                                         detail: "Your Bluesky follows come with you.")
+                                valueRow(icon: "bolt.horizontal.fill", tint: Theme.iris,
+                                         title: "Open by design",
+                                         detail: "AT Protocol native. IRC-compatible. Open source.")
+                            }
+                            .padding(.horizontal, 32)
+                            .padding(.bottom, 32)
+                            .transition(.opacity.combined(with: .move(edge: .top)))
+                        }
+
                         if !showGuestLogin {
                             // ── Primary: Bluesky Login ──
                             VStack(spacing: 20) {
                                 // Handle input
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text("BLUESKY HANDLE")
-                                        .font(.system(size: 11, weight: .bold))
+                                        .font(.fqCaption2.weight(.bold))
                                         .foregroundColor(Theme.textMuted)
                                         .kerning(1)
 
                                     HStack(spacing: 10) {
                                         Text("@")
-                                            .font(.system(size: 18, weight: .medium))
+                                            .font(.fqBody.weight(.medium))
                                             .foregroundColor(Theme.textMuted)
 
                                         TextField("", text: $handle, prompt: Text("yourname.bsky.social").foregroundColor(Theme.textMuted))
                                             .foregroundColor(Theme.textPrimary)
-                                            .font(.system(size: 16))
+                                            .font(.fqCallout)
                                             .autocapitalization(.none)
                                             .disableAutocorrection(true)
                                             .keyboardType(.URL)
@@ -126,39 +145,35 @@ struct ConnectView: View {
                                 Button(action: startLogin) {
                                     HStack(spacing: 8) {
                                         if loading || appState.connectionState == .connecting {
-                                            ProgressView().tint(.white).scaleEffect(0.85)
+                                            ProgressView().tint(Color(hex: "04121a")).scaleEffect(0.85)
                                         } else {
                                             Image(systemName: "person.badge.key.fill")
                                                 .font(.system(size: 14))
                                         }
                                         Text(loading ? "Authenticating..." : appState.connectionState == .connecting ? "Connecting..." : "Sign in with Bluesky")
-                                            .font(.system(size: 16, weight: .semibold))
+                                            .font(.fqCallout.weight(.semibold))
                                     }
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
+                                    .padding(.vertical, 15)
                                     .background(
                                         handle.isEmpty || loading
-                                            ? AnyShapeStyle(Theme.textMuted.opacity(0.3))
-                                            : AnyShapeStyle(LinearGradient(colors: [Theme.accent, Theme.accentLight], startPoint: .leading, endPoint: .trailing))
+                                            ? AnyShapeStyle(Theme.textMuted.opacity(0.25))
+                                            : AnyShapeStyle(Theme.signalGradient)
                                     )
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                                    .foregroundColor(Color(hex: "04121a"))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .shadow(color: handle.isEmpty ? .clear : Theme.accent.opacity(0.35), radius: 12, y: 4)
                                 }
                                 .disabled(handle.isEmpty || loading || appState.connectionState == .connecting)
                             }
                             .padding(24)
-                            .background(Theme.bgSecondary)
-                            .cornerRadius(16)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(Theme.border, lineWidth: 1)
-                            )
+                            .glassCard()
                             .padding(.horizontal, 24)
 
                             // Guest option
                             Button(action: { withAnimation { showGuestLogin = true } }) {
                                 Text("Continue as guest")
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textMuted)
                             }
                             .padding(.top, 20)
@@ -168,7 +183,7 @@ struct ConnectView: View {
                             VStack(spacing: 20) {
                                 VStack(alignment: .leading, spacing: 8) {
                                     Text("NICKNAME")
-                                        .font(.system(size: 11, weight: .bold))
+                                        .font(.fqCaption2.weight(.bold))
                                         .foregroundColor(Theme.textMuted)
                                         .kerning(1)
 
@@ -179,7 +194,7 @@ struct ConnectView: View {
 
                                         TextField("", text: $guestNick, prompt: Text("Choose a nickname").foregroundColor(Theme.textMuted))
                                             .foregroundColor(Theme.textPrimary)
-                                            .font(.system(size: 16))
+                                            .font(.fqCallout)
                                             .autocapitalization(.none)
                                             .disableAutocorrection(true)
                                             .textContentType(.username)
@@ -205,30 +220,26 @@ struct ConnectView: View {
                                 Button(action: connectAsGuest) {
                                     HStack(spacing: 8) {
                                         if appState.connectionState == .connecting {
-                                            ProgressView().tint(.white).scaleEffect(0.85)
+                                            ProgressView().tint(Color(hex: "04121a")).scaleEffect(0.85)
                                         }
                                         Text(appState.connectionState == .connecting ? "Connecting..." : "Connect as Guest")
-                                            .font(.system(size: 16, weight: .semibold))
+                                            .font(.fqCallout.weight(.semibold))
                                     }
                                     .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 14)
+                                    .padding(.vertical, 15)
                                     .background(
                                         guestNick.isEmpty
-                                            ? AnyShapeStyle(Theme.textMuted.opacity(0.3))
-                                            : AnyShapeStyle(LinearGradient(colors: [Theme.accent, Theme.accentLight], startPoint: .leading, endPoint: .trailing))
+                                            ? AnyShapeStyle(Theme.textMuted.opacity(0.25))
+                                            : AnyShapeStyle(Theme.signalGradient)
                                     )
-                                    .foregroundColor(.white)
-                                    .cornerRadius(10)
+                                    .foregroundColor(Color(hex: "04121a"))
+                                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                    .shadow(color: guestNick.isEmpty ? .clear : Theme.accent.opacity(0.35), radius: 12, y: 4)
                                 }
                                 .disabled(guestNick.isEmpty || appState.connectionState == .connecting)
                             }
                             .padding(24)
-                            .background(Theme.bgSecondary)
-                            .cornerRadius(16)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(Theme.border, lineWidth: 1)
-                            )
+                            .glassCard()
                             .padding(.horizontal, 24)
 
                             // Back to Bluesky login
@@ -237,7 +248,7 @@ struct ConnectView: View {
                                     Image(systemName: "arrow.left")
                                         .font(.system(size: 12))
                                     Text("Sign in with Bluesky instead")
-                                        .font(.system(size: 14))
+                                        .font(.fqFootnote)
                                 }
                                 .foregroundColor(Theme.accent)
                             }
@@ -249,7 +260,7 @@ struct ConnectView: View {
 
                         // Footer
                         Text("Open source · IRC compatible · AT Protocol identity")
-                            .font(.system(size: 11))
+                            .font(.fqCaption2)
                             .foregroundColor(Theme.textMuted)
                             .padding(.bottom, 16)
                     }
@@ -282,13 +293,37 @@ struct ConnectView: View {
         }
     }
 
+    private func valueRow(icon: String, tint: Color, title: String, detail: String) -> some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(tint.opacity(0.14))
+                    .frame(width: 38, height: 38)
+                Image(systemName: icon)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(tint)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.fqSubheadline.weight(.semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Text(detail)
+                    .font(.fqCaption)
+                    .foregroundColor(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func errorRow(_ text: String) -> some View {
         HStack(spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 12))
                 .foregroundColor(Theme.danger)
             Text(text)
-                .font(.system(size: 13))
+                .font(.fqFootnote)
                 .foregroundColor(Theme.danger)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

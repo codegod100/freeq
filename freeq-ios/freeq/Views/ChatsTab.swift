@@ -31,7 +31,7 @@ struct ChatsTab: View {
                                 Image(systemName: "wifi.slash")
                                     .font(.system(size: 12))
                                 Text("No network connection")
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(.fqFootnote.weight(.medium))
                             }
                             .foregroundColor(.white)
                             .listRowBackground(Theme.danger)
@@ -83,7 +83,7 @@ struct ChatsTab: View {
             }
             .navigationTitle(navTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 if mode == .channels {
@@ -166,39 +166,19 @@ struct ChatsTab: View {
     private var emptyState: some View {
         switch mode {
         case .channels:
-            VStack(spacing: 16) {
-                Image(systemName: "number.circle")
-                    .font(.system(size: 48))
-                    .foregroundColor(Theme.textMuted)
-                Text("No channels yet")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                Text("Join a channel to get started")
-                    .font(.system(size: 14))
-                    .foregroundColor(Theme.textMuted)
-                Button(action: { showingJoinSheet = true }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "plus.circle.fill")
-                        Text("Join Channel")
-                    }
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundColor(Theme.accent)
-                }
-            }
+            EmptyStateView(
+                icon: "number",
+                title: "No channels yet",
+                message: "Join a channel to jump into the conversation.",
+                actionTitle: "Join a channel",
+                action: { showingJoinSheet = true }
+            )
         case .dms:
-            VStack(spacing: 16) {
-                Image(systemName: "bubble.left.and.bubble.right")
-                    .font(.system(size: 48))
-                    .foregroundColor(Theme.textMuted)
-                Text("No direct messages yet")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(Theme.textSecondary)
-                Text("Tap a member's avatar in any channel to start a private chat.")
-                    .font(.system(size: 14))
-                    .foregroundColor(Theme.textMuted)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 32)
-            }
+            EmptyStateView(
+                icon: "bubble.left.and.bubble.right",
+                title: "No direct messages yet",
+                message: "Tap anyone's avatar in a channel to start a private, verified chat."
+            )
         }
     }
 }
@@ -292,7 +272,7 @@ struct ChatRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(isChannel ? conversation.name : "@" + conversation.name)
-                        .font(.system(size: 16, weight: unreadCount > 0 ? .bold : .regular))
+                        .font(.fqCallout.weight(unreadCount > 0 ? .bold : .regular))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(1)
 
@@ -305,14 +285,14 @@ struct ChatRow: View {
                     // Member count for channels
                     if isChannel && conversation.members.count > 0 {
                         Text("\(conversation.members.count)")
-                            .font(.system(size: 11))
+                            .font(.fqCaption2)
                             .foregroundColor(Theme.textMuted)
                     }
 
                     Spacer()
 
                     Text(timeString)
-                        .font(.system(size: 12))
+                        .font(.fqCaption)
                         .foregroundColor(unreadCount > 0 ? Theme.accent : Theme.textMuted)
                 }
 
@@ -325,17 +305,17 @@ struct ChatRow: View {
                                 Text("\(msg.from): \(msg.text)")
                             }
                         }
-                        .font(.system(size: 14))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(2)
                     } else if !conversation.topic.isEmpty {
                         Text(conversation.topic)
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                             .lineLimit(1)
                     } else {
                         Text("No messages yet")
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                             .lineLimit(1)
                     }
@@ -344,7 +324,7 @@ struct ChatRow: View {
 
                     if unreadCount > 0 {
                         Text("\(unreadCount)")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.fqCaption.weight(.bold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
