@@ -9,6 +9,15 @@ been cleared; the running build shows the sign-in screen. After this one
 sign-in, the token lands in the rebuild-proof store and persists across
 launches AND rebuilds.
 
+## 1b. Verify the message-list hitch budget on a Release build
+The AppKit list rewrite (default now; legacy behind Settings ▸ Advanced ▸
+"Use legacy message list") is architecturally sound but its after-numbers
+are *projected*, not measured — the hitch harness needs a live window +
+main run loop, which couldn't run headlessly. Before treating the Phase-2
+gate as closed: Release build, then via DebugBridge run `#stress` (10k
+msgs) → `#sweep`, `#editstorm`, `#hitch`. Target <1% (was 43% sweep / 100%
+editstorm on the old LazyVStack). Repro is in SPIKE-MESSAGE-LIST.md.
+
 ## 2. Dogfood call — 20 minutes with one other person
 Verifies a week of AV work that can't be tested solo. Checklist:
 - [ ] Speaking rings light up when the other person talks (AudioLevel events)
