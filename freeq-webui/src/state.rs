@@ -1,12 +1,14 @@
 //! Shared application state.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use freeq_sdk::oauth::OAuthSession;
 use parking_lot::Mutex;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use url::Url;
 
 // ── Auth state machine ─────────────────────────────────────────────────
@@ -16,12 +18,15 @@ use url::Url;
 pub enum AuthState {
     /// No handle known, not authenticated.
     Guest,
-    /// Handle known, LOGIN sent to server, waiting for OAuth URL.
-    LoggingIn { handle: String },
-    /// OAuth URL received from server, waiting for user to complete.
-    AwaitingOAuth { handle: String, login_url: String },
-    /// Fully authenticated with DID and nick.
-    Authenticated { handle: String, did: String, nick: String },
+    /// Fully authenticated with an AT Protocol OAuth session. The session
+    /// contains the access token, DPoP key, and PDS URL needed to prove
+    /// identity to the upstream IRC server via SASL `pds-oauth`.
+    Authenticated {
+        handle: String,
+        did: String,
+        nick: String,
+        oauth: OAuthSession,
+    },
 }
 
 impl Default for AuthState {
@@ -32,9 +37,7 @@ impl AuthState {
     pub fn handle(&self) -> Option<&str> {
         match self {
             AuthState::Guest => None,
-            AuthState::LoggingIn { handle }
-            | AuthState::AwaitingOAuth { handle, .. }
-            | AuthState::Authenticated { handle, .. } => Some(handle),
+            AuthState::Authenticated { handle, .. } => Some(handle),
         }
     }
 
@@ -49,12 +52,6 @@ impl AuthState {
         matches!(self, AuthState::Authenticated { .. })
     }
 
-    pub fn login_url(&self) -> Option<&str> {
-        match self {
-            AuthState::AwaitingOAuth { login_url, .. } => Some(login_url),
-            _ => None,
-        }
-    }
 }
 
 // ── App state ──────────────────────────────────────────────────────────
@@ -63,6 +60,10 @@ impl AuthState {
 pub struct AppState {
     pub upstream: Arc<Upstream>,
     pub sessions: Arc<Mutex<HashMap<String, Arc<SessionHandle>>>>,
+    /// In-flight loopback OAuth logins keyed by session id. The oneshot
+    /// sender is used to cancel a previous login attempt when a new one
+    /// is started for the same session.
+    pub pending_logins: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     pub http: reqwest::Client,
     pub tera: Arc<tera::Tera>,
 }
@@ -99,7 +100,13 @@ impl AppState {
         }
         if files.is_empty() { anyhow::bail!("no .tera templates in templates/"); }
         tera.add_template_files(files).context("loading Tera templates")?;
-        Ok(Self { upstream, sessions: Arc::new(Mutex::new(HashMap::new())), http, tera: Arc::new(tera) })
+        Ok(Self {
+            upstream,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_logins: Arc::new(Mutex::new(HashMap::new())),
+            http,
+            tera: Arc::new(tera),
+        })
     }
 
     pub fn session(&self, session_id: &str) -> Arc<SessionHandle> {
@@ -131,6 +138,12 @@ pub struct SessionHandle {
     pub ws_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Auth state machine — the single source of truth.
     pub auth: Mutex<AuthState>,
+    /// DID extracted from 333/ACCOUNT/NOTICE before 903, used as a fallback
+    /// for uploads when the user has not completed SASL auth in this session.
+    pub extracted_did: Mutex<Option<String>>,
+    /// Set to true when auth state changes and the upstream WS task should be
+    /// respawned with the new credentials.
+    pub reconnect: AtomicBool,
 }
 
 impl SessionHandle {
@@ -144,6 +157,12 @@ impl SessionHandle {
             irc_rx_slot: Mutex::new(Some(irc_rx)),
             ws_task: Mutex::new(None),
             auth: Mutex::new(AuthState::default()),
+            extracted_did: Mutex::new(None),
+            reconnect: AtomicBool::new(false),
         }
+    }
+
+    pub fn request_reconnect(&self) {
+        self.reconnect.store(true, Ordering::SeqCst);
     }
 }

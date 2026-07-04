@@ -43,7 +43,7 @@ html,body{height:100dvh;overflow:hidden}
         </form>
       </div>
       {% if is_authenticated %}<span class="navbar-item has-text-success is-size-7 py-1">&#x1f512; {{login_handle}}</span>
-      {% elif show_oauth_prompt %}<span class="navbar-item has-text-warning is-size-7 py-1" id="auth-status">authorizing as {{login_handle}}…</span>
+      {% elif show_oauth_prompt %}<span class="navbar-item has-text-warning is-size-7 py-1">OAuth pending…</span>
       {% elif show_login %}<div class="navbar-item py-1"><a class="button is-small is-link is-outlined" href="/login">Sign in</a></div>{% endif %}
       <div class="navbar-item py-1 is-size-7"><span id="status"><span class="dot"></span> <span>connecting…</span></span></div>
     </div>
@@ -66,8 +66,6 @@ html,body{height:100dvh;overflow:hidden}
     <div class="column" style="display:flex;flex-direction:column;min-height:0">
       <div id="messages" class="px-3 py-2">{{initial_messages_html|safe}}</div>
       <form id="send-form" data-signals="{msg:''}" data-on:submit="@post('/chat/{{channel}}/send')" data-signals-merge class="field has-addons mb-0 px-2 py-2" style="border-top:1px solid var(--bulma-border);flex-shrink:0">
-        <div class="control"><input type="file" accept="image/*" id="upload-input" style="display:none" onchange="uploadFile()"></div>
-        <div class="control"><button class="button is-small is-dark" type="button" onclick="document.getElementById('upload-input').click()" title="Upload image">+img</button></div>
         <div class="control is-expanded"><input class="input is-small" type="text" name="msg" placeholder="Send to #{{channel}}…" autocomplete="off" autofocus data-bind:msg></div>
         <div class="control"><button class="button is-small is-link" type="submit">Send</button></div>
         <div class="control"><button class="button is-small is-dark" type="button" data-on:click="@post('/chat/{{channel}}/part')">x</button></div>
@@ -86,43 +84,10 @@ html,body{height:100dvh;overflow:hidden}
 </div>
 <script>
 (function(){var m=document.getElementById('messages');if(m){requestAnimationFrame(function(){requestAnimationFrame(function(){m.scrollTop=m.scrollHeight})});new MutationObserver(function(){m.scrollTop=m.scrollHeight}).observe(m,{childList:!0})}})();
-function uploadFile(){
-  var f=document.getElementById('upload-input').files[0];
-  if(!f)return;
-  var fd=new FormData();fd.append('file',f);fd.append('channel','#{{channel}}');
-  var did=localStorage.getItem('freeq_did')||localStorage.getItem('freeq_handle')||'';
-  if(did)fd.append('did',did);
-  fetch('/upload',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){
-    if(d.url){var inp=document.querySelector('#send-form input[name=msg]');if(inp){inp.value=d.url;inp.dispatchEvent(new Event('input',{bubbles:true}))}}
-  }).catch(function(e){console.error('[freeq] upload error:',e)});
-}
+(function(){
   var s=localStorage.getItem('freeq_handle');
-  (function(){
-    var inp=document.querySelector('#send-form input[name=msg]');
-    if(!inp)return;
-    inp.addEventListener('paste',function(e){
-      var items=e.clipboardData&&e.clipboardData.items;
-      if(!items)return;
-      for(var i=0;i<items.length;i++){
-        if(items[i].type.indexOf('image/')===0){
-          e.preventDefault();
-          var blob=items[i].getAsFile();
-          var fd=new FormData();fd.append('file',blob,blob.name||'pasted.png');fd.append('channel','#{{channel}}');
-          var did=localStorage.getItem('freeq_did')||localStorage.getItem('freeq_handle')||'';
-          if(did)fd.append('did',did);
-          fetch('/upload',{method:'POST',body:fd}).then(function(r){return r.json()}).then(function(d){
-            if(d.url){inp.value=inp.value+d.url;inp.dispatchEvent(new Event('input',{bubbles:true}))}
-          }).catch(function(e){console.error('[freeq] paste upload error:',e)});
-          return;
-        }
-      }
-    });
-  })();
   function connect(){
-    var h=localStorage.getItem('freeq_handle');
-    var url='/chat/{{channel}}/events';
-    if(h)url+='?handle='+encodeURIComponent(h);
-    var src=new EventSource(url);
+    var src=new EventSource('/chat/{{channel}}/events');
     src.addEventListener('datastar-patch-signals',function(e){
       var l=e.data.split('\n');
       for(var i=0;i<l.length;i++){if(l[i].startsWith('signals '))try{var s=JSON.parse(l[i].slice(8));if(s.msg!==undefined){var inp=document.querySelector('#send-form input[name=msg]');if(inp)inp.value=s.msg}}catch(e){}}
@@ -140,9 +105,16 @@ function uploadFile(){
       if(mode==='append')t.insertAdjacentHTML('beforeend',els);else t.innerHTML=els;
     });
     src.onopen=function(){var st=document.getElementById('status');if(st){st.classList.add('connected');st.lastChild.textContent='connected'}};
-    src.onerror=function(e){var st=document.getElementById('status');if(st){st.classList.remove('connected');st.lastChild.textContent='reconnecting'}};
   }
+  {% if show_login or show_oauth_prompt %}
+  if(s&&!sessionStorage.getItem('freeq_retry')){
+    sessionStorage.setItem('freeq_retry','1');
+    fetch('/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'identifier='+encodeURIComponent(s),redirect:'manual'}).then(connect);
+  }else{connect()}
+  {% else %}
   connect();
+  {% endif %}
+})();
 </script>
 </body>
 </html>

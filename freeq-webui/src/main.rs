@@ -29,15 +29,17 @@ use datastar::axum::ReadSignals;
 use datastar::patch_elements::PatchElements;
 use datastar::patch_signals::PatchSignals;
 use datastar::prelude::{ElementPatchMode, ExecuteScript};
+use freeq_sdk::oauth::PreparedLogin;
 use rand::Rng;
 use serde::Deserialize;
 use tokio::sync::broadcast;
+use tokio::time::timeout;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, trace, warn};
 use url::Url;
 
 use crate::state::{AppState, AuthState, MemberEntry};
-use crate::upstream::{fetch_channels, fetch_history, spawn_upstream_if_needed, UpstreamHistoryMessage};
+use crate::upstream::{fetch_channels, fetch_history, is_903, is_904, spawn_upstream_if_needed, UpstreamHistoryMessage};
 
 // ── main ────────────────────────────────────────────────────────────────
 
@@ -66,6 +68,8 @@ async fn main() -> Result<()> {
     let app = Router::new()
         .route("/", get(get_root))
         .route("/login", get(get_login).post(post_login))
+        .route("/logout", post(post_logout))
+        .route("/auth/status", get(get_auth_status))
         .route("/chat", get(|| async { (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response() }))
         .route("/chat/{channel}", get(get_chat))
         .route("/chat/{channel}/events", get(get_channel_events))
@@ -173,10 +177,166 @@ async fn post_login(
 
     let (sid, _) = session_id_from_request(&req);
     let session = state.session(&sid);
-    *session.auth.lock() = AuthState::LoggingIn { handle: handle.clone() };
-    debug!(session = %sid, "login handle stored; redirecting to chat");
 
-    let mut resp = (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response();
+    // Start a local loopback OAuth login. The browser will be sent to the
+    // PDS authorization URL; after authorization, the PDS redirects back to
+    // the loopback listener on this machine and we exchange the code for an
+    // OAuthSession. This works for local dev where the browser and freeq-webui
+    // share 127.0.0.1.
+    let prepared = match PreparedLogin::new(&handle).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(session = %sid, %handle, "failed to prepare OAuth login: {e:#}");
+            let mut ctx = tera::Context::new();
+            ctx.insert("error", &format!("Failed to start OAuth login: {e:#}"));
+            let html = state.tera.render("login.html.tera", &ctx).unwrap_or_default();
+            return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+        }
+    };
+
+    let auth_url = prepared.auth_url().to_string();
+    let state_param = prepared.state().to_string();
+
+    // Cancel any previous login attempt for this session.
+    {
+        let mut pending = state.pending_logins.lock();
+        if let Some(sender) = pending.remove(&sid) {
+            let _ = sender.send(());
+        }
+        let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel();
+        pending.insert(sid.clone(), cancel_tx);
+        drop(pending);
+
+        let session_for_task = session.clone();
+        let pending_logins = state.pending_logins.clone();
+        let sid_task = sid.clone();
+        tokio::spawn(async move {
+            let result = tokio::select! {
+                biased;
+                _ = &mut cancel_rx => {
+                    debug!(session = %sid_task, "OAuth login cancelled by newer attempt");
+                    let _ = pending_logins.lock().remove(&sid_task);
+                    return;
+                }
+                result = timeout(Duration::from_secs(300), prepared.wait()) => result,
+            };
+            match result {
+                Ok(Ok(oauth)) => {
+                    let handle = oauth.handle.clone();
+                    let did = oauth.did.clone();
+                    let nick = crate::sanitize_nick(&handle);
+                    info!(session = %sid_task, %did, %handle, "OAuth login completed; stored session");
+                    *session_for_task.auth.lock() = AuthState::Authenticated { handle, did: did.clone(), nick, oauth };
+                    session_for_task.extracted_did.lock().replace(did);
+                    session_for_task.request_reconnect();
+                }
+                Ok(Err(e)) => {
+                    warn!(session = %sid_task, "OAuth login failed: {e:#}");
+                }
+                Err(_) => {
+                    warn!(session = %sid_task, "OAuth login timed out");
+                }
+            }
+            let _ = pending_logins.lock().remove(&sid_task);
+        });
+    }
+
+    debug!(session = %sid, %handle, %state_param, %auth_url, "OAuth authorization URL ready");
+
+    // Return a small polling page that opens the PDS auth URL and waits for
+    // the loopback login to complete.
+    let html = format!(
+        r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>freeq — sign in</title>
+<style>
+:root{{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--c1:#7ab7ff}}
+{{box-sizing:border-box}} html,body{{height:100%;margin:0}}
+body{{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}}
+#box{{width:100%;max-width:340px;padding:1.5rem;border:1px solid var(--border);border-radius:8px;background:#11151b;text-align:center}}
+h1{{font-size:1rem;margin:0 0 0.6rem;color:var(--c1)}}
+p{{margin:0;color:var(--muted);font-size:12px;line-height:1.5}}
+.error{{color:#ef476f}}
+a{{color:var(--c1)}}
+</style>
+</head>
+<body>
+<div id="box">
+<h1>Sign in with Bluesky</h1>
+<p id="status">Waiting for authorization…</p>
+<p style="margin-top:1rem"><a href="{url}" target="_blank" rel="noopener">Open authorization page</a></p>
+</div>
+<script>
+(function() {{
+  const url = '{url}';
+  window.open(url, '_blank');
+  const el = document.getElementById('status');
+  let done = false;
+  async function check() {{
+    if (done) return;
+    try {{
+      const r = await fetch('/auth/status');
+      const j = await r.json();
+      if (j.authenticated) {{
+        done = true;
+        window.location.replace('/chat/general');
+        return;
+      }}
+    }} catch (e) {{}}
+    setTimeout(check, 1500);
+  }}
+  setTimeout(check, 1500);
+}})();
+</script>
+</body>
+</html>
+"##,
+        url = auth_url.replace('\'', "%27")
+    );
+    let mut resp = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response();
+    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    resp
+}
+
+async fn post_logout(
+    State(state): State<AppState>,
+    req: axum::http::HeaderMap,
+) -> Response {
+    let (sid, _) = session_id_from_request(&req);
+    let session = state.session(&sid);
+    *session.auth.lock() = AuthState::Guest;
+    session.request_reconnect();
+    let mut resp = (StatusCode::FOUND, [("Location", "/")], "").into_response();
+    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    resp
+}
+
+async fn get_auth_status(
+    State(state): State<AppState>,
+    req: axum::http::HeaderMap,
+) -> Response {
+    let (sid, _) = session_id_from_request(&req);
+    let session = state.session(&sid);
+    let auth = session.auth.lock().clone();
+    let body = serde_json::json!({
+        "authenticated": auth.is_authenticated(),
+        "handle": auth.handle(),
+        "did": auth.did(),
+    });
+    let mut resp = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        body.to_string(),
+    )
+        .into_response();
     resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
     resp
 }
@@ -243,17 +403,17 @@ async fn get_chat(
     // Auth state for the navbar.
     let session = state.session(&sid);
     let auth = session.auth.lock().clone();
-    let (login_handle, is_authenticated, show_login, show_oauth_prompt) = match &auth {
-        AuthState::Authenticated { handle, .. } => (handle.clone(), true, false, false),
-        AuthState::AwaitingOAuth { handle, .. } | AuthState::LoggingIn { handle } => (handle.clone(), false, false, true),
-        AuthState::Guest => (String::new(), false, true, false),
+    let (login_handle, auth_did, is_authenticated) = match &auth {
+        AuthState::Authenticated { handle, did, .. } => (handle.clone(), did.clone(), true),
+        AuthState::Guest => (String::new(), String::new(), false),
     };
     let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
     ctx.insert("login_handle", &login_handle);
+    ctx.insert("auth_did", &auth_did);
     ctx.insert("is_authenticated", &is_authenticated);
-    ctx.insert("show_login", &show_login);
-    ctx.insert("show_oauth_prompt", &show_oauth_prompt);
+    ctx.insert("show_login", &!is_authenticated);
     ctx.insert("joined_channels", &joined);
+    ctx.insert("show_oauth_prompt", &false);
     let body = match state.tera.render("chat.html.tera", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -309,10 +469,13 @@ async fn post_upload(
             _ => {}
         }
     }
-    // Enrich DID from session if available
+    // Enrich DID from session if available; fall back to a DID extracted from
+    // 333/ACCOUNT/NOTICE lines for guests.
     let (sid, _) = session_id_from_request(&headers);
     let session = state.session(&sid);
-    let session_did = session.auth.lock().did().map(|d| d.to_string()).unwrap_or_default();
+    let session_did = session.auth.lock().did().map(|d| d.to_string())
+        .or_else(|| session.extracted_did.lock().clone())
+        .unwrap_or_default();
     let effective_did = if !session_did.is_empty() && session_did.starts_with("did:") { session_did } else { did };
     let file_data = match file_data {
         Some(d) => d,
@@ -340,19 +503,10 @@ async fn get_channel_events(
     State(state): State<AppState>,
     Path(channel): Path<String>,
     req: axum::http::HeaderMap,
-    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+    axum::extract::Query(_params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     let (sid, _is_new) = session_id_from_request(&req);
     let session = state.session(&sid);
-
-    // Auto-auth: if handle passed in URL, transition to LoggingIn
-    if let Some(handle) = params.get("handle") {
-        let mut auth = session.auth.lock();
-        if matches!(&*auth, AuthState::Guest) {
-            *auth = AuthState::LoggingIn { handle: handle.clone() };
-            debug!(session = %sid, %handle, "auto-auth via query param");
-        }
-    }
 
     debug!(session = %sid, channel = %channel, "SSE subscriber connected");
 
@@ -362,7 +516,7 @@ async fn get_channel_events(
     // messages that arrive during the WS handshake would be lost.
     let mut lines_rx = session.lines_tx.subscribe();
 
-    spawn_upstream_if_needed(&sid, &session, upstream.clone(), &channel);
+    spawn_upstream_if_needed(&state, &sid, &session, upstream.clone(), &channel);
 
     let stream = async_stream::stream! {
         let status_patch = PatchSignals::new(r#"{"_s":"connected"}"#);
@@ -388,24 +542,22 @@ async fn get_channel_events(
                         yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         continue;
                     }
-                    // --- Extract full DID from 333 (topic setter) lines ---
-                    if let Some(did) = parse_333_did(&line) {
+                    // --- Extract real DID from ACCOUNT messages ---
+                    if let Some(new_did) = parse_account_did(&line) {
+                        *session.extracted_did.lock() = Some(new_did.clone());
                         let mut auth = session.auth.lock();
-                        if !matches!(&*auth, AuthState::Authenticated { .. }) {
-                            let handle = auth.handle().unwrap_or("unknown").to_string();
-                            *auth = AuthState::Authenticated { handle, did: did.clone(), nick: String::new() };
-                            info!(session = %sid, %did, "authenticated DID extracted from 333");
+                        if let AuthState::Authenticated { ref mut did, .. } = &mut *auth {
+                            *did = new_did.clone();
+                            info!(session = %sid, did = %new_did, "authenticated DID updated from account-notify");
+                        } else {
+                            info!(session = %sid, did = %new_did, "DID extracted from account-notify");
                         }
                         continue;
                     }
-                    // --- Extract real DID from ACCOUNT messages ---
-                    if let Some(did) = parse_account_did(&line) {
-                        let mut auth = session.auth.lock();
-                        if !matches!(&*auth, AuthState::Authenticated { .. }) {
-                            let handle = auth.handle().unwrap_or("unknown").to_string();
-                            *auth = AuthState::Authenticated { handle, did: did.clone(), nick: String::new() };
-                            info!(session = %sid, %did, "authenticated DID extracted from ACCOUNT");
-                        }
+                    // --- Extract full DID from 333 (topic setter) lines ---
+                    if let Some(new_did) = parse_333_did(&line) {
+                        *session.extracted_did.lock() = Some(new_did.clone());
+                        info!(session = %sid, did = %new_did, "DID extracted from 333");
                         continue;
                     }
                     // --- live member tracking (JOIN/PART/QUIT/MODE) ---
@@ -470,50 +622,24 @@ async fn get_channel_events(
                     // --- SASL 903 (authentication success) ---
                     if is_903(&line) {
                         info!(session = %sid, "SASL authentication successful");
-                        let handle = session.auth.lock().handle().unwrap_or("unknown").to_string();
-                        let nick = sanitize_nick(&handle);
-                        if !nick.is_empty() {
-                            let tx = session.irc_tx.lock().clone();
-                            let _ = tx.try_send(format!("NICK {nick}\r\n"));
-                            info!(session = %sid, %nick, "sending NICK change after auth");
-                        }
-                        // Re-JOIN channels since NICK change loses membership
-                        {
-                            let joined = session.joined.lock().clone();
-                            let tx = session.irc_tx.lock().clone();
-                            for ch in &joined {
-                                let _ = tx.try_send(format!("JOIN {ch}\r\n"));
-                            }
-                            if !joined.is_empty() {
-                                info!(session = %sid, count = joined.len(), "re-JOINing channels after NICK change");
-                            }
-                        }
-                        *session.auth.lock() = AuthState::Authenticated { handle: handle.clone(), did: handle.clone(), nick };
-                        let js = format!(
-                            "localStorage.setItem('freeq_handle','{handle}');localStorage.setItem('freeq_did','{handle}');document.getElementById('status').classList.add('connected');var nb=document.querySelector('.navbar-end .navbar-item');if(nb)nb.outerHTML='<span class=\"navbar-item has-text-success is-size-7 py-1\">&#x1f512; {handle}</span>'",
-                            handle = handle
+                        let script = ExecuteScript::new(
+                            "document.getElementById('status').classList.add('connected')".to_string(),
                         );
-                        let script = ExecuteScript::new(js);
                         yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         continue;
                     }
-                    // --- OAuth login URL detection ---
-                    if let Some(oauth_url) = extract_login_url(&line) {
-                        info!(session = %sid, "OAuth login URL detected; showing authorize link");
-                        let escaped = oauth_url.replace('\\', "\\\\").replace('\'', "\\'");
-                        let js = format!("var el=document.getElementById('auth-status');if(el)el.outerHTML='<a class=\"navbar-item has-text-warning is-size-7 py-1\" href=\"{escaped}\" target=\"_blank\" rel=\"noopener\">\u{26A0} Authorize \u{2192}</a>'");
-                        let script = ExecuteScript::new(js);
-                        yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
+                    // --- SASL 904 (authentication failure) ---
+                    if is_904(&line) {
+                        warn!(session = %sid, "SASL authentication failed");
                         continue;
                     }
                     // --- Extract DID from auth NOTICE ("authenticated as did:plc:...") ---
-                    if let Some(did) = parse_auth_notice_did(&line) {
+                    if let Some(new_did) = parse_auth_notice_did(&line) {
+                        *session.extracted_did.lock() = Some(new_did.clone());
                         let mut auth = session.auth.lock();
-                        if let AuthState::Authenticated { ref handle, ref nick, .. } = &*auth {
-                            let handle = handle.clone();
-                            let nick = nick.clone();
-                            *auth = AuthState::Authenticated { handle, did: did.clone(), nick };
-                            info!(session = %sid, %did, "authenticated DID updated from NOTICE");
+                        if let AuthState::Authenticated { ref mut did, .. } = &mut *auth {
+                            *did = new_did.clone();
+                            info!(session = %sid, did = %new_did, "authenticated DID updated from NOTICE");
                         }
                         continue;
                     }
@@ -695,33 +821,8 @@ async fn get_channels(State(state): State<AppState>) -> Response {
 
 // ── IRC line formatting ─────────────────────────────────────────────────
 
-/// Extract OAuth login URL from a server NOTICE line.
-/// Format: :irc.freeq.at NOTICE nick :https://...
-fn extract_login_url(line: &str) -> Option<String> {
-    let line = line.trim_end_matches(['\r', '\n']);
-    let rest = line.strip_prefix(':')?;
-    let sp = rest.find(' ')?;
-    let after_prefix = &rest[sp + 1..];
-    if !after_prefix.starts_with("NOTICE ") { return None; }
-    // URL may appear with or without a colon prefix.
-    let url_start = after_prefix.find("https://")?;
-    let url = &after_prefix[url_start..];
-    let url_end = url.find(|c: char| c.is_whitespace()).unwrap_or(url.len());
-    let url = &url[..url_end];
-    if url.contains("/auth/login?") {
-        Some(url.to_string())
-    } else {
-        None
-    }
-}
 /// Check if a line is a 903 (RPL_SASLSUCCESS) numeric.
-fn is_903(line: &str) -> bool {
-    let line = line.trim_end_matches(['\r', '\n']);
-    let Some(rest) = line.strip_prefix(':') else { return false };
-    let Some(sp) = rest.find(' ') else { return false };
-    let after_prefix = &rest[sp + 1..];
-    after_prefix.starts_with("903 ")
-}
+
 
 fn should_emit(line: &str) -> bool {
     let line = line.trim_end_matches(['\r', '\n']);
@@ -1242,4 +1343,3 @@ mod tests {
         assert!(!html.contains("a<b>&c"));
     }
 }
-

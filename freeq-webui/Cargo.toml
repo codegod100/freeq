@@ -40,6 +40,8 @@ base64 = "0.22"
 sha2 = "0.10"
 bs58 = "0.5"
 
+freeq-sdk = { path = "../freeq-sdk", default-features = false }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

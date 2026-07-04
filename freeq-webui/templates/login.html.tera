@@ -3,38 +3,36 @@
 <head>
 <meta charset="utf-8">
 <title>freeq — sign in</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
 <link rel="icon" href="data:,">
 <style>
-:root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--c1:#7ab7ff;--self:#5cdb95;--err:#ef476f}
-*{box-sizing:border-box}html,body{height:100%;margin:0}
-body{font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}
-#login{width:380px;max-width:90vw;padding:2rem 1.5rem;background:#0a0d12;border:1px solid var(--border);border-radius:8px}
-#login h1{font-size:1.2rem;margin:0 0 .3rem;color:var(--c1)}
-#login .sub{font-size:.8rem;color:var(--muted);margin-bottom:1.2rem}
-#login label{display:block;font-size:.75rem;color:var(--muted);margin:.8rem 0 .3rem}
-#login input{width:100%;padding:.5rem .6rem;background:#161a1f;color:var(--fg);border:1px solid var(--border);border-radius:4px;font:inherit;font-size:13px}
-#login input:focus{outline:none;border-color:var(--c1)}
-#login button{width:100%;margin-top:1rem;padding:.5rem;font:inherit;font-size:13px;font-weight:700;cursor:pointer;border:0;border-radius:4px;background:var(--c1);color:#000}
-#login button:hover{filter:brightness(1.15)}
-#login .err{color:var(--err);font-size:.8rem;margin-top:.5rem;min-height:1.2em}
-#login .note{font-size:.7rem;color:var(--muted);margin-top:1.2rem;line-height:1.4}
-#login .note a{color:var(--c1)}
+:root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--self:#5cdb95;--c1:#7ab7ff}
+*{box-sizing:border-box} html,body{height:100%;margin:0}
+body{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}
+#box{width:100%;max-width:340px;padding:1.5rem;border:1px solid var(--border);border-radius:8px;background:#11151b}
+h1{font-size:1rem;margin:0 0 1.2rem;color:var(--c1)}
+p{margin:0 0 0.8rem;color:var(--muted);font-size:12px;line-height:1.5}
+label{display:block;margin-bottom:0.3rem;font-size:11px;color:var(--muted)}
+input{width:100%;padding:0.5rem;background:#161a1f;color:var(--fg);border:1px solid var(--border);border-radius:5px;font:inherit;margin-bottom:0.8rem}
+input:focus{outline:none;border-color:var(--c1)}
+button{width:100%;padding:0.55rem;font:inherit;font-weight:700;border:0;border-radius:5px;background:var(--c1);color:#000;cursor:pointer}
+button:hover{filter:brightness(1.15)}
+.guest{display:block;text-align:center;margin-top:0.9rem;color:var(--muted);font-size:12px;text-decoration:none}
+.guest:hover{color:var(--fg)}
+.error{color:#ef476f;font-size:12px;margin-bottom:0.8rem}
 </style>
 </head>
 <body>
-<div id="login">
-<h1>freeq</h1>
-<div class="sub">Sign in with your AT Protocol handle</div>
-<form method="POST" action="/login">
-<label for="id">Handle</label>
-<input type="text" id="id" name="identifier" placeholder="alice.bsky.social" required autofocus>
-<button type="submit">Sign in</button>
-<div class="err">{{error}}</div>
+<div id="box">
+<h1>freeq — sign in</h1>
+<p>Sign in with your AT Protocol handle (e.g. <code>you.bsky.social</code>).</p>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<form method="post" action="/login">
+<label for="identifier">Handle</label>
+<input type="text" id="identifier" name="identifier" placeholder="you.bsky.social" autocomplete="username" autofocus required>
+<button type="submit">Sign in with Bluesky</button>
 </form>
-<div class="note">
-You'll be redirected to your PDS to authorize. Your private key <strong>never</strong> leaves your device. Or <a href="/chat/general">join as guest</a>.
+<a class="guest" href="/chat/general">Continue as guest</a>
 </div>
-</div>
-<script>var h=localStorage.getItem('freeq_handle');if(h&&!sessionStorage.getItem('freeq_retry')){sessionStorage.setItem('freeq_retry','1');var f=document.querySelector('form');f.querySelector('input').value=h;f.submit()}</script>
 </body>
+</html>

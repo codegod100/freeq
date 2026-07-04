@@ -337,108 +337,152 @@ impl DpopKey {
     }
 }
 
+/// Prepared, but not yet started, AT Protocol OAuth login.
+///
+/// Holds the TCP listener, PKCE verifier, DPoP key, and PAR state needed to
+/// complete the flow. Callers that cannot hand the user's browser to
+/// `login()` (e.g. a web UI running in a separate process) can obtain the
+/// authorization URL with [`auth_url`](Self::auth_url), direct the user to
+/// it, and then call [`wait`](Self::wait) to exchange the resulting code
+/// for an [`OAuthSession`].
+pub struct PreparedLogin {
+    auth_url: String,
+    redirect_uri: String,
+    client_id: String,
+    state: String,
+    code_verifier: String,
+    token_endpoint: String,
+    pds_url: String,
+    dpop_key: DpopKey,
+    listener: TcpListener,
+    did: String,
+    handle: String,
+}
+
+impl PreparedLogin {
+    /// Resolve the handle, discover the authorization server, and push a
+    /// PAR to obtain a browser-ready authorization URL.
+    pub async fn new(handle: &str) -> Result<Self> {
+        let resolver = DidResolver::http();
+
+        tracing::info!("Resolving handle: {handle}");
+        let did = resolver
+            .resolve_handle(handle)
+            .await
+            .context("Failed to resolve handle")?;
+        let did_doc = resolver
+            .resolve(&did)
+            .await
+            .context("Failed to resolve DID document")?;
+        let pds_url =
+            pds::pds_endpoint(&did_doc).context("No PDS service endpoint in DID document")?;
+        tracing::info!(did = %did, pds = %pds_url, "Resolved identity");
+
+        let auth_meta = discover_auth_server(&pds_url).await?;
+        tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+
+        // Loopback OAuth client. The authorization server infers client
+        // metadata from these query parameters.
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+        let scope = "atproto";
+        let client_id = format!(
+            "http://localhost?redirect_uri={}&scope={}",
+            urlencod(&redirect_uri),
+            urlencod(scope),
+        );
+
+        let (code_verifier, code_challenge) = generate_pkce();
+        let dpop_key = DpopKey::generate();
+        let state = generate_random_string(16);
+
+        let par_endpoint = auth_meta
+            .pushed_authorization_request_endpoint
+            .as_deref()
+            .context("Authorization server does not support PAR")?;
+
+        let auth_url = push_authorization_request(
+            par_endpoint,
+            &auth_meta.authorization_endpoint,
+            &client_id,
+            &redirect_uri,
+            &code_challenge,
+            &state,
+            handle,
+            &dpop_key,
+        )
+        .await?;
+
+        Ok(Self {
+            auth_url,
+            redirect_uri,
+            client_id,
+            state,
+            code_verifier,
+            token_endpoint: auth_meta.token_endpoint,
+            pds_url,
+            dpop_key,
+            listener,
+            did,
+            handle: handle.to_string(),
+        })
+    }
+
+    /// The URL the user must visit to authorize this login.
+    pub fn auth_url(&self) -> &str {
+        &self.auth_url
+    }
+
+    /// The OAuth `state` parameter used for this login.
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    /// Wait for the browser to be redirected back to the loopback listener,
+    /// then exchange the authorization code for tokens.
+    pub async fn wait(self) -> Result<OAuthSession> {
+        let auth_code = wait_for_callback(self.listener, &self.state).await?;
+
+        let (access_token, token_did) = exchange_code(
+            &self.token_endpoint,
+            &auth_code,
+            &self.code_verifier,
+            &self.redirect_uri,
+            &self.client_id,
+            &self.dpop_key,
+        )
+        .await?;
+
+        check_token_did(&self.did, token_did.as_deref())?;
+
+        let dpop_nonce = probe_dpop_nonce(&self.pds_url, &access_token, &self.dpop_key).await;
+
+        tracing::info!(did = %self.did, dpop_nonce = ?dpop_nonce, "OAuth login successful");
+        Ok(OAuthSession {
+            did: self.did,
+            handle: self.handle,
+            access_token,
+            pds_url: self.pds_url,
+            dpop_key: self.dpop_key,
+            dpop_nonce,
+        })
+    }
+}
+
 /// Perform the full OAuth login flow for a Bluesky/AT Protocol handle.
 ///
 /// Opens the user's browser for authorization. Returns an OAuthSession
 /// that can be used to create a PdsSessionSigner.
 pub async fn login(handle: &str) -> Result<OAuthSession> {
-    let resolver = DidResolver::http();
+    let prepared = PreparedLogin::new(handle).await?;
 
-    // 1. Resolve handle → DID → PDS
-    tracing::info!("Resolving handle: {handle}");
-    let did = resolver
-        .resolve_handle(handle)
-        .await
-        .context("Failed to resolve handle")?;
-    let did_doc = resolver
-        .resolve(&did)
-        .await
-        .context("Failed to resolve DID document")?;
-    let pds_url = pds::pds_endpoint(&did_doc).context("No PDS service endpoint in DID document")?;
-    tracing::info!(did = %did, pds = %pds_url, "Resolved identity");
-
-    // 2. Discover authorization server
-    let auth_meta = discover_auth_server(&pds_url).await?;
-    tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
-
-    // 3. Start local callback server
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-
-    // AT Protocol loopback OAuth:
-    // client_id = http://localhost with query params declaring scopes and redirect_uri
-    // The auth server infers metadata from these params for loopback clients.
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    // Identity-only scope. Matches the freeq-server's `Login` purpose.
-    // Programs that need broader PDS permissions (e.g. blob upload) call
-    // their own `step_up()` with a wider scope; this default keeps the
-    // CLI consent screen narrow for the common case.
-    let scope = "atproto";
-    let client_id = format!(
-        "http://localhost?redirect_uri={}&scope={}",
-        urlencod(&redirect_uri),
-        urlencod(scope),
-    );
-
-    // 4. Generate PKCE and DPoP key
-    let (code_verifier, code_challenge) = generate_pkce();
-    let dpop_key = DpopKey::generate();
-    let state = generate_random_string(16);
-
-    // 5. PAR (Pushed Authorization Request) — required by Bluesky
-    let par_endpoint = auth_meta
-        .pushed_authorization_request_endpoint
-        .as_deref()
-        .context("Authorization server does not support PAR")?;
-
-    let auth_url = push_authorization_request(
-        par_endpoint,
-        &auth_meta.authorization_endpoint,
-        &client_id,
-        &redirect_uri,
-        &code_challenge,
-        &state,
-        handle,
-        &dpop_key,
-    )
-    .await?;
-
-    // 6. Open browser
     eprintln!("\nOpening browser for authorization...");
-    eprintln!("If the browser doesn't open, visit:\n  {auth_url}\n");
-    let _ = open::that(&auth_url);
+    eprintln!("If the browser doesn't open, visit:\n  {}\n", prepared.auth_url());
+    let _ = open::that(prepared.auth_url());
 
-    // 7. Wait for callback
-    let auth_code = wait_for_callback(listener, &state).await?;
-    eprintln!("Authorization received. Exchanging token...");
-
-    // 8. Exchange code for tokens
-    let (access_token, token_did) = exchange_code(
-        &auth_meta.token_endpoint,
-        &auth_code,
-        &code_verifier,
-        &redirect_uri,
-        &client_id,
-        &dpop_key,
-    )
-    .await?;
-
-    // 9. Verify DID matches
-    check_token_did(&did, token_did.as_deref())?;
-
-    // 10. Probe PDS getSession to discover the DPoP nonce
-    //     The PDS will reject our first call but return the nonce we need.
-    let dpop_nonce = probe_dpop_nonce(&pds_url, &access_token, &dpop_key).await;
-
-    tracing::info!(did = %did, dpop_nonce = ?dpop_nonce, "OAuth login successful");
-    Ok(OAuthSession {
-        did,
-        handle: handle.to_string(),
-        access_token,
-        pds_url,
-        dpop_key,
-        dpop_nonce,
-    })
+    prepared.wait().await
 }
 
 /// Verify that the DID asserted by the token response (`sub`), when present,
