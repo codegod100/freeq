@@ -66,8 +66,10 @@
 		D29F998C6DF599EA13C38C85 /* ConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 313F00E499C37E94C9855F4F /* ConnectView.swift */; };
 		D2DC1C78722C6743877143B7 /* MessageTimeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94E7AF9D701F15529729BA91 /* MessageTimeline.swift */; };
 		D520A6580822EF5314066E14 /* LinkPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1561609D65E3676C79D46E2 /* LinkPreview.swift */; };
+		D78576DC05AD84FE32E408D2 /* QuickSendPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B5CC4E0945A336F1B9303AF /* QuickSendPanel.swift */; };
 		D96E350E7A49137316852CC7 /* CallController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA939865F12BCD7A51A4E5D0 /* CallController.swift */; };
 		DE8F1528542FEB83C2A987CE /* ChannelListBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B238AA9ACDF3723BB74BB45 /* ChannelListBrowser.swift */; };
+		E04A550CE7A7BD40DA6CFD36 /* GlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9194BD66D242EE2DD6C3BA20 /* GlobalHotKey.swift */; };
 		E1AB7FC16F690AF9462DBBAC /* E2eeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20B3BED9F9A6237942DD0971 /* E2eeManager.swift */; };
 		E7D65B5702985BB69725442A /* MediaViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB6D944E494A3AE591F53C28 /* MediaViews.swift */; };
 		E8ABEEDF45BB77FFA7112E96 /* MessageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 41E19D6BE7C80AAE06A5EB97 /* MessageStore.swift */; };
@@ -115,8 +117,10 @@
 		71D02469D6C6FADFE295A523 /* ReconnectPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconnectPolicy.swift; sourceTree = "<group>"; };
 		7340BE5C80B24DD16B066ABC /* ChannelSettingsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelSettingsSheet.swift; sourceTree = "<group>"; };
 		746E6E96E986EB369B491948 /* CameraEffects.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraEffects.swift; sourceTree = "<group>"; };
+		7B5CC4E0945A336F1B9303AF /* QuickSendPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickSendPanel.swift; sourceTree = "<group>"; };
 		7BD3C7CC942BA721E1572347 /* JoinChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinChannelSheet.swift; sourceTree = "<group>"; };
 		878F66C1A9A17E125322D5CF /* FileUpload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileUpload.swift; sourceTree = "<group>"; };
+		9194BD66D242EE2DD6C3BA20 /* GlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKey.swift; sourceTree = "<group>"; };
 		923CB3DCE2113F08CCB9E8F7 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		932AFF9B3AF0BCF257A2DCE2 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		94E7AF9D701F15529729BA91 /* MessageTimeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageTimeline.swift; sourceTree = "<group>"; };
@@ -218,6 +222,7 @@
 				61EB9E0F12CF280B8BADFA41 /* MainView.swift */,
 				C0913CE54D322A7276C3E3DF /* MenuBarView.swift */,
 				A09A2F1C5515211E8D3BE359 /* OnboardingView.swift */,
+				7B5CC4E0945A336F1B9303AF /* QuickSendPanel.swift */,
 				5B36CCCF8041100BDA937EAB /* QuickSwitcher.swift */,
 				5BFC0A0C4F585C97716A8C4B /* SearchView.swift */,
 				38C6F4ECE1B53363B9F87425 /* Chat */,
@@ -296,6 +301,7 @@
 				0BD56638DA817D921B8F261C /* DebugBridge.swift */,
 				20B3BED9F9A6237942DD0971 /* E2eeManager.swift */,
 				F0D2221C3627158CF392EC73 /* FrameHitchMonitor.swift */,
+				9194BD66D242EE2DD6C3BA20 /* GlobalHotKey.swift */,
 				6D0D657E5F637E5EFD232E19 /* KeychainHelper.swift */,
 				DB1B29BA8601FC220D46B705 /* Logger.swift */,
 				13C9D32F59D3998D69B16618 /* MediaDeviceSelection.swift */,
@@ -468,6 +474,7 @@
 				3ACCE0099E0E97EC7A321EDC /* FileUpload.swift in Sources */,
 				6DDB3CED329F29FC4C691EAD /* FormatToolbar.swift in Sources */,
 				A9145BA4866695884EE7B4B9 /* FrameHitchMonitor.swift in Sources */,
+				E04A550CE7A7BD40DA6CFD36 /* GlobalHotKey.swift in Sources */,
 				B8AB7DBFF62520564B9DDE52 /* JoinChannelSheet.swift in Sources */,
 				ECC92464E4422B5DCFDC770B /* KeychainHelper.swift in Sources */,
 				D520A6580822EF5314066E14 /* LinkPreview.swift in Sources */,
@@ -485,6 +492,7 @@
 				49E784D589512E3A936DA345 /* OnboardingView.swift in Sources */,
 				643F1C899816A54E913DF822 /* PerfSignposts.swift in Sources */,
 				C1395A0B767D4843076ECA59 /* PinnedMessagesBar.swift in Sources */,
+				D78576DC05AD84FE32E408D2 /* QuickSendPanel.swift in Sources */,
 				F564EDD064F706DA1FED48B0 /* QuickSwitcher.swift in Sources */,
 				BD330C3D45562AE78F0834C0 /* ReconnectPolicy.swift in Sources */,
 				72BBEFA4E10C0E98C945A987 /* ScreenSharePicker.swift in Sources */,
