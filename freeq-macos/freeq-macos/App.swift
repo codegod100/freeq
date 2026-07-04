@@ -65,6 +65,7 @@ struct FreeqApp: App {
                 }
                 .onAppear {
                     AppearanceSetting.current.apply()
+                    MetricKitReporter.shared.start()
                     QuickSendController.shared.installHotKey()
                     if appState.hasSavedSession && appState.connectionState == .disconnected {
                         appState.reconnectIfSaved()

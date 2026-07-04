@@ -341,6 +341,7 @@ class AppState {
     // MARK: - Connection
 
     func connect(nick: String, webToken: String? = nil) {
+        Perf.event("connect.start")
         Log.irc.info("Connecting as \(nick, privacy: .public)")
         self.nick = nick
         connectionState = .connecting
@@ -1024,6 +1025,7 @@ extension AppState {
             connectionState = .connected
 
         case .registered(let registeredNick):
+            Perf.event("connect.registered")
             Log.irc.info("Registered as \(registeredNick, privacy: .public)")
             connectionState = .registered
             reconnectAttempts = 0

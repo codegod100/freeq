@@ -222,8 +222,64 @@ final class DebugBridge {
                     prefix: p[0], suffix: p[1],
                     placeholder: p.count > 2 ? p[2] : nil)
             }
+        case "mkchannel":
+            // Create a local channel buffer and select it — server-independent,
+            // so the smoke harness can exercise message flows without a live
+            // connection or channel post permissions.
+            let ch = arg.hasPrefix("#") ? arg : "#\(arg)"
+            _ = app.getOrCreateChannel(ch)
+            app.activeChannel = ch
+        case "localmsg":
+            // Inject a deterministic message authored by us into the active
+            // channel, bypassing the server — lets the smoke harness drive
+            // edit/delete/react flows without depending on channel post
+            // permissions. `#localmsg <id> <text>`
+            guard let ch = app.activeChannelState else { return }
+            let p = arg.split(separator: " ", maxSplits: 1).map(String.init)
+            let id = p.first ?? "local-1"
+            let text = p.count > 1 ? p[1] : "local message"
+            ch.appendIfNew(ChatMessage(
+                id: id, from: app.nick, text: text,
+                isAction: false, timestamp: Date(), replyTo: nil))
+        case "snapshot":
+            // Serialize key app state to JSON in the container so an external
+            // smoke-test driver can ASSERT outcomes (not just "didn't crash").
+            writeSnapshot(app: app)
         default:
             NSLog("[debug-bridge] unknown directive: \(line)")
+        }
+    }
+
+    /// Snapshot of observable state the smoke harness asserts against. Written
+    /// to `NSTemporaryDirectory()/freeq-snapshot.json` (container-scoped, so it
+    /// works under the sandbox and the driver can read it).
+    private func writeSnapshot(app: AppState) {
+        struct MsgSnap: Encodable {
+            let id: String, from: String, text: String, deleted: Bool
+            let reactions: [String: Int]
+        }
+        struct Snap: Encodable {
+            let connection: String
+            let activeChannel: String?
+            let channels: [String]
+            let dms: [String]
+            let messages: [MsgSnap]
+        }
+        let msgs = (app.activeChannelState?.messages ?? []).map { m in
+            MsgSnap(id: m.id, from: m.from, text: m.text, deleted: m.isDeleted,
+                    reactions: m.reactions.mapValues(\.count))
+        }
+        let snap = Snap(
+            connection: "\(app.connectionState)",
+            activeChannel: app.activeChannel,
+            channels: app.channels.map(\.name),
+            dms: app.dmBuffers.map(\.name),
+            messages: msgs)
+        let url = URL(fileURLWithPath:
+            (NSTemporaryDirectory() as NSString).appendingPathComponent("freeq-snapshot.json"))
+        if let data = try? JSONEncoder().encode(snap) {
+            try? data.write(to: url)
+            NSLog("[debug-bridge] snapshot written (\(msgs.count) msgs) → \(url.path)")
         }
     }
 }

@@ -128,3 +128,27 @@ jobs:
       - name: Run Swift tests
         working-directory: freeq-macos
         run: swift test
+
+  macos-smoke:
+    name: macOS Client (interaction smoke test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the full app and drive its core interactions (send / react /
+      # delete / channel switch / stress) through the DebugBridge, asserting
+      # on state snapshots. Catches wiring + crash regressions the unit tests
+      # can't (they don't compile AppState or the AppKit list). The FFI
+      # xcframework is checked in, so no Rust build is needed.
+      - name: Build the macOS app (Debug)
+        working-directory: freeq-macos
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+          xcodebuild -project freeq-macos.xcodeproj -scheme freeq-macos \
+            -configuration Debug -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Run interaction smoke test
+        working-directory: freeq-macos
+        run: ./scripts/smoke.sh

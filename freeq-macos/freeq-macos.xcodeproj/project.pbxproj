@@ -17,6 +17,7 @@
 		2DE20508FB26A54D6DC4847B /* CallMicCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF84986DB3E316AB54CFA706 /* CallMicCapture.swift */; };
 		304585E2A3DCCB55DD8467D9 /* ComposeBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDCB3DAE1E0BAC641DA22730 /* ComposeBar.swift */; };
 		3146DC065B84E88A34D2BD2C /* BookmarksPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49DCC7DD970BA3640B37934D /* BookmarksPanel.swift */; };
+		33EF406687F07E81DBDD26C8 /* MetricKitReporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7D12A148B4822BCB055DECD /* MetricKitReporter.swift */; };
 		34242A7406E61679FA27DFE9 /* ChannelHydration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E6BC4FEEBACC91D752966CC /* ChannelHydration.swift */; };
 		3ACCE0099E0E97EC7A321EDC /* FileUpload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 878F66C1A9A17E125322D5CF /* FileUpload.swift */; };
 		3ECAA9DD14311CA0514B5E45 /* BufferNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */; };
@@ -164,6 +165,7 @@
 		9E6BC4FEEBACC91D752966CC /* ChannelHydration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelHydration.swift; sourceTree = "<group>"; };
 		9FEA777B589463007FF478DC /* MessageListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageListView.swift; sourceTree = "<group>"; };
 		A09A2F1C5515211E8D3BE359 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		A7D12A148B4822BCB055DECD /* MetricKitReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricKitReporter.swift; sourceTree = "<group>"; };
 		AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferNavigation.swift; sourceTree = "<group>"; };
 		AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeTextExtraction.swift; sourceTree = "<group>"; };
 		AFDA007C5D2E0294D534B5A4 /* ComposeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeFormatting.swift; sourceTree = "<group>"; };
@@ -363,6 +365,7 @@
 				62B0B9FB9D87D335C6B9327D /* MessageBlocks.swift */,
 				41E19D6BE7C80AAE06A5EB97 /* MessageStore.swift */,
 				94E7AF9D701F15529729BA91 /* MessageTimeline.swift */,
+				A7D12A148B4822BCB055DECD /* MetricKitReporter.swift */,
 				FA3DBEC5B2360C6BABC6CCA7 /* PerfSignposts.swift */,
 				71D02469D6C6FADFE295A523 /* ReconnectPolicy.swift */,
 				00BBD649F1BBDEBFC67FE0CE /* ScreenSharePicker.swift */,
@@ -568,6 +571,7 @@
 				58358188E47643126CBEE786 /* MessageListView.swift in Sources */,
 				E8ABEEDF45BB77FFA7112E96 /* MessageStore.swift in Sources */,
 				D2DC1C78722C6743877143B7 /* MessageTimeline.swift in Sources */,
+				33EF406687F07E81DBDD26C8 /* MetricKitReporter.swift in Sources */,
 				49E784D589512E3A936DA345 /* OnboardingView.swift in Sources */,
 				643F1C899816A54E913DF822 /* PerfSignposts.swift in Sources */,
 				C1395A0B767D4843076ECA59 /* PinnedMessagesBar.swift in Sources */,

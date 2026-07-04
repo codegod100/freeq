@@ -11,7 +11,10 @@ set -uo pipefail
 
 NICK="${1:-chadsweep}"
 OUT="${OUT:-/tmp/freeq-sweep}"
-CMD="/tmp/freeq-cmd"
+# The sandbox blocks /tmp — the DebugBridge reads only the app container.
+# Command file MUST live there (matches scripts/smoke.sh).
+CMD="$HOME/Library/Containers/at.freeq.macos/Data/tmp/freeq-cmd"
+mkdir -p "$(dirname "$CMD")"
 APP="$HOME/Library/Developer/Xcode/DerivedData/freeq-macos-ceipvkbzleecbidnnlkaquiqlawo/Build/Products/Debug/freeq.app"
 BIN="$APP/Contents/MacOS/freeq"
 
