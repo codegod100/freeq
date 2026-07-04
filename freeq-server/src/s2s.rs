@@ -2009,7 +2009,10 @@ mod tests {
                 assert!(tags.is_empty(), "missing tags → empty via serde default");
                 assert!(msgid.is_none());
                 assert!(sig.is_none());
-                assert!(account.is_none(), "missing account → None via serde default");
+                assert!(
+                    account.is_none(),
+                    "missing account → None via serde default"
+                );
             }
             _ => panic!("expected Privmsg"),
         }

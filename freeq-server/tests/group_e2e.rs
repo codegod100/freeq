@@ -81,7 +81,10 @@ fn full_lifecycle_join_read_rotate_revoke() {
 
     // Alice (steward) can obviously read her own channel too.
     let alice_state = open_best(&server_fetch(&db, channel, &alice), &alice.secret).unwrap();
-    assert_eq!(alice_state.decrypt(&msg1).unwrap(), "Q3 board deck is in the drive");
+    assert_eq!(
+        alice_state.decrypt(&msg1).unwrap(),
+        "Q3 board deck is in the drive"
+    );
 
     // ── Bob leaves the company → rotate to epoch 2, re-seal to Alice only ────
     let e2 = e1.rotate();
@@ -120,7 +123,10 @@ fn full_lifecycle_join_read_rotate_revoke() {
             .unwrap()
         })
         .unwrap();
-    assert_eq!(alice_e1.decrypt(&msg1).unwrap(), "Q3 board deck is in the drive");
+    assert_eq!(
+        alice_e1.decrypt(&msg1).unwrap(),
+        "Q3 board deck is in the drive"
+    );
 }
 
 #[test]

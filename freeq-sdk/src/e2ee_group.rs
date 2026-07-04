@@ -407,7 +407,10 @@ mod tests {
         let msg_e2 = e2.encrypt("post-offboarding secret").unwrap();
 
         // Alice reads epoch 2; Bob (still holding only epoch 1) cannot.
-        assert_eq!(alice_e2.decrypt(&msg_e2).unwrap(), "post-offboarding secret");
+        assert_eq!(
+            alice_e2.decrypt(&msg_e2).unwrap(),
+            "post-offboarding secret"
+        );
         assert!(matches!(
             bob_e1.decrypt(&msg_e2),
             Err(GroupError::EpochMismatch { have: 1, got: 2 })

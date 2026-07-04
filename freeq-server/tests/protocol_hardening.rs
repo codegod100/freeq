@@ -292,10 +292,7 @@ async fn oversize_single_line_privmsg_is_not_silently_truncated() {
         let body = format!("HEAD_MARKER{}TAIL_MARKER_END", "x".repeat(14000));
         a.tx(&format!("PRIVMSG #rfc :{body}"));
 
-        let delivered = b.maybe(
-            |l| l.contains("PRIVMSG") && l.contains("HEAD_MARKER"),
-            1500,
-        );
+        let delivered = b.maybe(|l| l.contains("PRIVMSG") && l.contains("HEAD_MARKER"), 1500);
         let got_417 = a
             .maybe(|l| l.split_whitespace().nth(1) == Some("417"), 500)
             .is_some();
