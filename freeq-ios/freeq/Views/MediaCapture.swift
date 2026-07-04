@@ -15,14 +15,23 @@ struct MediaAttachmentButton: View {
     @State private var showingCamera = false
     @State private var selectedItems: [PhotosPickerItem] = []
     @State private var stagedMedia: StagedMedia? = nil
+    /// Snapshotted when the menu opens — a screenshot copied to the clipboard
+    /// (never saved to Photos) is otherwise unreachable from the picker.
+    @State private var clipboardHasImage = false
 
     var body: some View {
-        Button(action: { showingActionSheet = true }) {
+        Button(action: {
+            clipboardHasImage = UIPasteboard.general.hasImages
+            showingActionSheet = true
+        }) {
             Image(systemName: "plus.circle.fill")
                 .font(.system(size: 24))
                 .foregroundColor(Theme.accent)
         }
         .confirmationDialog("Attach Media", isPresented: $showingActionSheet) {
+            if clipboardHasImage {
+                Button("Paste Image") { pasteImage() }
+            }
             Button("Photo Library") { showingPhotoPicker = true }
             Button("Take Photo or Video") { showingCamera = true }
             Button("Cancel", role: .cancel) { }
@@ -45,6 +54,20 @@ struct MediaAttachmentButton: View {
         }
         .sheet(item: $stagedMedia) { media in
             MediaPreviewSheet(media: media, channel: channel)
+        }
+    }
+
+    /// Stage the image currently on the clipboard (e.g. a screenshot) for the
+    /// same caption + preview + upload flow as a picked photo. Prefers PNG so
+    /// text in screenshots stays crisp.
+    private func pasteImage() {
+        guard let image = UIPasteboard.general.image else { return }
+        if let png = image.pngData() {
+            stagedMedia = StagedMedia(data: png, contentType: "image/png",
+                                      thumbnail: image, filename: "pasted.png", duration: nil)
+        } else if let jpg = image.jpegData(compressionQuality: 0.9) {
+            stagedMedia = StagedMedia(data: jpg, contentType: "image/jpeg",
+                                      thumbnail: image, filename: "pasted.jpg", duration: nil)
         }
     }
 
