@@ -29,6 +29,7 @@
 		54790CCF1094BA4AEFBB3080 /* CallLayoutPolicies.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0BFAA19CD6272B8B0EB81C7 /* CallLayoutPolicies.swift */; };
 		58358188E47643126CBEE786 /* MessageListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FEA777B589463007FF478DC /* MessageListView.swift */; };
 		5EA53FDA92C4F2D89DA3588E /* CameraEffects.swift in Sources */ = {isa = PBXBuildFile; fileRef = 746E6E96E986EB369B491948 /* CameraEffects.swift */; };
+		643F1C899816A54E913DF822 /* PerfSignposts.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA3DBEC5B2360C6BABC6CCA7 /* PerfSignposts.swift */; };
 		6655210E4022992BD99591D9 /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = E71A46E52B4FC4C2F32D7F34 /* ServerConfig.swift */; };
 		6B30E038B8A212C0CF43009D /* SyntaxHighlighter.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4206386FFE3870AE9485C50 /* SyntaxHighlighter.swift */; };
 		6DDB3CED329F29FC4C691EAD /* FormatToolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = F95B3DDDA0598080AE7E870C /* FormatToolbar.swift */; };
@@ -39,6 +40,7 @@
 		7CA52334C990D1462FB32DE9 /* MessageBlocksView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08D72CE9AC9784183A6C8DB1 /* MessageBlocksView.swift */; };
 		80AAB9C3511F63855AFF87FF /* AudioLevelMeter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F52BF9F99E9D9772373AA39 /* AudioLevelMeter.swift */; };
 		814109482C3020E4DFB6F5DC /* FreeqSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4BCCB41ADB5F3934945B6E85 /* FreeqSDK.xcframework */; };
+		82F06962C82E36993AC3F92C /* AppKitMessageList.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */; };
 		87278B03BA72D53ADC27DB97 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61EB9E0F12CF280B8BADFA41 /* MainView.swift */; };
 		95713207153A9DD7BAB5955A /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3E838FFB8176761B9DAA50 /* ChatMessage.swift */; };
 		9A656A1FED0DA78997CD68B4 /* App.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20ABEF839D9D9D42C9D1BF08 /* App.swift */; };
@@ -133,6 +135,7 @@
 		CECE4CB96A2A81AB72EC2324 /* freeq-macos.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "freeq-macos.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		D1561609D65E3676C79D46E2 /* LinkPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreview.swift; sourceTree = "<group>"; };
 		D2DFA3935D1A36696CF3DBC0 /* Validation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Validation.swift; sourceTree = "<group>"; };
+		D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppKitMessageList.swift; sourceTree = "<group>"; };
 		D90D45494AECECE10448CB0E /* ComposeCommands.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeCommands.swift; sourceTree = "<group>"; };
 		DA3E838FFB8176761B9DAA50 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
 		DB0BA22F0AF547102314C733 /* CallAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAudioDevices.swift; sourceTree = "<group>"; };
@@ -147,6 +150,7 @@
 		F0D2221C3627158CF392EC73 /* FrameHitchMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FrameHitchMonitor.swift; sourceTree = "<group>"; };
 		F3D1930C0C5B69735D97DA9C /* ChannelCrypto.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelCrypto.swift; sourceTree = "<group>"; };
 		F95B3DDDA0598080AE7E870C /* FormatToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FormatToolbar.swift; sourceTree = "<group>"; };
+		FA3DBEC5B2360C6BABC6CCA7 /* PerfSignposts.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PerfSignposts.swift; sourceTree = "<group>"; };
 		FDCB3DAE1E0BAC641DA22730 /* ComposeBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeBar.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -183,6 +187,7 @@
 		38C6F4ECE1B53363B9F87425 /* Chat */ = {
 			isa = PBXGroup;
 			children = (
+				D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */,
 				2B98D35F34492C2C6B3E504F /* AutocompletePopup.swift */,
 				B840984A8780805615D0846A /* CallView.swift */,
 				1B11355062BDD7B9062AC22F /* ChatView.swift */,
@@ -292,6 +297,7 @@
 				62B0B9FB9D87D335C6B9327D /* MessageBlocks.swift */,
 				41E19D6BE7C80AAE06A5EB97 /* MessageStore.swift */,
 				94E7AF9D701F15529729BA91 /* MessageTimeline.swift */,
+				FA3DBEC5B2360C6BABC6CCA7 /* PerfSignposts.swift */,
 				71D02469D6C6FADFE295A523 /* ReconnectPolicy.swift */,
 				00BBD649F1BBDEBFC67FE0CE /* ScreenSharePicker.swift */,
 				E71A46E52B4FC4C2F32D7F34 /* ServerConfig.swift */,
@@ -418,6 +424,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				9A656A1FED0DA78997CD68B4 /* App.swift in Sources */,
+				82F06962C82E36993AC3F92C /* AppKitMessageList.swift in Sources */,
 				721B0A530115B270B487BF92 /* AppState.swift in Sources */,
 				80AAB9C3511F63855AFF87FF /* AudioLevelMeter.swift in Sources */,
 				AF76EC565DC3FE7EB618879F /* AutocompletePopup.swift in Sources */,
@@ -468,6 +475,7 @@
 				E8ABEEDF45BB77FFA7112E96 /* MessageStore.swift in Sources */,
 				D2DC1C78722C6743877143B7 /* MessageTimeline.swift in Sources */,
 				49E784D589512E3A936DA345 /* OnboardingView.swift in Sources */,
+				643F1C899816A54E913DF822 /* PerfSignposts.swift in Sources */,
 				C1395A0B767D4843076ECA59 /* PinnedMessagesBar.swift in Sources */,
 				F564EDD064F706DA1FED48B0 /* QuickSwitcher.swift in Sources */,
 				BD330C3D45562AE78F0834C0 /* ReconnectPolicy.swift in Sources */,

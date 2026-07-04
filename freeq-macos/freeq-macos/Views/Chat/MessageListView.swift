@@ -1,153 +1,54 @@
 import SwiftUI
 
+/// The channel message list.
+///
+/// Phase 2 rewrite: the default implementation is `AppKitMessageListView`
+/// (an `NSViewRepresentable` over a view-based `NSTableView` with row reuse
+/// and granular per-row updates). The old SwiftUI `LazyVStack` list is kept
+/// behind the `freeq.useLegacyMessageList` debug flag so the FrameHitch
+/// harness can A/B the two on demand. See `SPIKE-MESSAGE-LIST.md`.
+///
+/// This wrapper owns the two cross-cutting concerns both implementations
+/// share: the empty-channel welcome overlay and the reading-surface
+/// background. Reading `messages` here (via the timeline build) registers the
+/// Observation dependency, so every append/edit/delete/reaction re-evaluates
+/// this body and hands the chosen list fresh, pre-grouped rows.
 struct MessageListView: View {
     @Environment(AppState.self) private var appState
     let channel: ChannelState?
-    /// Which channel we last rendered for. A channel switch should snap
-    /// the scroll to the bottom (no animation, no visible "scroll from
-    /// top down" sweep). Only subsequent incremental adds in the SAME
-    /// channel get the gentle scroll animation.
-    @State private var lastRenderedChannel: String?
 
-    private var messages: [ChatMessage] {
-        channel?.messages ?? []
-    }
+    // A/B flag. Default OFF → the AppKit list. Flip on (in UserDefaults) to
+    // fall back to the legacy LazyVStack for a side-by-side hitch comparison.
+    @AppStorage("freeq.useLegacyMessageList") private var useLegacy = false
+    // Read here (not just inside rows) so a compact-mode toggle re-evaluates
+    // this body and lets the AppKit list re-measure every row height.
+    @AppStorage("freeq.compactMode") private var compactMode = false
 
-    // Deleted messages render as tombstones (reading flow must not
-    // silently lose rows mid-scroll), so the timeline is all messages.
-    private var shouldShowWelcome: Bool {
-        messages.isEmpty
-    }
+    private var messages: [ChatMessage] { channel?.messages ?? [] }
 
-    /// One row per message plus its separator decision. Identifiable +
-    /// Equatable structs (not enumerated tuples) so LazyVStack row
-    /// content actually refreshes when a message mutates in place
-    /// (edit/delete/reaction).
-    private struct TimelineEntry: Identifiable, Equatable {
-        let message: ChatMessage
-        let showsDateSeparator: Bool
-        var id: String { message.id }
-    }
-
-    private var timeline: [TimelineEntry] {
-        var previous: Date?
-        return messages.map { msg in
-            defer { previous = msg.timestamp }
-            return TimelineEntry(
-                message: msg,
-                showsDateSeparator: MessageTimeline.showsDateSeparator(
-                    before: msg.timestamp, previous: previous))
-        }
-    }
-
-    /// Stable sentinel ID for the bottom anchor — scrolling to a fixed
-    /// invisible spacer below the last row is more reliable than
-    /// scrolling to the last message's ID, because the message ID changes
-    /// every time a new one arrives (forcing layout) and SwiftUI's
-    /// LazyVStack sometimes lays out the last row partially below the
-    /// viewport on first measurement.
-    private let bottomAnchorID = "__bottom"
+    // Deleted messages render as tombstones (reading flow must not silently
+    // lose rows mid-scroll), so the timeline is over ALL messages.
+    private var shouldShowWelcome: Bool { messages.isEmpty }
 
     var body: some View {
         ZStack {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        // Load more history button
-                        if !messages.isEmpty {
-                            Button {
-                                loadOlderHistory()
-                            } label: {
-                                HStack {
-                                    Spacer()
-                                    Image(systemName: "arrow.up.circle")
-                                    Text("Load older messages")
-                                    Spacer()
-                                }
-                                .font(.caption)
-                                .foregroundStyle(Theme.textSecondary)
-                            }
-                            .buttonStyle(.plain)
-                            .padding(.vertical, 8)
-                            .background(
-                                Capsule()
-                                    .fill(Theme.surfaceSoft)
-                                    .padding(.horizontal, 220)
-                            )
-                            .id("load-more")
-                        }
+            // One O(n) pass turns the raw messages into grouped rows (date
+            // separators + sender-header decisions baked in). Cheap array work
+            // — the expensive part (view layout) is what the AppKit list now
+            // controls per-row instead of re-diffing the whole world.
+            let rows = MessageListTimeline.build(from: messages)
 
-                        // Each ForEach element must produce exactly ONE view:
-                        // emitting the separator and the row as siblings per
-                        // element breaks LazyVStack's in-place row updates
-                        // (reactions/edits/deletes stop repainting) — found
-                        // empirically via A/B against the pre-separator list.
-                        ForEach(timeline) { entry in
-                            VStack(alignment: .leading, spacing: 0) {
-                                if entry.showsDateSeparator {
-                                    DateSeparatorView(date: entry.message.timestamp)
-                                }
-                                messageRow(for: entry.message)
-                            }
-                            .id(entry.message.id)
-                        }
-
-                        // Invisible bottom-of-list anchor. Reserved height
-                        // gives the last real message room so it doesn't hug
-                        // the divider above the compose bar (the "half off
-                        // the bottom" symptom was the last row landing at
-                        // the very edge of the scroll viewport with no breathing
-                        // room).
-                        Color.clear
-                            .frame(height: 12)
-                            .id(bottomAnchorID)
-                    }
-                    .padding(.top, 8)
-                }
-                .onChange(of: messages.count) { oldCount, newCount in
-                    // If this count change is the initial load for a newly-
-                    // selected channel, snap with no animation — otherwise
-                    // the user sees a fast visual scroll from top to bottom
-                    // as the rows render.
-                    let isInitialLoadForCurrentChannel =
-                        lastRenderedChannel != appState.activeChannel
-                    guard newCount > 0 else { return }
-                    if isInitialLoadForCurrentChannel {
-                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-                        lastRenderedChannel = appState.activeChannel
-                    } else if newCount > oldCount {
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-                        }
-                    }
-                }
-                .onChange(of: appState.activeChannel) { _, _ in
-                    // Channel switch — snap to bottom on the next runloop
-                    // tick so the LazyVStack has populated its rows. Without
-                    // the deferral, scrollTo runs against an empty stack
-                    // and the view appears at the top, then the count-onChange
-                    // visibly catches up by animating down.
-                    DispatchQueue.main.async {
-                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-                        lastRenderedChannel = appState.activeChannel
-                    }
-                }
-                .onAppear {
-                    // First mount — snap immediately, no animation.
-                    proxy.scrollTo(bottomAnchorID, anchor: .bottom)
-                    lastRenderedChannel = appState.activeChannel
-                }
-                .onChange(of: appState.scrollToMessageId) { _, newId in
-                    if let id = newId {
-                        withAnimation(.easeInOut(duration: 0.3)) {
-                            proxy.scrollTo(id, anchor: .center)
-                        }
-                        // Flash highlight
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                            appState.scrollToMessageId = nil
-                        }
-                    }
-                }
+            if useLegacy {
+                LegacyMessageListView(channel: channel, rows: rows)
+            } else {
+                AppKitMessageListView(
+                    rows: rows,
+                    channelToken: channel?.name ?? "",
+                    scrollTarget: appState.scrollToMessageId,
+                    compactToken: compactMode,
+                    showLoadMore: !messages.isEmpty,
+                    appState: appState,
+                    onLoadOlder: loadOlderHistory)
             }
 
             if shouldShowWelcome {
@@ -157,14 +58,181 @@ struct MessageListView: View {
         .background(Theme.chatBackground)
     }
 
-    @ViewBuilder
-    private func messageRow(for msg: ChatMessage) -> some View {
-        if msg.isDeleted {
-            DeletedMessageRow(message: msg)
-        } else if msg.from.isEmpty {
-            SystemMessageRow(message: msg)
-        } else {
-            MessageRow(message: msg)
+    private func loadOlderHistory() {
+        guard let target = appState.activeChannel,
+              let oldest = messages.first else { return }
+        appState.requestHistory(channel: target, before: oldest.timestamp)
+    }
+}
+
+// MARK: - Timeline model (shared by both list implementations)
+
+/// One rendered row: the message plus the two grouping decisions that depend
+/// on its neighbours. Equatable (via `ChatMessage` + the two Bools) so the
+/// AppKit list can diff rows and reload only what actually changed — a header
+/// or separator flip caused by an inserted neighbour reloads that one row.
+struct RowModel: Equatable, Identifiable {
+    var message: ChatMessage
+    var showsDateSeparator: Bool
+    var showHeader: Bool
+    var id: String { message.id }
+}
+
+/// Pure builder: `[ChatMessage] → [RowModel]` in a single forward pass.
+/// Grouping/separator policy lives here (one place), so both the legacy and
+/// AppKit lists render identically.
+enum MessageListTimeline {
+    static func build(from messages: [ChatMessage]) -> [RowModel] {
+        var out: [RowModel] = []
+        out.reserveCapacity(messages.count)
+        var prev: ChatMessage?
+        for msg in messages {
+            out.append(RowModel(
+                message: msg,
+                showsDateSeparator: MessageTimeline.showsDateSeparator(
+                    before: msg.timestamp, previous: prev?.timestamp),
+                showHeader: showsHeader(prev: prev, current: msg)))
+            prev = msg
+        }
+        return out
+    }
+
+    /// A row draws its sender header unless it collapses under the previous
+    /// message from the same sender (mirrors the old `MessageRow.showHeader`).
+    static func showsHeader(prev: ChatMessage?, current: ChatMessage) -> Bool {
+        guard let prev else { return true }
+        if prev.from.isEmpty { return true }        // after a system line
+        if prev.isDeleted { return true }           // tombstones break grouping
+        if prev.from != current.from { return true }
+        // Break across a provenance boundary: a federated message (origin set)
+        // must not collapse under a local sender's header.
+        if prev.origin != current.origin { return true }
+        return current.timestamp.timeIntervalSince(prev.timestamp) > 300
+    }
+}
+
+// MARK: - Row content (hosted in each AppKit cell; reused by the legacy list)
+
+/// The exact per-row visual: optional date separator stacked above the row
+/// body (message / tombstone / system line). One view per timeline entry, so
+/// it drops straight into an `NSHostingView` cell or a `LazyVStack` element.
+struct MessageTimelineRowContent: View {
+    let row: RowModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if row.showsDateSeparator {
+                DateSeparatorView(date: row.message.timestamp)
+            }
+            if row.message.isDeleted {
+                DeletedMessageRow(message: row.message)
+            } else if row.message.from.isEmpty {
+                SystemMessageRow(message: row.message)
+            } else {
+                MessageRow(message: row.message, showHeader: row.showHeader)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// The "Load older messages" affordance (CHATHISTORY back-fill), pinned as the
+/// first row of the list.
+struct LoadMoreRowContent: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack {
+                Spacer()
+                Image(systemName: "arrow.up.circle")
+                Text("Load older messages")
+                Spacer()
+            }
+            .font(.caption)
+            .foregroundStyle(Theme.textSecondary)
+        }
+        .buttonStyle(.plain)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(Theme.surfaceSoft)
+                .padding(.horizontal, 220))
+    }
+}
+
+// MARK: - Legacy SwiftUI list (behind freeq.useLegacyMessageList)
+
+/// The pre-Phase-2 `ScrollView` + `LazyVStack` list. Retained verbatim (only
+/// re-pointed at the shared `RowModel`/row content) so the hitch harness can
+/// A/B it against the AppKit list. The spike proved it misses the <1% budget
+/// by 40–100× under scroll + streaming-edit load — hence the rewrite.
+struct LegacyMessageListView: View {
+    @Environment(AppState.self) private var appState
+    let channel: ChannelState?
+    let rows: [RowModel]
+
+    @State private var lastRenderedChannel: String?
+    private let bottomAnchorID = "__bottom"
+
+    private var messages: [ChatMessage] { channel?.messages ?? [] }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    if !messages.isEmpty {
+                        LoadMoreRowContent(action: loadOlderHistory)
+                            .id("load-more")
+                    }
+
+                    // Each ForEach element must produce exactly ONE view or
+                    // LazyVStack's in-place row updates break — the separator
+                    // is folded into the row content view for that reason.
+                    ForEach(rows) { row in
+                        MessageTimelineRowContent(row: row)
+                            .id(row.message.id)
+                    }
+
+                    Color.clear
+                        .frame(height: 12)
+                        .id(bottomAnchorID)
+                }
+                .padding(.top, 8)
+            }
+            .onChange(of: messages.count) { oldCount, newCount in
+                let isInitialLoadForCurrentChannel =
+                    lastRenderedChannel != appState.activeChannel
+                guard newCount > 0 else { return }
+                if isInitialLoadForCurrentChannel {
+                    proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                    lastRenderedChannel = appState.activeChannel
+                } else if newCount > oldCount {
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: appState.activeChannel) { _, _ in
+                DispatchQueue.main.async {
+                    proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                    lastRenderedChannel = appState.activeChannel
+                }
+            }
+            .onAppear {
+                proxy.scrollTo(bottomAnchorID, anchor: .bottom)
+                lastRenderedChannel = appState.activeChannel
+            }
+            .onChange(of: appState.scrollToMessageId) { _, newId in
+                if let id = newId {
+                    withAnimation(.easeInOut(duration: 0.3)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        appState.scrollToMessageId = nil
+                    }
+                }
+            }
         }
     }
 
@@ -264,6 +332,11 @@ struct MessageRow: View {
     @Environment(AppState.self) private var appState
     @AppStorage("freeq.compactMode") private var compactMode = false
     let message: ChatMessage
+    /// Whether this row draws the sender header (avatar + name + badges).
+    /// Computed once by `MessageListTimeline` from the preceding message, so
+    /// grouping is a data property the list diffs on — not a per-row scan of
+    /// the whole channel on every render (the old computed-property approach).
+    let showHeader: Bool
 
     // Hover is a UNION of row-hover and bar-hover: the action bar can be
     // taller than a single-line grouped row, so the pointer legitimately
@@ -282,20 +355,6 @@ struct MessageRow: View {
 
     private var isSystem: Bool {
         message.from == "server" || message.from == "system"
-    }
-
-    private var showHeader: Bool {
-        guard let ch = appState.activeChannelState,
-              let idx = ch.messages.firstIndex(where: { $0.id == message.id }),
-              idx > 0 else { return true }
-        let prev = ch.messages[idx - 1]
-        if prev.from.isEmpty { return true }  // After system message
-        if prev.isDeleted { return true }  // Tombstones break grouping
-        if prev.from != message.from { return true }
-        // Break across a provenance boundary: a federated message (origin set)
-        // must not collapse under a local sender's header.
-        if prev.origin != message.origin { return true }
-        return message.timestamp.timeIntervalSince(prev.timestamp) > 300
     }
 
     private var profile: ProfileCache.Profile? {
