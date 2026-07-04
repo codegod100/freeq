@@ -111,6 +111,16 @@ pub enum Event {
         new_nick: String,
     },
 
+    /// A read marker was set or reported for a target (IRCv3
+    /// `draft/read-marker`). Emitted both as the reply to our own
+    /// `mark_read`/`get_read_marker` and when another of our devices advances
+    /// the marker. `timestamp` is `Some(iso)` (ISO 8601, as in server-time) or
+    /// `None` when the server reports no marker (`MARKREAD <target> *`).
+    ReadMarker {
+        target: String,
+        timestamp: Option<String>,
+    },
+
     /// We were invited to a channel.
     Invited {
         channel: String,

@@ -170,7 +170,10 @@ fn chunk_multiline_body(text: &str, budget: usize) -> Vec<MultilineChunk> {
     let mut out = Vec::new();
     for line in text.split('\n') {
         if line.is_empty() {
-            out.push(MultilineChunk { body: String::new(), concat: false });
+            out.push(MultilineChunk {
+                body: String::new(),
+                concat: false,
+            });
             continue;
         }
         let mut first = true;
@@ -187,7 +190,10 @@ fn chunk_multiline_body(text: &str, budget: usize) -> Vec<MultilineChunk> {
                     end += 1;
                 }
             }
-            out.push(MultilineChunk { body: line[start..end].to_string(), concat: !first });
+            out.push(MultilineChunk {
+                body: line[start..end].to_string(),
+                concat: !first,
+            });
             first = false;
             start = end;
         }
@@ -278,12 +284,10 @@ impl ClientHandle {
     pub async fn privmsg(&self, target: &str, text: &str) -> Result<()> {
         // Route through multiline when the text spans lines OR is long enough
         // that a single PRIVMSG would risk server-side truncation.
-        let multiline_ready = (text.contains('\n')
-            || text.len() > MULTILINE_PER_CHUNK_BYTES)
-            && {
-                let caps = self.caps_acked.lock();
-                caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
-            };
+        let multiline_ready = (text.contains('\n') || text.len() > MULTILINE_PER_CHUNK_BYTES) && {
+            let caps = self.caps_acked.lock();
+            caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
+        };
         if multiline_ready {
             self.send_chunked_multiline(target, text, std::collections::HashMap::new())
                 .await?;
@@ -421,12 +425,10 @@ impl ClientHandle {
         text: &str,
         tags: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        let multiline_ready = (text.contains('\n')
-            || text.len() > MULTILINE_PER_CHUNK_BYTES)
-            && {
-                let caps = self.caps_acked.lock();
-                caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
-            };
+        let multiline_ready = (text.contains('\n') || text.len() > MULTILINE_PER_CHUNK_BYTES) && {
+            let caps = self.caps_acked.lock();
+            caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
+        };
         if multiline_ready {
             self.send_chunked_multiline(target, text, tags).await?;
         } else {
@@ -630,6 +632,28 @@ impl ClientHandle {
     /// Set the channel topic.
     pub async fn topic(&self, channel: &str, topic: &str) -> Result<()> {
         self.raw(&format!("TOPIC {channel} :{topic}")).await
+    }
+
+    // ── Read markers (draft/read-marker) ──────────────────────────────
+
+    /// Set the cross-device read marker for `target` to `timestamp`.
+    ///
+    /// `timestamp` must be ISO 8601 with millisecond precision and a `Z`
+    /// suffix, exactly as in the `server-time` extension
+    /// (`YYYY-MM-DDThh:mm:ss.sssZ`). The server only moves the marker forward:
+    /// a stale timestamp is ignored and the server replies with the current
+    /// (newer) value. Either way the reply arrives as [`Event::ReadMarker`],
+    /// and — for DID-authenticated sessions — the same update is pushed to your
+    /// other connected devices.
+    pub async fn mark_read(&self, target: &str, timestamp: &str) -> Result<()> {
+        self.raw(&format!("MARKREAD {target} timestamp={timestamp}"))
+            .await
+    }
+
+    /// Query the current read marker for `target`. The answer arrives as
+    /// [`Event::ReadMarker`] with `timestamp: None` when no marker has been set.
+    pub async fn get_read_marker(&self, target: &str) -> Result<()> {
+        self.raw(&format!("MARKREAD {target}")).await
     }
 
     // ── Agent-native methods ─────────────────────────────────────────
@@ -1971,6 +1995,22 @@ where
                             let away_msg = msg.params.first().cloned();
                             let _ = event_tx.send(Event::AwayChanged { nick, away_msg }).await;
                         }
+                        // MARKREAD (draft/read-marker) — reply to our own
+                        // get/set, or a push from another of our devices.
+                        // Format: `MARKREAD <target> timestamp=<iso>` or
+                        // `MARKREAD <target> *`.
+                        "MARKREAD" => {
+                            if let Some(target) = msg.params.first().cloned() {
+                                let timestamp = msg.params.get(1).and_then(|v| {
+                                    if v == "*" {
+                                        None
+                                    } else {
+                                        v.strip_prefix("timestamp=").map(|s| s.to_string())
+                                    }
+                                });
+                                let _ = event_tx.send(Event::ReadMarker { target, timestamp }).await;
+                            }
+                        }
                         // TOPIC (live change from another user)
                         "TOPIC" => {
                             if let Some(channel) = msg.params.first() {
@@ -2419,6 +2459,7 @@ async fn handle_cap_response<W: AsyncWrite + Unpin>(
                 "extended-join",
                 "draft/chathistory",
                 "draft/multiline",
+                "draft/read-marker",
             ] {
                 if caps_str.contains(cap) {
                     req_caps.push(cap);
@@ -2695,8 +2736,15 @@ mod multiline_tests {
         let chunks = chunk_multiline_body(&line, MULTILINE_PER_CHUNK_BYTES);
         assert!(chunks.len() > 1);
         assert!(!chunks[0].concat, "first chunk opens the line");
-        assert!(chunks[1..].iter().all(|c| c.concat), "rest are continuations");
-        assert!(chunks.iter().all(|c| c.body.len() <= MULTILINE_PER_CHUNK_BYTES));
+        assert!(
+            chunks[1..].iter().all(|c| c.concat),
+            "rest are continuations"
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.body.len() <= MULTILINE_PER_CHUNK_BYTES)
+        );
         assert_eq!(reassemble(&chunks), line);
     }
 
@@ -3116,7 +3164,10 @@ mod multiline_tests {
     async fn privmsg_auto_routes_to_multiline_when_cap_acked() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
-        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked
+            .lock()
+            .acked
+            .insert("draft/multiline".to_string());
         caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
@@ -3174,7 +3225,10 @@ mod multiline_tests {
     async fn send_tagged_auto_routes_to_multiline_with_opener_tags() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
-        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked
+            .lock()
+            .acked
+            .insert("draft/multiline".to_string());
         caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
@@ -3212,7 +3266,10 @@ mod multiline_tests {
     async fn privmsg_single_line_never_routes_to_multiline() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
-        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked
+            .lock()
+            .acked
+            .insert("draft/multiline".to_string());
         caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
@@ -4192,6 +4249,100 @@ mod irc_loop_tests {
         assert!(
             away_msg.is_none(),
             "away_msg should be None when returning from away"
+        );
+    }
+
+    // ── MARKREAD (draft/read-marker) ──────────────────────────────────────────
+
+    /// `MARKREAD <target> timestamp=<iso>` emits Event::ReadMarker with the
+    /// timestamp parsed out of the `timestamp=` prefix.
+    #[tokio::test]
+    async fn server_markread_with_timestamp_emits_read_marker() {
+        let (mut server, mut events, _cmd) = start_run_irc("rm1").await;
+
+        server
+            .write_all(b"MARKREAD #room timestamp=2026-07-02T10:00:00.000Z\r\n")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+
+        let got = tokio::time::timeout(tokio::time::Duration::from_millis(400), async {
+            while let Some(ev) = events.recv().await {
+                if let Event::ReadMarker { target, timestamp } = ev {
+                    return Some((target, timestamp));
+                }
+            }
+            None
+        })
+        .await
+        .unwrap_or(None);
+
+        let (target, timestamp) = got.expect("expected ReadMarker event");
+        assert_eq!(target, "#room");
+        assert_eq!(timestamp.as_deref(), Some("2026-07-02T10:00:00.000Z"));
+    }
+
+    /// `MARKREAD <target> *` (no marker set) emits Event::ReadMarker with
+    /// timestamp = None.
+    #[tokio::test]
+    async fn server_markread_star_emits_read_marker_none() {
+        let (mut server, mut events, _cmd) = start_run_irc("rm2").await;
+
+        server.write_all(b"MARKREAD #room *\r\n").await.unwrap();
+        server.flush().await.unwrap();
+
+        let got = tokio::time::timeout(tokio::time::Duration::from_millis(400), async {
+            while let Some(ev) = events.recv().await {
+                if let Event::ReadMarker { target, timestamp } = ev {
+                    return Some((target, timestamp));
+                }
+            }
+            None
+        })
+        .await
+        .unwrap_or(None);
+
+        let (target, timestamp) = got.expect("expected ReadMarker event");
+        assert_eq!(target, "#room");
+        assert!(timestamp.is_none(), "star means no marker → None");
+    }
+
+    /// The outbound `mark_read` helper writes a well-formed MARKREAD set line.
+    #[tokio::test]
+    async fn mark_read_writes_markread_set_line() {
+        let (mut server, _events, cmd) = start_run_irc("rm3").await;
+
+        // Registration gates outbound commands; send 001 so the queue flushes.
+        server
+            .write_all(b":srv 001 rm3 :Welcome\r\n")
+            .await
+            .unwrap();
+        server.flush().await.unwrap();
+
+        cmd.send(Command::Raw(
+            "MARKREAD #room timestamp=2026-07-02T10:00:00.000Z".to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let mut buf = vec![0u8; 512];
+        let mut wire = String::new();
+        for _ in 0..5 {
+            if let Ok(Ok(n)) = tokio::time::timeout(
+                tokio::time::Duration::from_millis(300),
+                server.read(&mut buf),
+            )
+            .await
+            {
+                wire.push_str(&String::from_utf8_lossy(&buf[..n]));
+                if wire.contains("MARKREAD") {
+                    break;
+                }
+            }
+        }
+        assert!(
+            wire.contains("MARKREAD #room timestamp=2026-07-02T10:00:00.000Z"),
+            "expected MARKREAD set line in:\n{wire}"
         );
     }
 
