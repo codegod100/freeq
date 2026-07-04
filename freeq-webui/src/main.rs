@@ -240,6 +240,17 @@ async fn get_chat(
     ctx.insert("channels", &channels);
     ctx.insert("initial_messages_html", &initial_messages_html);
 
+    // Auth state for the navbar.
+    let session = state.session(&sid);
+    let login_handle = session.login_handle.lock().clone();
+    let is_authenticated = session.authenticated_did.lock().is_some();
+    let show_oauth = !is_authenticated && login_handle.is_some();
+    let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
+    ctx.insert("login_handle", &login_handle.as_deref().unwrap_or(""));
+    ctx.insert("is_authenticated", &is_authenticated);
+    ctx.insert("show_login", &(!is_authenticated && login_handle.is_none()));
+    ctx.insert("show_oauth_prompt", &show_oauth);
+    ctx.insert("joined_channels", &joined);
     let body = match state.tera.render("chat.html.tera", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -385,8 +396,8 @@ async fn get_channel_events(
                             info!(session = %sid, %nick, "sending NICK change after auth");
                         }
                         let js = format!(
-                            "var s=document.getElementById('status');if(s){{s.classList.add('connected');var t=s.querySelector('[data-text]');if(t)t.textContent='{}'}}",
-                            handle
+                            "localStorage.setItem('freeq_handle','{handle}');sessionStorage.removeItem('freeq_retry');var m=document.getElementById('oauth-modal');if(m)m.classList.remove('is-active');document.getElementById('status').classList.add('connected')",
+                            handle = handle
                         );
                         let script = ExecuteScript::new(js);
                         yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
@@ -394,8 +405,9 @@ async fn get_channel_events(
                     }
                     // --- OAuth login URL detection ---
                     if let Some(oauth_url) = extract_login_url(&line) {
-                        info!(session = %sid, "OAuth login URL detected; opening in browser");
-                        let js = format!("window.open('{}', '_blank')", oauth_url);
+                        info!(session = %sid, "OAuth login URL detected; showing modal");
+                        let escaped = oauth_url.replace('\'', "\\'");
+                        let js = format!("var m=document.getElementById('oauth-modal');m.classList.add('is-active');document.getElementById('oauth-link').href='{escaped}'");
                         let script = ExecuteScript::new(js);
                         yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         continue;
@@ -473,7 +485,7 @@ async fn post_channel_send(
     // long-lived /events SSE never receives this line.
     let ts = Utc::now().format("%H:%M:%S").to_string();
     let safe = html_escape(&msg);
-    let echo_html = format!(r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick c1">you</span> {safe}</span></div>"#);
+    let echo_html = format!(r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick n1">you</span> {safe}</span></div>"#);
     let echo = PatchElements::new(echo_html).selector("#messages").mode(ElementPatchMode::Append);
     let echo_event = echo.write_as_axum_sse_event();
     let clear = PatchSignals::new(r#"{"msg":""}"#);
@@ -586,10 +598,12 @@ fn extract_login_url(line: &str) -> Option<String> {
     let sp = rest.find(' ')?;
     let after_prefix = &rest[sp + 1..];
     if !after_prefix.starts_with("NOTICE ") { return None; }
-    // Find the trailing text (prefixed with :)
-    let last_colon = after_prefix.rfind(" :")?;
-    let url = &after_prefix[last_colon + 2..];
-    if url.starts_with("https://") && url.contains("/auth/login?") {
+    // URL may appear with or without a colon prefix.
+    let url_start = after_prefix.find("https://")?;
+    let url = &after_prefix[url_start..];
+    let url_end = url.find(|c: char| c.is_whitespace()).unwrap_or(url.len());
+    let url = &url[..url_end];
+    if url.contains("/auth/login?") {
         Some(url.to_string())
     } else {
         None
@@ -839,7 +853,7 @@ fn nick_color_class(nick: &str) -> &'static str {
     for b in nick.bytes() {
         h = h.wrapping_mul(33).wrapping_add(b as u64);
     }
-    const CLASSES: &[&str] = &["c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8"];
+    const CLASSES: &[&str] = &["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"];
     CLASSES[(h % 8) as usize]
 }
 
