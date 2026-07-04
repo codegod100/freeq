@@ -60,6 +60,10 @@ class AppState {
     var selfAwayReason: String?
     var bookmarks: [Bookmark] = []
     var lastReadMsgId: [String: String] = [:]  // lowercase channel → last read msgid
+    /// draft/read-marker (S1): lowercase target → ISO8601 read-up-to
+    /// timestamp, synced across this account's devices. Consumed by the
+    /// unread "New" line (later phase).
+    var readMarkers: [String: String] = [:]
 
     struct Bookmark: Identifiable, Codable {
         var id: String { msgId }
@@ -960,6 +964,13 @@ class AppEventHandler: EventHandler {
 extension AppState {
     func handleEvent(_ event: FreeqEvent) {
         switch event {
+        case .readMarker(let target, let timestamp):
+            // draft/read-marker (S1) — cross-device read state. The unread
+            // "New" line UI that consumes this is a later phase (§6.3);
+            // store the latest marker (forward-only, enforced server-side)
+            // so that work has it. No UI effect yet.
+            if let timestamp { readMarkers[target.lowercased()] = timestamp }
+
         case .connected:
             connectionState = .connected
 
