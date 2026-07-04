@@ -18,6 +18,9 @@ struct ComposeView: View {
     @State private var holdTimer: Timer? = nil
     @State private var isUploadingVoice = false
 
+    // On-device Apple Intelligence: suggested replies to the latest message.
+    @State private var smartReplies: [String] = []
+
     var body: some View {
         VStack(spacing: 0) {
             Rectangle()
@@ -31,7 +34,7 @@ struct ComposeView: View {
                         .progressViewStyle(CircularProgressViewStyle(tint: Theme.accent))
                         .scaleEffect(0.7)
                     Text("Sending voice message…")
-                        .font(.system(size: 13))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textMuted)
                     Spacer()
                 }
@@ -49,7 +52,7 @@ struct ComposeView: View {
                                 HStack(spacing: 4) {
                                     UserAvatar(nick: nick, size: 20)
                                     Text(nick)
-                                        .font(.system(size: 13, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                         .foregroundColor(Theme.textPrimary)
                                 }
                                 .padding(.horizontal, 10)
@@ -87,6 +90,12 @@ struct ComposeView: View {
                     text = ""
                 }
                 .onAppear { text = edit.text }
+            }
+
+            // On-device smart replies — offered only when the last message isn't
+            // yours and you haven't started typing. Tapping fills the field.
+            if !smartReplies.isEmpty && text.isEmpty && appState.editingMessage == nil {
+                smartReplyBar
             }
 
             // Use ZStack with opacity to keep mic button gesture alive during recording
@@ -170,6 +179,60 @@ struct ComposeView: View {
                 }
             }
         }
+        .task(id: smartReplyKey) { await refreshSmartReplies() }
+        .onChange(of: text) { if !text.isEmpty { smartReplies = [] } }
+    }
+
+    // MARK: - Smart replies (on-device Apple Intelligence)
+
+    /// Recompute when the conversation or its latest message changes.
+    private var smartReplyKey: String {
+        let ch = appState.activeChannelState
+        return "\(ch?.name ?? "")|\(ch?.messages.last?.id ?? "")|\(ch?.messages.count ?? 0)"
+    }
+
+    @MainActor
+    private func refreshSmartReplies() async {
+        guard IntelligenceService.shared.isAvailable,
+              appState.editingMessage == nil,
+              let ch = appState.activeChannelState else {
+            smartReplies = []
+            return
+        }
+        let suggestions = await IntelligenceService.shared.smartReplies(ch.messages, myNick: appState.nick)
+        // Only surface if the user still hasn't typed anything.
+        if text.isEmpty { smartReplies = suggestions }
+    }
+
+    private var smartReplyBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.signalGradient)
+                    .accessibilityHidden(true)
+                ForEach(smartReplies, id: \.self) { suggestion in
+                    Button {
+                        text = suggestion
+                        smartReplies = []
+                        isFocused = true
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } label: {
+                        Text(suggestion)
+                            .font(.fqFootnote.weight(.medium))
+                            .foregroundColor(Theme.textPrimary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .transition(.opacity)
     }
 
     // MARK: - Mic Button (hold to record)

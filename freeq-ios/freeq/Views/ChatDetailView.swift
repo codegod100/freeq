@@ -6,6 +6,10 @@ struct ChatDetailView: View {
     let channelName: String
     @State private var showingMembers = false
     @State private var showingSearch = false
+    // On-device "catch me up" summary.
+    @State private var showingSummary = false
+    @State private var summaryText: String? = nil
+    @State private var summarizing = false
     @Environment(\.dismiss) var dismiss
 
     private var channelState: ChannelState? {
@@ -157,8 +161,23 @@ struct ChatDetailView: View {
                             .font(.system(size: 14))
                             .foregroundColor(Theme.textSecondary)
                     }
+
+                    // Catch me up — on-device summary of the recent conversation.
+                    if IntelligenceService.shared.isAvailable {
+                        Button(action: generateSummary) {
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(Theme.signalGradient)
+                        }
+                        .accessibilityLabel("Catch me up")
+                    }
                 }
             }
+        }
+        .sheet(isPresented: $showingSummary) {
+            CatchMeUpSheet(summary: summaryText, loading: summarizing)
+                .presentationDetents([.height(260)])
+                .presentationBackground(.ultraThinMaterial)
         }
         .onAppear {
             appState.activeChannel = channelName
@@ -182,5 +201,76 @@ struct ChatDetailView: View {
         case 2: return "\(typers[0]) and \(typers[1]) are typing..."
         default: return "Several people are typing..."
         }
+    }
+
+    private func generateSummary() {
+        guard let messages = channelState?.messages, messages.count > 1 else {
+            summaryText = "Not enough here to summarize yet."
+            showingSummary = true
+            return
+        }
+        summaryText = nil
+        summarizing = true
+        showingSummary = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        Task {
+            let result = await IntelligenceService.shared.summarize(messages, in: channelName)
+            await MainActor.run {
+                summaryText = result ?? "Couldn't summarize this one."
+                summarizing = false
+            }
+        }
+    }
+}
+
+/// The "catch me up" result — a single on-device sentence, with a clear note
+/// that inference never left the phone (freeq's whole ethos).
+private struct CatchMeUpSheet: View {
+    let summary: String?
+    let loading: Bool
+
+    var body: some View {
+        VStack(spacing: Theme.Space.lg) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Theme.signalGradient)
+                Text("Catch me up")
+                    .font(.fqTitle3.weight(.semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer()
+            }
+
+            Group {
+                if loading {
+                    HStack(spacing: 10) {
+                        ProgressView().tint(Theme.accent)
+                        Text("Reading the room…")
+                            .font(.fqSubheadline)
+                            .foregroundColor(Theme.textSecondary)
+                        Spacer()
+                    }
+                } else if let summary {
+                    Text(summary)
+                        .font(.fqBody)
+                        .foregroundColor(Theme.textPrimary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10))
+                Text("Summarized on your device — nothing left the phone.")
+                    .font(.fqCaption)
+            }
+            .foregroundColor(Theme.textMuted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(Theme.Space.xl)
     }
 }
