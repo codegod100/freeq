@@ -110,12 +110,16 @@ struct AppKitMessageListView: NSViewRepresentable {
             column.resizingMask = .autoresizingMask
             table.addTableColumn(column)
 
-            // When the width changes (window resize / panel toggle) SwiftUI row
-            // heights change too; invalidate them so the table re-measures.
+            // When the width changes (window resize / panel toggle) each row is
+            // pinned to a new fixed width, so RE-HOST them (reloadData) — a bare
+            // `noteHeightOfRows` would re-measure stale content still framed at
+            // the old width. Resize isn't a hot path, so a reload is fine; keep
+            // the reader pinned to the bottom if they were there.
             table.onWidthChange = { [weak self, weak table] in
                 guard let self, let table, table.numberOfRows > 0 else { return }
-                table.noteHeightOfRows(withIndexesChanged:
-                    IndexSet(integersIn: 0..<table.numberOfRows))
+                let atBottom = self.isAtBottom()
+                table.reloadData()
+                if atBottom { self.scrollToBottom() }
             }
 
             let scroll = NSScrollView()
@@ -324,13 +328,25 @@ struct AppKitMessageListView: NSViewRepresentable {
 
         /// The SwiftUI content for a row, with the app environment attached so
         /// hosted `@Environment(AppState.self)` / `@AppStorage` rows work.
+        ///
+        /// The row is pinned to a FIXED width (the table's current width). This
+        /// is load-bearing, not cosmetic: chat rows use `maxWidth: .infinity`,
+        /// so without a bound the hosting view's intrinsic *width* is infinite,
+        /// and `.intrinsicContentSize` tries to install a content-size width
+        /// constraint of ∞ — which `_makeOrUpdateContentSizeWidthConstraint`
+        /// throws on (an uncaught NSException mid-layout → crash) the moment a
+        /// row reflows before the cell's width is applied, e.g. when a reaction
+        /// badge appears. A finite width makes both the width and the wrapped
+        /// height valid.
         private func content(for item: Item) -> AnyView {
+            let width = max(1, tableView?.bounds.width ?? 0)
             switch item {
             case .loadMore:
                 let action = onLoadOlder
-                return AnyView(LoadMoreRowContent(action: action))
+                return AnyView(LoadMoreRowContent(action: action).frame(width: width))
             case .entry(let row):
                 let view = MessageTimelineRowContent(row: row)
+                    .frame(width: width, alignment: .leading)
                 if let appState {
                     return AnyView(view.environment(appState))
                 }
