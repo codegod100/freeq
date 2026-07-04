@@ -8,9 +8,13 @@ struct ServerChannel: Identifiable {
     var id: String { name }
 }
 
-/// Channel discovery — browse and join channels.
+enum DiscoverMode: Hashable { case channels, people }
+
+/// Discovery — browse channels, or find people across the verified AT Protocol
+/// graph.
 struct DiscoverTab: View {
     @EnvironmentObject var appState: AppState
+    @State private var mode: DiscoverMode = .channels
     @State private var channelInput = ""
     @State private var serverChannels: [ServerChannel] = []
     @State private var loading = true
@@ -33,6 +37,17 @@ struct DiscoverTab: View {
                 Theme.bgPrimary.ignoresSafeArea()
 
                 VStack(spacing: 0) {
+                    Picker("View", selection: $mode) {
+                        Text("Channels").tag(DiscoverMode.channels)
+                        Text("People").tag(DiscoverMode.people)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+
+                    if mode == .people {
+                        PeopleSearchView()
+                    } else {
                     // Search bar (always visible at top)
                     HStack(spacing: 10) {
                         Image(systemName: "magnifyingglass")
@@ -152,6 +167,7 @@ struct DiscoverTab: View {
                         }
                         .refreshable { await fetchChannels() }
                     }
+                    } // end mode == .channels
                 }
             }
             .navigationTitle("Discover")

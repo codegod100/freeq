@@ -9,10 +9,20 @@ struct UserProfileSheet: View {
     /// The sender is peer-vouched by that server, not verified here — so we warn
     /// and suppress the local verified badge.
     var origin: String? = nil
+    /// When opened from People search / graph browsing (not a freeq member), the
+    /// AT identifier (DID or handle) to show directly — bypasses nick→DID
+    /// resolution and the freeq-only actions.
+    var directActor: String? = nil
     @State private var profile: BlueskyProfile? = nil
     @State private var loading = true
     @State private var recentPosts: [BskyFeedItem] = []
     @State private var loadingFeed = false
+    /// The AT identifier we actually resolved/used — powers the tappable
+    /// follower/following graph lists.
+    @State private var resolvedActor: String? = nil
+
+    /// True when this is a stranger from the graph, not a freeq member.
+    private var isDirect: Bool { directActor != nil }
 
     var body: some View {
         NavigationView {
@@ -41,10 +51,10 @@ struct UserProfileSheet: View {
                         UserAvatar(nick: nick, size: 80)
                             .padding(.top, 24)
 
-                        // Nick + verified
+                        // Name + verified
                         VStack(spacing: 4) {
                             HStack(spacing: 6) {
-                                Text(nick)
+                                Text(headerTitle)
                                     .font(.fqTitle3.weight(.bold))
                                     .foregroundColor(Theme.textPrimary)
 
@@ -90,11 +100,27 @@ struct UserProfileSheet: View {
                                 .padding(.horizontal, 32)
                         }
 
-                        // Stats
+                        // Stats — Followers / Following are tappable into the
+                        // navigable graph; Posts is informational.
                         if let p = profile {
                             HStack(spacing: 24) {
-                                statItem(count: p.followersCount ?? 0, label: "Followers")
-                                statItem(count: p.followsCount ?? 0, label: "Following")
+                                if let actor = resolvedActor {
+                                    NavigationLink {
+                                        GraphListView(title: "Followers", source: .followers(actor: actor))
+                                    } label: {
+                                        statItem(count: p.followersCount ?? 0, label: "Followers")
+                                    }
+                                    .buttonStyle(.plain)
+                                    NavigationLink {
+                                        GraphListView(title: "Following", source: .follows(actor: actor))
+                                    } label: {
+                                        statItem(count: p.followsCount ?? 0, label: "Following")
+                                    }
+                                    .buttonStyle(.plain)
+                                } else {
+                                    statItem(count: p.followersCount ?? 0, label: "Followers")
+                                    statItem(count: p.followsCount ?? 0, label: "Following")
+                                }
                                 statItem(count: p.postsCount ?? 0, label: "Posts")
                             }
                             .padding(.vertical, 8)
@@ -102,8 +128,9 @@ struct UserProfileSheet: View {
 
                         // Actions
                         VStack(spacing: 12) {
-                            // DM button
-                            if nick.lowercased() != appState.nick.lowercased() {
+                            // DM button — freeq members only (a graph stranger may
+                            // not be on freeq at all).
+                            if !isDirect && nick.lowercased() != appState.nick.lowercased() {
                                 Button(action: startDM) {
                                     HStack(spacing: 8) {
                                         Image(systemName: "bubble.left.fill")
@@ -184,6 +211,19 @@ struct UserProfileSheet: View {
         .task { await fetchProfile() }
     }
 
+    /// The big name at the top: the resolved Bluesky name when browsing the
+    /// graph, otherwise the freeq nick.
+    private var headerTitle: String {
+        if isDirect {
+            if let p = profile {
+                if let d = p.displayName, !d.trimmingCharacters(in: .whitespaces).isEmpty { return d }
+                return "@\(p.handle)"
+            }
+            return nick
+        }
+        return nick
+    }
+
     private func statItem(count: Int, label: String) -> some View {
         VStack(spacing: 2) {
             Text(formatCount(count))
@@ -208,6 +248,13 @@ struct UserProfileSheet: View {
     }
 
     private func fetchProfile() async {
+        // Graph browsing / People search: we already hold a real AT identifier,
+        // so use it directly (no nick→DID resolution, no did:key guard).
+        if let direct = directActor {
+            await MainActor.run { resolvedActor = direct }
+            await loadProfile(actor: direct)
+            return
+        }
         // Resolve ONLY by the server-verified DID. We must NOT fall back to
         // the nick (nor a guessed "<nick>.bsky.social"): nicks are freely
         // chosen, so resolving from one shows a STRANGER's profile, avatar
@@ -242,7 +289,14 @@ struct UserProfileSheet: View {
             await MainActor.run { loading = false }
             return
         }
+        await MainActor.run { resolvedActor = actor }
+        await loadProfile(actor: actor)
+    }
 
+    /// Fetch and populate the profile card for an AT identifier (DID or handle),
+    /// then load its recent posts. Shared by nick-resolution and direct-actor
+    /// (graph) paths.
+    private func loadProfile(actor: String) async {
         let urlStr = "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=\(actor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? actor)"
         guard let url = URL(string: urlStr) else {
             await MainActor.run { loading = false }
