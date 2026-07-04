@@ -18,6 +18,25 @@ gate as closed: Release build, then via DebugBridge run `#stress` (10k
 msgs) → `#sweep`, `#editstorm`, `#hitch`. Target <1% (was 43% sweep / 100%
 editstorm on the old LazyVStack). Repro is in SPIKE-MESSAGE-LIST.md.
 
+## 1c. Try the new macOS integrations (installed build)
+All build; a few need a signed install or one-time registration to fully
+light up at runtime:
+- **Menu bar extra** — should appear immediately (freeq icon in the menu
+  bar): call status, mute/leave, unread jump. Works ad-hoc.
+- **Global hotkey ⌥⌘Space** — floating quick-send panel from any app.
+  Works ad-hoc.
+- **App Intents / Shortcuts** — open Shortcuts.app → search "freeq":
+  Send Message, Join Call, Toggle Mute, Set Away, Open Conversation. Also
+  drivable by agents. May need the app launched once from /Applications so
+  Shortcuts indexes it.
+- **Writing Tools** — select text in the composer → right-click / the
+  Writing Tools affordance (macOS 15+, Apple Intelligence enabled).
+- **Share Extension "Send to freeq"** — appears in other apps' Share menus
+  for text/links. This one most needs proper signing to load reliably
+  (like the sandbox items). If it doesn't show up under the ad-hoc build,
+  it's the signing gap (item 4), not a code bug — verify after Developer ID.
+- `freeq://share?text=…&channel=…` URLs work now (test: `open "freeq://share?text=hi"`).
+
 ## 2. Dogfood call — 20 minutes with one other person
 Verifies a week of AV work that can't be tested solo. Checklist:
 - [ ] Speaking rings light up when the other person talks (AudioLevel events)

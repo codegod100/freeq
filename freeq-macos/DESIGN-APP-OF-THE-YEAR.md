@@ -145,7 +145,12 @@ Legend: ✅ complete · ⚠️ partial · ❌ missing · ✎ corrected after re-
 | Feature | macOS | Web | Notes |
 |---|---|---|---|
 | Theme | ✅ ✎ (App.swift:4 AppearanceSetting system/light/dark) | ✅ | shipped ahead of Phase 1 |
-| App Intents / Spotlight / widgets / menu bar extra / multi-window / Handoff / TipKit | ❌ | n/a | §9 |
+| Menu bar extra | ✅ ✎ (MenuBarView.swift + MenuBarModel.swift) | n/a | ambient call/unread presence; state-reactive icon; survives closing the window (2026-07-04) |
+| App Intents / Shortcuts | ✅ ✎ (FreeqAppIntents.swift — 6 intents + AppShortcutsProvider) | n/a | agent- and automation-drivable; §9 Spotlight projection follows |
+| Share Extension ("Send to freeq") | ✅ ✎ (ShareExtension/ + ShareURL.swift via freeq:// scheme) | n/a | text/links now; images need app-group + signing; runtime load needs signing |
+| Global quick-send hotkey | ✅ ✎ (GlobalHotKey.swift + QuickSendPanel.swift, ⌥⌘Space) | n/a | Carbon, sandbox-safe, floats over other apps |
+| Writing Tools (Apple Intelligence) | ✅ ✎ (ComposeBar.swift:665 writingToolsBehavior) | n/a | inline proofread/rewrite; Genmoji-in-messages needs a wire format |
+| Spotlight / widgets / multi-window / Handoff / TipKit | ❌ | n/a | §9 — remaining projections |
 | Accessibility | ❌ zero labels | ⚠️ | §7.3 program |
 | Sandbox / MAS | ❌ off | n/a | Phase 1 |
 | Auto-update | ❌ | ✅ toast | **Sparkle in Phase 1** (dogfood depends on it) |
