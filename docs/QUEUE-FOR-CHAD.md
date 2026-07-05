@@ -3,15 +3,22 @@
 Ordered. Everything else from the top-10 is being executed autonomously
 (see git log + DESIGN-APP-OF-THE-YEAR.md matrix updates).
 
-## 0. Deploy the auth broker (enables Follow on iOS) — 5 min
+## 0. Deploy the auth broker (enables Follow on iOS) — needs YOUR miren org
 `freeq-auth-broker` gained `/api/graph/follow` + `/api/graph/unfollow`
-(commit 2ea6712): the broker performs follow/unfollow on the user's own
-PDS so clients never hold the DPoP-bound access token. Code is committed,
-`cargo test` green — **deliberately not deployed overnight** (a bad
-deploy would take down everyone's login). Deploy auth.freeq.at the usual
-way (git pull + cargo build --release + systemctl restart). The iOS
-Follow button is already shipped and feature-detects: it stays hidden
-until the broker answers, then just works. Nothing else to coordinate.
+(commit 2ea6712, pushed to main): the broker performs follow/unfollow on
+the user's own PDS so clients never hold the DPoP-bound access token.
+
+**I attempted the deploy and hit an org wall**: auth.freeq.at runs on the
+miren "club" cluster (org-miren-club, 34.27.122.56), and the local
+`chad@blueyard.com` identity gets 403 there — `miren doctor` says auth is
+valid, so it's org membership/permission, and re-login is interactive.
+To deploy: `miren cluster switch club`, sort the login if prompted, then
+`cd freeq-auth-broker && ./deploy.sh`. (Note: deploy.sh deploys to
+whatever cluster is active — it went to a BlueYard shell app on my first
+try; I deleted that shell, BlueYard is clean, live broker untouched.)
+After deploy, verify: `curl https://auth.freeq.at/health` shows the new
+git hash, and a bogus `POST /api/graph/follow` returns 401 not 404. The
+iOS Follow button feature-detects and lights up on its own.
 
 ## 0b. Deploy the web app (safety + honest 🔒 + status) — 5 min
 freeq-app gained block/report/guidelines, real signature verification on
