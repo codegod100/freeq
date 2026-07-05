@@ -1,6 +1,5 @@
 //! Upstream WS bridge + REST client.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -12,7 +11,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
-use crate::state::{AppState, AuthState, SessionHandle, Upstream};
+use crate::state::{AppState, AuthState, SessionHandle, Upstream, WsState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpstreamChannel {
@@ -67,19 +66,19 @@ pub fn spawn_upstream_if_needed(
     channel: &str,
 ) {
     let target = super::canonical_channel(channel);
-    let reconnect = session.reconnect.swap(false, Ordering::SeqCst);
+    let was_ready = session.get_ws_state() == WsState::Ready;
     let mut task_guard = session.ws_task.lock();
 
     if let Some(handle) = task_guard.take() {
         if !handle.is_finished() {
-            if reconnect {
+            if was_ready {
                 info!(session = %sid, "aborting upstream WS task for reconnect");
             }
             handle.abort();
         }
     }
 
-    if !reconnect {
+    if !was_ready {
         if let Some(handle) = &*task_guard {
             if !handle.is_finished() {
                 debug!(session = %sid, channel = %target, "WS task already running");
@@ -153,6 +152,8 @@ pub fn spawn_upstream_if_needed(
     let session_for_task = Arc::clone(&session);
 
     *task_guard = Some(tokio::spawn(async move {
+        session_for_task.set_ws_state(WsState::Connecting);
+        debug!(session = %session_id, "ws_state → Connecting");
         info!(session = %session_id, ws = %ws_url, channel = %target_for_task, "connecting to upstream /irc");
         let result = run_upstream_ws(
             ws_url,
@@ -194,6 +195,8 @@ pub async fn run_upstream_ws(
 
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url.as_str())
         .await.context("WS connect failed")?;
+    session.set_ws_state(WsState::Registering);
+    debug!(session = %session_id, "ws_state → Registering");
 
     let nick = auth
         .as_ref()
@@ -280,8 +283,8 @@ pub async fn run_upstream_ws(
                                     // No SASL (guest mode or server didn't ACK sasl) — finish reg.
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_ready → true");
-                                    session.ws_ready.store(true, Ordering::SeqCst);
+                                    debug!(session = %session_id, "ws_state → Ready");
+                                    session.set_ws_state(WsState::Ready);
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -294,8 +297,8 @@ pub async fn run_upstream_ws(
                                     info!("server sent numeric registration reply without CAP ACK — proceeding as guest");
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_ready → true");
-                                    session.ws_ready.store(true, Ordering::SeqCst);
+                                    debug!(session = %session_id, "ws_state → Ready");
+                                    session.set_ws_state(WsState::Ready);
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -316,8 +319,8 @@ pub async fn run_upstream_ws(
                                             auth_creds = None;
                                             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                             let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_ready → true");
-                                            session.ws_ready.store(true, Ordering::SeqCst);
+                                    debug!(session = %session_id, "ws_state → Ready");
+                                    session.set_ws_state(WsState::Ready);
                                             phase = RegPhase::Ready;
                                             if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                                 break 'bridge;
@@ -342,8 +345,8 @@ pub async fn run_upstream_ws(
                                             auth_creds = None;
                                             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                             let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_ready → true");
-                                            session.ws_ready.store(true, Ordering::SeqCst);
+                                    debug!(session = %session_id, "ws_state → Ready");
+                                    session.set_ws_state(WsState::Ready);
                                             phase = RegPhase::Ready;
                                             if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                                 break 'bridge;
@@ -375,8 +378,8 @@ pub async fn run_upstream_ws(
                                     info!("SASL authentication successful");
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_ready → true");
-                                    session.ws_ready.store(true, Ordering::SeqCst);
+                                    debug!(session = %session_id, "ws_state → Ready");
+                                    session.set_ws_state(WsState::Ready);
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -425,8 +428,8 @@ pub async fn run_upstream_ws(
                                     auth_creds = None;
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_ready → true");
-                                    session.ws_ready.store(true, Ordering::SeqCst);
+                                    debug!(session = %session_id, "ws_state → Ready");
+                                    session.set_ws_state(WsState::Ready);
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -449,8 +452,8 @@ pub async fn run_upstream_ws(
             }
         }
     }
-    debug!(session = %session_id, "ws_ready → false");
-    session.ws_ready.store(false, Ordering::SeqCst);
+    debug!(session = %session_id, "ws_state → Disconnected");
+    session.set_ws_state(WsState::Disconnected);
     Ok(())
 }
 

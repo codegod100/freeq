@@ -14,7 +14,6 @@ mod state;
 mod upstream;
 
 use std::net::SocketAddr;
-use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use axum::extract::{Path, Query, State};
@@ -797,6 +796,22 @@ async fn get_channel_events(
                     // --- SASL 903 (authentication success) ---
                     if is_903(&line) {
                         info!(session = %sid, "SASL authentication successful");
+                        // Push updated auth signals to the browser navbar
+                        let (handle, did) = {
+                            let auth = session.auth.lock();
+                            match &*auth {
+                                AuthState::Authenticated { handle, did, .. } =>
+                                    (handle.clone(), did.clone()),
+                                AuthState::Guest =>
+                                    (String::new(), String::new()),
+                            }
+                        };
+                        let signals = serde_json::json!({
+                            "auth_handle": handle,
+                            "auth_did": did,
+                        });
+                        let signal_patch = PatchSignals::new(&signals.to_string());
+                        yield Ok::<Event, std::convert::Infallible>(signal_patch.write_as_axum_sse_event());
                         let script = ExecuteScript::new(
                             "document.getElementById('status').classList.add('connected')".to_string(),
                         );
@@ -806,6 +821,8 @@ async fn get_channel_events(
                     // --- SASL 904 (authentication failure) ---
                     if is_904(&line) {
                         warn!(session = %sid, "SASL authentication failed");
+                        let signals = PatchSignals::new(r#"{"auth_handle":"","auth_did":""}"#);
+                        yield Ok::<Event, std::convert::Infallible>(signals.write_as_axum_sse_event());
                         continue;
                     }
                     // --- Extract DID from auth NOTICE ("authenticated as did:plc:...") ---
@@ -873,9 +890,9 @@ async fn post_channel_send(
     let target = canonical_channel(&channel);
 
     let irc_tx = session.irc_tx.lock().clone();
-    let ws_ready = session.ws_ready.load(Ordering::SeqCst);
+    let ws_state = session.get_ws_state();
     let is_joined = session.joined.lock().contains(&target);
-    debug!(session = %sid, channel = %target, len = msg.len(), ws_ready, is_joined, "send requested");
+    debug!(session = %sid, channel = %target, len = msg.len(), ?ws_state, is_joined, "send requested");
 
     if let Err(e) = irc_tx
         .send(format!("PRIVMSG {target} :{msg}\r\n"))

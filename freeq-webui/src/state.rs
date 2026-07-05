@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -244,7 +244,7 @@ impl AppState {
                         oauth,
                     };
                     handle.extracted_did.lock().replace(did.clone());
-                    handle.reconnect.store(true, Ordering::SeqCst);
+                    handle.request_reconnect();
                     info!(session = %session_id, %did, "restored authenticated session from disk");
                 }
                 Ok(None) => {}
@@ -270,6 +270,32 @@ pub struct MemberEntry {
 
 // ── Session ────────────────────────────────────────────────────────────
 
+/// Upstream WebSocket connection state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WsState {
+    /// No WS task running, no connection.
+    Disconnected = 0,
+    /// WS task spawned, TCP/WebSocket handshake in progress.
+    Connecting = 1,
+    /// TCP connected, IRC registration (NICK/USER/CAP/SASL) in progress.
+    Registering = 2,
+    /// Fully registered, can send commands.
+    Ready = 3,
+}
+
+impl WsState {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => WsState::Disconnected,
+            1 => WsState::Connecting,
+            2 => WsState::Registering,
+            3 => WsState::Ready,
+            _ => WsState::Disconnected,
+        }
+    }
+}
+
 pub struct SessionHandle {
     pub irc_tx: Mutex<mpsc::Sender<String>>,
     pub lines_tx: broadcast::Sender<String>,
@@ -282,11 +308,10 @@ pub struct SessionHandle {
     /// DID extracted from 333/ACCOUNT/NOTICE before 903, used as a fallback
     /// for uploads when the user has not completed SASL auth in this session.
     pub extracted_did: Mutex<Option<String>>,
-    /// Set to true when auth state changes and the upstream WS task should be
-    /// respawned with the new credentials.
-    pub reconnect: AtomicBool,
-    /// Whether the upstream WS handshake has completed (RegPhase::Ready).
-    pub ws_ready: AtomicBool,
+    /// Upstream WebSocket connection state. Transitions are atomic:
+    /// Disconnected → Connecting (on spawn) → Registering (on TCP connect)
+    /// → Ready (on CAP END/JOIN) → Disconnected (on WS close/error).
+    pub ws_state: AtomicU8,
 }
 
 impl SessionHandle {
@@ -301,12 +326,38 @@ impl SessionHandle {
             ws_task: Mutex::new(None),
             auth: Mutex::new(AuthState::default()),
             extracted_did: Mutex::new(None),
-            ws_ready: AtomicBool::new(false),
-            reconnect: AtomicBool::new(false),
+            ws_state: AtomicU8::new(WsState::Disconnected as u8),
         }
     }
 
+    /// Read the current WS state.
+    pub fn get_ws_state(&self) -> WsState {
+        WsState::from_u8(self.ws_state.load(Ordering::SeqCst))
+    }
+
+    /// Attempt to transition from `expected` to `new`. Returns the actual
+    /// state after the attempt (the new state on success, current on failure).
+    pub fn transition_ws_state(&self, expected: WsState, new: WsState) -> WsState {
+        let prev = self.ws_state.compare_exchange(
+            expected as u8,
+            new as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        match prev {
+            Ok(_) => new,
+            Err(actual) => WsState::from_u8(actual),
+        }
+    }
+
+    /// Force-set the WS state (no CAS precondition).
+    pub fn set_ws_state(&self, state: WsState) {
+        self.ws_state.store(state as u8, Ordering::SeqCst);
+    }
+
+    /// Request that the WS task reconnect. If the task is in Ready state,
+    /// this will cause it to break its loop and reconnect.
     pub fn request_reconnect(&self) {
-        self.reconnect.store(true, Ordering::SeqCst);
+        self.set_ws_state(WsState::Disconnected);
     }
 }
