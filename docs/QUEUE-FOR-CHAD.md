@@ -13,6 +13,13 @@ way (git pull + cargo build --release + systemctl restart). The iOS
 Follow button is already shipped and feature-detects: it stays hidden
 until the broker answers, then just works. Nothing else to coordinate.
 
+## 0b. Deploy the web app (safety + honest 🔒 + status) — 5 min
+freeq-app gained block/report/guidelines, real signature verification on
+the 🔒 badge (calls /api/v1/verify/{msgid}), and status in DM rows
+(commit bc463cd; build + 703 tests green). Deploy irc.freeq.at's web
+bundle the usual way (git pull + npm ci + npm run build on the box).
+Until deployed, the web 🔒 keeps overstating trust — worth doing soon.
+
 ## 1. Sign in to the macOS app (2 min)
 The old broker token was dead server-side (broker 502s on it — S3). It's
 been cleared; the running build shows the sign-in screen. After this one
