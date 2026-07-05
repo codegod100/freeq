@@ -1,8 +1,48 @@
 # Plan: all of freeq on the Hetzner box, managed by miren
 
-**Status: PLAN ONLY — not yet executed.** Written 2026-07-05.
-Companion doc: `MIGRATION-RETH-TO-HETZNER.md` (the data-migration half,
-folded in as Phase 5 here).
+**Status: IN PROGRESS (2026-07-05).** miren is live on the box in the Freeq
+org; the marketing site is fully migrated to miren; the auth broker is the
+one remaining blocker (a miren disk-scheduling issue, below). irc.freeq.at
+migration explicitly OUT of scope (Chad's call), box NOT resized.
+Companion doc: `MIGRATION-RETH-TO-HETZNER.md`.
+
+## STATUS 2026-07-05 (what's actually done)
+
+- ✅ **miren server** on the box (systemd `miren`, behind-proxy-http ingress
+  127.0.0.1:8090, coexists with nginx). Idle ~223 MB.
+- ✅ **Registered to the FREEQ org** (org-freeq-nmg3r6leb0q5), cluster
+  `freeq` / cluster-t6dod5ibeg47, status active, visible in miren.cloud.
+  Gotcha: the register-approval screen defaults the org dropdown to
+  "Miren" — MUST switch it to "Freeq" before approving (I did the first one
+  wrong; reset by deleting registration.json+api.*+service-account.key,
+  restart miren, re-register). Also: `miren login` on the box first, else
+  the pending reg never surfaces in the org console.
+- ✅ **Mac CLI** deploys to it: `miren cluster add -c freeq -a
+  87.99.152.98:8443 -i cloud` (plain address, NOT the `;sha1:` form), then
+  `miren deploy -C freeq`.
+- ✅ **freeq-site MIGRATED to miren** — `.miren/app.toml` (gunicorn web
+  service), deployed, `miren route set freeq.at / www.freeq.at`, nginx
+  `freeq.at` vhost repointed `:8000`→`:8090`, old `freeq-site.service`
+  (gunicorn systemd) stopped+disabled. Publicly serving 200 + valid cert.
+  Rollback: `/root/freeq.at.nginx.pre-miren.bak` + re-enable the unit.
+- ✅ **Proved the box CAN build** — miren's Rust buildpack built the broker
+  fine; box memory only dipped to 745 MB available (never near OOM). The
+  earlier "don't build on 2 GB" caution was overcautious.
+- ⛔ **Broker under miren: BLOCKED on disk scheduling.** The broker app
+  builds + deploys, secret set via `miren env set -s KEY=@file`, but the
+  disk-backed **fixed-concurrency** workload never schedules a running
+  instance — ingress returns 500 `error acquiring lease: app/…` and
+  `app restart` says `no pools found for app`. The stateless site (no disk,
+  auto scaling) schedules fine, so the differentiator is the persistent
+  disk + fixed concurrency on this single constrained node. **Next:** debug
+  miren disk-volume provisioning / single-node fixed-instance scheduling
+  (does the disk need pre-creating via `miren` disks? is num_instances=1 +
+  disk unsupported on a 1-node cluster? try an ephemeral no-disk deploy to
+  isolate). PROD AUTH IS SAFE — still on the hand-run Docker broker on
+  :8081 (untouched); do NOT cut auth.freeq.at over until the miren broker
+  runs healthy AND broker.db is copied into its volume (brief stop) so
+  sessions carry.
+- Marketing note: `new.freeq.at` chat + irc.freeq.at migration untouched.
 
 **Goal:** the Hetzner box (87.99.152.98) runs a miren server registered to
 the **Freeq org** (org-freeq-nmg3r6leb0q5) on miren.cloud, with the CLI
