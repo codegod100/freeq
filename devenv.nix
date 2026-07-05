@@ -11,7 +11,7 @@
 # root. We deliberately do NOT use `languages.rust.*` here — that block
 # would fight the toolchain file.
 {
-  # ── Nix packages ─────────────────────────────────────────────────────
+  # ── Nix packages ──────────────────────────────────────────────────────
   packages = with pkgs; [
     # Install rustup itself (not a specific toolchain) — it reads
     # rust-toolchain.toml at the repo root, downloads the pinned version
@@ -22,6 +22,18 @@
 
     gcc
     openssl
+    # alsa-sys (freeq-sdk media/audio features) requires libasound and
+    # pkg-config at build time. Without these, `cargo check --workspace
+    # --all-targets` fails in a fresh devenv shell.
+    alsa-lib
+    pkg-config
+    # whisper-rs-sys needs bindgen (libclang), cmake, and a C++ toolchain.
+    # ratatui-image needs chafa for image rendering in the TUI; chafa
+    # needs glib-2.0 in pkg-config search path.
+    clang
+    cmake
+    chafa
+    glib
 
     # Test scripts under scripts/ use lsof + nc.
     lsof
@@ -64,6 +76,9 @@
     SERVER = "127.0.0.1:16667";
     LOCAL_SERVER = "127.0.0.1:16667";
     REMOTE_SERVER = "127.0.0.1:16668";
+
+    # bindgen (used by whisper-rs-sys) needs libclang.so on PATH.
+    LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
   };
 
   # ── Scripts (task-like shortcuts) ───────────────────────────────────

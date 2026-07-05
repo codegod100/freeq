@@ -1,3 +1,48 @@
+## Build & Run
+
+**All Cargo, Rust, and Node development operations in this repo MUST be run inside `devenv shell`.** The devenv provides the pinned Rust toolchain, Node 24, Bun, and required system dependencies. Running raw `cargo ...` or `npm ...` outside the shell may use the wrong toolchain or fail to find dependencies.
+
+Enter the shell with:
+
+```bash
+devenv shell
+```
+
+Then run commands inside it, or use the devenv shortcuts directly from outside:
+
+```bash
+devenv shell check
+devenv shell test
+```
+
+Common shortcuts:
+
+| Command | What it does |
+|---------|--------------|
+| `devenv shell build` | `cargo build --workspace` |
+| `devenv shell check` | `cargo check --workspace --all-targets` |
+| `devenv shell test` | `cargo test --workspace --all-features` |
+| `devenv shell lint` | `cargo clippy --workspace --all-targets -- -D warnings` |
+| `devenv shell fmt` | `cargo fmt --all -- --check` |
+| `devenv shell server-dev` | Run freeq-server on `127.0.0.1:6667` / `127.0.0.1:8080` |
+| `devenv shell webui-dev` | Run DataStar web UI proxy on `127.0.0.1:8090` |
+| `devenv shell web-dev` | Run the React web app dev server (Vite) |
+| `devenv shell e2e` | Run the S2S acceptance suite |
+
+### DataStar web UI with AT Protocol OAuth (via tailscale funnel)
+
+The web UI's Bluesky OAuth requires a public FQDN. To use it from a remote browser on your tailnet:
+
+```bash
+# 1. In one terminal, start the freeq-webui proxy (binds localhost, sets FREEQ_PUBLIC_URL)
+devenv shell webui-dev
+
+# 2. In another terminal, expose it to the public internet with a funnel FQDN:
+tailscale funnel 8090
+```
+
+The default `FREEQ_PUBLIC_URL` is `https://<short-hostname>.tailfe3ae2.ts.net` and is derived from the machine's hostname. Override it with the env var if your tailnet name differs.
+
 **Requirements:**
 - `session_id` must be unique per TCP connection
 - `nonce` must be cryptographically random

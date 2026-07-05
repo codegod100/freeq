@@ -311,6 +311,7 @@ async fn post_login(
 
         let session_for_task = session.clone();
         let pending_logins = state.pending_logins.clone();
+        let session_store = state.session_store.clone();
         let sid_task = sid.clone();
         tokio::spawn(async move {
             let result = tokio::select! {
@@ -328,6 +329,11 @@ async fn post_login(
                     let did = oauth.did.clone();
                     let nick = crate::sanitize_nick(&handle);
                     info!(session = %sid_task, %did, %handle, "OAuth login completed; stored session");
+                    if let Some(store) = session_store {
+                        if let Err(e) = store.save(&sid_task, &oauth) {
+                            warn!(session = %sid_task, "failed to persist session to disk: {e:#}");
+                        }
+                    }
                     *session_for_task.auth.lock() = AuthState::Authenticated { handle, did: did.clone(), nick, oauth };
                     session_for_task.extracted_did.lock().replace(did);
                     session_for_task.request_reconnect();
@@ -366,11 +372,14 @@ async fn post_logout(
     let session = state.session(&sid);
     *session.auth.lock() = AuthState::Guest;
     session.request_reconnect();
-    let mut resp = (StatusCode::FOUND, [("Location", "/")], "").into_response();
-    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    if let Some(store) = &state.session_store {
+        if let Err(e) = store.remove(&sid) {
+            warn!(session = %sid, "failed to remove persisted session: {e:#}");
+        }
+    }
+    let resp = (StatusCode::FOUND, [("Location", "/")], "").into_response();
     resp
 }
-
 async fn get_auth_status(
     State(state): State<AppState>,
     req: axum::http::HeaderMap,
@@ -407,7 +416,7 @@ async fn get_oauth_client_metadata(
     };
 
     let metadata = serde_json::json!({
-        "client_id": public_url,
+        "client_id": format!("{public_url}/.well-known/oauth-client-metadata"),
         "client_name": "freeq Web UI",
         "client_uri": public_url,
         "redirect_uris": [format!("{public_url}/auth/callback")],
@@ -479,12 +488,17 @@ async fn get_auth_callback(
         }
     };
 
-    // Update session auth state
+    // Update session auth state and persist for restarts
     let session = state.session(&sid);
     let handle = oauth.handle.clone();
     let did = oauth.did.clone();
     let nick = crate::sanitize_nick(&handle);
     info!(session = %sid, %did, %handle, "OAuth web callback completed; stored session");
+    if let Some(store) = &state.session_store {
+        if let Err(e) = store.save(&sid, &oauth) {
+            warn!(session = %sid, "failed to persist session to disk: {e:#}");
+        }
+    }
     *session.auth.lock() = AuthState::Authenticated { handle, did: did.clone(), nick, oauth };
     session.extracted_did.lock().replace(did);
     session.request_reconnect();

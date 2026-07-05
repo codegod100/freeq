@@ -520,10 +520,10 @@ impl PreparedLogin {
         let auth_meta = discover_auth_server(&pds_url).await?;
         tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
 
-        // Web client: the PDS discovers client metadata from
-        // {client_id}/.well-known/oauth-client-metadata.
+        // Web client: the client_id is the URL of the published metadata
+        // document; the PDS fetches it directly.
         let redirect_uri = format!("{public_url}/auth/callback");
-        let client_id = public_url.to_string();
+        let client_id = format!("{public_url}/.well-known/oauth-client-metadata");
 
         let (code_verifier, code_challenge) = generate_pkce();
         let dpop_key = DpopKey::generate();

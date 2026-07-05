@@ -1,15 +1,101 @@
 //! Shared application state.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use freeq_sdk::oauth::{OAuthSession, PreparedLogin};
+use freeq_sdk::oauth::{derive_session_key, OAuthSession, PreparedLogin};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use tracing::{info, warn};
 use url::Url;
+
+
+/// Persists authenticated OAuth sessions to disk so users stay logged in
+/// across `freeq-webui` restarts.
+///
+/// Sessions are encrypted with AES-256-GCM using a per-session key derived
+/// from a machine-local secret (stored next to the sessions) plus the
+/// session_id. This keeps tokens off disk in plaintext while still letting
+/// the server recover them after a restart.
+#[derive(Clone)]
+pub struct SessionStore {
+    dir: PathBuf,
+    machine_key: [u8; 32],
+}
+
+impl SessionStore {
+    /// Open or create a session store at `dir`. Generates a machine key on
+    /// first use and saves it with restrictive permissions.
+    pub fn new(dir: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&dir).context("creating session store dir")?;
+        let key_path = dir.join(".key");
+        let machine_key = if key_path.exists() {
+            let bytes = std::fs::read(&key_path).context("reading session key")?;
+            let mut key = [0u8; 32];
+            if bytes.len() != 32 {
+                anyhow::bail!("session key file has wrong length: {}", bytes.len());
+            }
+            key.copy_from_slice(&bytes);
+            key
+        } else {
+            let mut key = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut key);
+            std::fs::write(&key_path, &key).context("writing session key")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+                    .context("setting session key permissions")?;
+            }
+            key
+        };
+        Ok(Self { dir, machine_key })
+    }
+
+    /// Path for a given session file. Sanitizes the session id to avoid
+    /// directory traversal.
+    fn session_path(&self, sid: &str) -> PathBuf {
+        let safe = sid.replace(['/', '\\', '.'], "_");
+        self.dir.join(format!("{safe}.bin"))
+    }
+
+    /// Derive a per-session encryption key.
+    fn derive_key(&self, sid: &str) -> [u8; 32] {
+        derive_session_key(&self.machine_key, sid)
+    }
+
+    /// Save an authenticated session to disk.
+    pub fn save(&self, sid: &str, oauth: &OAuthSession) -> Result<()> {
+        let path = self.session_path(sid);
+        let key = self.derive_key(sid);
+        oauth.save_encrypted(&path, &key).context("saving session")?;
+        Ok(())
+    }
+
+    /// Load an authenticated session from disk, if present.
+    pub fn load(&self, sid: &str) -> Result<Option<OAuthSession>> {
+        let path = self.session_path(sid);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let key = self.derive_key(sid);
+        let oauth = OAuthSession::load_encrypted(&path, &key).context("loading session")?;
+        Ok(Some(oauth))
+    }
+
+    /// Remove a persisted session (e.g. on logout).
+    pub fn remove(&self, sid: &str) -> Result<()> {
+        let path = self.session_path(sid);
+        if path.exists() {
+            std::fs::remove_file(&path).context("removing session file")?;
+        }
+        Ok(())
+    }
+}
 
 // ── Auth state machine ─────────────────────────────────────────────────
 
@@ -60,6 +146,10 @@ impl AuthState {
 pub struct AppState {
     pub upstream: Arc<Upstream>,
     pub sessions: Arc<Mutex<HashMap<String, Arc<SessionHandle>>>>,
+    /// Optional disk-backed session store. When present, authenticated
+    /// OAuth sessions are encrypted and saved on login so users stay
+    /// logged in across `freeq-webui` restarts.
+    pub session_store: Option<SessionStore>,
     /// In-flight loopback OAuth logins keyed by session id. The oneshot
     /// sender is used to cancel a previous login attempt when a new one
     /// is started for the same session.
@@ -94,6 +184,19 @@ impl AppState {
     pub fn new(upstream_base: Url, public_url: Option<String>) -> Result<Self> {
         let upstream = Arc::new(Upstream::from_base(upstream_base)?);
         let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
+
+        // Optional encrypted session persistence. Disabled if the env var is
+        // explicitly empty; otherwise defaults to a local directory.
+        let sessions_dir = std::env::var("FREEQ_WEBUI_SESSIONS_DIR")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| Some(PathBuf::from(".dev-data/webui-sessions")));
+        let session_store = sessions_dir
+            .map(SessionStore::new)
+            .transpose()
+            .context("initializing session store")?;
+
         let mut tera = tera::Tera::default();
         let mut files: Vec<(String, Option<String>)> = Vec::new();
         for entry in std::fs::read_dir("templates").context("reading templates/")? {
@@ -110,6 +213,7 @@ impl AppState {
         Ok(Self {
             upstream,
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            session_store,
             pending_logins: Arc::new(Mutex::new(HashMap::new())),
             pending_web_logins: Arc::new(Mutex::new(HashMap::new())),
             public_url,
@@ -118,11 +222,39 @@ impl AppState {
         })
     }
 
+    /// Return an existing session, or create a new one. If a session store is
+    /// configured and a persisted authenticated session exists for this id,
+    /// restore it into memory so the user stays logged in across restarts.
     pub fn session(&self, session_id: &str) -> Arc<SessionHandle> {
-        self.sessions.lock()
-            .entry(session_id.to_string())
-            .or_insert_with(|| Arc::new(SessionHandle::new()))
-            .clone()
+        let mut sessions = self.sessions.lock();
+        if let Some(handle) = sessions.get(session_id) {
+            return handle.clone();
+        }
+
+        let handle = Arc::new(SessionHandle::new());
+        if let Some(store) = &self.session_store {
+            match store.load(session_id) {
+                Ok(Some(oauth)) => {
+                    let did = oauth.did.clone();
+                    let nick = crate::sanitize_nick(&oauth.handle);
+                    *handle.auth.lock() = AuthState::Authenticated {
+                        handle: oauth.handle.clone(),
+                        did: did.clone(),
+                        nick,
+                        oauth,
+                    };
+                    handle.extracted_did.lock().replace(did.clone());
+                    handle.reconnect.store(true, Ordering::SeqCst);
+                    info!(session = %session_id, %did, "restored authenticated session from disk");
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    warn!(session = %session_id, "failed to restore session from disk: {e:#}");
+                }
+            }
+        }
+        sessions.insert(session_id.to_string(), handle.clone());
+        handle
     }
 }
 
