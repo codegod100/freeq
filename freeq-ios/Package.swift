@@ -26,6 +26,8 @@ let package = Package(
             sources: [
                 "ChatMessage.swift",
                 "MessageActions.swift",
+                "ServerConfig.swift",
+                "FreeqDirectory.swift",
             ]
         ),
         .testTarget(
