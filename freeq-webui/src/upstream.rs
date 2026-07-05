@@ -37,11 +37,16 @@ pub struct UpstreamHistoryMessage {
 // ── AT Protocol OAuth-backed auth helpers ────────────────────────────────
 
 /// Credentials we hand to the upstream WS task so it can run SASL.
-#[derive(Clone, Debug)]
 pub struct AuthCredentials {
     pub did: String,
     pub nick: String,
     pub access_token: String,
+    /// Refresh token for renewing the access token when it expires.
+    pub refresh_token: Option<String>,
+    /// Token endpoint URL for refresh requests.
+    pub token_endpoint: String,
+    /// OAuth client_id used during authorization.
+    pub client_id: String,
     pub pds_url: String,
     /// DPoP key + nonce for proving possession of the access token.
     pub dpop_key: freeq_sdk::oauth::DpopKey,
@@ -128,6 +133,9 @@ pub fn spawn_upstream_if_needed(
             did: did.clone(),
             nick: nick.clone(),
             access_token: oauth.access_token.clone(),
+            refresh_token: oauth.refresh_token.clone(),
+            token_endpoint: oauth.token_endpoint.clone(),
+            client_id: oauth.client_id.clone(),
             pds_url: oauth.pds_url.clone(),
             dpop_key: oauth.dpop_key.clone(),
             dpop_nonce: oauth.dpop_nonce.clone(),
@@ -376,6 +384,43 @@ pub async fn run_upstream_ws(
                                     continue;
                                 }
                                 if is_904(trimmed) || trimmed.contains(" 904 ") {
+                                    // Try refreshing the OAuth token before giving up.
+                                    let mut refreshed = false;
+                                    if let Some(ref creds) = auth_creds {
+                                        if creds.refresh_token.is_some() {
+                                            let mut temp = freeq_sdk::oauth::OAuthSession {
+                                                did: creds.did.clone(),
+                                                handle: String::new(),
+                                                access_token: creds.access_token.clone(),
+                                                refresh_token: creds.refresh_token.clone(),
+                                                token_endpoint: creds.token_endpoint.clone(),
+                                                client_id: creds.client_id.clone(),
+                                                pds_url: creds.pds_url.clone(),
+                                                dpop_key: creds.dpop_key.clone(),
+                                                dpop_nonce: creds.dpop_nonce.clone(),
+                                            };
+                                            match temp.refresh().await {
+                                                Ok(()) => {
+                                                    info!(session = %session_id, "token refreshed; updating session and reconnecting");
+                                                    let mut guard = session.auth.lock();
+                                                    if let AuthState::Authenticated { ref mut oauth, .. } = *guard {
+                                                        oauth.access_token = temp.access_token.clone();
+                                                        oauth.refresh_token = temp.refresh_token.clone();
+                                                        oauth.dpop_nonce = temp.dpop_nonce.clone();
+                                                    }
+                                                    drop(guard);
+                                                    session.request_reconnect();
+                                                    refreshed = true;
+                                                }
+                                                Err(e) => {
+                                                    warn!(session = %session_id, "token refresh failed: {e:#}; falling back to guest");
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if refreshed {
+                                        break 'bridge;
+                                    }
                                     warn!("SASL authentication failed; proceeding as guest");
                                     auth_creds = None;
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;

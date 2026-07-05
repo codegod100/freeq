@@ -65,9 +65,9 @@ html,body{height:100dvh;overflow:hidden}
     </div>
     <div class="column" style="display:flex;flex-direction:column;min-height:0">
       <div id="messages" class="px-3 py-2">{{initial_messages_html|safe}}</div>
-      <form id="send-form" data-signals="{msg:''}" data-on:submit="@post('/chat/{{channel}}/send')" data-signals-merge class="field has-addons mb-0 px-2 py-2" style="border-top:1px solid var(--bulma-border);flex-shrink:0">
-        <div class="control is-expanded"><input class="input is-small" type="text" name="msg" placeholder="Send to #{{channel}}…" autocomplete="off" autofocus data-bind:msg></div>
-        <div class="control"><button class="button is-small is-link" type="submit">Send</button></div>
+      <form id="send-form" data-signals="{msg:'',uploading:false}" data-on:submit="@post('/chat/{{channel}}/send')" data-signals-merge class="field has-addons mb-0 px-2 py-2" style="border-top:1px solid var(--bulma-border);flex-shrink:0">
+        <div class="control is-expanded"><input class="input is-small" type="text" name="msg" placeholder="Send to #{{channel}}…" autocomplete="off" autofocus data-bind:msg data-attr:disabled="$uploading" data-attr:placeholder="$uploading ? 'Uploading image…' : 'Send to #{{channel}}…'"></div>
+        <div class="control"><button class="button is-small is-link" type="submit" data-attr:disabled="$uploading">Send</button></div>
         <div class="control"><button class="button is-small is-dark" type="button" data-on:click="@post('/chat/{{channel}}/part')">x</button></div>
       </form>
     </div>
@@ -84,6 +84,7 @@ html,body{height:100dvh;overflow:hidden}
 </div>
 <script>
 (function(){var m=document.getElementById('messages');if(m){requestAnimationFrame(function(){requestAnimationFrame(function(){m.scrollTop=m.scrollHeight})});new MutationObserver(function(){m.scrollTop=m.scrollHeight}).observe(m,{childList:!0})}})();
+(function(){var inp=document.querySelector('#send-form input[name=msg]'),form=document.getElementById('send-form');if(!inp||!form)return;inp.addEventListener('paste',function(e){var items=e.clipboardData&&e.clipboardData.items;if(!items)return;for(var i=0;i<items.length;i++){if(items[i].type.indexOf('image/')!==0)continue;var file=items[i].getAsFile();if(!file)continue;e.preventDefault();form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:true}));var fd=new FormData;fd.append('file',file,'paste.'+(items[i].type.split('/')[1]||'png'));fd.append('channel','#{{channel}}');fetch('/upload',{method:'POST',body:fd}).then(function(r){var ct=r.headers.get('content-type')||'';var p=ct.includes('json')?r.json():r.text().then(function(t){throw new Error(t||'Upload failed')});return p.then(function(j){if(!r.ok)throw new Error(j.message||j.error||'Upload failed');return j.url})}).then(function(url){var start=inp.selectionStart||0,end=inp.selectionEnd||0,t=inp.value;inp.value=t.slice(0,start)+url+' '+t.slice(end);var pos=start+url.length+1;inp.setSelectionRange(pos,pos)}).catch(function(err){alert('Upload failed: '+err.message)}).finally(function(){form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:false}));inp.focus()});return}})})();
 (function(){
   var s=localStorage.getItem('freeq_handle');
   function connect(){

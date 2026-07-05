@@ -31,18 +31,25 @@ pub struct OAuthSession {
     pub did: String,
     pub handle: String,
     pub access_token: String,
+    /// Refresh token for renewing the access token when it expires.
+    pub refresh_token: Option<String>,
+    /// Token endpoint URL for refresh requests.
+    pub token_endpoint: String,
+    /// OAuth client_id used during authorization.
+    pub client_id: String,
     pub pds_url: String,
     pub dpop_key: DpopKey,
     /// DPoP nonce for the PDS (discovered during token exchange or pre-flight).
     pub dpop_nonce: Option<String>,
 }
-
-/// Serializable form of an OAuth session for disk caching.
 #[derive(Serialize, Deserialize)]
 struct CachedSession {
     did: String,
     handle: String,
     access_token: String,
+    refresh_token: Option<String>,
+    token_endpoint: String,
+    client_id: String,
     pds_url: String,
     dpop_key: String,
     dpop_nonce: Option<String>,
@@ -58,6 +65,9 @@ impl OAuthSession {
             did: self.did.clone(),
             handle: self.handle.clone(),
             access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            token_endpoint: self.token_endpoint.clone(),
+            client_id: self.client_id.clone(),
             pds_url: self.pds_url.clone(),
             dpop_key: self.dpop_key.to_base64url(),
             dpop_nonce: self.dpop_nonce.clone(),
@@ -91,6 +101,9 @@ impl OAuthSession {
             did: self.did.clone(),
             handle: self.handle.clone(),
             access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            token_endpoint: self.token_endpoint.clone(),
+            client_id: self.client_id.clone(),
             pds_url: self.pds_url.clone(),
             dpop_key: self.dpop_key.to_base64url(),
             dpop_nonce: self.dpop_nonce.clone(),
@@ -135,6 +148,9 @@ impl OAuthSession {
             did: cached.did,
             handle: cached.handle,
             access_token: cached.access_token,
+            refresh_token: cached.refresh_token,
+            token_endpoint: cached.token_endpoint,
+            client_id: cached.client_id,
             pds_url: cached.pds_url,
             dpop_key,
             dpop_nonce: cached.dpop_nonce,
@@ -163,6 +179,9 @@ impl OAuthSession {
             did: cached.did,
             handle: cached.handle,
             access_token: cached.access_token,
+            refresh_token: cached.refresh_token,
+            token_endpoint: cached.token_endpoint,
+            client_id: cached.client_id,
             pds_url: cached.pds_url,
             dpop_key,
             dpop_nonce: cached.dpop_nonce,
@@ -199,6 +218,104 @@ impl OAuthSession {
         }
 
         Ok(self)
+    }
+
+    /// Refresh the access token using the stored refresh token.
+    ///
+    /// Calls the token endpoint with `grant_type=refresh_token`. Updates
+    /// `access_token`, `refresh_token` (if the server issued a new one),
+    /// and `dpop_nonce` in place. Returns `Ok(())` on success.
+    ///
+    /// Fails if no refresh token is available or the token endpoint
+    /// rejects the request.
+    pub async fn refresh(&mut self) -> Result<()> {
+        let rt = self
+            .refresh_token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No refresh token available"))?;
+
+        let client = reqwest::Client::new();
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", rt.as_str()),
+            ("client_id", self.client_id.as_str()),
+        ];
+
+        let dpop_proof = self.dpop_key.proof("POST", &self.token_endpoint, self.dpop_nonce.as_deref(), None)?;
+        let resp = client
+            .post(&self.token_endpoint)
+            .header("DPoP", &dpop_proof)
+            .form(&params)
+            .send()
+            .await
+            .context("Token refresh request failed")?;
+
+        // Capture DPoP nonce from response headers
+        if let Some(nonce) = resp
+            .headers()
+            .get("dpop-nonce")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.dpop_nonce = Some(nonce.to_string());
+        }
+
+        // Handle use_dpop_nonce retry
+        let status = resp.status();
+        if (status.as_u16() == 400 || status.as_u16() == 401) && self.dpop_nonce.is_some() {
+            let dpop_proof_retry = self.dpop_key.proof(
+                "POST",
+                &self.token_endpoint,
+                self.dpop_nonce.as_deref(),
+                None,
+            )?;
+            let resp2 = client
+                .post(&self.token_endpoint)
+                .header("DPoP", &dpop_proof_retry)
+                .form(&params)
+                .send()
+                .await
+                .context("Token refresh retry failed")?;
+
+            if !resp2.status().is_success() {
+                let status = resp2.status();
+                let text = resp2.text().await.unwrap_or_default();
+                anyhow::bail!("Token refresh failed ({status}): {text}");
+            }
+
+            // Update DPoP nonce from retry response
+            if let Some(nonce) = resp2
+                .headers()
+                .get("dpop-nonce")
+                .and_then(|v| v.to_str().ok())
+            {
+                self.dpop_nonce = Some(nonce.to_string());
+            }
+
+            let token_resp: TokenResponse = resp2
+                .json()
+                .await
+                .context("Failed to parse token refresh response")?;
+            self.access_token = token_resp.access_token;
+            if token_resp.refresh_token.is_some() {
+                self.refresh_token = token_resp.refresh_token;
+            }
+            return Ok(());
+        }
+
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Token refresh failed ({status}): {text}");
+        }
+
+        let token_resp: TokenResponse = resp
+            .json()
+            .await
+            .context("Failed to parse token refresh response")?;
+        self.access_token = token_resp.access_token;
+        if token_resp.refresh_token.is_some() {
+            self.refresh_token = token_resp.refresh_token;
+        }
+        Ok(())
     }
 }
 
@@ -250,6 +367,8 @@ struct ProtectedResourceMetadata {
 #[derive(Debug, Clone, Deserialize)]
 struct TokenResponse {
     access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
     #[serde(default)]
     sub: Option<String>,
 }
@@ -461,10 +580,8 @@ impl PreparedLogin {
         }
         self.exchange_and_finish(code).await
     }
-
-    /// Shared token exchange + session construction.
     async fn exchange_and_finish(self, auth_code: &str) -> Result<OAuthSession> {
-        let (access_token, token_did) = exchange_code(
+        let (access_token, refresh_token, token_did) = exchange_code(
             &self.token_endpoint,
             auth_code,
             &self.code_verifier,
@@ -478,11 +595,14 @@ impl PreparedLogin {
 
         let dpop_nonce = probe_dpop_nonce(&self.pds_url, &access_token, &self.dpop_key).await;
 
-        tracing::info!(did = %self.did, dpop_nonce = ?dpop_nonce, "OAuth login successful");
+        tracing::info!(did = %self.did, dpop_nonce = ?dpop_nonce, has_refresh = refresh_token.is_some(), "OAuth login successful");
         Ok(OAuthSession {
             did: self.did,
             handle: self.handle,
             access_token,
+            refresh_token,
+            token_endpoint: self.token_endpoint,
+            client_id: self.client_id.clone(),
             pds_url: self.pds_url,
             dpop_key: self.dpop_key,
             dpop_nonce,
@@ -801,7 +921,7 @@ async fn exchange_code(
     redirect_uri: &str,
     client_id: &str,
     dpop_key: &DpopKey,
-) -> Result<(String, Option<String>)> {
+) -> Result<(String, Option<String>, Option<String>)> {
     let client = reqwest::Client::new();
 
     let params = [
@@ -851,7 +971,7 @@ async fn exchange_code(
             .json()
             .await
             .context("Failed to parse token response")?;
-        return Ok((token_resp.access_token, token_resp.sub));
+        return Ok((token_resp.access_token, token_resp.refresh_token, token_resp.sub));
     }
 
     if !status.is_success() {
@@ -863,7 +983,7 @@ async fn exchange_code(
         .json()
         .await
         .context("Failed to parse token response")?;
-    Ok((token_resp.access_token, token_resp.sub))
+    Ok((token_resp.access_token, token_resp.refresh_token, token_resp.sub))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
@@ -1022,6 +1142,9 @@ mod tests {
             did: "did:plc:test".to_string(),
             handle: "alice.test".to_string(),
             access_token: access_token.to_string(),
+            refresh_token: None,
+            token_endpoint: format!("{pds_url}/token"),
+            client_id: "http://localhost/.well-known/oauth-client-metadata".to_string(),
             pds_url,
             dpop_key: DpopKey::generate(),
             dpop_nonce: None,
@@ -1415,7 +1538,7 @@ mod tests {
         );
         let base = spawn_app(router).await;
         let key = DpopKey::generate();
-        let (token, sub) = exchange_code(
+        let (token, _refresh, sub) = exchange_code(
             &format!("{base}/token"),
             "auth-code-1",
             "verifier",
@@ -1434,7 +1557,7 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let base = spawn_app(mock_token_endpoint("server-nonce-1", hits.clone())).await;
         let key = DpopKey::generate();
-        let (token, sub) = exchange_code(
+        let (token, _refresh, sub) = exchange_code(
             &format!("{base}/token"),
             "code",
             "verifier",
