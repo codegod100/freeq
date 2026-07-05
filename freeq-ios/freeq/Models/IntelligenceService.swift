@@ -50,6 +50,37 @@ final class IntelligenceService {
         return nil
     }
 
+    /// Stream a "catch me up" summary token-by-token via `onPartial`, so the UI
+    /// can type it out live — the signature on-device-intelligence feel.
+    /// Returns the final text (or nil if unavailable).
+    func summarizeStreaming(_ messages: [ChatMessage], in channel: String,
+                            onPartial: @escaping (String) -> Void) async -> String? {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, *) {
+            guard case .available = SystemLanguageModel.default.availability else { return nil }
+            let transcript = Self.transcript(messages.suffix(40))
+            guard transcript.count > 1 else { return nil }
+            let session = LanguageModelSession(instructions: """
+                You summarize a group chat for someone catching up after being away. \
+                Reply with ONE short, plain sentence naming who did or asked what. \
+                No preamble, no markdown, no quotes.
+                """)
+            do {
+                let stream = session.streamResponse(to: "Channel \(channel):\n" + transcript.joined(separator: "\n"))
+                var last = ""
+                for try await partial in stream {
+                    last = partial.content
+                    onPartial(last)
+                }
+                return last.trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch {
+                return nil
+            }
+        }
+        #endif
+        return nil
+    }
+
     /// Up to three short, natural suggested replies to the latest messages.
     /// Empty when unavailable or the last message is the user's own.
     func smartReplies(_ messages: [ChatMessage], myNick: String) async -> [String] {

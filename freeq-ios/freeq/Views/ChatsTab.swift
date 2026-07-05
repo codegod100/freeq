@@ -157,7 +157,11 @@ struct ChatsTab: View {
         case .channels: source = appState.channels
         case .dms:      source = appState.dmBuffers
         }
-        let filtered = source.filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
+        let filtered = source.filter {
+            !$0.name.trimmingCharacters(in: .whitespaces).isEmpty
+            // Hide DMs from people you've blocked.
+            && !(mode == .dms && appState.isBlocked(nick: $0.name))
+        }
         switch mode {
         case .channels:
             // Channels are durable, named rooms — alphabetical is the

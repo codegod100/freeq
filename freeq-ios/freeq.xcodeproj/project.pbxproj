@@ -77,6 +77,7 @@
 		DD3E3EE1D2C986B904CB5D82 /* PhotoPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C517F4469AC28926160BA7 /* PhotoPicker.swift */; };
 		DEFDB6EC3FA34DAA0295C7CA /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B28D17294C06F964661A5E97 /* KeychainHelper.swift */; };
 		DF5C0556FF5AC209D6B65CC2 /* VerifiedProofSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 959D2D11B77277E11CBCB348 /* VerifiedProofSheet.swift */; };
+		E51D087B116EE63A4FA6AAF9 /* Safety.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26DE5AC40702B5E286A3DED3 /* Safety.swift */; };
 		E54F6F22FE39E885EFCBE309 /* SettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B107817CBF9268860E40AC0 /* SettingsTab.swift */; };
 		E5597772C5D44A3D46FD0F8A /* WatchPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */; };
 		E623701B0C3975E1362DFE23 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C056AC763D7872C28041B3E /* Theme.swift */; };
@@ -115,6 +116,7 @@
 		1D97CC3F5A8E1F52F2C940FF /* BufferListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferListView.swift; sourceTree = "<group>"; };
 		1DE07EAC6B16A20177585C57 /* ImageLightbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageLightbox.swift; sourceTree = "<group>"; };
 		25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntelligenceService.swift; sourceTree = "<group>"; };
+		26DE5AC40702B5E286A3DED3 /* Safety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Safety.swift; sourceTree = "<group>"; };
 		27BC2996888A988136F5405B /* freeqTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = freeqTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		34D75D9768B423C15C80F711 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		39851CF7C369A289DB8E3E93 /* MemberListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberListView.swift; sourceTree = "<group>"; };
@@ -308,6 +310,7 @@
 				81C517F4469AC28926160BA7 /* PhotoPicker.swift */,
 				9DF1180A85E6505A55D9F225 /* PinnedMessagesView.swift */,
 				607BA33EFE4FD90620B86761 /* PresenceDot.swift */,
+				26DE5AC40702B5E286A3DED3 /* Safety.swift */,
 				F40F27BC70CA9C7E4307D2A3 /* SearchSheet.swift */,
 				5B107817CBF9268860E40AC0 /* SettingsTab.swift */,
 				34D75D9768B423C15C80F711 /* SidebarView.swift */,
@@ -614,6 +617,7 @@
 				DD3E3EE1D2C986B904CB5D82 /* PhotoPicker.swift in Sources */,
 				014D479059F416C096AC45EF /* PinnedMessagesView.swift in Sources */,
 				F09302BFFFB8EAEBFFECBE57 /* PresenceDot.swift in Sources */,
+				E51D087B116EE63A4FA6AAF9 /* Safety.swift in Sources */,
 				B792746D241CB91D4B15E377 /* SearchSheet.swift in Sources */,
 				7CE09F1FC8607BC12D448A0D /* ServerConfig.swift in Sources */,
 				E54F6F22FE39E885EFCBE309 /* SettingsTab.swift in Sources */,

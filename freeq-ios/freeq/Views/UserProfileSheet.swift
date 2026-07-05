@@ -23,6 +23,7 @@ struct UserProfileSheet: View {
     /// What freeq knows about this identity — presence, nick, shared channels.
     @State private var freeqIdentity: FreeqIdentity? = nil
     @State private var showProof = false
+    @State private var reportSource: ReportTarget? = nil
 
     /// True when this is a stranger from the graph, not a freeq member.
     private var isDirect: Bool { directActor != nil }
@@ -190,6 +191,33 @@ struct UserProfileSheet: View {
                                     .cornerRadius(10)
                                 }
                             }
+
+                            // Safety — block / report (not on your own profile).
+                            if nick.lowercased() != appState.nick.lowercased() {
+                                HStack(spacing: 12) {
+                                    Button(role: .destructive) {
+                                        reportSource = ReportTarget(nick: freeqIdentity?.nick ?? nick, did: resolvedActor)
+                                    } label: {
+                                        Label("Report", systemImage: "flag")
+                                            .font(.fqFootnote.weight(.medium))
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 10)
+                                            .background(Theme.bgTertiary, in: RoundedRectangle(cornerRadius: 10))
+                                            .foregroundColor(Theme.danger)
+                                    }
+                                    Button {
+                                        appState.blockUser(nick: freeqIdentity?.nick ?? nick, did: resolvedActor)
+                                        dismiss()
+                                    } label: {
+                                        Label("Block", systemImage: "hand.raised")
+                                            .font(.fqFootnote.weight(.medium))
+                                            .frame(maxWidth: .infinity)
+                                            .padding(.vertical, 10)
+                                            .background(Theme.bgTertiary, in: RoundedRectangle(cornerRadius: 10))
+                                            .foregroundColor(Theme.danger)
+                                    }
+                                }
+                            }
                         }
                         .padding(.horizontal, 24)
 
@@ -241,6 +269,10 @@ struct UserProfileSheet: View {
             if let actor = resolvedActor, actor.hasPrefix("did:") {
                 VerifiedProofSheet(did: actor, handle: profile?.handle, displayName: profile?.displayName)
             }
+        }
+        .reportDialog($reportSource) { target, reason in
+            appState.reportUser(nick: target.nick, did: target.did, reason: reason)
+            dismiss()
         }
     }
 

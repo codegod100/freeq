@@ -344,6 +344,41 @@ class AppState: ObservableObject {
     /// Channels pane of ChatsTab to push that channel.
     @Published var pendingChannelNav: String? = nil
 
+    // ── Safety: blocking & reporting (App Store UGC requirement) ──
+    // Blocked by DID when we have one (stable across nick changes); by
+    // lowercased nick otherwise. Blocked people's messages are hidden and their
+    // DMs suppressed.
+    @Published var blockedDIDs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "freeq.blockedDIDs") ?? []) {
+        didSet { UserDefaults.standard.set(Array(blockedDIDs), forKey: "freeq.blockedDIDs") }
+    }
+    @Published var blockedNicks: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "freeq.blockedNicks") ?? []) {
+        didSet { UserDefaults.standard.set(Array(blockedNicks), forKey: "freeq.blockedNicks") }
+    }
+
+    func isBlocked(nick: String, did: String? = nil) -> Bool {
+        if let did, !did.isEmpty, blockedDIDs.contains(did) { return true }
+        return blockedNicks.contains(nick.lowercased())
+    }
+
+    func blockUser(nick: String, did: String?) {
+        if let did, !did.isEmpty { blockedDIDs.insert(did) }
+        blockedNicks.insert(nick.lowercased())
+    }
+
+    func unblockUser(nick: String?, did: String?) {
+        if let did { blockedDIDs.remove(did) }
+        if let nick { blockedNicks.remove(nick.lowercased()) }
+    }
+
+    /// Record a user's report of a message/user. There's no server report
+    /// endpoint yet, so we hide the content immediately and block the author —
+    /// report-and-block — which is the user-visible remedy App Review requires.
+    /// The reason is logged for the eventual moderation pipeline.
+    func reportUser(nick: String, did: String?, reason: String) {
+        authLog.notice("user report: nick=\(nick, privacy: .public) reason=\(reason, privacy: .public)")
+        blockUser(nick: nick, did: did)
+    }
+
     // ── AV (voice/video calls) ──
     @Published var isInCall: Bool = false
     @Published var isMuted: Bool = false

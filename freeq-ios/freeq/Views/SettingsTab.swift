@@ -120,6 +120,36 @@ struct SettingsTab: View {
                             .foregroundColor(Theme.textMuted)
                     }
 
+                    // Safety
+                    Section {
+                        NavigationLink {
+                            BlockedUsersView()
+                        } label: {
+                            HStack {
+                                Label("Blocked", systemImage: "hand.raised")
+                                    .foregroundColor(Theme.textPrimary)
+                                Spacer()
+                                if !appState.blockedNicks.isEmpty {
+                                    Text("\(appState.blockedNicks.count)")
+                                        .font(.fqFootnote)
+                                        .foregroundColor(Theme.textSecondary)
+                                }
+                            }
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+
+                        NavigationLink {
+                            CommunityGuidelinesView()
+                        } label: {
+                            Label("Community Guidelines", systemImage: "checkmark.shield")
+                                .foregroundColor(Theme.textPrimary)
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+                    } header: {
+                        Text("Safety")
+                            .foregroundColor(Theme.textMuted)
+                    }
+
                     // About
                     Section {
                         HStack {

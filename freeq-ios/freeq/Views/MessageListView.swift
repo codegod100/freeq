@@ -7,6 +7,7 @@ struct MessageListView: View {
     @State private var emojiPickerMessage: ChatMessage? = nil
     @State private var profileTarget: ProfileNickTarget? = nil
     @State private var proofTarget: ProofTarget? = nil
+    @State private var reportSource: ReportTarget? = nil
     @State private var threadMessage: ChatMessage? = nil
     @StateObject private var avatarCache = AvatarCache.shared
 
@@ -77,6 +78,9 @@ struct MessageListView: View {
 
                             if msg.from.isEmpty {
                                 systemMessage(msg)
+                            } else if appState.isBlocked(nick: msg.from, did: channel.memberInfo(for: msg.from)?.did) {
+                                // Hidden — you blocked this person.
+                                EmptyView()
                             } else if msg.isDeleted {
                                 deletedMessage(msg, showHeader: showHeader)
                             } else {
@@ -235,6 +239,10 @@ struct MessageListView: View {
         .sheet(item: $proofTarget) { target in
             VerifiedProofSheet(did: target.did, handle: target.handle, msgId: target.msgId)
         }
+        .reportDialog($reportSource) { target, reason in
+            appState.reportUser(nick: target.nick, did: target.did, reason: reason)
+            ToastManager.shared.show("Reported & blocked", icon: "flag.fill")
+        }
     }
 
     // MARK: - Scroll
@@ -354,6 +362,24 @@ struct MessageListView: View {
             ToastManager.shared.show("Message ID copied", icon: "number")
         }) {
             Label("Copy Message ID", systemImage: "number")
+        }
+
+        // Safety — not for your own messages.
+        if msg.from.lowercased() != appState.nick.lowercased() {
+            Divider()
+            Button(role: .destructive, action: {
+                reportSource = ReportTarget(nick: msg.from,
+                                            did: channel.memberInfo(for: msg.from)?.did,
+                                            text: msg.text)
+            }) {
+                Label("Report…", systemImage: "flag")
+            }
+            Button(role: .destructive, action: {
+                appState.blockUser(nick: msg.from, did: channel.memberInfo(for: msg.from)?.did)
+                ToastManager.shared.show("Blocked \(msg.from)", icon: "hand.raised.fill")
+            }) {
+                Label("Block \(msg.from)", systemImage: "hand.raised")
+            }
         }
     }
 

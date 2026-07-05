@@ -213,11 +213,15 @@ struct ChatDetailView: View {
         summarizing = true
         showingSummary = true
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        Task {
-            let result = await IntelligenceService.shared.summarize(messages, in: channelName)
-            await MainActor.run {
-                summaryText = result ?? "Couldn't summarize this one."
+        Task { @MainActor in
+            // Stream it — the sentence types itself out live.
+            let result = await IntelligenceService.shared.summarizeStreaming(messages, in: channelName) { partial in
+                summaryText = partial
                 summarizing = false
+            }
+            summarizing = false
+            if (summaryText?.isEmpty ?? true) {
+                summaryText = result ?? "Couldn't summarize this one."
             }
         }
     }

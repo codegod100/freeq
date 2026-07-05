@@ -259,10 +259,17 @@ struct ConnectView: View {
                         Color.clear.frame(height: 120).id("bottomPadding")
 
                         // Footer
-                        Text("Open source · IRC compatible · AT Protocol identity")
-                            .font(.fqCaption2)
-                            .foregroundColor(Theme.textMuted)
-                            .padding(.bottom, 16)
+                        VStack(spacing: 6) {
+                            Text("By continuing, you agree there is zero tolerance for objectionable content or abusive behavior.")
+                                .font(.fqCaption2)
+                                .foregroundColor(Theme.textMuted)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 32)
+                            Text("Open source · IRC compatible · AT Protocol identity")
+                                .font(.fqCaption2)
+                                .foregroundColor(Theme.textMuted.opacity(0.7))
+                        }
+                        .padding(.bottom, 16)
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)

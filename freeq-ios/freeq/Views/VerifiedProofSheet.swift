@@ -15,6 +15,8 @@ struct VerifiedProofSheet: View {
     @State private var key: SigningKeyInfo? = nil
     @State private var loading = true
     @State private var copied = false
+    @State private var verify: VerifyResult? = nil
+    @State private var verifying = false
 
     var body: some View {
         ZStack {
@@ -64,17 +66,7 @@ struct VerifiedProofSheet: View {
                     }
 
                     if msgId != nil {
-                        HStack(spacing: 8) {
-                            Image(systemName: "checkmark.shield.fill")
-                                .foregroundColor(Theme.verify)
-                            Text("This message was cryptographically signed by this key.")
-                                .font(.fqCaption)
-                                .foregroundColor(Theme.textSecondary)
-                            Spacer()
-                        }
-                        .padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .glassCard(.thin)
+                        messageVerdict
                     }
 
                     Spacer(minLength: 8)
@@ -85,6 +77,33 @@ struct VerifiedProofSheet: View {
         .presentationDetents([.medium, .large])
         .presentationBackground(.ultraThinMaterial)
         .task { await loadKey() }
+        .task { await loadVerification() }
+    }
+
+    /// The honest, checked result for a specific message — not an assertion.
+    @ViewBuilder private var messageVerdict: some View {
+        HStack(spacing: 8) {
+            if verifying {
+                ProgressView().scaleEffect(0.7).tint(Theme.textMuted)
+                Text("Checking this message's signature…")
+                    .font(.fqCaption).foregroundColor(Theme.textMuted)
+            } else if let v = verify {
+                Image(systemName: v.valid ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                    .foregroundColor(v.valid ? Theme.verify : Theme.warning)
+                Text(v.summary)
+                    .font(.fqCaption)
+                    .foregroundColor(v.valid ? Theme.textSecondary : Theme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Image(systemName: "shield").foregroundColor(Theme.textMuted)
+                Text("Signature status unavailable.")
+                    .font(.fqCaption).foregroundColor(Theme.textMuted)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassCard(.thin)
     }
 
     private var seal: some View {
@@ -145,6 +164,30 @@ struct VerifiedProofSheet: View {
         .glassCard(.thin)
     }
 
+    /// Ask the server to actually verify the message's ed25519 signature over
+    /// its canonical form, and report exactly what came back.
+    private func loadVerification() async {
+        guard let msgId else { return }
+        verifying = true
+        defer { verifying = false }
+        let base = ServerConfig.apiBaseUrl
+        let enc = msgId.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? msgId
+        guard let url = URL(string: "\(base)/api/v1/verify/\(enc)") else { return }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+            // The server returns a `verification` object (or null if unsigned).
+            let v = json["verification"] as? [String: Any]
+            verify = VerifyResult(
+                valid: v?["valid"] as? Bool ?? false,
+                verifiedBy: v?["verified_by"] as? String ?? "none"
+            )
+        } catch {
+            // Leave verify nil → "unavailable" rather than claiming anything.
+        }
+    }
+
     private func loadKey() async {
         let base = ServerConfig.apiBaseUrl
         let enc = did.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? did
@@ -162,6 +205,25 @@ struct VerifiedProofSheet: View {
             loading = false
         } catch {
             loading = false
+        }
+    }
+}
+
+/// The checked outcome of verifying a specific message's signature.
+struct VerifyResult {
+    let valid: Bool
+    let verifiedBy: String   // "client-session-key" | "server-key" | "none"
+
+    var summary: String {
+        switch (valid, verifiedBy) {
+        case (true, "client-session-key"):
+            return "Verified — this message was signed on the sender's own device."
+        case (true, "server-key"):
+            return "Verified — signed by the server on the sender's behalf."
+        case (true, _):
+            return "Verified — the signature checks out."
+        default:
+            return "This message's signature could not be verified."
         }
     }
 }

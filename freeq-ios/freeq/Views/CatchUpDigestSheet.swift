@@ -41,6 +41,13 @@ struct CatchUpDigestSheet: View {
                                 }
                                 .buttonStyle(.plain)
                             }
+                            HStack(spacing: 6) {
+                                Image(systemName: "lock.fill").font(.system(size: 10))
+                                Text("Summarized on your device with Apple Intelligence — nothing left the phone.")
+                                    .font(.fqCaption2)
+                            }
+                            .foregroundColor(Theme.textMuted)
+                            .padding(.top, 6)
                         }
                         .padding(Theme.Space.lg)
                     }
