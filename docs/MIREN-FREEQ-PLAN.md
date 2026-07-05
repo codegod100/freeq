@@ -61,6 +61,32 @@ Hetzner console → ubuntu-2gb-ash-1 → Rescale, **with disk increase**:
 - ~2–5 min downtime (site, new.freeq.at, auth broker); everything
   auto-restarts (systemd + Docker restart policies). Verify all three after.
 
+## EXECUTION LOG (2026-07-05, no-resize variant)
+
+Ran Phase 1 partially, hit two real blockers (see `QUEUE-FOR-CHAD.md #00`).
+Verified facts to save the next session time:
+- `miren server install --skip-system-check` works on 2 GB. Ingress
+  override via systemd drop-in `/etc/systemd/system/miren.service.d/override.conf`:
+  `MIREN_INGRESS_MODE=behind-proxy-http`, `MIREN_INGRESS_ADDRESS=127.0.0.1:8090`.
+  Idle footprint ~223 MB; prod broker/site unaffected.
+- Local cluster: `-C local`. Working app.toml keys confirmed by trial:
+  `[services.web] port=`, `[services.web.concurrency] mode="fixed" num_instances=1`
+  (REQUIRED before disks), `[[services.web.disks]] name/mount_path/size_gb`,
+  `[[services.web.env]] key/value`, `[build] dockerfile="Dockerfile"`.
+- `image = "..."` on the primary service is NOT enough — miren still runs
+  stack detection and a build. A `[build] dockerfile=` with a `FROM <img>`
+  rebase is accepted, but BuildKit pulls the base from a **registry**, not
+  the local containerd (importing into containerd ns `miren` didn't help).
+- miren's built-in registry listens on :5000 but a plain `docker push
+  localhost:5000/...` reported success yet left an empty catalog and
+  BuildKit saw a zero-size descriptor. **Open problem:** the correct way to
+  get a pre-built image where miren's BuildKit can pull it (registry
+  auth/creds, or a sidecar registry). Cracking this = unattended,
+  prod-safe deploys without a Rust compile on the 2 GB box.
+- Cloud registration mints a pending reg but it doesn't surface in the
+  Freeq-org console because the box CLI has no miren.cloud identity —
+  `miren login` on the box first, then `register`.
+
 ## Phase 1 — miren on the box, registered to the Freeq org
 
 1. `miren server install -n freeq` … with env overrides in the unit:

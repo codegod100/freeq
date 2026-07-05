@@ -3,6 +3,48 @@
 Ordered. Everything else from the top-10 is being executed autonomously
 (see git log + DESIGN-APP-OF-THE-YEAR.md matrix updates).
 
+## 00. Miren on the Hetzner box — INSTALLED; 2 things need you
+Goal (your ask): miren running on 87.99.152.98, CLI logged in there,
+managing all of freeq. Progress made autonomously (2026-07-05), stopped
+at two points that genuinely need you. Full plan: `docs/MIREN-FREEQ-PLAN.md`
+(minus the irc.freeq.at migration + box resize, which you excluded).
+
+**DONE & verified (prod never disrupted — broker/site/miren all healthy):**
+- `miren server` installed as systemd unit `miren` (`--skip-system-check`,
+  since the box is 2 GB/13 GB free vs miren's 4 GB/50 GB minimum). Ingress
+  set to `behind-proxy-http` on 127.0.0.1:8090 so **nginx keeps :443** and
+  coexists. API on :8443. Idle footprint ~223 MB, no pressure.
+- Local cluster works (`miren ... -C local`); app.toml schema worked out
+  (fixed concurrency + disks + env + `[build] dockerfile=`); the broker
+  image imports into miren's containerd fine.
+
+**BLOCKER 1 — cloud registration needs your approval (2 min).**
+`miren server register -n freeq` mints a pending registration but it
+**never appears in the Freeq-org Clusters page to approve** — because the
+box's CLI isn't logged into miren.cloud (its identity is blank). Fix:
+run `miren login` ON THE BOX (`ssh root@87.99.152.98`), approve the
+device code in your browser, THEN `miren server register -n freeq`; it'll
+show up under org-freeq for you to approve. Until this, the box cluster
+isn't in your console and can't be driven from your Mac.
+
+**BLOCKER 2 — how to get app images built, on a 2 GB box (your call).**
+Deploying the broker (or anything) under miren needs an image. Two paths:
+- (a) Let miren BUILD from source — but that's a Rust compile via BuildKit
+  on the 2 GB box **that also runs prod auth**; real OOM/thrash risk to
+  live sign-ins. I would only do this attended, watching prod. Safer if
+  you ever reconsider the resize.
+- (b) Deploy a PRE-BUILT image (no compile) — works in principle
+  (`[build] dockerfile` = a `FROM <img>` rebase), but miren's BuildKit
+  pulls the base from a registry, and miren's built-in registry on :5000
+  didn't accept a plain `docker push` (empty catalog / zero-size
+  descriptor). Needs figuring out miren's registry auth/push, or standing
+  up a small registry BuildKit can read. This is the unblock for
+  unattended, prod-safe miren deploys — worth cracking next session.
+
+Net: miren is *running* on the box; making it *manage* freeq is gated on
+(1) your login+approve, and (2) settling the image-build path. Nothing is
+half-deployed — the box is clean and all three prod services are healthy.
+
 ## 0. Auth broker — DONE (moved off miren to the Hetzner box)
 `freeq-auth-broker` now runs as a **Docker container on the Hetzner box**
 (87.99.152.98), not miren. Why: auth.freeq.at was on the miren *club* org
