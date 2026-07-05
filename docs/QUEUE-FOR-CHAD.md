@@ -3,6 +3,16 @@
 Ordered. Everything else from the top-10 is being executed autonomously
 (see git log + DESIGN-APP-OF-THE-YEAR.md matrix updates).
 
+## 0. Deploy the auth broker (enables Follow on iOS) — 5 min
+`freeq-auth-broker` gained `/api/graph/follow` + `/api/graph/unfollow`
+(commit 2ea6712): the broker performs follow/unfollow on the user's own
+PDS so clients never hold the DPoP-bound access token. Code is committed,
+`cargo test` green — **deliberately not deployed overnight** (a bad
+deploy would take down everyone's login). Deploy auth.freeq.at the usual
+way (git pull + cargo build --release + systemctl restart). The iOS
+Follow button is already shipped and feature-detects: it stays hidden
+until the broker answers, then just works. Nothing else to coordinate.
+
 ## 1. Sign in to the macOS app (2 min)
 The old broker token was dead server-side (broker 502s on it — S3). It's
 been cleared; the running build shows the sign-in screen. After this one
