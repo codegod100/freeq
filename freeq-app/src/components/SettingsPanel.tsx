@@ -21,6 +21,9 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
   const setShowJoinPart = useStore((s) => s.setShowJoinPart);
   const loadMedia = useStore((s) => s.loadExternalMedia);
   const setLoadMedia = useStore((s) => s.setLoadExternalMedia);
+  const blockedDids = useStore((s) => s.blockedDids);
+  const blockedNicks = useStore((s) => s.blockedNicks);
+  const unblockUser = useStore((s) => s.unblockUser);
 
   const [notifs, setNotifs] = useState(true);
   const [sounds, setSounds] = useState(true);
@@ -139,6 +142,33 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
             <p className="text-[11px] text-fg-dim leading-relaxed mt-1">
               When off, images from external URLs require a click to load. Prevents IP leakage via tracking pixels.
             </p>
+
+            <div className="pt-2">
+              <div className="text-sm text-fg-muted mb-1">Blocked users</div>
+              {blockedNicks.length === 0 && blockedDids.length === 0 ? (
+                <p className="text-[11px] text-fg-dim leading-relaxed">
+                  No blocked users. Block someone from their profile or a message&apos;s context menu.
+                </p>
+              ) : (
+                <div className="space-y-1">
+                  {blockedNicks.map((n) => (
+                    <BlockedUserRow key={n} id={n} onUnblock={() => unblockUser(n)} />
+                  ))}
+                  {blockedDids.map((d) => (
+                    <BlockedUserRow key={d} id={d} mono onUnblock={() => unblockUser(d)} />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-2 p-2 bg-bg-tertiary rounded-lg">
+              <p className="text-[11px] text-fg-dim leading-relaxed">
+                freeq has zero tolerance for objectionable content and abusive users.
+                Blocking hides someone immediately; reporting also flags them for review.
+                To escalate, email{' '}
+                <a href="mailto:abuse@freeq.at" className="text-accent hover:underline">abuse@freeq.at</a>.
+              </p>
+            </div>
           </Section>
 
           {/* Keyboard shortcuts */}
@@ -179,6 +209,19 @@ function Section({ title, children }: { title: string; children: React.ReactNode
     <div>
       <h3 className="text-[10px] uppercase tracking-widest text-fg-dim font-semibold mb-2">{title}</h3>
       <div className="space-y-2">{children}</div>
+    </div>
+  );
+}
+
+function BlockedUserRow({ id, mono, onUnblock }: { id: string; mono?: boolean; onUnblock: () => void }) {
+  return (
+    <div className="flex items-center justify-between text-sm gap-2">
+      <span className={`text-fg truncate ${mono ? 'font-mono text-xs' : ''}`} title={id}>
+        {id}
+      </span>
+      <button onClick={onUnblock} className="text-xs text-danger hover:underline shrink-0">
+        Unblock
+      </button>
     </div>
   );
 }

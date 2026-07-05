@@ -153,6 +153,8 @@ export interface Store {
   bookmarks: { channel: string; msgId: string; from: string; text: string; timestamp: Date }[];
   bookmarksPanelOpen: boolean;
   hiddenDMs: Set<string>; // lowercase nicks — hidden from sidebar but messages preserved
+  blockedDids: string[]; // blocked users by DID (authoritative — survives nick changes)
+  blockedNicks: string[]; // lowercase nicks — fallback for DID-less (guest) users
   searchOpen: boolean;
   scrollToMsgId: string | null;
   searchQuery: string;
@@ -234,6 +236,9 @@ export interface Store {
   toggleMuted: (channel: string) => void;
   hideDM: (nick: string) => void;
   unhideDM: (nick: string) => void;
+  blockUser: (nick: string, did?: string | null) => void;
+  unblockUser: (nickOrDid: string) => void;
+  isBlocked: (nick: string, did?: string | null) => boolean;
   isFavorite: (channel: string) => boolean;
   isMuted: (channel: string) => boolean;
   addBookmark: (channel: string, msgId: string, from: string, text: string, timestamp: Date) => void;
@@ -330,6 +335,8 @@ export const useStore = create<Store>((set, get) => ({
   bookmarks: safeJsonParse(localStorage.getItem('freeq-bookmarks'), []).map((b: any) => ({ ...b, timestamp: new Date(b.timestamp) })),
   bookmarksPanelOpen: false,
   hiddenDMs: new Set(safeJsonParse(localStorage.getItem('freeq-hidden-dms'), [])),
+  blockedDids: safeJsonParse(localStorage.getItem('freeq-blocked-dids'), []),
+  blockedNicks: safeJsonParse(localStorage.getItem('freeq-blocked-nicks'), []),
   searchOpen: false,
   scrollToMsgId: null,
   searchQuery: '',
@@ -396,7 +403,7 @@ export const useStore = create<Store>((set, get) => ({
     channelSettingsOpen: null,
     avSessions: new Map(),
     activeAvSession: null,
-    theme: s.theme, messageDensity: s.messageDensity, loadExternalMedia: s.loadExternalMedia, favorites: s.favorites, mutedChannels: s.mutedChannels, bookmarks: s.bookmarks, bookmarksPanelOpen: false, // preserve across reconnects
+    theme: s.theme, messageDensity: s.messageDensity, loadExternalMedia: s.loadExternalMedia, favorites: s.favorites, mutedChannels: s.mutedChannels, blockedDids: s.blockedDids, blockedNicks: s.blockedNicks, bookmarks: s.bookmarks, bookmarksPanelOpen: false, // preserve across reconnects
   })),
 
   // Channels
@@ -931,6 +938,34 @@ export const useStore = create<Store>((set, get) => ({
     localStorage.setItem('freeq-hidden-dms', JSON.stringify([...hidden]));
     return { hiddenDMs: hidden };
   }),
+  blockUser: (nick, did) => set((s) => {
+    // Block by DID when we have one (survives nick changes); nick fallback for guests.
+    if (did) {
+      if (s.blockedDids.includes(did)) return {};
+      const blockedDids = [...s.blockedDids, did];
+      localStorage.setItem('freeq-blocked-dids', JSON.stringify(blockedDids));
+      return { blockedDids };
+    }
+    const key = nick.toLowerCase();
+    if (s.blockedNicks.includes(key)) return {};
+    const blockedNicks = [...s.blockedNicks, key];
+    localStorage.setItem('freeq-blocked-nicks', JSON.stringify(blockedNicks));
+    return { blockedNicks };
+  }),
+  unblockUser: (nickOrDid) => set((s) => {
+    const key = nickOrDid.toLowerCase();
+    const blockedDids = s.blockedDids.filter((d) => d !== nickOrDid);
+    const blockedNicks = s.blockedNicks.filter((n) => n !== key);
+    if (blockedDids.length === s.blockedDids.length && blockedNicks.length === s.blockedNicks.length) return {};
+    localStorage.setItem('freeq-blocked-dids', JSON.stringify(blockedDids));
+    localStorage.setItem('freeq-blocked-nicks', JSON.stringify(blockedNicks));
+    return { blockedDids, blockedNicks };
+  }),
+  isBlocked: (nick, did) => {
+    const s = get();
+    if (did && s.blockedDids.includes(did)) return true;
+    return s.blockedNicks.includes(nick.toLowerCase());
+  },
   isFavorite: (channel) => get().favorites.has(channel.toLowerCase()),
   isMuted: (channel) => get().mutedChannels.has(channel.toLowerCase()),
   addBookmark: (channel, msgId, from, text, timestamp) => set((s) => {

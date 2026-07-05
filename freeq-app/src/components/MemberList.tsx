@@ -4,6 +4,7 @@ import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles'
 import { UserPopover } from './UserPopover';
 import { sendWhois } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
+import { parseAwayStatus } from '../lib/status';
 import * as e2ee from '../lib/e2ee';
 
 const NICK_COLORS = [
@@ -210,12 +211,10 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
         <div className="text-xs text-fg-dim mt-1">
           {presence.online ? (
             presence.away ? (
-              <span className="text-warning">Away{presence.away !== '' ? `: ${(() => {
-                try {
-                  const j = JSON.parse(presence.away!);
-                  return j.status || j.state || presence.away;
-                } catch { return presence.away; }
-              })()}` : ''}</span>
+              <span className="text-warning">Away{(() => {
+                const status = parseAwayStatus(presence.away);
+                return status ? `: ${status}` : '';
+              })()}</span>
             ) : (
               <span className="text-success">Online</span>
             )

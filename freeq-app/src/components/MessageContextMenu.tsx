@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore, type Message } from '../store';
 import { sendDelete, pinMessage, unpinMessage, getNick } from '../irc/client';
+import { REPORT_REASONS, reportUser, type ReportReason } from '../lib/safety';
 import { showToast } from './Toast';
 
 interface Props {
@@ -16,6 +17,7 @@ interface Props {
 
 export function MessageContextMenu({ msg, channel, position, onClose, onReply, onEdit, onThread, onReact }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const [showReportReasons, setShowReportReasons] = useState(false);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -45,6 +47,23 @@ export function MessageContextMenu({ msg, channel, position, onClose, onReply, o
     if (confirm('Delete this message?')) {
       sendDelete(channel, msg.id);
     }
+    onClose();
+  };
+
+  // DID for the sender — member list first, `account` tag fallback
+  const senderDid = () =>
+    useStore.getState().channels.get(channel.toLowerCase())?.members.get(msg.from.toLowerCase())?.did
+    || msg.tags?.account;
+
+  const handleBlock = () => {
+    useStore.getState().blockUser(msg.from, senderDid());
+    showToast(`Blocked ${msg.from}`, 'success', 2000);
+    onClose();
+  };
+
+  const handleReport = (reason: ReportReason) => {
+    reportUser(msg.from, senderDid(), reason, { channel, msgid: msg.id });
+    showToast(`Reported and blocked ${msg.from}`, 'success', 2500);
     onClose();
   };
 
@@ -104,6 +123,24 @@ export function MessageContextMenu({ msg, channel, position, onClose, onReply, o
           <div className="h-px bg-border mx-2 my-1" />
           <MenuItem icon="✏️" label="Edit" onClick={() => { onEdit(); onClose(); }} />
           <MenuItem icon="🗑️" label="Delete" onClick={handleDelete} danger />
+        </>
+      )}
+      {!msg.isSelf && !msg.isSystem && (
+        <>
+          <div className="h-px bg-border mx-2 my-1" />
+          {showReportReasons ? (
+            <>
+              <div className="px-3 py-1 text-[10px] uppercase tracking-widest text-fg-dim font-semibold">Report for…</div>
+              {REPORT_REASONS.map((reason) => (
+                <MenuItem key={reason} icon="🚩" label={reason} onClick={() => handleReport(reason)} danger />
+              ))}
+            </>
+          ) : (
+            <>
+              <MenuItem icon="🚩" label="Report…" onClick={() => setShowReportReasons(true)} danger />
+              <MenuItem icon="🚫" label={`Block ${msg.from}`} onClick={handleBlock} danger />
+            </>
+          )}
         </>
       )}
     </div>

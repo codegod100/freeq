@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
 import { useStore } from '../store';
-import { sendWhois } from '../irc/client';
+import { sendWhois, getNick } from '../irc/client';
+import { REPORT_REASONS, reportUser } from '../lib/safety';
+import { parseAwayStatus } from '../lib/status';
+import { showToast } from './Toast';
 import * as e2ee from '../lib/e2ee';
 
 export interface CreatorChainLink {
@@ -202,6 +205,7 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
   const whois = useStore((s) => s.whoisCache.get(nick.toLowerCase()));
   const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
   const [actorInfo, setActorInfo] = useState<ActorInfo | null>(null);
+  const [showReportReasons, setShowReportReasons] = useState(false);
 
   useEffect(() => {
     // Always trigger WHOIS to get latest info
@@ -210,6 +214,18 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
 
   const effectiveDid = did || whois?.did;
   const isDidKey = effectiveDid?.startsWith('did:key:');
+  const isSelf = nick.toLowerCase() === getNick().toLowerCase();
+  const isBlocked = useStore((s) =>
+    (!!effectiveDid && s.blockedDids.includes(effectiveDid)) || s.blockedNicks.includes(nick.toLowerCase()));
+  // Away status from any shared channel member list (custom status text)
+  const away = useStore((s) => {
+    for (const ch of s.channels.values()) {
+      const m = ch.members.get(nick.toLowerCase());
+      if (m) return m.away ?? null;
+    }
+    return null;
+  });
+  const awayStatus = parseAwayStatus(away);
 
   // Fetch safety number for E2EE verification
   useEffect(() => {
@@ -302,6 +318,13 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
             <div className="text-xs text-accent mt-1 flex items-center gap-1">
               <span>@{handle}</span>
               {!origin && <span className="text-success text-[10px]" title="AT Protocol identity">✓</span>}
+            </div>
+          )}
+
+          {/* Away / custom status */}
+          {away != null && (
+            <div className="text-xs text-warning mt-1 truncate" title={awayStatus ?? undefined}>
+              Away{awayStatus ? `: ${awayStatus}` : ''}
             </div>
           )}
 
@@ -472,6 +495,55 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
               </a>
             )}
           </div>
+
+          {/* Safety actions — not for yourself */}
+          {!isSelf && (
+            showReportReasons ? (
+              <div className="mt-2">
+                <div className="text-[10px] uppercase tracking-widest text-fg-dim font-semibold mb-1">Report for…</div>
+                <div className="flex flex-wrap gap-1">
+                  {REPORT_REASONS.map((reason) => (
+                    <button
+                      key={reason}
+                      onClick={() => {
+                        reportUser(nick, effectiveDid, reason);
+                        showToast(`Reported and blocked ${nick}`, 'success', 2500);
+                        onClose();
+                      }}
+                      className="text-[11px] px-2 py-1 rounded-lg bg-danger/10 hover:bg-danger/20 text-danger"
+                    >
+                      {reason}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => {
+                    if (isBlocked) {
+                      if (effectiveDid) useStore.getState().unblockUser(effectiveDid);
+                      useStore.getState().unblockUser(nick);
+                      showToast(`Unblocked ${nick}`, 'success', 2000);
+                    } else {
+                      useStore.getState().blockUser(nick, effectiveDid);
+                      showToast(`Blocked ${nick}`, 'success', 2000);
+                      onClose();
+                    }
+                  }}
+                  className="flex-1 bg-danger/10 hover:bg-danger/20 text-danger text-xs py-1.5 rounded-lg font-medium"
+                >
+                  {isBlocked ? 'Unblock' : 'Block'}
+                </button>
+                <button
+                  onClick={() => setShowReportReasons(true)}
+                  className="flex-1 bg-danger/10 hover:bg-danger/20 text-danger text-xs py-1.5 rounded-lg font-medium"
+                >
+                  Report…
+                </button>
+              </div>
+            )
+          )}
         </div>
       </div>
     </>

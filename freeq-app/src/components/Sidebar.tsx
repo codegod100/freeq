@@ -5,6 +5,7 @@ import { joinChannel, partChannel, disconnect, startAvSession, endAvSession, lea
 import { SpeakerIcon } from './SessionIndicator';
 import { MicIcon, MicOffIcon, CameraOnIcon, CameraOffIcon, PhoneOffIcon } from './CallPanel';
 import { fetchProfile, getCachedProfile } from '../lib/profiles';
+import { parseAwayStatus } from '../lib/status';
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -26,6 +27,8 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const favorites = useStore((s) => s.favorites);
   useStore((s) => s.mutedChannels); // subscribe for re-render
   const hiddenDMs = useStore((s) => s.hiddenDMs);
+  const blockedDids = useStore((s) => s.blockedDids);
+  const blockedNicks = useStore((s) => s.blockedNicks);
 
   const navRef = useRef<HTMLElement>(null);
   const revealChannel = useStore((s) => s.sidebarRevealChannel);
@@ -59,6 +62,18 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const dmList = allJoined
     .filter((ch) => !ch.name.startsWith('#') && !ch.name.startsWith('&') && ch.name !== 'server')
     .filter((ch) => !hiddenDMs.has(ch.name.toLowerCase()))
+    .filter((ch) => {
+      // Hide conversations with blocked users (nick first, then DID via shared channels)
+      const lower = ch.name.toLowerCase();
+      if (blockedNicks.includes(lower)) return false;
+      if (blockedDids.length > 0) {
+        for (const c of channels.values()) {
+          const m = c.members.get(lower);
+          if (m?.did && blockedDids.includes(m.did)) return false;
+        }
+      }
+      return true;
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const handleJoin = () => {
@@ -325,6 +340,7 @@ function ChannelButton({ ch, isActive, onSelect, icon, showPreview }: {
           {(ch.isEncrypted || (!ch.name.startsWith('#') && ch.members.values().next().value?.did)) && (
             <span className="text-[10px] text-success shrink-0" title="End-to-end encrypted">🔒</span>
           )}
+          {showPreview && <DmStatusText nick={ch.name} />}
           {!showPreview && ch.members.size > 0 && (
             <span className="text-[10px] text-fg-dim ml-auto shrink-0">{ch.members.size}</span>
           )}
@@ -581,6 +597,24 @@ function DmAvatar({ nick }: { nick: string }) {
     <div className="w-8 h-8 rounded-full bg-surface flex items-center justify-center text-accent font-bold text-sm">
       {(nick[0] || '?').toUpperCase()}
     </div>
+  );
+}
+
+/** Custom status text for a DM contact — parsed from their AWAY reason
+ *  in any shared channel. Muted + truncated so it never crowds the row. */
+function DmStatusText({ nick }: { nick: string }) {
+  const status = useStore((s) => {
+    for (const ch of s.channels.values()) {
+      const m = ch.members.get(nick.toLowerCase());
+      if (m) return parseAwayStatus(m.away);
+    }
+    return null;
+  });
+  if (!status) return null;
+  return (
+    <span className="text-[11px] text-fg-dim truncate min-w-0" title={status}>
+      {status}
+    </span>
   );
 }
 

@@ -669,7 +669,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
           </button>
           {member?.did && !isFederated && <VerifiedBadge />}
           {isFederated && <ViaBadge origin={origin!} />}
-          {msg.tags['+freeq.at/sig'] && !isFederated && <SignedBadge />}
+          {msg.tags['+freeq.at/sig'] && !isFederated && <SignedBadge msgid={msg.id} />}
           {member?.away != null && (
             <span className="text-xs text-fg-dim bg-warning/10 text-warning px-1.5 py-0.5 rounded">away</span>
           )}
@@ -819,15 +819,61 @@ function ViaBadge({ origin }: { origin: string }) {
   );
 }
 
-/** Signed message badge — message has a server-attested cryptographic signature */
-function SignedBadge() {
+/** Result of checking a signature against GET /api/v1/verify/{msgid}. */
+type VerifyOutcome = 'device' | 'server' | 'failed';
+
+// Cache checked results per msgid so re-opening the popover (or the same
+// badge in another render) doesn't re-fetch. Definitive server answers are
+// cached; network errors are not, so a transient failure can be retried.
+const verifyCache = new Map<string, VerifyOutcome>();
+
+async function verifySignature(msgid: string): Promise<VerifyOutcome> {
+  const cached = verifyCache.get(msgid);
+  if (cached) return cached;
+  try {
+    const r = await fetch(`/api/v1/verify/${encodeURIComponent(msgid)}`);
+    if (!r.ok) return 'failed';
+    const j = await r.json();
+    const v = j?.verification;
+    let outcome: VerifyOutcome = 'failed';
+    if (v?.valid && v.verified_by === 'client-session-key') outcome = 'device';
+    else if (v?.valid && v.verified_by === 'server-key') outcome = 'server';
+    verifyCache.set(msgid, outcome);
+    return outcome;
+  } catch {
+    return 'failed';
+  }
+}
+
+const VERIFY_LABELS: Record<VerifyOutcome, { text: string; tone: string }> = {
+  device: { text: 'Verified — signed on the sender’s device', tone: 'text-success' },
+  server: { text: 'Verified — signed by the server on the sender’s behalf', tone: 'text-success' },
+  failed: { text: 'Signature could not be verified', tone: 'text-warning' },
+};
+
+/** Signed message badge — message carries a cryptographic signature.
+ *  Clicking it checks the signature against the server's verify endpoint
+ *  and shows the actual result, instead of asserting validity unchecked. */
+function SignedBadge({ msgid }: { msgid: string }) {
   const [showInfo, setShowInfo] = useState(false);
+  const [outcome, setOutcome] = useState<VerifyOutcome | null>(() => verifyCache.get(msgid) ?? null);
+  const [checking, setChecking] = useState(false);
+
+  const toggle = () => {
+    const opening = !showInfo;
+    setShowInfo(opening);
+    if (opening && outcome === null && !checking) {
+      setChecking(true);
+      verifySignature(msgid).then((o) => { setOutcome(o); setChecking(false); });
+    }
+  };
+
   return (
     <span className="relative inline-block">
       <button
         className="text-success text-xs opacity-60 hover:opacity-100 transition-opacity"
-        onClick={(e) => { e.stopPropagation(); setShowInfo(!showInfo); }}
-        title="Cryptographically signed message"
+        onClick={(e) => { e.stopPropagation(); toggle(); }}
+        title="Signed message — click to verify"
       >
         <svg className="w-3 h-3 inline -mt-0.5" viewBox="0 0 16 16" fill="currentColor">
           <path d="M8 1a2 2 0 00-2 2v3H5a2 2 0 00-2 2v5a2 2 0 002 2h6a2 2 0 002-2V8a2 2 0 00-2-2H10V3a2 2 0 00-2-2zm0 1.5a.5.5 0 01.5.5v3h-1V3a.5.5 0 01.5-.5z"/>
@@ -842,9 +888,23 @@ function SignedBadge() {
             </svg>
             Signed Message
           </div>
+          {checking ? (
+            <div className="text-[11px] text-fg-dim flex items-center gap-1.5 mb-1">
+              <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Checking signature…
+            </div>
+          ) : outcome && (
+            <div className={`text-[11px] font-medium mb-1 ${VERIFY_LABELS[outcome].tone}`}>
+              {outcome !== 'failed' && '✓ '}{VERIFY_LABELS[outcome].text}
+            </div>
+          )}
           <p className="text-[11px] text-fg-muted leading-relaxed">
-            This message is cryptographically signed by the sender&apos;s verified identity.
-            It cannot be forged or tampered with — the signature is tied to their AT Protocol DID.
+            This message carries a cryptographic signature tied to the sender&apos;s
+            AT Protocol DID. The check above verifies it against the server&apos;s
+            signing keys.
           </p>
           <button
             className="text-[10px] text-fg-dim hover:text-fg-muted mt-1.5"
@@ -1095,14 +1155,27 @@ export function MessageList() {
     return s.channels.get(s.activeChannel.toLowerCase())?.messages || [];
   });
   const showJoinPart = useStore((s) => s.showJoinPart);
+  const blockedDids = useStore((s) => s.blockedDids);
+  const blockedNicks = useStore((s) => s.blockedNicks);
+  const activeMembers = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.members);
 
   // Filter out join/part/quit noise unless the user opted in.
   // Keep moderation actions (kicks, bans, mode changes) always visible.
   const JOIN_PART_RE = /^.+ (joined|left|quit)(\s|$)/;
   const messages = useMemo(() => {
-    if (showJoinPart) return rawMessages;
-    return rawMessages.filter((m) => !m.isSystem || !JOIN_PART_RE.test(m.text));
-  }, [rawMessages, showJoinPart]);
+    let msgs = rawMessages;
+    // Hide messages from blocked users (DID first, nick fallback for guests).
+    if (blockedDids.length > 0 || blockedNicks.length > 0) {
+      msgs = msgs.filter((m) => {
+        if (m.isSelf || m.isSystem) return true;
+        const did = activeMembers?.get(m.from.toLowerCase())?.did || m.tags?.account;
+        if (did && blockedDids.includes(did)) return false;
+        return !blockedNicks.includes(m.from.toLowerCase());
+      });
+    }
+    if (showJoinPart) return msgs;
+    return msgs.filter((m) => !m.isSystem || !JOIN_PART_RE.test(m.text));
+  }, [rawMessages, showJoinPart, blockedDids, blockedNicks, activeMembers]);
 
   const lastReadMsgId = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.lastReadMsgId);
   const pins = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.pins ?? EMPTY_PINS);
