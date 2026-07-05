@@ -1,6 +1,7 @@
 //! Upstream WS bridge + REST client.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -52,9 +53,16 @@ pub struct AuthCredentials {
     pub dpop_nonce: Option<String>,
 }
 
-pub async fn fetch_history(state: &AppState, channel: &str, limit: usize) -> Result<Vec<UpstreamHistoryMessage>> {
+pub async fn fetch_history(
+    state: &AppState,
+    channel: &str,
+    limit: usize,
+) -> Result<Vec<UpstreamHistoryMessage>> {
     let encoded = channel.replace('#', "%23");
-    let url = state.upstream.base.join(&format!("api/v1/channels/{encoded}/history?limit={limit}"))?;
+    let url = state
+        .upstream
+        .base
+        .join(&format!("api/v1/channels/{encoded}/history?limit={limit}"))?;
     Ok(state.http.get(url).send().await?.json().await?)
 }
 
@@ -113,8 +121,13 @@ pub fn spawn_upstream_if_needed(
 
     session.joined.lock().insert(target.clone());
 
-    let rejoin: Vec<String> = session.joined.lock().iter()
-        .filter(|c| *c != &target).cloned().collect();
+    let rejoin: Vec<String> = session
+        .joined
+        .lock()
+        .iter()
+        .filter(|c| *c != &target)
+        .cloned()
+        .collect();
     if !rejoin.is_empty() {
         let tx = session.irc_tx.lock().clone();
         for ch in &rejoin {
@@ -127,7 +140,10 @@ pub fn spawn_upstream_if_needed(
     // inside the WS task so this function stays synchronous and no
     // parking_lot MutexGuards are held across await points.
     let auth = session.auth.lock().clone();
-    let auth_creds = if let AuthState::Authenticated { did, nick, oauth, .. } = &auth {
+    let auth_creds = if let AuthState::Authenticated {
+        did, nick, oauth, ..
+    } = &auth
+    {
         Some(AuthCredentials {
             did: did.clone(),
             nick: nick.clone(),
@@ -163,7 +179,8 @@ pub fn spawn_upstream_if_needed(
             auth_creds,
             session_for_task,
             session_id.clone(),
-        ).await;
+        )
+        .await;
         if let Err(e) = result {
             error!(session = %session_id, "upstream WS error: {e:#}");
         } else {
@@ -194,7 +211,8 @@ pub async fn run_upstream_ws(
     use futures_util::stream::SplitStream;
 
     let (mut ws, _resp) = tokio_tungstenite::connect_async(ws_url.as_str())
-        .await.context("WS connect failed")?;
+        .await
+        .context("WS connect failed")?;
     session.set_ws_state(WsState::Registering);
     debug!(session = %session_id, "ws_state → Registering");
 
@@ -203,14 +221,20 @@ pub async fn run_upstream_ws(
         .map(|a| super::sanitize_nick(&a.nick))
         .unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
     debug!(session = %session_id, %nick, authenticated = auth.is_some(), "upstream IRC registration");
-    ws.send(WsMessage::Text(format!("NICK {nick}\r\n").into())).await?;
-    ws.send(WsMessage::Text("USER webui 0 * :freeq-webui\r\n".into())).await?;
+    ws.send(WsMessage::Text(format!("NICK {nick}\r\n").into()))
+        .await?;
+    ws.send(WsMessage::Text("USER webui 0 * :freeq-webui\r\n".into()))
+        .await?;
 
     // IRCv3 capability negotiation: request SASL and account-notify.
     ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
-    ws.send(WsMessage::Text("CAP REQ :sasl account-notify\r\n".into())).await?;
+    ws.send(WsMessage::Text("CAP REQ :sasl account-notify\r\n".into()))
+        .await?;
 
-    let (mut write, mut read): (futures_util::stream::SplitSink<_, WsMessage>, SplitStream<_>) = ws.split();
+    let (mut write, mut read): (
+        futures_util::stream::SplitSink<_, WsMessage>,
+        SplitStream<_>,
+    ) = ws.split();
 
     // Registration state machine. We hold CAP END until SASL completes (or is
     // skipped) so the server doesn't finalize registration mid-handshake.
@@ -218,14 +242,34 @@ pub async fn run_upstream_ws(
     enum RegPhase {
         WaitCapAck,
         SaslChallenge,
-        SaslResult,
+        SaslResult(&'static str),
         Ready,
     }
     let mut phase = RegPhase::WaitCapAck;
+    *session.reg_phase.lock() = "WaitCapAck".to_string();
     let mut auth_creds = auth;
     let mut pending: Vec<String> = Vec::new();
+    const SASL_TIMEOUT: Duration = Duration::from_secs(10);
+    let mut sasl_deadline: Option<tokio::time::Instant> = None;
 
     'bridge: loop {
+        // SASL timeout guard: if we've been waiting too long for 903/904,
+        // clear auth so the user sees a prompt to log in again.
+        if let Some(dl) = sasl_deadline {
+            if tokio::time::Instant::now() >= dl {
+                warn!(
+                    "SASL authentication timed out\n    session={session_id}\n    timeout={SASL_TIMEOUT:?}"
+                );
+                *session.auth.lock() = AuthState::Guest;
+                *session.reg_phase.lock() = "SASL(timeout)".to_string();
+                let _ = lines_tx.send(
+                    ":freeq-webui NOTICE * :SASL authentication timed out \u{2014} token may have expired. Please log in again."
+                        .to_string(),
+                );
+                break 'bridge;
+            }
+        }
+
         tokio::select! {
             Some(cmd) = irc_rx.recv() => {
                 debug!(session = %session_id, dir = ">>", line = %cmd.trim_end_matches(['\r', '\n']), "upstream IRC");
@@ -275,16 +319,16 @@ pub async fn run_upstream_ws(
                                             let _ = write.send(WsMessage::Text(
                                                 "AUTHENTICATE ATPROTO-CHALLENGE\r\n".into(),
                                             )).await;
-                                            info!("sent AUTHENTICATE ATPROTO-CHALLENGE");
                                             phase = RegPhase::SaslChallenge;
+                                            *session.reg_phase.lock() = "SaslChallenge".to_string();
                                             continue;
                                         }
                                     }
                                     // No SASL (guest mode or server didn't ACK sasl) — finish reg.
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
+                                    *session.reg_phase.lock() = String::new();
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -297,8 +341,8 @@ pub async fn run_upstream_ws(
                                     info!("server sent numeric registration reply without CAP ACK — proceeding as guest");
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
+                                    *session.reg_phase.lock() = String::new();
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -319,8 +363,8 @@ pub async fn run_upstream_ws(
                                             auth_creds = None;
                                             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                             let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
+                                    *session.reg_phase.lock() = String::new();
                                             phase = RegPhase::Ready;
                                             if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                                 break 'bridge;
@@ -345,8 +389,8 @@ pub async fn run_upstream_ws(
                                             auth_creds = None;
                                             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                             let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
+                                    *session.reg_phase.lock() = String::new();
                                             phase = RegPhase::Ready;
                                             if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                                 break 'bridge;
@@ -368,18 +412,20 @@ pub async fn run_upstream_ws(
                                     let _ = write.send(WsMessage::Text(
                                         format!("AUTHENTICATE {encoded}\r\n").into(),
                                     )).await;
-                                    info!(did = %creds.did, "sent SASL pds-oauth response");
-                                    phase = RegPhase::SaslResult;
+                                    phase = RegPhase::SaslResult("waiting");
+                                    *session.reg_phase.lock() = "SaslResult(waiting)".to_string();
+                                    sasl_deadline = Some(tokio::time::Instant::now() + SASL_TIMEOUT);
                                     continue;
                                 }
                             }
-                            RegPhase::SaslResult => {
+                            RegPhase::SaslResult(_) => {
                                 if is_903(trimmed) {
                                     info!("SASL authentication successful");
+                                    sasl_deadline = None;
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
+                                    *session.reg_phase.lock() = "SASL(ok)".to_string();
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -387,6 +433,7 @@ pub async fn run_upstream_ws(
                                     continue;
                                 }
                                 if is_904(trimmed) || trimmed.contains(" 904 ") {
+                                    sasl_deadline = None;
                                     // Try refreshing the OAuth token before giving up.
                                     let mut refreshed = false;
                                     if let Some(ref creds) = auth_creds {
@@ -430,6 +477,7 @@ pub async fn run_upstream_ws(
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
                                     debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
+                                    *session.reg_phase.lock() = "SASL(failed,guest)".to_string();
                                     phase = RegPhase::Ready;
                                     if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
                                         break 'bridge;
@@ -453,6 +501,7 @@ pub async fn run_upstream_ws(
         }
     }
     debug!(session = %session_id, "ws_state → Disconnected");
+    *session.reg_phase.lock() = String::new();
     session.set_ws_state(WsState::Disconnected);
     Ok(())
 }
@@ -464,7 +513,11 @@ fn parse_challenge(challenge_b64: &str) -> Result<Challenge> {
     serde_json::from_slice(&bytes).context("invalid challenge JSON")
 }
 
-async fn flush_pending<W>(pending: &mut Vec<String>, write: &mut W, session_id: &str) -> Result<(), tokio_tungstenite::tungstenite::Error>
+async fn flush_pending<W>(
+    pending: &mut Vec<String>,
+    write: &mut W,
+    session_id: &str,
+) -> Result<(), tokio_tungstenite::tungstenite::Error>
 where
     W: futures_util::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send,
 {
@@ -482,7 +535,9 @@ fn ping_token(line: &str) -> Option<&str> {
     let line = line.trim_end_matches(['\r', '\n']);
     if let Some(rest) = line.strip_prefix(':') {
         if let Some(sp) = rest.find(' ') {
-            if &rest[..sp] == "PING" { return None; }
+            if &rest[..sp] == "PING" {
+                return None;
+            }
             let after = &rest[sp + 1..];
             if after.starts_with("PING ") {
                 return Some(after.strip_prefix("PING ").unwrap_or(""));
@@ -506,9 +561,15 @@ fn parse_cap_ack(line: &str) -> Option<Vec<&str>> {
     let cap = parts.next()?;
     let star_or_nick = parts.next()?;
     let ack = parts.next()?;
-    if !cap.eq_ignore_ascii_case("CAP") { return None; }
-    if star_or_nick != "*" && !star_or_nick.starts_with(':') { return None; }
-    if !ack.eq_ignore_ascii_case("ACK") { return None; }
+    if !cap.eq_ignore_ascii_case("CAP") {
+        return None;
+    }
+    if star_or_nick != "*" && !star_or_nick.starts_with(':') {
+        return None;
+    }
+    if !ack.eq_ignore_ascii_case("ACK") {
+        return None;
+    }
     let last = parts.next()?;
     let caps = last.strip_prefix(':').unwrap_or(last);
     Some(caps.split_whitespace().collect())
@@ -520,10 +581,12 @@ fn parse_authenticate_challenge(line: &str) -> Option<&str> {
     line.strip_prefix("AUTHENTICATE ").map(|s| s.trim_start())
 }
 
+/// Numeric 903 (RPL_SASLSUCCESS) – Sent by the server to confirm SASL authentication completed successfully.
 pub fn is_903(line: &str) -> bool {
     is_numeric(line, "903 ")
 }
 
+/// Numeric 904 (ERR_SASLFAIL) – Sent by the server when SASL authentication fails.
 pub fn is_904(line: &str) -> bool {
     is_numeric(line, "904 ")
 }
@@ -596,7 +659,9 @@ mod tests {
             // ACK the capability request. The webui will then finish registration
             // and flush any buffered user commands (CAP END, JOIN, then PRIVMSG).
             let _ = ws_write
-                .send(WsMessage::Text(":server CAP * ACK :sasl account-notify\r\n".into()))
+                .send(WsMessage::Text(
+                    ":server CAP * ACK :sasl account-notify\r\n".into(),
+                ))
                 .await;
 
             while let Some(line) = server_out_rx.recv().await {
@@ -610,7 +675,16 @@ mod tests {
         let (lines_tx, mut lines_rx) = broadcast::channel(16);
         let (irc_tx, irc_rx) = mpsc::channel(16);
         let client = tokio::spawn(async move {
-            run_upstream_ws(ws_url, lines_tx, irc_rx, "#test".to_string(), None, Arc::new(SessionHandle::new()), "test".into()).await
+            run_upstream_ws(
+                ws_url,
+                lines_tx,
+                irc_rx,
+                "#test".to_string(),
+                None,
+                Arc::new(SessionHandle::new()),
+                "test".into(),
+            )
+            .await
         });
 
         // Queue a user command before the handshake completes.
@@ -636,7 +710,10 @@ mod tests {
             .iter()
             .position(|l| l.contains("PRIVMSG") && l.contains("hello upstream"))
             .expect("PRIVMSG should reach upstream");
-        let cap_end_pos = seen.iter().position(|l| l == "CAP END").expect("CAP END should be sent");
+        let cap_end_pos = seen
+            .iter()
+            .position(|l| l == "CAP END")
+            .expect("CAP END should be sent");
         let join_pos = seen
             .iter()
             .position(|l| l.starts_with("JOIN "))

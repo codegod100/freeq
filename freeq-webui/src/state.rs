@@ -308,6 +308,10 @@ pub struct SessionHandle {
     /// DID extracted from 333/ACCOUNT/NOTICE before 903, used as a fallback
     /// for uploads when the user has not completed SASL auth in this session.
     pub extracted_did: Mutex<Option<String>>,
+    /// Registration sub-phase while ws_state is Registering.
+    /// Updated by the WS task: "WaitCapAck" → "SaslChallenge" → "SaslResult".
+    /// Cleared when ws_state transitions to Ready or Disconnected.
+    pub reg_phase: Mutex<String>,
     /// Upstream WebSocket connection state. Transitions are atomic:
     /// Disconnected → Connecting (on spawn) → Registering (on TCP connect)
     /// → Ready (on CAP END/JOIN) → Disconnected (on WS close/error).
@@ -326,6 +330,7 @@ impl SessionHandle {
             ws_task: Mutex::new(None),
             auth: Mutex::new(AuthState::default()),
             extracted_did: Mutex::new(None),
+            reg_phase: Mutex::new(String::new()),
             ws_state: AtomicU8::new(WsState::Disconnected as u8),
         }
     }

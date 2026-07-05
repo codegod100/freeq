@@ -163,6 +163,7 @@ pub(super) async fn handle_authenticate(
     send: &impl Fn(&Arc<SharedState>, &str, String),
 ) {
     let param = msg.params.first().map(|s| s.as_str()).unwrap_or("");
+    tracing::debug!(%session_id, sasl_failures = conn.sasl_failures, in_progress = conn.sasl_in_progress, param_prefix = %param.chars().take(60).collect::<String>(), "AUTHENTICATE received");
 
     if conn.sasl_failures >= 3 {
         // Already sent ERROR for too many failures; ignore further AUTHENTICATE attempts.
@@ -209,8 +210,11 @@ pub(super) async fn handle_authenticate(
             };
 
             let taken = state.challenge_store.take(session_id);
+            tracing::debug!(%session_id, challenge_found = taken.is_some(), "SASL challenge taken");
             match taken {
                 Some((challenge, challenge_bytes)) => {
+                    let method = response.method.clone().unwrap_or_else(|| "crypto".to_string());
+                    tracing::debug!(%session_id, %method, "SASL verification starting");
                     let verify_result = if let Some(result) = web_token_result {
                         result
                     } else {
@@ -222,6 +226,7 @@ pub(super) async fn handle_authenticate(
                         )
                         .await
                     };
+                    tracing::debug!(%session_id, success = verify_result.is_ok(), "SASL verification complete");
                     match verify_result {
                         // Connect-time allowlist (opt-in): reject verified DIDs
                         // that aren't permitted on this instance. Handle isn't

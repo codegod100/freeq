@@ -165,10 +165,9 @@ async fn get_login(State(state): State<AppState>) -> Response {
     }
 }
 
-
-/// Return an HTML page that opens the given `auth_url` in a popup and
-/// polls `/auth/status` until authentication completes, then redirects
-/// to `/chat/general`.
+/// Return an HTML page that navigates to the given `auth_url` in the
+/// same tab, then polls `/auth/status` until authentication completes
+/// and redirects to `/chat/general`.
 fn oauth_polling_page(auth_url: &str) -> String {
     let url = auth_url.replace('\'', "%27");
     format!(
@@ -193,12 +192,12 @@ a{{color:var(--c1)}}
 <div id="box">
 <h1>Sign in with Bluesky</h1>
 <p id="status">Waiting for authorization…</p>
-<p style="margin-top:1rem"><a href="{url}" target="_blank" rel="noopener">Open authorization page</a></p>
+<p style="margin-top:1rem"><a href="{url}">Open authorization page</a></p>
 </div>
 <script>
 (function() {{
   const url = '{url}';
-  window.open(url, '_blank');
+  window.location.replace(url);
   const el = document.getElementById('status');
   let done = false;
   async function check() {{
@@ -891,8 +890,9 @@ async fn post_channel_send(
 
     let irc_tx = session.irc_tx.lock().clone();
     let ws_state = session.get_ws_state();
+    let reg_phase = session.reg_phase.lock().clone();
     let is_joined = session.joined.lock().contains(&target);
-    debug!(session = %sid, channel = %target, len = msg.len(), ?ws_state, is_joined, "send requested");
+    debug!(session = %sid, channel = %target, len = msg.len(), ?ws_state, reg_phase, is_joined, "send requested");
 
     if let Err(e) = irc_tx
         .send(format!("PRIVMSG {target} :{msg}\r\n"))
