@@ -103,6 +103,14 @@ struct MemberRow: View {
     let member: MemberInfo
     let channelName: String
     @State private var showProfile = false
+    @State private var reportTarget: ReportTarget?
+
+    private var isSelf: Bool {
+        member.nick.lowercased() == appState.nick.lowercased()
+    }
+    private var memberDid: String? {
+        member.did ?? ProfileCache.shared.did(for: member.nick)
+    }
 
     private var profile: ProfileCache.Profile? {
         ProfileCache.shared.profile(for: member.nick)
@@ -216,6 +224,21 @@ struct MemberRow: View {
             Button("WHOIS") {
                 appState.sendWhois(member.nick)
             }
+            if !isSelf {
+                Divider()
+                Button("Report…") {
+                    reportTarget = ReportTarget(nick: member.nick, did: memberDid)
+                }
+                if appState.isBlocked(nick: member.nick, did: memberDid) {
+                    Button("Unblock \(member.nick)") {
+                        appState.unblockUser(nick: member.nick, did: memberDid)
+                    }
+                } else {
+                    Button("Block \(member.nick)", role: .destructive) {
+                        appState.blockUser(nick: member.nick, did: memberDid)
+                    }
+                }
+            }
             Divider()
             Button("Op") { appState.setMode(channelName, "+o", member.nick) }
             Button("Deop") { appState.setMode(channelName, "-o", member.nick) }
@@ -224,6 +247,9 @@ struct MemberRow: View {
             Button("Kick", role: .destructive) {
                 appState.kickUser(channelName, member.nick)
             }
+        }
+        .reportDialog($reportTarget) { t, reason in
+            appState.reportUser(nick: t.nick, did: t.did, reason: reason)
         }
     }
 }

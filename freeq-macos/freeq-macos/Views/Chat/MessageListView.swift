@@ -24,7 +24,14 @@ struct MessageListView: View {
     // this body and lets the AppKit list re-measure every row height.
     @AppStorage("freeq.compactMode") private var compactMode = false
 
-    private var messages: [ChatMessage] { channel?.messages ?? [] }
+    // Blocked people's messages never reach the timeline (reading blockList
+    // here registers the Observation dependency, so a block/unblock re-filters
+    // live). System lines always pass.
+    private var messages: [ChatMessage] {
+        appState.blockList.visible(channel?.messages ?? []) {
+            ProfileCache.shared.did(for: $0)
+        }
+    }
 
     // Deleted messages render as tombstones (reading flow must not silently
     // lose rows mid-scroll), so the timeline is over ALL messages.
@@ -349,6 +356,10 @@ struct MessageRow: View {
     @State private var hoverToken = 0
     private var isHovered: Bool { isRowHovered || isBarHovered }
 
+    // Safety (report/block) + identity proof presentation
+    @State private var reportTarget: ReportTarget?
+    @State private var showProof = false
+
     private var isSelf: Bool {
         message.from.lowercased() == appState.nick.lowercased()
     }
@@ -412,17 +423,23 @@ struct MessageRow: View {
                             }
 
                             if hasDid {
-                                Image(systemName: "checkmark.seal.fill")
-                                    .font(.caption2)
-                                    .foregroundStyle(Theme.verified)
-                                    .help("AT Protocol verified identity")
+                                Button { showProof = true } label: {
+                                    Image(systemName: "checkmark.seal.fill")
+                                        .font(.caption2)
+                                        .foregroundStyle(Theme.verified)
+                                }
+                                .buttonStyle(.plain)
+                                .help("AT Protocol verified identity — click for proof")
                             }
 
                             if message.origin == nil && message.isSigned {
-                                Image(systemName: "lock.fill")
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(Theme.success)
-                                    .help("Cryptographically signed message")
+                                Button { showProof = true } label: {
+                                    Image(systemName: "lock.fill")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(Theme.success)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Cryptographically signed message — click to verify")
                             }
 
                             if message.isEncrypted {
@@ -608,6 +625,19 @@ struct MessageRow: View {
             }
         }
         .contextMenu { messageContextMenu }
+        .reportDialog($reportTarget) { t, reason in
+            appState.reportUser(nick: t.nick, did: t.did, reason: reason)
+        }
+        .sheet(isPresented: $showProof) {
+            VerifiedProofSheet(
+                did: ProfileCache.shared.did(for: message.from),
+                handle: profile?.handle,
+                displayName: profile?.displayName,
+                nick: message.from,
+                msgId: message.isSigned ? message.id : nil
+            )
+            .environment(appState)
+        }
     }
 
     @ViewBuilder
@@ -668,6 +698,22 @@ struct MessageRow: View {
                     if isPinned { appState.unpin(msgId: message.id, in: target) }
                     else { appState.pin(msgId: message.id, in: target) }
                 }
+            }
+        }
+
+        // Safety: report/block other people's messages (App Store UGC parity
+        // with iOS). Reporting hides the content and blocks the author.
+        if !isSystem && !isSelf {
+            Divider()
+            Button("Report…") {
+                reportTarget = ReportTarget(
+                    nick: message.from,
+                    did: ProfileCache.shared.did(for: message.from),
+                    text: message.text
+                )
+            }
+            Button("Block \(message.from)", role: .destructive) {
+                appState.blockUser(nick: message.from, did: ProfileCache.shared.did(for: message.from))
             }
         }
 

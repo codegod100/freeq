@@ -6,11 +6,17 @@ struct UserProfileSheet: View {
     @Environment(\.dismiss) private var dismiss
     let nick: String
 
+    @State private var reportTarget: ReportTarget?
+    @State private var showProof = false
+
     private var profile: ProfileCache.Profile? {
         ProfileCache.shared.profile(for: nick)
     }
     private var did: String? {
         ProfileCache.shared.did(for: nick)
+    }
+    private var isSelf: Bool {
+        nick.lowercased() == appState.nick.lowercased()
     }
 
     var body: some View {
@@ -50,20 +56,24 @@ struct UserProfileSheet: View {
                             .padding(.top, 8)
                     }
 
-                    // DID
+                    // DID — click for the identity/signing-key proof card
                     if let did {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.seal.fill")
-                                .font(.caption)
-                                .foregroundStyle(.blue)
-                            Text(did)
-                                .font(.caption2.monospaced())
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
+                        Button { showProof = true } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.caption)
+                                    .foregroundStyle(.blue)
+                                Text(did)
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                            .contentShape(Rectangle())
                         }
+                        .buttonStyle(.plain)
                         .padding(.top, 4)
-                        .textSelection(.enabled)
+                        .help("Verified via the AT Protocol — click for proof")
                     }
 
                     // Bio
@@ -127,25 +137,68 @@ struct UserProfileSheet: View {
             }
 
             // Actions — pinned below the scroll area so they never clip.
-            HStack(spacing: 12) {
-                Button("Send Message") {
-                    let dm = appState.getOrCreateDM(nick)
-                    appState.activeChannel = dm.name
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
+            VStack(spacing: 8) {
+                HStack(spacing: 12) {
+                    Button("Send Message") {
+                        let dm = appState.getOrCreateDM(nick)
+                        appState.activeChannel = dm.name
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
 
-                if let handle = profile?.handle ?? did.map({ _ in nick }),
-                   let blueSkyURL = Validation.makeBlueSkyProfileURL(handle: handle) {
-                    Link("View on Bluesky", destination: blueSkyURL)
-                        .font(.body)
+                    if let handle = profile?.handle ?? did.map({ _ in nick }),
+                       let blueSkyURL = Validation.makeBlueSkyProfileURL(handle: handle) {
+                        Link("View on Bluesky", destination: blueSkyURL)
+                            .font(.body)
+                    }
+                }
+
+                // Safety
+                if !isSelf {
+                    HStack(spacing: 16) {
+                        if appState.isBlocked(nick: nick, did: did) {
+                            Button("Unblock") {
+                                appState.unblockUser(nick: nick, did: did)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Theme.accent)
+                        } else {
+                            Button("Report…") {
+                                reportTarget = ReportTarget(nick: nick, did: did)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                            Button("Block") {
+                                appState.blockUser(nick: nick, did: did)
+                                dismiss()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                        }
+                    }
                 }
             }
             .padding(.top, 12)
             .padding(.bottom, 16)
         }
         .frame(width: 340, height: 480)
+        .reportDialog($reportTarget) { t, reason in
+            appState.reportUser(nick: t.nick, did: t.did, reason: reason)
+            dismiss()
+        }
+        .sheet(isPresented: $showProof) {
+            VerifiedProofSheet(
+                did: did,
+                handle: profile?.handle,
+                displayName: profile?.displayName,
+                nick: nick
+            )
+            .environment(appState)
+        }
         .onAppear {
             // Trigger WHOIS if we don't have DID
             if did == nil { appState.sendWhois(nick) }

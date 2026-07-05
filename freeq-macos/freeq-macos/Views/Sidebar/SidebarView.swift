@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
+    @State private var showStatusEditor = false
 
     var body: some View {
         @Bindable var state = appState
@@ -29,10 +30,11 @@ struct SidebarView: View {
                 }
             }
 
-            // DMs
-            if !appState.dmBuffers.isEmpty {
+            // DMs (blocked people's DMs are suppressed)
+            let visibleDMs = appState.dmBuffers.filter { !appState.isBlocked(nick: $0.name) }
+            if !visibleDMs.isEmpty {
                 Section("Direct Messages") {
-                    ForEach(appState.dmBuffers.sorted(by: { $0.lastActivity > $1.lastActivity })) { dm in
+                    ForEach(visibleDMs.sorted(by: { $0.lastActivity > $1.lastActivity })) { dm in
                         DMRow(dm: dm)
                             .tag(dm.name)
                             .listRowBackground(Color.clear)
@@ -66,6 +68,10 @@ struct SidebarView: View {
                 bottomBar
             }
         }
+        .sheet(isPresented: $showStatusEditor) {
+            StatusEditorSheet()
+                .environment(appState)
+        }
         .onChange(of: appState.activeChannel) { _, newValue in
             if let ch = newValue {
                 appState.clearUnread(ch)
@@ -98,14 +104,19 @@ struct SidebarView: View {
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                    Text(appState.selfAwayReason.map { "Away — \($0)" } ?? "Signed in")
+                    // A custom status shows verbatim; a plain away shows as "Away — X".
+                    Text(appState.selfStatus
+                        ?? appState.selfAwayReason.map { "Away — \($0)" }
+                        ?? "Signed in")
                         .font(.caption2)
                         .foregroundStyle(isAway ? Theme.warning : Theme.textTertiary)
                         .lineLimit(1)
                 }
                 .help(isAway
-                    ? "Away: \(appState.selfAwayReason ?? "") — signed in as \(did)"
-                    : "Signed in as \(did)")
+                    ? "Away: \(appState.selfAwayReason ?? "") — signed in as \(did). Click to set a status."
+                    : "Signed in as \(did). Click to set a status.")
+                .contentShape(Rectangle())
+                .onTapGesture { showStatusEditor = true }
             } else if appState.connectionState == .registered {
                 Circle()
                     .fill(Theme.warning)
@@ -145,12 +156,15 @@ struct SidebarView: View {
             // User menu
             Menu {
                 if appState.authenticatedDID != nil {
+                    Button(appState.selfStatus == nil ? "Set Status…" : "Edit Status…") {
+                        showStatusEditor = true
+                    }
                     if appState.selfAwayReason == nil {
                         Button("Set Away") {
                             appState.setAway("AFK")
                         }
                     } else {
-                        Button("Remove Away") {
+                        Button(appState.selfStatus == nil ? "Remove Away" : "Clear Status") {
                             appState.setAway(nil)
                         }
                     }

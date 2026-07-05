@@ -23,6 +23,12 @@ struct SettingsView: View {
                     Label("P2P / iroh", systemImage: "point.3.connected.trianglepath.dotted")
                 }
 
+            SafetySettings()
+                .environment(appState)
+                .tabItem {
+                    Label("Safety", systemImage: "hand.raised")
+                }
+
             ShortcutsSettings()
                 .tabItem {
                     Label("Shortcuts", systemImage: "keyboard")

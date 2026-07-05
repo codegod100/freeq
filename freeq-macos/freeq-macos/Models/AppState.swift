@@ -66,6 +66,24 @@ class AppState {
     /// Our own away state (nil = present). Set optimistically on /away and
     /// confirmed by the server's away-notify echo.
     var selfAwayReason: String?
+    /// The user's own custom status (emoji + text), carried over IRC AWAY so
+    /// it broadcasts to everyone in shared channels natively. Persists across
+    /// launches and is re-broadcast after each (re)connect.
+    var selfStatus: String? = UserDefaults.standard.string(forKey: "freeq.status")
+
+    // MARK: - Safety: blocking & reporting
+    /// Blocked people — by DID when known (stable across nick changes) and by
+    /// lowercased nick. Their messages are hidden from every list and their
+    /// DMs suppressed. The pure decisions live in `BlockList`.
+    var blockList = BlockList(
+        dids: Set(UserDefaults.standard.stringArray(forKey: "freeq.blockedDIDs") ?? []),
+        nicks: Set(UserDefaults.standard.stringArray(forKey: "freeq.blockedNicks") ?? [])
+    ) {
+        didSet {
+            UserDefaults.standard.set(Array(blockList.dids), forKey: "freeq.blockedDIDs")
+            UserDefaults.standard.set(Array(blockList.nicks), forKey: "freeq.blockedNicks")
+        }
+    }
     var bookmarks: [Bookmark] = []
     var lastReadMsgId: [String: String] = [:]  // lowercase channel → last read msgid
     /// draft/read-marker (S1): lowercase target → ISO8601 read-up-to
@@ -667,6 +685,62 @@ class AppState {
         }
         // Optimistic — the server's away-notify echo (if any) confirms it.
         selfAwayReason = reason
+        // Clearing away supersedes any saved custom status — otherwise the
+        // old status would silently re-broadcast on the next reconnect.
+        if reason == nil, selfStatus != nil {
+            selfStatus = nil
+            UserDefaults.standard.removeObject(forKey: "freeq.status")
+        }
+    }
+
+    /// Set (or clear, with nil/empty) the custom status. Rides IRC AWAY —
+    /// same wire mechanism as `setAway`, plus persistence so the status
+    /// survives restarts and re-broadcasts after each (re)connect.
+    func setStatus(_ text: String?) {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let t = trimmed, !t.isEmpty {
+            selfStatus = t
+            UserDefaults.standard.set(t, forKey: "freeq.status")
+            sendRaw("AWAY :\(t)")
+            selfAwayReason = t  // optimistic; away-notify echo confirms
+        } else {
+            selfStatus = nil
+            UserDefaults.standard.removeObject(forKey: "freeq.status")
+            sendRaw("AWAY")
+            selfAwayReason = nil
+        }
+    }
+
+    /// Re-broadcast a saved status after (re)connect so others see it again.
+    func reapplyStatusIfNeeded() {
+        if let s = selfStatus, !s.isEmpty {
+            sendRaw("AWAY :\(s)")
+            selfAwayReason = s
+        }
+    }
+
+    // MARK: - Safety: blocking & reporting
+
+    func isBlocked(nick: String, did: String? = nil) -> Bool {
+        guard !blockList.isEmpty else { return false }
+        return blockList.isBlocked(nick: nick, did: did ?? profileCache.did(for: nick))
+    }
+
+    func blockUser(nick: String, did: String?) {
+        blockList.block(nick: nick, did: did ?? profileCache.did(for: nick))
+    }
+
+    func unblockUser(nick: String?, did: String?) {
+        blockList.unblock(nick: nick, did: did ?? nick.flatMap { profileCache.did(for: $0) })
+    }
+
+    /// Record a user's report of a message/user. There's no server report
+    /// endpoint yet, so we hide the content immediately and block the author —
+    /// report-and-block — which is the user-visible remedy. The reason is
+    /// logged for the eventual moderation pipeline.
+    func reportUser(nick: String, did: String?, reason: String) {
+        Log.irc.notice("user report: nick=\(nick, privacy: .public) reason=\(reason, privacy: .public)")
+        blockUser(nick: nick, did: did)
     }
 
     /// ⌥↑/⌥↓ and ⌥⇧↑/⌥⇧↓ — move through buffers in sidebar order,
@@ -1036,6 +1110,9 @@ extension AppState {
                 joinChannel(ch)
             }
             requestDmTargetsIfReady()
+            // Re-broadcast a saved custom status so shared channels see it
+            // again after the reconnect.
+            reapplyStatusIfNeeded()
             // Self-avatar: prime the profile cache with our own DID so
             // our avatar resolves immediately, without waiting for one
             // of our own messages to round-trip the server and come
@@ -1194,14 +1271,19 @@ extension AppState {
             // Persist to local DB
             Task { await MessageStore.shared.store(message, channel: target) }
 
+            // Blocked senders: the message still lands in the buffer (the
+            // list filters it out on display, so unblocking restores it) but
+            // must not ring bells or bump unread badges.
+            let senderBlocked = !isSelf && isBlocked(nick: msg.fromNick, did: msg.account)
+
             if target.hasPrefix("#") {
                 let ch = getOrCreateChannel(target)
                 ch.appendIfNew(message)
                 ch.typingUsers.removeValue(forKey: msg.fromNick)
-                incrementUnread(target)
+                if !senderBlocked { incrementUnread(target) }
 
                 // Mention notification
-                if !isSelf && msg.text.localizedCaseInsensitiveContains(nick) {
+                if !isSelf && !senderBlocked && msg.text.localizedCaseInsensitiveContains(nick) {
                     mentionCounts[target.lowercased(), default: 0] += 1
                     if !mutedChannels.contains(target.lowercased()) {
                         sendNotification(title: "\(msg.fromNick) in \(target)", body: msg.text)
@@ -1213,10 +1295,10 @@ extension AppState {
                 closedDMs.remove(bufName.lowercased())
                 let dm = getOrCreateDM(bufName)
                 dm.appendIfNew(message)
-                incrementUnread(bufName)
+                if !senderBlocked { incrementUnread(bufName) }
 
                 // DM notification
-                if !isSelf {
+                if !isSelf && !senderBlocked {
                     sendNotification(title: msg.fromNick, body: msg.text)
                     playSound(.dm)
                 }
