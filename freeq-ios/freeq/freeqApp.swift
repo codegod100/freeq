@@ -56,7 +56,7 @@ struct FreeqApp: App {
                 .onChange(of: appState.dmBuffers.count) { PhoneWatchBridge.shared.push() }
                 .onChange(of: appState.connectionState) { PhoneWatchBridge.shared.push() }
                 .onOpenURL { url in
-                    handleAuthCallback(url)
+                    appState.handleAuthCallback(url)
                 }
                 .onContinueUserActivity(CSSearchableItemActionType) { activity in
                     // User tapped a freeq channel/DM in iOS Spotlight.
@@ -73,40 +73,4 @@ struct FreeqApp: App {
         }
     }
 
-    /// Handle freeq://auth?token=...&broker_token=...&nick=...&did=...&handle=...
-    private func handleAuthCallback(_ url: URL) {
-        guard url.scheme == "freeq", url.host == "auth" else { return }
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
-
-        // Check for error
-        if let error = components.queryItems?.first(where: { $0.name == "error" })?.value {
-            appState.errorMessage = error
-            appState.connectionState = .disconnected
-            return
-        }
-
-        guard let token = components.queryItems?.first(where: { $0.name == "token" })?.value,
-              let nick = components.queryItems?.first(where: { $0.name == "nick" })?.value,
-              let did = components.queryItems?.first(where: { $0.name == "did" })?.value
-        else {
-            appState.errorMessage = "Invalid auth response"
-            return
-        }
-
-        let brokerToken = components.queryItems?.first(where: { $0.name == "broker_token" })?.value
-        let handle = components.queryItems?.first(where: { $0.name == "handle" })?.value ?? nick
-
-        // Save session
-        UserDefaults.standard.set(handle, forKey: "freeq.handle")
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "freeq.lastLogin")
-        if let brokerToken { KeychainHelper.save(key: "brokerToken", value: brokerToken) }
-        UserDefaults.standard.removeObject(forKey: "freeq.loginPending")
-
-        // Connect
-        appState.pendingWebToken = token
-        appState.brokerToken = brokerToken
-        appState.authenticatedDID = did
-        appState.serverAddress = ServerConfig.ircServer
-        appState.connect(nick: nick)
-    }
 }

@@ -1920,6 +1920,45 @@ class AppState: ObservableObject {
         if let s = selfStatus, !s.isEmpty { sendRaw("AWAY :\(s)") }
     }
 
+    /// Handle freeq://auth?token=...&broker_token=...&nick=...&did=...&handle=...
+    /// — the broker's OAuth completion. Reached two ways: the in-app
+    /// ASWebAuthenticationSession completion (primary), or onOpenURL if the
+    /// flow ever bounces through Safari (legacy/fallback).
+    func handleAuthCallback(_ url: URL) {
+        guard url.scheme == "freeq", url.host == "auth" else { return }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+
+        if let error = components.queryItems?.first(where: { $0.name == "error" })?.value {
+            errorMessage = error
+            connectionState = .disconnected
+            return
+        }
+
+        guard let token = components.queryItems?.first(where: { $0.name == "token" })?.value,
+              let nick = components.queryItems?.first(where: { $0.name == "nick" })?.value,
+              let did = components.queryItems?.first(where: { $0.name == "did" })?.value
+        else {
+            errorMessage = "Invalid auth response"
+            return
+        }
+
+        let brokerTok = components.queryItems?.first(where: { $0.name == "broker_token" })?.value
+        let handle = components.queryItems?.first(where: { $0.name == "handle" })?.value ?? nick
+
+        // Save session
+        UserDefaults.standard.set(handle, forKey: "freeq.handle")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "freeq.lastLogin")
+        if let brokerTok { KeychainHelper.save(key: "brokerToken", value: brokerTok) }
+        UserDefaults.standard.removeObject(forKey: "freeq.loginPending")
+
+        // Connect
+        pendingWebToken = token
+        brokerToken = brokerTok
+        authenticatedDID = did
+        serverAddress = ServerConfig.ircServer
+        connect(nick: nick)
+    }
+
     func awayMessage(for nick: String) -> String? {
         for ch in channels {
             if let m = ch.members.first(where: { $0.nick.lowercased() == nick.lowercased() }) {

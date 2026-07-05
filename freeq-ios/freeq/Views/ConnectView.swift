@@ -355,9 +355,20 @@ struct ConnectView: View {
         UserDefaults.standard.set(handle, forKey: "freeq.handle")
         UserDefaults.standard.set(true, forKey: "freeq.loginPending")
 
-        // Open in Safari — the broker will redirect back via freeq:// URL scheme
-        // which iOS routes to our app via CFBundleURLTypes + onOpenURL handler
-        UIApplication.shared.open(url)
+        // In-app OAuth sheet (ASWebAuthenticationSession) — no Safari bounce.
+        // The broker redirects back via the freeq:// scheme, which the session
+        // captures and hands to the same callback handler.
+        AuthSession.shared.start(loginURL: url) { callbackURL, failure in
+            DispatchQueue.main.async {
+                loading = false
+                if let callbackURL {
+                    appState.handleAuthCallback(callbackURL)
+                } else if let failure {
+                    error = failure
+                }
+                // nil/nil = user dismissed the sheet — no error to show.
+            }
+        }
     }
 
     private func connectAsGuest() {
