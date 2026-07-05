@@ -194,6 +194,15 @@ struct UserProfileSheet: View {
                                 }
                             }
 
+                            // Follow / Following — a real graph write, delegated
+                            // to the broker (which holds the OAuth session).
+                            // Hidden until the deployed broker supports it.
+                            if relationship != nil, appState.brokerToken != nil,
+                               let actor = resolvedActor, actor.hasPrefix("did:"),
+                               actor != appState.authenticatedDID {
+                                followButton(actor: actor)
+                            }
+
                             // View on Bluesky
                             if let p = profile {
                                 Link(destination: URL(string: "https://bsky.app/profile/\(p.handle)")!) {
@@ -323,6 +332,72 @@ struct UserProfileSheet: View {
         if n >= 1_000_000 { return "\(n / 1_000_000)M" }
         if n >= 1_000 { return "\(n / 1_000)K" }
         return "\(n)"
+    }
+
+    @State private var followBusy = false
+
+    @ViewBuilder
+    private func followButton(actor: String) -> some View {
+        let following = relationship?.iFollow == true
+        Button {
+            toggleFollow(actor: actor)
+        } label: {
+            HStack(spacing: 8) {
+                if followBusy {
+                    ProgressView().scaleEffect(0.8).tint(following ? Theme.textSecondary : Theme.accent)
+                } else {
+                    Image(systemName: following ? "person.fill.checkmark" : "person.badge.plus")
+                        .font(.system(size: 13))
+                }
+                Text(following ? "Following" : "Follow")
+                    .font(.fqSubheadline.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(following ? AnyShapeStyle(Theme.bgTertiary) : AnyShapeStyle(Theme.accent.opacity(0.16)))
+            .foregroundColor(following ? Theme.textSecondary : Theme.accent)
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(following ? Theme.border : Theme.accent.opacity(0.4), lineWidth: 1)
+            )
+        }
+        .disabled(followBusy)
+    }
+
+    private func toggleFollow(actor: String) {
+        guard let token = appState.brokerToken, let rel = relationship, !followBusy else { return }
+        followBusy = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        Task { @MainActor in
+            defer { followBusy = false }
+            if rel.iFollow {
+                guard let uri = rel.followingURI else { return }
+                switch await BlueskyGraph.unfollow(followURI: uri, brokerToken: token) {
+                case .done:
+                    relationship = BlueskyGraph.Relationship(
+                        followsMe: rel.followsMe, iFollow: false, followingURI: nil)
+                case .unsupported:
+                    relationship = nil // hide the button this launch
+                case .failed(let why):
+                    appState.errorMessage = "Unfollow failed: \(why)"
+                }
+            } else {
+                switch await BlueskyGraph.follow(subjectDID: actor, brokerToken: token) {
+                case .done:
+                    // Re-fetch to pick up the new record's URI for a later unfollow.
+                    if let me = appState.authenticatedDID {
+                        let rels = await BlueskyGraph.relationships(viewer: me, others: [actor])
+                        relationship = rels[actor] ?? BlueskyGraph.Relationship(
+                            followsMe: rel.followsMe, iFollow: true, followingURI: nil)
+                    }
+                case .unsupported:
+                    relationship = nil
+                case .failed(let why):
+                    appState.errorMessage = "Follow failed: \(why)"
+                }
+            }
+        }
     }
 
     private func startDM(_ target: String) {
