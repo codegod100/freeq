@@ -38,8 +38,10 @@ use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, trace, warn};
 use url::Url;
 
-use crate::state::{AppState, AuthState, MemberEntry};
-use crate::upstream::{fetch_channels, fetch_history, is_903, is_904, spawn_upstream_if_needed, UpstreamHistoryMessage};
+use crate::state::{AppState, AuthState, MemberEntry, WsState};
+use crate::upstream::{
+    fetch_channels, fetch_history, is_903, is_904, spawn_upstream_if_needed, UpstreamHistoryMessage,
+};
 
 // ── main ────────────────────────────────────────────────────────────────
 
@@ -47,19 +49,15 @@ use crate::upstream::{fetch_channels, fetch_history, is_903, is_904, spawn_upstr
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    tracing_subscriber::EnvFilter::new(
-                        "debug,reqwest=info,hyper=info,tungstenite=info",
-                    )
-                }),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new("debug,reqwest=info,hyper=info,tungstenite=info")
+            }),
         )
         .init();
 
-    let upstream = std::env::var("FREEQ_UPSTREAM")
-        .unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
-    let bind = std::env::var("FREEQ_WEBUI_BIND")
-        .unwrap_or_else(|_| "127.0.0.1:8090".to_string());
+    let upstream =
+        std::env::var("FREEQ_UPSTREAM").unwrap_or_else(|_| "http://127.0.0.1:8080".to_string());
+    let bind = std::env::var("FREEQ_WEBUI_BIND").unwrap_or_else(|_| "127.0.0.1:8090".to_string());
     let public_url = std::env::var("FREEQ_PUBLIC_URL").ok();
     let upstream_url: Url = upstream.parse().context("FREEQ_UPSTREAM must be a URL")?;
 
@@ -71,16 +69,25 @@ async fn main() -> Result<()> {
         .route("/login", get(get_login).post(post_login))
         .route("/logout", post(post_logout))
         .route("/auth/status", get(get_auth_status))
-        .route("/chat", get(|| async { (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response() }))
+        .route(
+            "/chat",
+            get(|| async {
+                (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response()
+            }),
+        )
         .route("/chat/{channel}", get(get_chat))
         .route("/chat/{channel}/events", get(get_channel_events))
         .route("/chat/{channel}/send", post(post_channel_send))
         .route("/chat/{channel}/join", post(post_channel_join))
         .route("/chat/{channel}/part", post(post_channel_part))
-        .route("/datastar.js", get(get_datastar_js))
+        .route("/chat/{channel}/topic", post(post_channel_topic))
         .route("/upload", post(post_upload))
+        .route("/datastar.js", get(get_datastar_js))
         .route("/api/channels", get(get_channels))
-        .route("/.well-known/oauth-client-metadata", get(get_oauth_client_metadata))
+        .route(
+            "/.well-known/oauth-client-metadata",
+            get(get_oauth_client_metadata),
+        )
         .route("/auth/callback", get(get_auth_callback))
         .layer(
             CorsLayer::new()
@@ -160,8 +167,17 @@ async fn get_login(State(state): State<AppState>) -> Response {
     let mut ctx = tera::Context::new();
     ctx.insert("error", "");
     match state.tera.render("login.html.tera", &ctx) {
-        Ok(html) => (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("template error: {e}")).into_response(),
+        Ok(html) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("template error: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -231,8 +247,16 @@ async fn post_login(
     if handle.is_empty() {
         let mut ctx = tera::Context::new();
         ctx.insert("error", "Please enter your handle");
-        let html = state.tera.render("login.html.tera", &ctx).unwrap_or_default();
-        return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+        let html = state
+            .tera
+            .render("login.html.tera", &ctx)
+            .unwrap_or_default();
+        return (
+            StatusCode::BAD_REQUEST,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response();
     }
 
     let (sid, _) = session_id_from_request(&req);
@@ -250,8 +274,16 @@ async fn post_login(
                 warn!(session = %sid, %handle, "failed to prepare web OAuth login: {e:#}");
                 let mut ctx = tera::Context::new();
                 ctx.insert("error", &format!("Failed to start OAuth login: {e:#}"));
-                let html = state.tera.render("login.html.tera", &ctx).unwrap_or_default();
-                return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+                let html = state
+                    .tera
+                    .render("login.html.tera", &ctx)
+                    .unwrap_or_default();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                    html,
+                )
+                    .into_response();
             }
         };
 
@@ -260,7 +292,10 @@ async fn post_login(
 
         // Store pending login — the callback at /auth/callback will
         // look it up by state and exchange the code.
-        state.pending_web_logins.lock().insert(state_param.clone(), (sid.clone(), prepared));
+        state
+            .pending_web_logins
+            .lock()
+            .insert(state_param.clone(), (sid.clone(), prepared));
 
         debug!(session = %sid, %handle, %state_param, %auth_url, "web OAuth authorization URL ready");
 
@@ -271,8 +306,10 @@ async fn post_login(
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
             html,
-        ).into_response();
-        resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+        )
+            .into_response();
+        resp.headers_mut()
+            .insert(header::SET_COOKIE, session_cookie_header(&sid));
         return resp;
     }
 
@@ -289,8 +326,16 @@ async fn post_login(
             warn!(session = %sid, %handle, "failed to prepare OAuth login: {e:#}");
             let mut ctx = tera::Context::new();
             ctx.insert("error", &format!("Failed to start OAuth login: {e:#}"));
-            let html = state.tera.render("login.html.tera", &ctx).unwrap_or_default();
-            return (StatusCode::BAD_REQUEST, [(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
+            let html = state
+                .tera
+                .render("login.html.tera", &ctx)
+                .unwrap_or_default();
+            return (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+                html,
+            )
+                .into_response();
         }
     };
 
@@ -332,7 +377,12 @@ async fn post_login(
                             warn!(session = %sid_task, "failed to persist session to disk: {e:#}");
                         }
                     }
-                    *session_for_task.auth.lock() = AuthState::Authenticated { handle, did: did.clone(), nick, oauth };
+                    *session_for_task.auth.lock() = AuthState::Authenticated {
+                        handle,
+                        did: did.clone(),
+                        nick,
+                        oauth,
+                    };
                     session_for_task.extracted_did.lock().replace(did);
                     session_for_task.request_reconnect();
                 }
@@ -358,14 +408,12 @@ async fn post_login(
         html,
     )
         .into_response();
-    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, session_cookie_header(&sid));
     resp
 }
 
-async fn post_logout(
-    State(state): State<AppState>,
-    req: axum::http::HeaderMap,
-) -> Response {
+async fn post_logout(State(state): State<AppState>, req: axum::http::HeaderMap) -> Response {
     let (sid, _) = session_id_from_request(&req);
     let session = state.session(&sid);
     *session.auth.lock() = AuthState::Guest;
@@ -378,10 +426,7 @@ async fn post_logout(
     let resp = (StatusCode::FOUND, [("Location", "/")], "").into_response();
     resp
 }
-async fn get_auth_status(
-    State(state): State<AppState>,
-    req: axum::http::HeaderMap,
-) -> Response {
+async fn get_auth_status(State(state): State<AppState>, req: axum::http::HeaderMap) -> Response {
     let (sid, _) = session_id_from_request(&req);
     let session = state.session(&sid);
     let auth = session.auth.lock().clone();
@@ -396,7 +441,8 @@ async fn get_auth_status(
         body.to_string(),
     )
         .into_response();
-    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, session_cookie_header(&sid));
     resp
 }
 
@@ -405,9 +451,7 @@ async fn get_auth_status(
 /// Serves the OAuth client metadata that Bluesky's PDS fetches to
 /// discover redirect URIs and client capabilities for a web-based
 /// OAuth flow (used when running behind `tailscale funnel`).
-async fn get_oauth_client_metadata(
-    State(state): State<AppState>,
-) -> Response {
+async fn get_oauth_client_metadata(State(state): State<AppState>) -> Response {
     let public_url = match &state.public_url {
         Some(url) => url.clone(),
         None => return (StatusCode::NOT_FOUND, "web OAuth not configured").into_response(),
@@ -430,7 +474,8 @@ async fn get_oauth_client_metadata(
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
         metadata.to_string(),
-    ).into_response()
+    )
+        .into_response()
 }
 
 // ── GET /auth/callback ────────────────────────────────────────────────
@@ -453,7 +498,10 @@ async fn get_auth_callback(
 ) -> Response {
     // Handle authorization errors from the PDS
     if let Some(error) = &params.error {
-        let desc = params.error_description.as_deref().unwrap_or("unknown error");
+        let desc = params
+            .error_description
+            .as_deref()
+            .unwrap_or("unknown error");
         warn!(%error, %desc, "OAuth callback error");
         return (StatusCode::OK, [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
             format!("<html><body><h1>Authorization Failed</h1><p>{error}: {desc}</p><p><a href=\"/login\">Try again</a></p></body></html>")
@@ -469,7 +517,11 @@ async fn get_auth_callback(
         Some(v) => v,
         None => {
             warn!(state = %callback_state, "callback with unknown state");
-            return (StatusCode::BAD_REQUEST, "Unknown or expired state parameter. Please try logging in again.").into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                "Unknown or expired state parameter. Please try logging in again.",
+            )
+                .into_response();
         }
     };
 
@@ -497,20 +549,21 @@ async fn get_auth_callback(
             warn!(session = %sid, "failed to persist session to disk: {e:#}");
         }
     }
-    *session.auth.lock() = AuthState::Authenticated { handle, did: did.clone(), nick, oauth };
+    *session.auth.lock() = AuthState::Authenticated {
+        handle,
+        did: did.clone(),
+        nick,
+        oauth,
+    };
     session.extracted_did.lock().replace(did);
     session.request_reconnect();
 
     // Redirect to chat
-    let mut resp = (
-        StatusCode::FOUND,
-        [("Location", "/chat/general")],
-        "",
-    ).into_response();
-    resp.headers_mut().insert(header::SET_COOKIE, session_cookie_header(&sid));
+    let mut resp = (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response();
+    resp.headers_mut()
+        .insert(header::SET_COOKIE, session_cookie_header(&sid));
     resp
 }
-
 
 /// Serve the DataStar JS bundle from the binary. Loaded via `include_str!`
 /// at compile time so there's no runtime file lookup; the bundle lives at
@@ -518,7 +571,10 @@ async fn get_auth_callback(
 async fn get_datastar_js() -> Response {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         include_str!("../static/datastar.js"),
     )
         .into_response()
@@ -543,7 +599,6 @@ async fn get_chat(
     // immediately when the page opens its EventSource.
     let _ = state.session(&sid);
 
-
     // Fetch the channel list from the upstream. If it fails (e.g. the
     // upstream is down), we still render the page with an empty list —
     // the chat itself works once the WS reconnects.
@@ -556,7 +611,9 @@ async fn get_chat(
         .unwrap_or_default();
 
     // Initial scrollback so channel switches show data immediately.
-    let history = fetch_history(&state, &channel, 25).await.unwrap_or_default();
+    let history = fetch_history(&state, &channel, 25)
+        .await
+        .unwrap_or_default();
     debug!(channel = %channel, count = history.len(), "fetched history");
     let initial_messages_html = history
         .iter()
@@ -580,10 +637,21 @@ async fn get_chat(
     let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
     ctx.insert("login_handle", &login_handle);
     ctx.insert("auth_did", &auth_did);
+    let topic_json = serde_json::to_string(&topic)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
+    let login_handle_json = serde_json::to_string(&login_handle)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
+    let auth_did_json = serde_json::to_string(&auth_did)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
+    ctx.insert("topic_json", &topic_json);
+    ctx.insert("login_handle_json", &login_handle_json);
+    ctx.insert("auth_did_json", &auth_did_json);
     ctx.insert("is_authenticated", &is_authenticated);
-    ctx.insert("show_login", &!is_authenticated);
     ctx.insert("joined_channels", &joined);
-    ctx.insert("show_oauth_prompt", &false);
+    ctx.insert("show_login", &!is_authenticated);
     let body = match state.tera.render("chat.html.tera", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -624,17 +692,24 @@ async fn post_upload(
     while let Ok(Some(field)) = multipart.next_field().await {
         match field.name() {
             Some("file") => {
-                content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+                content_type = field
+                    .content_type()
+                    .unwrap_or("application/octet-stream")
+                    .to_string();
                 filename = field.file_name().unwrap_or("upload").to_string();
                 if let Ok(bytes) = field.bytes().await {
                     file_data = Some(bytes.to_vec());
                 }
             }
             Some("channel") => {
-                if let Ok(v) = field.text().await { channel = v; }
+                if let Ok(v) = field.text().await {
+                    channel = v;
+                }
             }
             Some("did") => {
-                if let Ok(v) = field.text().await { did = v; }
+                if let Ok(v) = field.text().await {
+                    did = v;
+                }
             }
             _ => {}
         }
@@ -643,10 +718,18 @@ async fn post_upload(
     // 333/ACCOUNT/NOTICE lines for guests.
     let (sid, _) = session_id_from_request(&headers);
     let session = state.session(&sid);
-    let session_did = session.auth.lock().did().map(|d| d.to_string())
+    let session_did = session
+        .auth
+        .lock()
+        .did()
+        .map(|d| d.to_string())
         .or_else(|| session.extracted_did.lock().clone())
         .unwrap_or_default();
-    let effective_did = if !session_did.is_empty() && session_did.starts_with("did:") { session_did } else { did };
+    let effective_did = if !session_did.is_empty() && session_did.starts_with("did:") {
+        session_did
+    } else {
+        did
+    };
     let file_data = match file_data {
         Some(d) => d,
         None => return (StatusCode::BAD_REQUEST, "No file provided").into_response(),
@@ -654,7 +737,13 @@ async fn post_upload(
     tracing::info!(did = %effective_did, "upload proxy forwarding");
     let upstream_url = state.upstream.base.join("api/v1/upload").unwrap();
     let form = reqwest::multipart::Form::new()
-        .part("file", reqwest::multipart::Part::bytes(file_data).file_name(filename).mime_str(&content_type).unwrap())
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(file_data)
+                .file_name(filename)
+                .mime_str(&content_type)
+                .unwrap(),
+        )
         .text("did", effective_did)
         .text("channel", channel);
     match state.http.post(upstream_url).multipart(form).send().await {
@@ -689,7 +778,7 @@ async fn get_channel_events(
     spawn_upstream_if_needed(&state, &sid, &session, upstream.clone(), &channel);
 
     let stream = async_stream::stream! {
-        let status_patch = PatchSignals::new(r#"{"_s":"connected"}"#);
+        let status_patch = PatchSignals::new(r#"{"connected":true}"#);
         yield Ok::<Event, std::convert::Infallible>(status_patch.write_as_axum_sse_event());
         loop {
             match lines_rx.recv().await {
@@ -729,6 +818,26 @@ async fn get_channel_events(
                         *session.extracted_did.lock() = Some(new_did.clone());
                         info!(session = %sid, did = %new_did, "DID extracted from 333");
                         continue;
+                    }
+                    // --- live topic updates (TOPIC / 332) ---
+                    if let Some(new_topic) = parse_topic_change(&line, &canon) {
+                        debug!(session = %sid, channel = %canon, topic = %new_topic, "live topic update received");
+                        // Custom lightweight SSE event that the page's inline
+                        // EventSource handler uses to update the topic text directly,
+                        let topic_event = Event::default()
+                            .event("topicupdate")
+                            .data(serde_json::json!(&new_topic).to_string());
+                        yield Ok::<Event, std::convert::Infallible>(topic_event);
+                    }
+                    // --- channel error numerics (442 / 482) ---
+                    if let Some(err_text) = parse_channel_error(&line, &canon) {
+                        let ts = Utc::now().format("%H:%M:%S").to_string();
+                        let safe = html_escape(err_text);
+                        let html = format!(r#"<div class="notice"><span class="ts">{ts}</span><span class="body">{safe}</span></div>"#);
+                        let patch = PatchElements::new(html).selector("#messages").mode(ElementPatchMode::Append);
+                        yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
+                        let scroll = ExecuteScript::new("document.getElementById('messages').scrollTop = 999999");
+                        yield Ok::<Event, std::convert::Infallible>(scroll.write_as_axum_sse_event());
                     }
                     // --- live member tracking (JOIN/PART/QUIT/MODE) ---
                     if let Some(change) = parse_member_change(&line) {
@@ -872,6 +981,11 @@ struct JoinSignals {
     channel: String,
 }
 
+#[derive(Deserialize)]
+struct TopicSignals {
+    topic_draft: String,
+}
+
 async fn post_channel_send(
     State(state): State<AppState>,
     Path(channel): Path<String>,
@@ -887,30 +1001,41 @@ async fn post_channel_send(
     }
 
     let target = canonical_channel(&channel);
-
-    let irc_tx = session.irc_tx.lock().clone();
+    let auth = session.auth.lock().clone();
+    let user = auth.handle().unwrap_or("guest");
+    let did = auth.did().unwrap_or("");
     let ws_state = session.get_ws_state();
     let reg_phase = session.reg_phase.lock().clone();
     let is_joined = session.joined.lock().contains(&target);
-    debug!(session = %sid, channel = %target, len = msg.len(), ?ws_state, reg_phase, is_joined, "send requested");
+    debug!(session = %sid, channel = %target, len = msg.len(), ?ws_state, reg_phase, is_joined, user, did, "send requested");
 
-    if let Err(e) = irc_tx
-        .send(format!("PRIVMSG {target} :{msg}\r\n"))
-        .await
-    {
+    if ws_state != WsState::Ready {
+        debug!(session = %sid, channel = %target, ?ws_state, "send rejected: not ready");
+        return (StatusCode::SERVICE_UNAVAILABLE, "not connected yet").into_response();
+    }
+
+    if !is_joined {
+        debug!(session = %sid, channel = %target, "send rejected: not joined");
+        return (StatusCode::SERVICE_UNAVAILABLE, "not joined").into_response();
+    }
+
+    let irc_tx = session.irc_tx.lock().clone();
+    if let Err(e) = irc_tx.send(format!("PRIVMSG {target} :{msg}\r\n")).await {
         warn!(session = %sid, "send to upstream failed: {e}");
         return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
     }
 
-    debug!(session = %sid, channel = %target, "PRIVMSG queued to upstream; echoing to DOM");
-
-    // Echo the sent message back to the DOM immediately. The IRC
+    debug!(session = %sid, channel = %target, user, did, "PRIVMSG queued to upstream; echoing to DOM");
     // server doesn't reflect a PRIVMSG back to its sender, so the
     // long-lived /events SSE never receives this line.
     let ts = Utc::now().format("%H:%M:%S").to_string();
     let safe = html_escape(&msg);
-    let echo_html = format!(r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick n1">you</span> {safe}</span></div>"#);
-    let echo = PatchElements::new(echo_html).selector("#messages").mode(ElementPatchMode::Append);
+    let echo_html = format!(
+        r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick n1">you</span> {safe}</span></div>"#
+    );
+    let echo = PatchElements::new(echo_html)
+        .selector("#messages")
+        .mode(ElementPatchMode::Append);
     let echo_event = echo.write_as_axum_sse_event();
     let clear = PatchSignals::new(r#"{"msg":""}"#);
     let clear_event = clear.write_as_axum_sse_event();
@@ -920,14 +1045,9 @@ async fn post_channel_send(
         yield Ok::<Event, std::convert::Infallible>(echo_event);
         yield Ok::<Event, std::convert::Infallible>(scroll_event);
         yield Ok::<Event, std::convert::Infallible>(clear_event);
-    }).into_response()
+    })
+    .into_response()
 }
-
-// ── POST /chat/{channel}/join and /part ─────────────────────────────────
-
-/// Send `JOIN {channel}` over the upstream WS. The DataStar join form
-/// posts `{channel: "#new"}` to `/chat/_new/join`; we route the
-/// `_new` literal through and use the form's `channel` signal.
 async fn post_channel_join(
     State(state): State<AppState>,
     Path(_path_chan): Path<String>,
@@ -947,10 +1067,7 @@ async fn post_channel_join(
 
     session.joined.lock().insert(target.clone());
     let irc_tx = session.irc_tx.lock().clone();
-    if let Err(e) = irc_tx
-        .send(format!("JOIN {target}\r\n"))
-        .await
-    {
+    if let Err(e) = irc_tx.send(format!("JOIN {target}\r\n")).await {
         warn!(session = %sid, "join failed: {e}");
         return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
     }
@@ -964,7 +1081,8 @@ async fn post_channel_join(
     let event = evt.write_as_axum_sse_event();
     Sse::new(async_stream::stream! {
         yield Ok::<Event, std::convert::Infallible>(event);
-    }).into_response()
+    })
+    .into_response()
 }
 
 /// Send `PART {channel}` over the upstream WS.
@@ -979,17 +1097,45 @@ async fn post_channel_part(
     debug!(session = %sid, channel = %target, "part requested");
     session.joined.lock().remove(&target);
     let irc_tx = session.irc_tx.lock().clone();
-    let _ = irc_tx
-        .send(format!("PART {target}\r\n"))
-        .await;
+    let _ = irc_tx.send(format!("PART {target}\r\n")).await;
     let evt = ExecuteScript::new("window.location='/chat/general'");
     let event = evt.write_as_axum_sse_event();
     Sse::new(async_stream::stream! {
         yield Ok::<Event, std::convert::Infallible>(event);
-    }).into_response()
+    })
+    .into_response()
 }
 
-// ── GET /api/channels (proxied from upstream) ──────────────────────────
+async fn post_channel_topic(
+    State(state): State<AppState>,
+    Path(channel): Path<String>,
+    req: axum::http::HeaderMap,
+    ReadSignals(signals): ReadSignals<TopicSignals>,
+) -> Response {
+    let (sid, _is_new) = session_id_from_request(&req);
+    let session = state.session(&sid);
+    let target = canonical_channel(&channel);
+    let text = signals.topic_draft;
+    let auth = session.auth.lock().clone();
+    let user = auth.handle().unwrap_or("guest");
+    let did = auth.did().unwrap_or("");
+    debug!(session = %sid, channel = %target, len = text.len(), user, did, text = %text, "topic change requested");
+
+    let irc_tx = session.irc_tx.lock().clone();
+    if let Err(e) = irc_tx.send(format!("TOPIC {target} :{text}\r\n")).await {
+        warn!(session = %sid, user, did, "topic change failed: {e}");
+        return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
+    }
+
+    debug!(session = %sid, channel = %target, user, did, "TOPIC queued to upstream");
+
+    let clear = PatchSignals::new(r#"{"editing_topic":false,"topic_draft":""}"#);
+    let clear_event = clear.write_as_axum_sse_event();
+    Sse::new(async_stream::stream! {
+        yield Ok::<Event, std::convert::Infallible>(clear_event);
+    })
+    .into_response()
+}
 
 async fn get_channels(State(state): State<AppState>) -> Response {
     let url = state
@@ -1001,12 +1147,7 @@ async fn get_channels(State(state): State<AppState>) -> Response {
         Ok(r) => {
             let status = r.status();
             let body = r.text().await.unwrap_or_default();
-            (
-                status,
-                [(header::CONTENT_TYPE, "application/json")],
-                body,
-            )
-                .into_response()
+            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
         }
         Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
     }
@@ -1060,8 +1201,10 @@ fn extract_irc_target(after_prefix: &str) -> Option<&str> {
             // Only filter if the target looks like a channel (starts with
             // # / & / + / !). Server-wide NOTICE * or PRIVMSG to a nick
             // should pass through unfiltered.
-            if target.starts_with('#') || target.starts_with('&')
-                || target.starts_with('+') || target.starts_with('!')
+            if target.starts_with('#')
+                || target.starts_with('&')
+                || target.starts_with('+')
+                || target.starts_with('!')
             {
                 Some(target)
             } else {
@@ -1115,18 +1258,28 @@ fn render_irc_line(line: &str) -> String {
     format!(r#"<div class="notice">{ts_html}<span class="body">{safe}</span></div>"#)
 }
 
-
 /// A membership-affecting IRC event parsed from a line.
 ///
 /// `Join`/`Part`/`Mode` carry the channel so the handler can ignore events
 /// for other channels; `Quit` has no channel (it applies to every channel
 /// the user was in, so the current view removes them).
 enum MemberChange {
-    Join { channel: String, nick: String },
-    Part { channel: String, nick: String },
-    Quit { nick: String },
+    Join {
+        channel: String,
+        nick: String,
+    },
+    Part {
+        channel: String,
+        nick: String,
+    },
+    Quit {
+        nick: String,
+    },
     /// `(mode_char, adding, target_nick)` — only `o`/`h`/`v` affect display.
-    Mode { channel: String, ops: Vec<(char, bool, String)> },
+    Mode {
+        channel: String,
+        ops: Vec<(char, bool, String)>,
+    },
 }
 
 /// Parse an IRC line into a [`MemberChange`], if it is one. Recognizes
@@ -1182,6 +1335,57 @@ fn parse_member_change(line: &str) -> Option<MemberChange> {
         _ => None,
     }
 }
+/// Parse a live topic change (`TOPIC #chan :text`) or the RPL_TOPIC
+/// numeric (`:server 332 <nick> #chan :text`) and return the new
+/// topic text only if it is for the requested channel.
+fn parse_topic_change(line: &str, current_channel: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    // Locate the trailing `:` parameter and the tokens before it.
+    let colon_idx = rest.find(" :")?;
+    let before = &rest[..colon_idx];
+    let text = &rest[colon_idx + 2..];
+    let mut tokens = before.split_whitespace();
+    let _source = tokens.next()?;
+    let second = tokens.next()?;
+    let channel = if second.eq_ignore_ascii_case("TOPIC") {
+        tokens.next()?
+    } else if second == "332" {
+        let _nick = tokens.next()?;
+        tokens.next()?
+    } else {
+        return None;
+    };
+    if channel.eq_ignore_ascii_case(current_channel) {
+        Some(text.to_string())
+    } else {
+        None
+    }
+}
+
+/// Parse a channel-scoped error numeric (442 ERR_NOTONCHANNEL,
+/// 482 ERR_CHANOPRIVSNEEDED) and return a short human-readable message
+/// if it targets the channel the user is viewing.
+fn parse_channel_error(line: &str, current_channel: &str) -> Option<&'static str> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let mut tokens = rest.split_whitespace();
+    let _server = tokens.next()?;
+    let numeric = tokens.next()?;
+    if !matches!(numeric, "442" | "482") {
+        return None;
+    }
+    let _nick = tokens.next()?;
+    let channel = tokens.next()?;
+    if !channel.eq_ignore_ascii_case(current_channel) {
+        return None;
+    }
+    match numeric {
+        "442" => Some("You are not on that channel."),
+        "482" => Some("You must be a channel operator to change the topic."),
+        _ => None,
+    }
+}
 
 /// Render the member map as an HTML list. Used by the SSE handler to
 /// update `#member-panel`. Members are sorted by rank (op → halfop →
@@ -1229,8 +1433,12 @@ fn render_member_list(members: &std::collections::HashMap<String, MemberEntry>) 
 /// Check if an IRC line is a 353 (NAMES reply).
 fn is_353(line: &str) -> bool {
     let line = line.trim_end_matches(['\r', '\n']);
-    let Some(rest) = line.strip_prefix(':') else { return false };
-    let Some(sp) = rest.find(' ') else { return false };
+    let Some(rest) = line.strip_prefix(':') else {
+        return false;
+    };
+    let Some(sp) = rest.find(' ') else {
+        return false;
+    };
     rest[sp + 1..].starts_with("353 ")
 }
 
@@ -1242,7 +1450,9 @@ fn parse_333_did(line: &str) -> Option<String> {
     // rest = "333 nick #chan did:plc:xxx timestamp"
     let parts: Vec<&str> = rest.splitn(4, ' ').collect();
     // parts = ["333", "nick", "#chan", "did:plc:xxx timestamp"]
-    if parts.len() < 4 || parts[0] != "333" { return None; }
+    if parts.len() < 4 || parts[0] != "333" {
+        return None;
+    }
     let rest2 = parts[3];
     let did = rest2.split(' ').next()?;
     if did.starts_with("did:plc:") {
@@ -1255,21 +1465,28 @@ fn parse_333_did(line: &str) -> Option<String> {
 /// Parse DID from auth NOTICE: `:server NOTICE nick :...authenticated as did:plc:XXX...`
 fn parse_auth_notice_did(line: &str) -> Option<String> {
     let line = line.trim_end_matches(['\r', '\n']);
-    if !line.contains("authenticated as did:plc:") { return None; }
+    if !line.contains("authenticated as did:plc:") {
+        return None;
+    }
     let start = line.find("did:plc:")?;
     let rest = &line[start..];
-    let end = rest.find(|c: char| c.is_whitespace() || c == ')').unwrap_or(rest.len());
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == ')')
+        .unwrap_or(rest.len());
     Some(rest[..end].to_string())
 }
-
 
 /// Parse a DID from an IRCv3 ACCOUNT message: `:nick ACCOUNT did:plc:xxx`
 fn parse_account_did(line: &str) -> Option<String> {
     let line = line.trim_end_matches(['\r', '\n']);
     let (_prefix, rest) = line.strip_prefix(':')?.split_once(' ')?;
     let (cmd, did) = rest.split_once(' ')?;
-    if cmd != "ACCOUNT" { return None; }
-    if did == "*" { return None; } // logged out
+    if cmd != "ACCOUNT" {
+        return None;
+    }
+    if did == "*" {
+        return None;
+    } // logged out
     Some(did.to_string())
 }
 
@@ -1287,7 +1504,10 @@ fn parse_353_members(line: &str) -> Vec<MemberEntry> {
         .split(' ')
         .filter(|t| !t.is_empty())
         .map(|token| {
-            let pfx_len = token.chars().take_while(|c| matches!(c, '@' | '%' | '+' | '~' | '&')).count();
+            let pfx_len = token
+                .chars()
+                .take_while(|c| matches!(c, '@' | '%' | '+' | '~' | '&'))
+                .count();
             let nick = &token[pfx_len..];
             let pfx = &token[..pfx_len];
             MemberEntry {
@@ -1345,9 +1565,13 @@ fn sanitize_nick(handle: &str) -> String {
         if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
             out.push(c);
         }
-        if out.len() >= 20 { break; }
+        if out.len() >= 20 {
+            break;
+        }
     }
-    if out.is_empty() { return String::new(); }
+    if out.is_empty() {
+        return String::new();
+    }
     // Must start with a letter.
     if !out.starts_with(|c: char| c.is_ascii_alphabetic()) {
         out.insert(0, 'u');
@@ -1363,9 +1587,13 @@ fn linkify_urls(escaped: &str) -> String {
     let mut rest = escaped;
     while let Some(pos) = rest.find("https://") {
         out.push_str(&rest[..pos]);
-        let url_end = rest[pos..].find(|c: char| c.is_whitespace() || c == '<').unwrap_or(rest.len() - pos);
+        let url_end = rest[pos..]
+            .find(|c: char| c.is_whitespace() || c == '<')
+            .unwrap_or(rest.len() - pos);
         let url = &rest[pos..pos + url_end];
-        out.push_str(&format!(r#"<a href="{url}" target="_blank" rel="noopener">{url}</a>"#));
+        out.push_str(&format!(
+            r#"<a href="{url}" target="_blank" rel="noopener">{url}</a>"#
+        ));
         rest = &rest[pos + url_end..];
     }
     out.push_str(rest);
@@ -1525,7 +1753,10 @@ mod tests {
     #[test]
     fn render_empty_returns_placeholder() {
         let map: HashMap<String, MemberEntry> = HashMap::new();
-        assert_eq!(render_member_list(&map), r#"<div class="member empty">—</div>"#);
+        assert_eq!(
+            render_member_list(&map),
+            r#"<div class="member empty">—</div>"#
+        );
     }
 
     #[test]
@@ -1622,18 +1853,12 @@ mod tests {
 
     #[test]
     fn extract_target_privmsg() {
-        assert_eq!(
-            extract_irc_target("PRIVMSG #chan :hello"),
-            Some("#chan")
-        );
+        assert_eq!(extract_irc_target("PRIVMSG #chan :hello"), Some("#chan"));
     }
 
     #[test]
     fn extract_target_notice_channel() {
-        assert_eq!(
-            extract_irc_target("NOTICE #chan :msg"),
-            Some("#chan")
-        );
+        assert_eq!(extract_irc_target("NOTICE #chan :msg"), Some("#chan"));
     }
 
     #[test]
@@ -1650,10 +1875,7 @@ mod tests {
 
     #[test]
     fn extract_target_mode() {
-        assert_eq!(
-            extract_irc_target("MODE #chan +o bob"),
-            Some("#chan")
-        );
+        assert_eq!(extract_irc_target("MODE #chan +o bob"), Some("#chan"));
     }
 
     #[test]
@@ -1661,5 +1883,47 @@ mod tests {
         assert_eq!(extract_irc_target("QUIT :bye"), None);
         assert_eq!(extract_irc_target("JOIN :#chan"), None);
         assert_eq!(extract_irc_target("PART #chan"), None);
+    }
+
+    // ── parse_topic_change ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_topic_change_topic_same_channel() {
+        assert_eq!(
+            parse_topic_change(":op!u@h TOPIC #test :new topic", "#test"),
+            Some("new topic".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_topic_change_topic_other_channel_is_none() {
+        assert_eq!(
+            parse_topic_change(":op!u@h TOPIC #other :new topic", "#test"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_topic_change_332_same_channel() {
+        assert_eq!(
+            parse_topic_change(":srv 332 alice #test :welcome", "#test"),
+            Some("welcome".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_topic_change_332_other_channel_is_none() {
+        assert_eq!(
+            parse_topic_change(":srv 332 alice #other :welcome", "#test"),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_topic_change_topic_with_colons_and_channel_in_text() {
+        assert_eq!(
+            parse_topic_change(":op!u@h TOPIC #test :visit #test at https://x/y", "#test"),
+            Some("visit #test at https://x/y".to_string())
+        );
     }
 }

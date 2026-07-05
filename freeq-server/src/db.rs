@@ -1693,10 +1693,19 @@ mod tests {
         let removed = db.prune_messages_older_than(500).unwrap();
         assert_eq!(removed, 2);
 
-        assert!(db.get_messages("#dev", 50, None).unwrap().iter().all(|m| m.msgid.as_deref() == Some("r1")));
+        assert!(
+            db.get_messages("#dev", 50, None)
+                .unwrap()
+                .iter()
+                .all(|m| m.msgid.as_deref() == Some("r1"))
+        );
         assert!(db.get_messages("#ops", 50, None).unwrap().is_empty());
         // Pruned rows also leave the FTS index (no stale search hits).
-        assert!(db.search_messages("#dev", "ancient", 50, None).unwrap().is_empty());
+        assert!(
+            db.search_messages("#dev", "ancient", 50, None)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

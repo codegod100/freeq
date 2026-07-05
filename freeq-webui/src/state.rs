@@ -13,7 +13,6 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{info, warn};
 use url::Url;
 
-
 /// Persists authenticated OAuth sessions to disk so users stay logged in
 /// across `freeq-webui` restarts.
 ///
@@ -72,7 +71,9 @@ impl SessionStore {
     pub fn save(&self, sid: &str, oauth: &OAuthSession) -> Result<()> {
         let path = self.session_path(sid);
         let key = self.derive_key(sid);
-        oauth.save_encrypted(&path, &key).context("saving session")?;
+        oauth
+            .save_encrypted(&path, &key)
+            .context("saving session")?;
         Ok(())
     }
 
@@ -116,7 +117,9 @@ pub enum AuthState {
 }
 
 impl Default for AuthState {
-    fn default() -> Self { AuthState::Guest }
+    fn default() -> Self {
+        AuthState::Guest
+    }
 }
 
 impl AuthState {
@@ -137,7 +140,6 @@ impl AuthState {
     pub fn is_authenticated(&self) -> bool {
         matches!(self, AuthState::Authenticated { .. })
     }
-
 }
 
 // ── App state ──────────────────────────────────────────────────────────
@@ -172,7 +174,10 @@ pub struct Upstream {
 
 impl Upstream {
     pub fn from_base(base: Url) -> Result<Self> {
-        let scheme = match base.scheme() { "https" => "wss", _ => "ws" };
+        let scheme = match base.scheme() {
+            "https" => "wss",
+            _ => "ws",
+        };
         let host = base.host_str().context("upstream URL missing host")?;
         let port = base.port().map(|p| format!(":{p}")).unwrap_or_default();
         let ws = Url::parse(&format!("{scheme}://{host}{port}/irc"))?;
@@ -183,7 +188,9 @@ impl Upstream {
 impl AppState {
     pub fn new(upstream_base: Url, public_url: Option<String>) -> Result<Self> {
         let upstream = Arc::new(Upstream::from_base(upstream_base)?);
-        let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build()?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
 
         // Optional encrypted session persistence. Disabled if the env var is
         // explicitly empty; otherwise defaults to a local directory.
@@ -203,13 +210,19 @@ impl AppState {
             let entry = entry?;
             let p = entry.path();
             if p.extension().and_then(|s| s.to_str()) == Some("tera") {
-                let name = p.file_name().and_then(|s| s.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("bad template filename: {p:?}"))?.to_string();
+                let name = p
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .ok_or_else(|| anyhow::anyhow!("bad template filename: {p:?}"))?
+                    .to_string();
                 files.push((p.to_string_lossy().to_string(), Some(name)));
             }
         }
-        if files.is_empty() { anyhow::bail!("no .tera templates in templates/"); }
-        tera.add_template_files(files).context("loading Tera templates")?;
+        if files.is_empty() {
+            anyhow::bail!("no .tera templates in templates/");
+        }
+        tera.add_template_files(files)
+            .context("loading Tera templates")?;
         Ok(Self {
             upstream,
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -323,7 +336,8 @@ impl SessionHandle {
         let (irc_tx, irc_rx) = mpsc::channel::<String>(256);
         let (lines_tx, _) = broadcast::channel::<String>(4096);
         Self {
-            irc_tx: Mutex::new(irc_tx), lines_tx,
+            irc_tx: Mutex::new(irc_tx),
+            lines_tx,
             joined: Mutex::new(HashSet::new()),
             channel_members: Mutex::new(HashMap::new()),
             irc_rx_slot: Mutex::new(Some(irc_rx)),

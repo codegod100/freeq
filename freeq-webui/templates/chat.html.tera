@@ -27,13 +27,15 @@ html,body{height:100dvh;overflow:hidden}
 #messages a{color:var(--bulma-link-text)}
 </style>
 </head>
-<body data-signals="{auth_handle:'{{login_handle}}',auth_did:'{{auth_did}}'}">
+<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:""}'>
 <section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
   <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
     <div class="navbar-brand" style="min-height:2.5rem">
       <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
       <span class="navbar-item has-text-link py-1">#{{channel}}</span>
-      {% if topic %}<span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile">{{topic}}</span>{% endif %}
+      <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic">{{topic}}</span></span>
+      <span class="navbar-item py-1 is-hidden-mobile" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''"><button class="button is-small is-dark ml-2" type="button" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
+      <span class="navbar-item py-1 is-hidden-mobile" data-attr:style="$editing_topic ? '' : 'display:none'"><form class="field has-addons mb-0" data-signals="{topic_draft:''}" data-signals-merge data-on:submit="@post('/chat/{{channel}}/topic')"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" data-bind:topic_draft style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form></span>
     </div>
     <div class="navbar-end">
       <div class="navbar-item py-1">
@@ -78,7 +80,7 @@ html,body{height:100dvh;overflow:hidden}
   <div class="modal-content" style="max-width:500px"><div class="box">
     <p class="has-text-weight-bold mb-2">Sign in with your AT Protocol identity</p>
     <p class="is-size-7 has-text-grey mb-3">Click below to authorize with your PDS:</p>
-    <a id="oauth-link" class="button is-link is-fullwidth" href="#" target="_blank" rel="noopener">Open authorization page</a>
+    <a id="oauth-link" class="button is-link is-fullwidth" href="#">Open authorization page</a>
   </div></div>
 </div>
 <script>
@@ -91,6 +93,10 @@ html,body{height:100dvh;overflow:hidden}
     src.addEventListener('datastar-patch-signals',function(e){
       var l=e.data.split('\n');
       for(var i=0;i<l.length;i++){if(l[i].startsWith('signals '))try{var s=JSON.parse(l[i].slice(8));if(s.msg!==undefined){var inp=document.querySelector('#send-form input[name=msg]');if(inp)inp.value=s.msg}}catch(e){}}
+    });
+    src.addEventListener('topicupdate',function(e){
+      var t=document.getElementById('channel-topic');
+      if(t){try{t.textContent=JSON.parse(e.data)}catch(x){t.textContent=e.data}}
     });
     src.addEventListener('datastar-patch-elements',function(e){
       var l=e.data.split('\n'),sel=null,mode='outer',els=null;

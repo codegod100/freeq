@@ -1881,8 +1881,7 @@ impl Server {
                 let maint_state = Arc::clone(&state);
                 tokio::spawn(async move {
                     let mut ticks: u64 = 0;
-                    let mut interval =
-                        tokio::time::interval(std::time::Duration::from_secs(60));
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
                     interval.tick().await; // skip immediate tick
                     loop {
                         interval.tick().await;
@@ -2965,9 +2964,7 @@ pub(crate) async fn process_s2s_message(
                 if let Some(ref sig) = sig {
                     tags.insert("+freeq.at/sig".to_string(), sig.clone());
                 }
-                if with_account
-                    && let Some(ref acct) = account
-                {
+                if with_account && let Some(ref acct) = account {
                     tags.insert("account".to_string(), acct.clone());
                 }
                 let tag_msg = crate::irc::Message {
@@ -5222,7 +5219,10 @@ mod s2s_adversarial_tests {
             stored.chars().count(),
             body.chars().count(),
         );
-        assert_eq!(stored, body, "stored history must match the full federated body");
+        assert_eq!(
+            stored, body,
+            "stored history must match the full federated body"
+        );
     }
 
     #[tokio::test]
@@ -5244,7 +5244,10 @@ mod s2s_adversarial_tests {
             .unwrap()
             .members
             .insert("acct-recv".to_string());
-        state.cap_message_tags.lock().insert("acct-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("acct-recv".to_string());
         state.cap_account_tag.lock().insert("acct-recv".to_string());
 
         process_s2s_message(
@@ -5285,7 +5288,10 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#acct2");
 
         let (tx, mut rx) = mpsc::channel(16);
-        state.connections.lock().insert("plain-recv".to_string(), tx);
+        state
+            .connections
+            .lock()
+            .insert("plain-recv".to_string(), tx);
         state
             .channels
             .lock()
@@ -5349,7 +5355,10 @@ mod s2s_adversarial_tests {
             .unwrap()
             .members
             .insert("prov-recv".to_string());
-        state.cap_message_tags.lock().insert("prov-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("prov-recv".to_string());
 
         process_s2s_message(
             &state,
@@ -5389,7 +5398,10 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#prov2");
 
         let (tx, mut rx) = mpsc::channel(16);
-        state.connections.lock().insert("prov2-recv".to_string(), tx);
+        state
+            .connections
+            .lock()
+            .insert("prov2-recv".to_string(), tx);
         state
             .channels
             .lock()
@@ -5397,7 +5409,10 @@ mod s2s_adversarial_tests {
             .unwrap()
             .members
             .insert("prov2-recv".to_string());
-        state.cap_message_tags.lock().insert("prov2-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("prov2-recv".to_string());
 
         // Note: no peer_names entry for PEER.
         process_s2s_message(
@@ -7285,7 +7300,12 @@ mod allowlist_tests {
 
     #[test]
     fn empty_allowlists_are_open() {
-        assert!(did_allowed(&[], &[], "did:plc:anyone", Some("a.bsky.social")));
+        assert!(did_allowed(
+            &[],
+            &[],
+            "did:plc:anyone",
+            Some("a.bsky.social")
+        ));
     }
 
     #[test]
@@ -7300,7 +7320,12 @@ mod allowlist_tests {
         let doms = v(&["acme.com"]);
         assert!(did_allowed(&[], &doms, "did:plc:x", Some("alice.acme.com")));
         assert!(did_allowed(&[], &doms, "did:plc:x", Some("acme.com")));
-        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("alice.evil.com")));
+        assert!(!did_allowed(
+            &[],
+            &doms,
+            "did:plc:x",
+            Some("alice.evil.com")
+        ));
         // Not fooled by a suffix that isn't a domain boundary.
         assert!(!did_allowed(&[], &doms, "did:plc:x", Some("notacme.com")));
     }

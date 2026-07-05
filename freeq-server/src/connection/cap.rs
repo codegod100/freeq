@@ -213,7 +213,10 @@ pub(super) async fn handle_authenticate(
             tracing::debug!(%session_id, challenge_found = taken.is_some(), "SASL challenge taken");
             match taken {
                 Some((challenge, challenge_bytes)) => {
-                    let method = response.method.clone().unwrap_or_else(|| "crypto".to_string());
+                    let method = response
+                        .method
+                        .clone()
+                        .unwrap_or_else(|| "crypto".to_string());
                     tracing::debug!(%session_id, %method, "SASL verification starting");
                     let verify_result = if let Some(result) = web_token_result {
                         result

@@ -170,7 +170,10 @@ fn chunk_multiline_body(text: &str, budget: usize) -> Vec<MultilineChunk> {
     let mut out = Vec::new();
     for line in text.split('\n') {
         if line.is_empty() {
-            out.push(MultilineChunk { body: String::new(), concat: false });
+            out.push(MultilineChunk {
+                body: String::new(),
+                concat: false,
+            });
             continue;
         }
         let mut first = true;
@@ -187,7 +190,10 @@ fn chunk_multiline_body(text: &str, budget: usize) -> Vec<MultilineChunk> {
                     end += 1;
                 }
             }
-            out.push(MultilineChunk { body: line[start..end].to_string(), concat: !first });
+            out.push(MultilineChunk {
+                body: line[start..end].to_string(),
+                concat: !first,
+            });
             first = false;
             start = end;
         }
@@ -278,12 +284,10 @@ impl ClientHandle {
     pub async fn privmsg(&self, target: &str, text: &str) -> Result<()> {
         // Route through multiline when the text spans lines OR is long enough
         // that a single PRIVMSG would risk server-side truncation.
-        let multiline_ready = (text.contains('\n')
-            || text.len() > MULTILINE_PER_CHUNK_BYTES)
-            && {
-                let caps = self.caps_acked.lock();
-                caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
-            };
+        let multiline_ready = (text.contains('\n') || text.len() > MULTILINE_PER_CHUNK_BYTES) && {
+            let caps = self.caps_acked.lock();
+            caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
+        };
         if multiline_ready {
             self.send_chunked_multiline(target, text, std::collections::HashMap::new())
                 .await?;
@@ -421,12 +425,10 @@ impl ClientHandle {
         text: &str,
         tags: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        let multiline_ready = (text.contains('\n')
-            || text.len() > MULTILINE_PER_CHUNK_BYTES)
-            && {
-                let caps = self.caps_acked.lock();
-                caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
-            };
+        let multiline_ready = (text.contains('\n') || text.len() > MULTILINE_PER_CHUNK_BYTES) && {
+            let caps = self.caps_acked.lock();
+            caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
+        };
         if multiline_ready {
             self.send_chunked_multiline(target, text, tags).await?;
         } else {
@@ -2695,8 +2697,15 @@ mod multiline_tests {
         let chunks = chunk_multiline_body(&line, MULTILINE_PER_CHUNK_BYTES);
         assert!(chunks.len() > 1);
         assert!(!chunks[0].concat, "first chunk opens the line");
-        assert!(chunks[1..].iter().all(|c| c.concat), "rest are continuations");
-        assert!(chunks.iter().all(|c| c.body.len() <= MULTILINE_PER_CHUNK_BYTES));
+        assert!(
+            chunks[1..].iter().all(|c| c.concat),
+            "rest are continuations"
+        );
+        assert!(
+            chunks
+                .iter()
+                .all(|c| c.body.len() <= MULTILINE_PER_CHUNK_BYTES)
+        );
         assert_eq!(reassemble(&chunks), line);
     }
 
@@ -3116,7 +3125,10 @@ mod multiline_tests {
     async fn privmsg_auto_routes_to_multiline_when_cap_acked() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
-        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked
+            .lock()
+            .acked
+            .insert("draft/multiline".to_string());
         caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
@@ -3174,7 +3186,10 @@ mod multiline_tests {
     async fn send_tagged_auto_routes_to_multiline_with_opener_tags() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
-        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked
+            .lock()
+            .acked
+            .insert("draft/multiline".to_string());
         caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,
@@ -3212,7 +3227,10 @@ mod multiline_tests {
     async fn privmsg_single_line_never_routes_to_multiline() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
-        caps_acked.lock().acked.insert("draft/multiline".to_string());
+        caps_acked
+            .lock()
+            .acked
+            .insert("draft/multiline".to_string());
         caps_acked.lock().acked.insert("batch".to_string());
         let handle = ClientHandle {
             cmd_tx,

@@ -241,7 +241,12 @@ impl OAuthSession {
             ("client_id", self.client_id.as_str()),
         ];
 
-        let dpop_proof = self.dpop_key.proof("POST", &self.token_endpoint, self.dpop_nonce.as_deref(), None)?;
+        let dpop_proof = self.dpop_key.proof(
+            "POST",
+            &self.token_endpoint,
+            self.dpop_nonce.as_deref(),
+            None,
+        )?;
         let resp = client
             .post(&self.token_endpoint)
             .header("DPoP", &dpop_proof)
@@ -565,7 +570,10 @@ impl PreparedLogin {
     /// Only valid for loopback (localhost) logins. Panics if called on a
     /// web-based `PreparedLogin` created with [`for_web`](Self::for_web).
     pub async fn wait(mut self) -> Result<OAuthSession> {
-        let listener = self.listener.take().expect("wait() called on web-based PreparedLogin; use handle_callback() instead");
+        let listener = self
+            .listener
+            .take()
+            .expect("wait() called on web-based PreparedLogin; use handle_callback() instead");
         let auth_code = wait_for_callback(listener, &self.state).await?;
         self.exchange_and_finish(&auth_code).await
     }
@@ -576,7 +584,11 @@ impl PreparedLogin {
     /// exchanges the code for tokens. Returns the completed `OAuthSession`.
     pub async fn handle_callback(self, code: &str, callback_state: &str) -> Result<OAuthSession> {
         if callback_state != self.state {
-            bail!("State mismatch in OAuth callback: expected {}, got {}", self.state, callback_state);
+            bail!(
+                "State mismatch in OAuth callback: expected {}, got {}",
+                self.state,
+                callback_state
+            );
         }
         self.exchange_and_finish(code).await
     }
@@ -690,7 +702,10 @@ pub async fn login(handle: &str) -> Result<OAuthSession> {
     let prepared = PreparedLogin::new(handle).await?;
 
     eprintln!("\nOpening browser for authorization...");
-    eprintln!("If the browser doesn't open, visit:\n  {}\n", prepared.auth_url());
+    eprintln!(
+        "If the browser doesn't open, visit:\n  {}\n",
+        prepared.auth_url()
+    );
     let _ = open::that(prepared.auth_url());
 
     prepared.wait().await
@@ -971,7 +986,11 @@ async fn exchange_code(
             .json()
             .await
             .context("Failed to parse token response")?;
-        return Ok((token_resp.access_token, token_resp.refresh_token, token_resp.sub));
+        return Ok((
+            token_resp.access_token,
+            token_resp.refresh_token,
+            token_resp.sub,
+        ));
     }
 
     if !status.is_success() {
@@ -983,7 +1002,11 @@ async fn exchange_code(
         .json()
         .await
         .context("Failed to parse token response")?;
-    Ok((token_resp.access_token, token_resp.refresh_token, token_resp.sub))
+    Ok((
+        token_resp.access_token,
+        token_resp.refresh_token,
+        token_resp.sub,
+    ))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
