@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.automirrored.filled.Chat
@@ -37,22 +39,23 @@ fun UserProfileSheet(
 ) {
     var profile by remember { mutableStateOf<BlueskyProfile?>(null) }
     var loading by remember { mutableStateOf(true) }
+    var showReportDialog by remember { mutableStateOf(false) }
     val uriHandler = LocalUriHandler.current
     val isOwnProfile = nick.equals(appState.nick.value, ignoreCase = true)
+    // Identity is the server-bound DID, never the nick. Resolve the DID
+    // from our own session (self) or a channel member entry / account-tag
+    // map; with no DID there is no Bluesky profile to show (no
+    // nick-as-handle guessing).
+    val resolvedDid = if (isOwnProfile) {
+        appState.authenticatedDID.value
+    } else {
+        appState.didForNick(nick)
+    }
+    val isBlocked = appState.isBlocked(nick, resolvedDid)
 
     LaunchedEffect(nick) {
-        // Identity is the server-bound DID, never the nick. Resolve the DID
-        // from our own session (self) or a channel member entry; with no DID
-        // there is no Bluesky profile to show (no nick-as-handle guessing).
-        val did = if (isOwnProfile) {
-            appState.authenticatedDID.value
-        } else {
-            appState.channels.firstNotNullOfOrNull { ch ->
-                ch.members.firstOrNull { it.nick.equals(nick, ignoreCase = true) }?.did
-            }
-        }
         profile = withContext(Dispatchers.IO) {
-            AvatarCache.fetchProfileIfNeeded(nick, did)
+            AvatarCache.fetchProfileIfNeeded(nick, resolvedDid)
         }
         loading = false
     }
@@ -260,6 +263,54 @@ fun UserProfileSheet(
                         }
                     }
                 }
+
+                // Safety actions (hidden for own profile)
+                if (!isOwnProfile) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        OutlinedButton(
+                            onClick = { showReportDialog = true },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = FreeqColors.danger
+                            )
+                        ) {
+                            Icon(
+                                Icons.Default.Flag,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Report", fontWeight = FontWeight.Medium)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (isBlocked) {
+                                    appState.unblockUser(nick, resolvedDid)
+                                } else {
+                                    appState.blockUser(nick, resolvedDid)
+                                    appState.errorMessage.value = "Blocked $nick"
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = FreeqColors.danger
+                            )
+                        ) {
+                            Icon(
+                                Icons.Default.Block,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                if (isBlocked) "Unblock" else "Block",
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
             }
 
             // Loading indicator
@@ -272,6 +323,19 @@ fun UserProfileSheet(
                 )
             }
         }
+    }
+
+    // Report reason picker — on choice: report (log) + block + snackbar
+    if (showReportDialog) {
+        ReportReasonDialog(
+            nick = nick,
+            onReport = { reason ->
+                appState.reportUser(nick, resolvedDid, reason)
+                appState.errorMessage.value = "Reported $nick — user blocked"
+                showReportDialog = false
+            },
+            onDismiss = { showReportDialog = false }
+        )
     }
 }
 

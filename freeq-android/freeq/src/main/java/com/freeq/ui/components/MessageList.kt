@@ -50,7 +50,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.freeq.model.AppState
-import com.freeq.model.AvatarCache
 import com.freeq.model.ChannelState
 import com.freeq.model.UnreadBoundary
 import com.freeq.model.PinCache
@@ -70,7 +69,12 @@ fun MessageList(
     scrollToMessageId: String? = null,
     modifier: Modifier = Modifier
 ) {
-    val messages = channelState.messages
+    // Safety: hide blocked users' messages at render time. Messages stay in
+    // the buffer so unblocking restores history. System messages (empty
+    // `from`) always render.
+    val messages = channelState.messages.filter { msg ->
+        msg.from.isEmpty() || !appState.isBlocked(msg.from, appState.didForNick(msg.from))
+    }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
@@ -409,8 +413,15 @@ private fun MessageBubble(
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var showEmojiPicker by remember { mutableStateOf(false) }
+    var showReportDialog by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     val isOwn = msg.from.equals(appState.nick.value, ignoreCase = true)
+    // Sender identity: the server-bound DID from the channel member entry
+    // (same source UserProfileSheet uses), with the account-tag map as
+    // fallback for DMs where the buffer has no member list.
+    val senderMember = channelState.members
+        .firstOrNull { it.nick.equals(msg.from, ignoreCase = true) }
+    val senderDid = senderMember?.did ?: appState.didForNick(msg.from)
     val isMention = !isOwn && appState.nick.value.isNotEmpty() &&
             msg.text.contains(appState.nick.value, ignoreCase = true)
     // Read directly from pins map so Compose tracks the state change
@@ -559,9 +570,7 @@ private fun MessageBubble(
             ) {
                 // Header: nick + time
                 if (showHeader) {
-                    val memberPrefix = channelState.members
-                        .firstOrNull { it.nick.equals(msg.from, ignoreCase = true) }
-                        ?.prefix ?: ""
+                    val memberPrefix = senderMember?.prefix ?: ""
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -573,7 +582,14 @@ private fun MessageBubble(
                             color = Theme.nickColor(msg.from),
                             modifier = Modifier.clickable { onNickClick?.invoke(msg.from, msg.origin) }
                         )
-                        if (msg.origin == null && AvatarCache.avatarUrl(msg.from) != null) {
+                        // Verified = the sender's server-bound DID (never the
+                        // "has a cached avatar" proxy, which false-negatives
+                        // before the avatar fetch lands). did:key = guest /
+                        // session key, not a verified AT identity. Federated
+                        // messages (origin set) stay suppressed — peer-vouched,
+                        // not verified here.
+                        if (msg.origin == null && !senderDid.isNullOrEmpty()
+                            && !senderDid.startsWith("did:key:")) {
                             Icon(
                                 Icons.Default.CheckCircle,
                                 contentDescription = "Verified",
@@ -779,6 +795,51 @@ private fun MessageBubble(
                     }
                 )
             }
+            if (!isOwn) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                DropdownMenuItem(
+                    text = { Text("Report…") },
+                    onClick = {
+                        showMenu = false
+                        showReportDialog = true
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Flag,
+                            contentDescription = null,
+                            tint = FreeqColors.danger
+                        )
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Block ${msg.from}") },
+                    onClick = {
+                        appState.blockUser(msg.from, senderDid)
+                        appState.errorMessage.value = "Blocked ${msg.from}"
+                        showMenu = false
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Block,
+                            contentDescription = null,
+                            tint = FreeqColors.danger
+                        )
+                    }
+                )
+            }
+        }
+
+        // Report reason picker — on choice: report (log) + block + snackbar
+        if (showReportDialog) {
+            ReportReasonDialog(
+                nick = msg.from,
+                onReport = { reason ->
+                    appState.reportUser(msg.from, senderDid, reason)
+                    appState.errorMessage.value = "Reported ${msg.from} — user blocked"
+                    showReportDialog = false
+                },
+                onDismiss = { showReportDialog = false }
+            )
         }
 
         // Emoji picker dialog

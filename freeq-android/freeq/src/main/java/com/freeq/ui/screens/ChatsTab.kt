@@ -42,7 +42,12 @@ fun ChatsTab(
 
     val allConversations by remember {
         derivedStateOf {
-            (appState.channels + appState.dmBuffers.filter { it.name.isNotEmpty() && it.messages.isNotEmpty() })
+            // Blocked users' DM conversations are hidden (safety layer);
+            // unblocking in Settings → Safety brings them back.
+            (appState.channels + appState.dmBuffers.filter {
+                it.name.isNotEmpty() && it.messages.isNotEmpty() &&
+                    !appState.isBlocked(it.name, appState.didForNick(it.name))
+            })
                 .sortedByDescending { it.lastActivityTime.value }
         }
     }

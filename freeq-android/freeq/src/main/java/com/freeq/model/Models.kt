@@ -178,6 +178,23 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val unreadCounts = mutableStateMapOf<String, Int>()
     val mutedChannels = mutableStateListOf<String>()
 
+    // Safety: client-side block list (Google Play UGC policy requires in-app
+    // block + report). SnapshotStateLists rather than plain MutableSets so
+    // hiding blocked content recomposes immediately; set semantics are
+    // enforced on insert. blockedNicks entries are stored lowercased.
+    val blockedDids = mutableStateListOf<String>()
+    val blockedNicks = mutableStateListOf<String>()
+
+    // Nick → server-bound DID learned from message account-tags. Keyed by
+    // lowercased nick. Backfills channel member entries (the FFI NAMES reply
+    // carries no DID) so DID-gated UI has a real source.
+    val knownDids = mutableStateMapOf<String, String>()
+
+    // Custom status, shipped as the IRC AWAY message (matches iOS):
+    // `AWAY :<text>` on set, bare `AWAY` to clear. Persisted and re-sent
+    // after every (re)registration.
+    var customStatus = mutableStateOf("")
+
     var replyingTo = mutableStateOf<ChatMessage?>(null)
     var editingMessage = mutableStateOf<ChatMessage?>(null)
 
@@ -304,6 +321,17 @@ class AppState(application: Application) : AndroidViewModel(application) {
         prefs.getStringSet("mutedChannels", emptySet())?.forEach { ch ->
             if (ch !in mutedChannels) mutedChannels.add(ch)
         }
+
+        // Restore block lists
+        prefs.getStringSet("blockedNicks", emptySet())?.forEach { n ->
+            if (n !in blockedNicks) blockedNicks.add(n)
+        }
+        prefs.getStringSet("blockedDids", emptySet())?.forEach { d ->
+            if (d !in blockedDids) blockedDids.add(d)
+        }
+
+        // Restore custom status
+        customStatus.value = prefs.getString("customStatus", "") ?: ""
 
         // Prune stale typing indicators every 3 seconds
         scope.launch {
@@ -686,6 +714,82 @@ class AppState(application: Application) : AndroidViewModel(application) {
         prefs.edit().putStringSet("mutedChannels", mutedChannels.toSet()).apply()
     }
 
+    // ── Safety: block & report ──
+
+    fun isBlocked(nick: String, did: String? = null): Boolean =
+        (did != null && did in blockedDids) || nick.lowercase() in blockedNicks
+
+    fun blockUser(nick: String, did: String? = null) {
+        val n = nick.trim().lowercase()
+        if (n.isNotEmpty() && n !in blockedNicks) blockedNicks.add(n)
+        if (!did.isNullOrEmpty() && did !in blockedDids) blockedDids.add(did)
+        persistBlockLists()
+    }
+
+    fun unblockUser(nick: String? = null, did: String? = null) {
+        nick?.let { n -> blockedNicks.removeAll { it.equals(n, ignoreCase = true) } }
+        did?.let { blockedDids.remove(it) }
+        persistBlockLists()
+    }
+
+    /** Report = local audit-trail log + block. The log line is the record
+     *  until a server-side report endpoint exists; abuse@freeq.at handles
+     *  escalation (surfaced in Settings → Safety). */
+    fun reportUser(nick: String, did: String? = null, reason: String) {
+        Log.w("freeq.safety", "user report: nick=$nick did=${did ?: "unknown"} reason=$reason")
+        blockUser(nick, did)
+    }
+
+    private fun persistBlockLists() {
+        prefs.edit()
+            .putStringSet("blockedNicks", blockedNicks.toSet())
+            .putStringSet("blockedDids", blockedDids.toSet())
+            .apply()
+    }
+
+    // ── DID identity helpers ──
+
+    /** Server-bound DID for a nick: channel member entries first, then the
+     *  account-tag map. Never derived from the nick itself (impersonation). */
+    fun didForNick(nick: String): String? {
+        for (ch in channels) {
+            ch.members.firstOrNull { it.nick.equals(nick, ignoreCase = true) }
+                ?.did?.let { return it }
+        }
+        return knownDids[nick.lowercase()]
+    }
+
+    /** Record a server-verified DID (from a message account-tag) on the
+     *  nick's channel member entries. NAMES carries no DID over the FFI, so
+     *  this is what makes DID-gated UI (verified badge, profile sheet) work. */
+    fun recordUserDid(nick: String, did: String) {
+        knownDids[nick.lowercase()] = did
+        for (ch in channels) {
+            val idx = ch.members.indexOfFirst { it.nick.equals(nick, ignoreCase = true) }
+            if (idx >= 0 && ch.members[idx].did != did) {
+                ch.members[idx] = ch.members[idx].copy(did = did)
+            }
+        }
+    }
+
+    // ── Custom status (IRC AWAY) ──
+
+    fun setCustomStatus(status: String) {
+        val trimmed = status.trim()
+        customStatus.value = trimmed
+        prefs.edit().putString("customStatus", trimmed).apply()
+        sendCustomStatus()
+    }
+
+    /** Push the persisted status to the server: `AWAY :<text>`, bare `AWAY`
+     *  to clear. No-op while unregistered — the Registered handler re-sends
+     *  a non-empty status after every (re)connect. */
+    internal fun sendCustomStatus() {
+        if (connectionState.value != ConnectionState.Registered) return
+        val s = customStatus.value
+        sendRaw(if (s.isEmpty()) "AWAY" else "AWAY :$s")
+    }
+
     // ── Channel helpers ──
 
     fun getOrCreateChannel(name: String): ChannelState {
@@ -770,6 +874,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
         if (nick.value.equals(oldNick, ignoreCase = true)) {
             nick.value = newNick
         }
+        knownDids.remove(oldNick.lowercase())?.let { knownDids[newNick.lowercase()] = it }
     }
 
     fun awayMessage(nick: String): String? {
@@ -836,6 +941,11 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 if (state.authenticatedDID.value != null) {
                     state.sendRaw("CHATHISTORY TARGETS * * 50")
                 }
+                // Re-assert persisted custom status (AWAY) on every
+                // (re)registration — the server forgets it across connections.
+                if (state.customStatus.value.isNotEmpty()) {
+                    state.sendCustomStatus()
+                }
             }
 
             is FreeqEvent.Authenticated -> {
@@ -859,7 +969,10 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 }
                 // Add joiner to members if not already present
                 if (ch.members.none { it.nick.equals(event.nick, ignoreCase = true) }) {
-                    ch.members.add(MemberInfo(nick = event.nick, isOp = false, isVoiced = false))
+                    ch.members.add(MemberInfo(
+                        nick = event.nick, isOp = false, isVoiced = false,
+                        did = state.knownDids[event.nick.lowercase()]
+                    ))
                 }
                 if (event.nick.equals(state.nick.value, ignoreCase = true)) {
                     // Navigate if this was a user-initiated join
@@ -912,10 +1025,21 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 val ircMsg = event.msg
                 val isSelf = ircMsg.fromNick.equals(state.nick.value, ignoreCase = true)
 
-                // Prefetch avatar using DID if available (from account-tag)
+                // Prefetch avatar using DID if available (from account-tag),
+                // and record the server-bound DID on member entries so the
+                // verified badge / profile sheet gate on real identity.
                 ircMsg.account?.let { did ->
                     AvatarCache.prefetch(ircMsg.fromNick, did)
+                    state.recordUserDid(ircMsg.fromNick, did)
                 }
+
+                // Blocked sender: message is still stored (hidden at render
+                // so unblocking restores history) but must not notify or
+                // count as unread.
+                val fromBlocked = !isSelf && state.isBlocked(
+                    ircMsg.fromNick,
+                    ircMsg.account ?: state.didForNick(ircMsg.fromNick)
+                )
 
                 // Handle pin/unpin sync broadcasts
                 if (ircMsg.pinMsgid != null && ircMsg.target.startsWith("#")) {
@@ -981,10 +1105,10 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 if (ircMsg.target.startsWith("#")) {
                     val ch = state.getOrCreateChannel(ircMsg.target)
                     ch.appendIfNew(msg)
-                    state.incrementUnread(ircMsg.target)
+                    if (!fromBlocked) state.incrementUnread(ircMsg.target)
                     ch.typingUsers.remove(ircMsg.fromNick)
 
-                    if (!isSelf && !state.isMuted(ircMsg.target) && ircMsg.text.contains(state.nick.value, ignoreCase = true)) {
+                    if (!isSelf && !fromBlocked && !state.isMuted(ircMsg.target) && ircMsg.text.contains(state.nick.value, ignoreCase = true)) {
                         state.notificationManager.sendMessageNotification(
                             from = ircMsg.fromNick, text = ircMsg.text, channel = ircMsg.target
                         )
@@ -993,9 +1117,9 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                     val bufferName = if (isSelf) ircMsg.target else ircMsg.fromNick
                     val dm = state.getOrCreateDM(bufferName)
                     dm.appendIfNew(msg)
-                    state.incrementUnread(bufferName)
+                    if (!fromBlocked) state.incrementUnread(bufferName)
 
-                    if (!isSelf) {
+                    if (!isSelf && !fromBlocked) {
                         state.notificationManager.sendMessageNotification(
                             from = ircMsg.fromNick, text = ircMsg.text, channel = bufferName
                         )
@@ -1017,7 +1141,11 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                             awayMsg = m.awayMsg ?: ch.members[idx].awayMsg
                         )
                     } else {
-                        ch.members.add(MemberInfo(nick = m.nick, isOp = m.isOp, isHalfop = m.isHalfop, isVoiced = m.isVoiced, awayMsg = m.awayMsg))
+                        ch.members.add(MemberInfo(
+                            nick = m.nick, isOp = m.isOp, isHalfop = m.isHalfop,
+                            isVoiced = m.isVoiced, awayMsg = m.awayMsg,
+                            did = state.knownDids[m.nick.lowercase()]
+                        ))
                     }
                 }
                 AvatarCache.prefetchAll(event.members.map { it.nick })
