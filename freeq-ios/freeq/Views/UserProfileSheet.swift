@@ -24,6 +24,8 @@ struct UserProfileSheet: View {
     @State private var freeqIdentity: FreeqIdentity? = nil
     @State private var showProof = false
     @State private var reportSource: ReportTarget? = nil
+    /// Viewer↔subject graph relationship (follows you / mutual).
+    @State private var relationship: BlueskyGraph.Relationship? = nil
 
     /// True when this is a stranger from the graph, not a freeq member.
     private var isDirect: Bool { directActor != nil }
@@ -107,9 +109,26 @@ struct UserProfileSheet: View {
                                         .font(.fqSubheadline)
                                         .foregroundColor(Theme.textSecondary)
                                 }
-                                Text("@\(p.handle)")
-                                    .font(.fqFootnote)
-                                    .foregroundColor(Theme.textMuted)
+                                HStack(spacing: 6) {
+                                    Text("@\(p.handle)")
+                                        .font(.fqFootnote)
+                                        .foregroundColor(Theme.textMuted)
+                                    if let rel = relationship {
+                                        if rel.isMutual {
+                                            Text("mutual")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundColor(Theme.verify)
+                                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                                .background(Theme.verify.opacity(0.14), in: Capsule())
+                                        } else if rel.followsMe {
+                                            Text("follows you")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundColor(Theme.iris)
+                                                .padding(.horizontal, 6).padding(.vertical, 2)
+                                                .background(Theme.iris.opacity(0.14), in: Capsule())
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -399,10 +418,16 @@ struct UserProfileSheet: View {
     /// (graph) paths.
     private func loadProfile(actor: String) async {
         // Resolve what freeq knows about this identity in parallel — presence,
-        // nick (so Message works), shared channels.
+        // nick (so Message works), shared channels — and how the viewer relates
+        // to them on the graph (follows you / mutual).
         if actor.hasPrefix("did:") {
             let fid = await FreeqDirectory.shared.identity(for: actor)
             await MainActor.run { freeqIdentity = fid }
+            if let me = await MainActor.run(body: { appState.authenticatedDID }),
+               me.hasPrefix("did:"), me != actor {
+                let rels = await BlueskyGraph.relationships(viewer: me, others: [actor])
+                await MainActor.run { relationship = rels[actor] }
+            }
         }
         let urlStr = "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=\(actor.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? actor)"
         guard let url = URL(string: urlStr) else {

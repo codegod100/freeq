@@ -59,6 +59,40 @@ enum BlueskyGraph {
         return await fetchActors(url, key: "follows")
     }
 
+    /// Viewer-relative relationship between `viewer` and another account.
+    struct Relationship {
+        let followsMe: Bool   // they follow the viewer
+        let iFollow: Bool     // the viewer follows them
+        var isMutual: Bool { followsMe && iFollow }
+    }
+
+    /// Resolve how `viewer` relates to each of `others` (batched ≤30 per call —
+    /// the endpoint's limit). Public endpoint; no auth needed.
+    static func relationships(viewer: String, others: [String]) async -> [String: Relationship] {
+        guard !others.isEmpty else { return [:] }
+        var out: [String: Relationship] = [:]
+        for chunk in stride(from: 0, to: others.count, by: 30)
+            .map({ Array(others[$0..<min($0 + 30, others.count)]) }) {
+            let othersParam = chunk.map(enc).joined(separator: "&others=")
+            let url = "\(base)/app.bsky.graph.getRelationships?actor=\(enc(viewer))&others=\(othersParam)"
+            guard let u = URL(string: url) else { continue }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: u)
+                guard (response as? HTTPURLResponse)?.statusCode == 200,
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let rels = json["relationships"] as? [[String: Any]] else { continue }
+                for rel in rels {
+                    guard let did = rel["did"] as? String else { continue }
+                    out[did] = Relationship(
+                        followsMe: rel["followedBy"] != nil,
+                        iFollow: rel["following"] != nil
+                    )
+                }
+            } catch { continue }
+        }
+        return out
+    }
+
     // MARK: - Plumbing
 
     private static func enc(_ s: String) -> String {

@@ -263,7 +263,7 @@ struct DiscoverTab: View {
     private func loadPeopleChannels() async {
         guard let myDID = appState.authenticatedDID else { return }
         let follows = await BlueskyGraph.follows(of: myDID, limit: 100)
-        let people = await PeopleResolver.resolve(follows).filter { $0.onFreeq }
+        let people = await PeopleResolver.resolve(follows, viewer: myDID).filter { $0.onFreeq }
         // Accumulate: channel -> the people I follow who are in it.
         var byChannel: [String: [FreeqPerson]] = [:]
         for person in people {

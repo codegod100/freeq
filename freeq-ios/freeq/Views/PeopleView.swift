@@ -5,6 +5,9 @@ import SwiftUI
 struct FreeqPerson: Identifiable {
     let actor: BskyActor
     let identity: FreeqIdentity?
+    /// How the signed-in viewer relates to this person on the graph
+    /// (follows you / you follow / mutual). nil when signed out.
+    var relationship: BlueskyGraph.Relationship? = nil
     var id: String { actor.did }
     var onFreeq: Bool { identity?.isOnFreeq ?? false }
 }
@@ -79,6 +82,14 @@ struct PersonRow: View {
                             .padding(.horizontal, 4).padding(.vertical, 1)
                             .background(Theme.iris.opacity(0.16), in: Capsule())
                     }
+                    // Graph social proof — mutual beats follows-you.
+                    if let rel = person.relationship {
+                        if rel.isMutual {
+                            relChip("mutual", tint: Theme.verify)
+                        } else if rel.followsMe {
+                            relChip("follows you", tint: Theme.iris)
+                        }
+                    }
                 }
                 Text("@\(person.actor.handle)")
                     .font(.fqMonoCaption)
@@ -100,6 +111,14 @@ struct PersonRow: View {
         }
         .padding(.vertical, 6)
         .contentShape(Rectangle())
+    }
+
+    private func relChip(_ label: String, tint: Color) -> some View {
+        Text(label)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(tint)
+            .padding(.horizontal, 5).padding(.vertical, 1.5)
+            .background(tint.opacity(0.14), in: Capsule())
     }
 
     @ViewBuilder private var freeqLine: some View {
@@ -190,16 +209,25 @@ struct GraphListView: View {
         case .followers(let a): actors = await BlueskyGraph.followers(of: a)
         case .follows(let a): actors = await BlueskyGraph.follows(of: a)
         }
-        people = await PeopleResolver.resolve(actors)
+        people = await PeopleResolver.resolve(actors, viewer: appState.authenticatedDID)
         loading = false
     }
 }
 
-/// Batch-annotates Bluesky actors with their freeq identity.
+/// Batch-annotates Bluesky actors with their freeq identity and (when the
+/// viewer is signed in) their graph relationship to the viewer.
 enum PeopleResolver {
-    static func resolve(_ actors: [BskyActor]) async -> [FreeqPerson] {
-        let map = await FreeqDirectory.shared.identities(for: actors.map(\.did))
-        return actors.map { FreeqPerson(actor: $0, identity: map[$0.did]) }
+    static func resolve(_ actors: [BskyActor], viewer: String? = nil) async -> [FreeqPerson] {
+        let dids = actors.map(\.did)
+        async let identityMap = FreeqDirectory.shared.identities(for: dids)
+        let relMap: [String: BlueskyGraph.Relationship]
+        if let viewer, viewer.hasPrefix("did:") {
+            relMap = await BlueskyGraph.relationships(viewer: viewer, others: dids.filter { $0 != viewer })
+        } else {
+            relMap = [:]
+        }
+        let ids = await identityMap
+        return actors.map { FreeqPerson(actor: $0, identity: ids[$0.did], relationship: relMap[$0.did]) }
     }
 
     /// freeq people first (online first), then everyone else.
@@ -378,7 +406,7 @@ struct PeopleSearchView: View {
     private func loadFollows() async {
         guard let myDID = appState.authenticatedDID else { loadingFollows = false; return }
         let follows = await BlueskyGraph.follows(of: myDID, limit: 100)
-        let resolved = await PeopleResolver.resolve(follows)
+        let resolved = await PeopleResolver.resolve(follows, viewer: myDID)
         followsOnFreeq = PeopleResolver.sorted(resolved.filter { $0.onFreeq })
         loadingFollows = false
     }
@@ -393,7 +421,7 @@ struct PeopleSearchView: View {
             if Task.isCancelled { return }
             let actors = await BlueskyGraph.searchActors(q)
             if Task.isCancelled { return }
-            let resolved = await PeopleResolver.resolve(actors)
+            let resolved = await PeopleResolver.resolve(actors, viewer: appState.authenticatedDID)
             if Task.isCancelled { return }
             results = resolved
             searching = false
