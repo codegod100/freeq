@@ -426,6 +426,8 @@ async fn main() {
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
         .route("/session", post(session))
+        .route("/api/graph/follow", post(graph_follow))
+        .route("/api/graph/unfollow", post(graph_unfollow))
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list([
@@ -1113,6 +1115,219 @@ async fn session(
         did: record.did,
         handle: record.handle,
     }))
+}
+
+// ── Graph delegation: follow / unfollow ────────────────────────────────────
+//
+// The client never holds the AT access token (it's DPoP-bound to the broker's
+// key anyway). Instead the broker performs the two graph writes on the user's
+// own PDS on their behalf, authenticated by the same broker_token as /session.
+
+#[derive(Deserialize)]
+struct GraphFollowRequest {
+    broker_token: String,
+    /// DID of the account to follow.
+    #[serde(default)]
+    subject_did: Option<String>,
+    /// For unfollow: the at:// URI of the existing follow record (the client
+    /// already has it from app.bsky.graph.getRelationships).
+    #[serde(default)]
+    follow_uri: Option<String>,
+}
+
+/// Authenticate a broker token and produce a fresh access token, persisting
+/// the rotated refresh token — the same discipline as `/session` (shared
+/// per-token lock, read-inside-lock, encrypt-before-store).
+async fn authed_access_token(
+    state: &Arc<BrokerState>,
+    broker_token: &str,
+) -> Result<(BrokerSessionRecord, String, Option<String>), (StatusCode, String)> {
+    let token_lock = {
+        let mut locks = state.refresh_locks.lock().await;
+        locks
+            .entry(broker_token.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _refresh_guard = token_lock.lock().await;
+
+    let record = get_session(state, broker_token)
+        .await
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid broker token".to_string()))?;
+
+    let (access_token, refresh_token, dpop_nonce, _scope) =
+        refresh_access_token(&state.config, &record)
+            .await
+            .map_err(|e| match e {
+                RefreshError::InvalidGrant => (
+                    StatusCode::UNAUTHORIZED,
+                    "Session expired — re-authentication required".to_string(),
+                ),
+                RefreshError::Transient(err) => {
+                    (StatusCode::BAD_GATEWAY, format!("Refresh failed: {err}"))
+                }
+            })?;
+
+    let now = chrono::Utc::now().timestamp();
+    let enc_key = &state.config.encryption_key;
+    let encrypted_refresh = encrypt_field(enc_key, &refresh_token);
+    let encrypted_nonce = dpop_nonce.as_deref().map(|n| encrypt_field(enc_key, n));
+    {
+        let db = state.db.lock().await;
+        db.execute(
+            "UPDATE sessions SET refresh_token = ?1, dpop_nonce = ?2, updated_at = ?3 WHERE broker_token = ?4",
+            rusqlite::params![encrypted_refresh, encrypted_nonce, now, record.broker_token],
+        )
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+    }
+
+    Ok((record, access_token, dpop_nonce))
+}
+
+/// DPoP-authenticated POST to the user's PDS, with the standard
+/// `use_dpop_nonce` retry dance resource servers require.
+async fn pds_dpop_post(
+    record: &BrokerSessionRecord,
+    access_token: &str,
+    nonce: Option<String>,
+    url: &str,
+    body: serde_json::Value,
+) -> Result<(reqwest::StatusCode, String), anyhow::Error> {
+    let dpop_key = DpopKey::from_base64url(&record.dpop_key_b64)?;
+    let client = upstream_client()?;
+
+    let proof = dpop_key.proof("POST", url, nonce.as_deref(), Some(access_token))?;
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("DPoP {access_token}"))
+        .header("DPoP", &proof)
+        .json(&body)
+        .send()
+        .await?;
+
+    let fresh_nonce = resp
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+
+    if (status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::BAD_REQUEST)
+        && text.contains("use_dpop_nonce")
+        && fresh_nonce.is_some()
+    {
+        let proof2 = dpop_key.proof("POST", url, fresh_nonce.as_deref(), Some(access_token))?;
+        let resp2 = client
+            .post(url)
+            .header("Authorization", format!("DPoP {access_token}"))
+            .header("DPoP", &proof2)
+            .json(&body)
+            .send()
+            .await?;
+        let status2 = resp2.status();
+        let text2 = resp2.text().await.unwrap_or_default();
+        return Ok((status2, text2));
+    }
+
+    Ok((status, text))
+}
+
+/// POST /api/graph/follow {broker_token, subject_did} — create an
+/// app.bsky.graph.follow record in the user's own repo.
+async fn graph_follow(
+    State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
+    Json(req): Json<GraphFollowRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok())
+        && !ALLOWED_ORIGINS.contains(&origin)
+    {
+        return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
+    }
+    let subject = req
+        .subject_did
+        .as_deref()
+        .filter(|d| d.starts_with("did:"))
+        .ok_or((StatusCode::BAD_REQUEST, "subject_did required".to_string()))?;
+
+    let (record, access_token, nonce) = authed_access_token(&state, &req.broker_token).await?;
+    if subject == record.did {
+        return Err((StatusCode::BAD_REQUEST, "Cannot follow yourself".to_string()));
+    }
+
+    let url = format!("{}/xrpc/com.atproto.repo.createRecord", record.pds_url);
+    let body = serde_json::json!({
+        "repo": record.did,
+        "collection": "app.bsky.graph.follow",
+        "record": {
+            "$type": "app.bsky.graph.follow",
+            "subject": subject,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
+        }
+    });
+    let (status, text) = pds_dpop_post(&record, &access_token, nonce, &url, body)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PDS call failed: {e}")))?;
+
+    if !status.is_success() {
+        tracing::warn!(did = %record.did, status = %status, "follow createRecord failed");
+        return Err((StatusCode::BAD_GATEWAY, format!("PDS rejected follow: {text}")));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+    Ok(Json(serde_json::json!({ "ok": true, "uri": parsed.get("uri") })))
+}
+
+/// POST /api/graph/unfollow {broker_token, follow_uri} — delete the follow
+/// record named by the at:// URI (must live in the caller's own repo).
+async fn graph_unfollow(
+    State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
+    Json(req): Json<GraphFollowRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok())
+        && !ALLOWED_ORIGINS.contains(&origin)
+    {
+        return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
+    }
+    let uri = req
+        .follow_uri
+        .as_deref()
+        .ok_or((StatusCode::BAD_REQUEST, "follow_uri required".to_string()))?;
+
+    let (record, access_token, nonce) = authed_access_token(&state, &req.broker_token).await?;
+
+    // at://did:plc:xxx/app.bsky.graph.follow/rkey — the repo DID must be the
+    // caller's own (you can only delete your own follow records).
+    let rest = uri
+        .strip_prefix("at://")
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid follow_uri".to_string()))?;
+    let mut parts = rest.split('/');
+    let (repo_did, collection, rkey) = (parts.next(), parts.next(), parts.next());
+    match (repo_did, collection, rkey) {
+        (Some(d), Some("app.bsky.graph.follow"), Some(rkey))
+            if d == record.did && !rkey.is_empty() =>
+        {
+            let url = format!("{}/xrpc/com.atproto.repo.deleteRecord", record.pds_url);
+            let body = serde_json::json!({
+                "repo": record.did,
+                "collection": "app.bsky.graph.follow",
+                "rkey": rkey,
+            });
+            let (status, text) = pds_dpop_post(&record, &access_token, nonce, &url, body)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PDS call failed: {e}")))?;
+            if !status.is_success() {
+                tracing::warn!(did = %record.did, status = %status, "unfollow deleteRecord failed");
+                return Err((StatusCode::BAD_GATEWAY, format!("PDS rejected unfollow: {text}")));
+            }
+            Ok(Json(serde_json::json!({ "ok": true })))
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "follow_uri must be an app.bsky.graph.follow record in your own repo".to_string(),
+        )),
+    }
 }
 
 async fn get_session(state: &Arc<BrokerState>, broker_token: &str) -> Option<BrokerSessionRecord> {
