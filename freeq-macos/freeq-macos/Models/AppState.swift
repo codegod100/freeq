@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import UserNotifications
 import AVFoundation
 
 extension ISO8601DateFormatter {
@@ -63,6 +62,10 @@ class AppState {
     // MARK: - Favorites, Muted, Bookmarks
     var favorites: Set<String> = []  // lowercase channel names
     var mutedChannels: Set<String> = []  // lowercase channel names
+    /// Channels set to notify on mentions only (lowercase). The middle tier
+    /// between "all" (default) and fully `mutedChannels`: regular messages
+    /// don't notify, but a mention still does.
+    var mentionOnlyChannels: Set<String> = []
     /// Our own away state (nil = present). Set optimistically on /away and
     /// confirmed by the server's away-notify echo.
     var selfAwayReason: String?
@@ -184,6 +187,8 @@ class AppState {
     var replyingToMessage: ChatMessage?
     var scrollToMessageId: String?
     var showSearch: Bool = false
+    var showHelp: Bool = false
+    var showNewDM: Bool = false
     var motd: String = ""
     var showMotd: Bool = false
     var threadRootMessage: ChatMessage?
@@ -281,6 +286,7 @@ class AppState {
         closedDMs = Set(UserDefaults.standard.stringArray(forKey: "freeq.closedDMs") ?? [])
         favorites = Set(UserDefaults.standard.stringArray(forKey: "freeq.favorites") ?? [])
         mutedChannels = Set(UserDefaults.standard.stringArray(forKey: "freeq.muted") ?? [])
+        mentionOnlyChannels = Set(UserDefaults.standard.stringArray(forKey: "freeq.mentionOnly") ?? [])
         if let data = UserDefaults.standard.data(forKey: "freeq.bookmarks"),
            let saved = try? JSONDecoder().decode([Bookmark].self, from: data) {
             bookmarks = saved
@@ -353,7 +359,7 @@ class AppState {
     }
 
     private func requestNotificationPermission() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+        NotificationManager.shared.configure()
     }
 
     // MARK: - Connection
@@ -917,6 +923,39 @@ class AppState {
         return dm
     }
 
+    /// Open (creating if needed) a DM buffer with `nick` and make it active.
+    /// Reuses an existing buffer, un-hides a previously closed one, and is the
+    /// shared entry point for the ⌘N picker and the "Send Message" buttons.
+    func openDM(with nick: String) {
+        let trimmed = nick.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return }
+        closedDMs.remove(trimmed.lowercased())
+        let dm = getOrCreateDM(trimmed)
+        activeChannel = dm.name
+    }
+
+    /// Nicks the ⌘N picker suggests: everyone visible in a shared channel
+    /// plus anyone you already have a DM with, minus yourself. Deduped
+    /// case-insensitively, sorted for stable display.
+    var knownNicks: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        let me = nick.lowercased()
+        for ch in channels {
+            for m in ch.members {
+                let key = m.nick.lowercased()
+                if key != me, !key.isEmpty, seen.insert(key).inserted {
+                    out.append(m.nick)
+                }
+            }
+        }
+        for dm in dmBuffers {
+            let key = dm.name.lowercased()
+            if key != me, seen.insert(key).inserted { out.append(dm.name) }
+        }
+        return out.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
     func closeDM(_ nick: String) {
         let lower = nick.lowercased()
         closedDMs.insert(lower)
@@ -932,6 +971,20 @@ class AppState {
         let all = allBuffers
         guard index < all.count else { return }
         activeChannel = all[index].name
+    }
+
+    /// Favorited channels in the same order the sidebar shows them (channel
+    /// order, filtered to favorites) — so ⌃⌘1…9 lines up with what the user
+    /// sees under the Favorites header.
+    var favoriteChannels: [ChannelState] {
+        channels.filter { favorites.contains($0.name.lowercased()) }
+    }
+
+    /// Jump to the Nth favorite (0-based). No-op if fewer favorites exist.
+    func switchToFavorite(_ index: Int) {
+        let favs = favoriteChannels
+        guard index < favs.count else { return }
+        activeChannel = favs[index].name
     }
 
     func incrementUnread(_ channel: String) {
@@ -995,6 +1048,31 @@ class AppState {
         UserDefaults.standard.set(Array(mutedChannels), forKey: "freeq.muted")
     }
 
+    /// Notification tiers for a channel. `all` (default): mentions + regular
+    /// (regular gated by the global `notifyAllMessages`). `mentionsOnly`:
+    /// only mentions. `muted`: nothing.
+    enum ChannelNotifyLevel: String { case all, mentionsOnly, muted }
+
+    func notifyLevel(_ channel: String) -> ChannelNotifyLevel {
+        let key = channel.lowercased()
+        if mutedChannels.contains(key) { return .muted }
+        if mentionOnlyChannels.contains(key) { return .mentionsOnly }
+        return .all
+    }
+
+    func setNotifyLevel(_ level: ChannelNotifyLevel, for channel: String) {
+        let key = channel.lowercased()
+        mutedChannels.remove(key)
+        mentionOnlyChannels.remove(key)
+        switch level {
+        case .all: break
+        case .mentionsOnly: mentionOnlyChannels.insert(key)
+        case .muted: mutedChannels.insert(key)
+        }
+        UserDefaults.standard.set(Array(mutedChannels), forKey: "freeq.muted")
+        UserDefaults.standard.set(Array(mentionOnlyChannels), forKey: "freeq.mentionOnly")
+    }
+
     func addBookmark(channel: String, msg: ChatMessage) {
         guard !bookmarks.contains(where: { $0.msgId == msg.id }) else { return }
         bookmarks.append(Bookmark(channel: channel, msgId: msg.id, from: msg.from, text: msg.text, timestamp: msg.timestamp))
@@ -1056,16 +1134,9 @@ class AppState {
         }
     }
 
-    // MARK: - Notifications
-
-    func sendNotification(title: String, body: String) {
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        content.sound = .default
-        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request)
-    }
+    // Message notifications now live in NotificationManager (permission,
+    // active/focus gating, click-to-focus, inline reply). See
+    // handleEvent(_:) message routing for the call sites.
 }
 
 // MARK: - IRC Event Handler
@@ -1282,12 +1353,33 @@ extension AppState {
                 ch.typingUsers.removeValue(forKey: msg.fromNick)
                 if !senderBlocked { incrementUnread(target) }
 
-                // Mention notification
-                if !isSelf && !senderBlocked && msg.text.localizedCaseInsensitiveContains(nick) {
-                    mentionCounts[target.lowercased(), default: 0] += 1
-                    if !mutedChannels.contains(target.lowercased()) {
-                        sendNotification(title: "\(msg.fromNick) in \(target)", body: msg.text)
+                let level = notifyLevel(target)
+                let mentioned = msg.text.localizedCaseInsensitiveContains(nick)
+                if !isSelf && !senderBlocked && level != .muted {
+                    if mentioned {
+                        mentionCounts[target.lowercased(), default: 0] += 1
+                        // Mentions are time-sensitive so a permitted Focus
+                        // can let them through.
+                        NotificationManager.shared.notifyMessage(
+                            target: target,
+                            title: "\(msg.fromNick) in \(target)",
+                            body: msg.text,
+                            timeSensitive: true
+                        )
+                        NotificationManager.shared.requestAttentionIfBackground()
                         playSound(.mention)
+                    } else if level == .all
+                        && UserDefaults.standard.bool(forKey: "freeq.notifyAllMessages") {
+                        // Opt-in: notify for ALL channel traffic, not just
+                        // mentions. Still gated by NotificationManager to the
+                        // inactive/not-viewing case, off by default so a busy
+                        // backgrounded channel doesn't flood, and skipped for
+                        // channels the user set to mentions-only.
+                        NotificationManager.shared.notifyMessage(
+                            target: target,
+                            title: "\(msg.fromNick) in \(target)",
+                            body: msg.text
+                        )
                     }
                 }
             } else {
@@ -1297,9 +1389,15 @@ extension AppState {
                 dm.appendIfNew(message)
                 if !senderBlocked { incrementUnread(bufName) }
 
-                // DM notification
+                // DM notification (time-sensitive: a DM is a direct ping).
                 if !isSelf && !senderBlocked {
-                    sendNotification(title: msg.fromNick, body: msg.text)
+                    NotificationManager.shared.notifyMessage(
+                        target: bufName,
+                        title: msg.fromNick,
+                        body: msg.text,
+                        timeSensitive: true
+                    )
+                    NotificationManager.shared.requestAttentionIfBackground()
                     playSound(.dm)
                 }
             }
@@ -1392,6 +1490,12 @@ extension AppState {
                     activeChannel = channels.first?.name
                 }
                 errorMessage = "Kicked from \(channel) by \(by): \(reason)"
+                // Being removed from a channel is worth a notification even
+                // in the foreground — no target (the channel is gone).
+                NotificationManager.shared.notifyEvent(
+                    title: "Removed from \(channel)",
+                    body: reason.isEmpty ? "Kicked by \(by)" : "Kicked by \(by): \(reason)"
+                )
             } else {
                 if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
                     ch.members.removeAll { $0.nick.lowercased() == kickedNick.lowercased() }

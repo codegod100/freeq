@@ -72,6 +72,17 @@ struct MessageListView: View {
     }
 }
 
+// MARK: - Hover-bar clamp
+
+/// How far a row's top has scrolled above the list's visible top edge. The
+/// AppKit list measures this per visible row (it owns the real viewport
+/// geometry — SwiftUI `.global` can't see across the per-row hosting views) and
+/// the hovered row shifts its action bar down by this much so the scroll view
+/// never clips it. The bar rides the visible top of the message, Slack-style.
+@Observable final class RowClamp {
+    var overscroll: CGFloat = 0
+}
+
 // MARK: - Timeline model (shared by both list implementations)
 
 /// One rendered row: the message plus the two grouping decisions that depend
@@ -337,6 +348,8 @@ struct SystemMessageRow: View {
 
 struct MessageRow: View {
     @Environment(AppState.self) private var appState
+    /// Present only in the AppKit list; nil in the legacy list (no clamp).
+    @Environment(RowClamp.self) private var rowClamp: RowClamp?
     @AppStorage("freeq.compactMode") private var compactMode = false
     let message: ChatMessage
     /// Whether this row draws the sender header (avatar + name + badges).
@@ -477,17 +490,20 @@ struct MessageRow: View {
 
             // Reply indicator (click → scroll + option to open thread)
             if let replyTo = message.replyTo {
+                // Resolve the original once and reuse in both the label and the
+                // click handler, instead of scanning the message array twice.
+                let replyOriginal = appState.activeChannelState?.messages.first(where: { $0.id == replyTo })
                 Button {
                     appState.scrollToMessageId = replyTo
                     // Also open the thread if the original message exists
-                    if let original = appState.activeChannelState?.messages.first(where: { $0.id == replyTo }) {
+                    if let original = replyOriginal {
                         appState.threadRootMessage = original
                     }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "arrowshape.turn.up.left.fill")
                             .font(.caption2)
-                        if let original = appState.activeChannelState?.messages.first(where: { $0.id == replyTo }) {
+                        if let original = replyOriginal {
                             Text("\(original.from): \(original.text)")
                                 .font(.caption2)
                                 .lineLimit(1)
@@ -520,6 +536,9 @@ struct MessageRow: View {
                 let ytId = extractYouTubeID(from: message.text)
                 let isVoice = isVoiceMessage(message.text)
                 let mediaURLs = imageURLs + videoURLs + audioURLs
+                // Compute once — this was previously extracted twice (embed +
+                // link-preview guard), running the regex over the text twice.
+                let bskyPost = extractBskyPost(from: message.text)
                 let cleanText = mediaURLs.isEmpty ? message.text : textWithoutImages(message.text, imageURLs: mediaURLs)
 
                 if !cleanText.isEmpty {
@@ -556,7 +575,7 @@ struct MessageRow: View {
                 }
 
                 // Bluesky post embed
-                if let bsky = extractBskyPost(from: message.text) {
+                if let bsky = bskyPost {
                     BlueskyEmbed(handle: bsky.handle, rkey: bsky.rkey)
                 }
 
@@ -566,7 +585,7 @@ struct MessageRow: View {
                 }
 
                 // Link preview (only if no other media)
-                if mediaURLs.isEmpty && ytId == nil && extractBskyPost(from: message.text) == nil,
+                if mediaURLs.isEmpty && ytId == nil && bskyPost == nil,
                    let url = extractFirstURL(from: message.text) {
                     LinkPreviewView(url: url)
                 }
@@ -613,15 +632,21 @@ struct MessageRow: View {
                 }
             }
         }
-        // Inside the row's bounds (the old `.offset(y: -12)` pushed the bar's
-        // top half outside the hover region entirely); the bar's own onHover
-        // covers whatever still overhangs short rows.
+        // The bar rides the top of the message but stays inside the viewport:
+        // the AppKit list reports how far this row's top has scrolled above the
+        // visible edge (`RowClamp.overscroll`) and the bar shifts down by that
+        // much — capped to the row — so the scroll view never clips it.
         .overlay(alignment: .topTrailing) {
             if isHovered && !isSystem {
-                HoverActionBar(message: message)
-                    .padding(.trailing, 8)
-                    .padding(.top, 1)
-                    .onHover { isBarHovered = $0 }
+                GeometryReader { geo in
+                    let shift = min(rowClamp?.overscroll ?? 0, max(0, geo.size.height - 30))
+                    HoverActionBar(message: message)
+                        .padding(.trailing, 8)
+                        .padding(.top, 1)
+                        .offset(y: shift)
+                        .frame(maxWidth: .infinity, alignment: .topTrailing)
+                        .onHover { isBarHovered = $0 }
+                }
             }
         }
         .contextMenu { messageContextMenu }
@@ -760,8 +785,7 @@ struct MessageRow: View {
         // Markdown only links [label](url) / <url>; detect bare URLs too, on the
         // delimiter-stripped plain text so indices line up.
         let plain = String(result.characters)
-        let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-        if let matches = detector?.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
+        if let matches = sharedLinkDetector?.matches(in: plain, range: NSRange(plain.startIndex..., in: plain)) {
             for match in matches.reversed() {
                 guard let r = Range(match.range, in: plain),
                       let attrRange = Range(r, in: result),
@@ -929,19 +953,43 @@ struct FlowLayout: Layout {
 
 // MARK: - Full timestamp for hover
 
+// Cached formatters. `DateFormatter` is one of the most expensive Cocoa
+// objects to construct; these were being allocated fresh on every call from
+// every visible row on every scroll frame. Configured once, read-only after
+// (string(from:) is safe to call concurrently on an unmutated formatter, and
+// these are only touched from the main-thread render path anyway).
+private let fullTimestampFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = .current
+    f.dateStyle = .full
+    f.timeStyle = .medium
+    return f
+}()
+
+private let timeOnlyFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = .current
+    f.dateStyle = .none
+    f.timeStyle = .short
+    return f
+}()
+
+private let dateTimeFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = .current
+    f.dateStyle = .medium
+    f.timeStyle = .short
+    return f
+}()
+
 private func fullTimestamp(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = .current
-    formatter.dateStyle = .full
-    formatter.timeStyle = .medium
-    return formatter.string(from: date)
+    fullTimestampFormatter.string(from: date)
 }
 
 // MARK: - URL extraction
 
 private func extractFirstURL(from text: String) -> String? {
-    let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-    if let match = detector?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+    if let match = sharedLinkDetector?.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
        let range = Range(match.range, in: text) {
         return String(text[range])
     }
@@ -951,15 +999,11 @@ private func extractFirstURL(from text: String) -> String? {
 // MARK: - Time formatting (shared)
 
 func formatTime(_ date: Date) -> String {
-    let formatter = DateFormatter()
-    formatter.locale = .current
-    let calendar = Calendar.current
-    if calendar.isDateInToday(date) {
-        formatter.dateStyle = .none
-        formatter.timeStyle = .short
+    // Today → time only; otherwise date + time. Two cached formatters instead
+    // of allocating one per call.
+    if Calendar.current.isDateInToday(date) {
+        return timeOnlyFormatter.string(from: date)
     } else {
-        formatter.dateStyle = .medium
-        formatter.timeStyle = .short
+        return dateTimeFormatter.string(from: date)
     }
-    return formatter.string(from: date)
 }

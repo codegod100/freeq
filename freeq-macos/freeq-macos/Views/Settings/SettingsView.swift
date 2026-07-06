@@ -17,6 +17,11 @@ struct SettingsView: View {
                     Label("Connection", systemImage: "network")
                 }
 
+            AudioSettings()
+                .tabItem {
+                    Label("Audio", systemImage: "waveform.circle")
+                }
+
             P2pSettings()
                 .environment(appState)
                 .tabItem {
@@ -42,6 +47,7 @@ struct GeneralSettings: View {
     @Environment(AppState.self) private var appState
     @AppStorage("freeq.showJoinPart") private var showJoinPart = true
     @AppStorage("freeq.notificationsEnabled") private var notificationsEnabled = true
+    @AppStorage("freeq.notifyAllMessages") private var notifyAllMessages = false
     @AppStorage("freeq.compactMode") private var compactMode = false
     @AppStorage("freeq.soundsEnabled") private var soundsEnabled = true
     @AppStorage("freeq.appearance") private var appearanceRaw = "system"
@@ -61,8 +67,12 @@ struct GeneralSettings: View {
             }
             Section("Notifications") {
                 Toggle("Enable notifications", isOn: $notificationsEnabled)
+                Toggle("Notify for all channel messages", isOn: $notifyAllMessages)
+                    .disabled(!notificationsEnabled)
                 Toggle("Sound effects", isOn: $soundsEnabled)
-                Text("Notifications fire for mentions and DMs")
+                Text(notifyAllMessages
+                     ? "Notifications fire for mentions, DMs, all channel messages, and call invites (only when the app is in the background or the channel isn't on screen). DMs and mentions are marked time-sensitive so an allowed Focus can let them through."
+                     : "Notifications fire for mentions, DMs, and call invites. Enable the option above to notify for all channel activity too. Set a per-channel level (all / mentions only / muted) by right-clicking a channel in the sidebar.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

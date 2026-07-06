@@ -6,6 +6,13 @@ import AVKit
 private let imageExtensions = Set(["jpg", "jpeg", "png", "gif", "webp"])
 private let videoExtensions = Set(["mp4", "m4v", "mov", "webm"])
 private let audioExtensions = Set(["m4a", "mp3", "ogg", "wav", "aac"])
+/// Shared link detector. `NSDataDetector` construction is expensive (it was
+/// being allocated fresh on every URL-extraction call, several times per
+/// message row per scroll frame). The type is thread-safe, so one reused
+/// instance is both correct and much cheaper. Used here and in
+/// MessageListView's parse/extract helpers.
+let sharedLinkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+
 private let cdnImagePattern = try! NSRegularExpression(pattern: "https?://cdn\\.bsky\\.app/img/[^\\s<]+", options: .caseInsensitive)
 private let youtubePattern = try! NSRegularExpression(pattern: "(?:youtube\\.com/watch\\?v=|youtu\\.be/)([a-zA-Z0-9_-]{11})", options: .caseInsensitive)
 private let bskyPostPattern = try! NSRegularExpression(pattern: "https?://bsky\\.app/profile/([^/]+)/post/([a-zA-Z0-9]+)", options: .caseInsensitive)
@@ -38,8 +45,7 @@ private func extractMediaURLs(from text: String, matching extensions: Set<String
     var urls: [String] = []
 
     // Standard image URLs (.jpg, .png, etc.)
-    let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-    if let matches = detector?.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+    if let matches = sharedLinkDetector?.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
         for match in matches {
             guard let range = Range(match.range, in: text), let url = match.url else { continue }
             let path = url.pathExtension.lowercased()

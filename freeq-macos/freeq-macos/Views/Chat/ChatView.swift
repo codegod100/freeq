@@ -5,6 +5,7 @@ struct ChatView: View {
     @Environment(AppState.self) private var appState
 
     var body: some View {
+        GeometryReader { geo in
         VStack(spacing: 0) {
             TopBarView()
             Divider().overlay(Theme.borderSoft)
@@ -35,7 +36,12 @@ struct ChatView: View {
             }
 
             if appState.isInCall, let callChannel = appState.currentCallChannel {
+                // Cap the call panel so the video scales down to fit rather than
+                // pushing its own controls (and the message list) off-screen on
+                // shorter displays. The grid uses aspect-fit, so it shrinks
+                // gracefully; controls stay pinned and visible.
                 CallView(channel: callChannel)
+                    .frame(maxHeight: max(220, geo.size.height * 0.6))
                 Divider().overlay(Theme.borderSoft)
             }
 
@@ -59,6 +65,7 @@ struct ChatView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.chatBackground)
+        }
     }
 
     private func typingText(_ typers: [String]) -> String {

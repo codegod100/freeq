@@ -143,7 +143,9 @@ struct CallView: View {
             .padding(8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(minHeight: 280, maxHeight: .infinity)
+        // Low floor so the aspect-fit tiles can shrink on short windows; the
+        // parent caps the overall panel height, keeping the controls visible.
+        .frame(minHeight: 120, maxHeight: .infinity)
     }
 
     private struct GridTile: Identifiable {

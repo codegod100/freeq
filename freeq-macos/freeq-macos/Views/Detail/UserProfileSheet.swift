@@ -140,8 +140,7 @@ struct UserProfileSheet: View {
             VStack(spacing: 8) {
                 HStack(spacing: 12) {
                     Button("Send Message") {
-                        let dm = appState.getOrCreateDM(nick)
-                        appState.activeChannel = dm.name
+                        appState.openDM(with: nick)
                         dismiss()
                     }
                     .buttonStyle(.borderedProminent)
@@ -200,8 +199,9 @@ struct UserProfileSheet: View {
             .environment(appState)
         }
         .onAppear {
-            // Trigger WHOIS if we don't have DID
-            if did == nil { appState.sendWhois(nick) }
+            // Background hydration to discover the DID — display:false so it
+            // doesn't print the raw WHOIS into the conversation.
+            if did == nil { appState.sendWhois(nick, display: false) }
             // Fetch profile if we have DID
             if let did, profile == nil {
                 ProfileCache.shared.fetchProfile(nick: nick, did: did)

@@ -211,8 +211,7 @@ struct MemberRow: View {
         }
         .contextMenu {
             Button("Send Message") {
-                let dm = appState.getOrCreateDM(member.nick)
-                appState.activeChannel = dm.name
+                appState.openDM(with: member.nick)
             }
             if let handle = profile?.handle {
                 Button("View on Bluesky") {
@@ -381,7 +380,9 @@ struct DMProfilePanel: View {
                         }
 
                         Button {
-                            appState.sendWhois(nick)
+                            // Refreshes the panel's identity fields, not a chat
+                            // dump — keep the reply out of the conversation.
+                            appState.sendWhois(nick, display: false)
                             ProfileCache.shared.fetchProfileIfPossible(nick: nick)
                         } label: {
                             actionLabel("Refresh identity", systemImage: "arrow.clockwise")
@@ -399,7 +400,10 @@ struct DMProfilePanel: View {
         }
         .background(Theme.detailBackground)
         .task(id: nick) {
-            appState.sendWhois(nick)
+            // Background identity hydration only — discovers the DID/handle to
+            // fill this panel. display:false keeps the raw WHOIS reply out of
+            // the conversation (it used to dump into every DM on open).
+            appState.sendWhois(nick, display: false)
             ProfileCache.shared.fetchProfileIfPossible(nick: nick)
         }
     }

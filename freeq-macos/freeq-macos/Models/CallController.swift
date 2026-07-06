@@ -388,6 +388,17 @@ extension AppState {
             if pendingAvStart.contains(chanKey) && actor.lowercased() == nick.lowercased() {
                 pendingAvStart.remove(chanKey)
                 startCall(channel: channel, sessionId: sessionId)
+            } else if actor.lowercased() != nick.lowercased()
+                && notifyLevel(channel) != .muted {
+                // Someone else started a call in a channel we're in — a
+                // time-sensitive "join?" nudge. Clicking focuses the channel.
+                NotificationManager.shared.notifyEvent(
+                    title: "Voice session in \(channel)",
+                    body: "\(actor) started a call",
+                    target: channel,
+                    threadId: "freeq.call.\(chanKey)"
+                )
+                NotificationManager.shared.requestAttentionIfBackground()
             }
         case "ended":
             activeAvSessions.removeValue(forKey: chanKey)

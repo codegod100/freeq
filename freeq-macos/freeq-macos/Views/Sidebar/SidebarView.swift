@@ -260,8 +260,23 @@ struct ChannelRow: View {
             Button(appState.favorites.contains(channel.name.lowercased()) ? "Unfavorite" : "Favorite") {
                 appState.toggleFavorite(channel.name)
             }
-            Button(appState.mutedChannels.contains(channel.name.lowercased()) ? "Unmute" : "Mute") {
-                appState.toggleMuted(channel.name)
+            Menu("Notifications") {
+                let current = appState.notifyLevel(channel.name)
+                Button {
+                    appState.setNotifyLevel(.all, for: channel.name)
+                } label: {
+                    Label("All messages", systemImage: current == .all ? "checkmark" : "")
+                }
+                Button {
+                    appState.setNotifyLevel(.mentionsOnly, for: channel.name)
+                } label: {
+                    Label("Mentions only", systemImage: current == .mentionsOnly ? "checkmark" : "")
+                }
+                Button {
+                    appState.setNotifyLevel(.muted, for: channel.name)
+                } label: {
+                    Label("Muted", systemImage: current == .muted ? "checkmark" : "")
+                }
             }
             Divider()
             Button("Leave Channel") {

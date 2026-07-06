@@ -38,7 +38,14 @@ struct MainView: View {
                     }
                     .toolbar {
                         ToolbarItem(placement: .navigation) {
-                            connectionIndicator
+                            HStack(spacing: 8) {
+                                Image("Logo")
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: 20, height: 20)
+                                    .accessibilityLabel("freeq")
+                                connectionIndicator
+                            }
                         }
                     }
 

@@ -12,6 +12,7 @@ enum CommandActions {
         case "nav.bookmarks": return .init("b", modifiers: [.command, .shift])
         case "nav.browseChannels": return .init("l", modifiers: [.command, .shift])
         case "nav.joinChannel": return .init("j", modifiers: .command)
+        case "nav.newDM": return .init("n", modifiers: .command)
         case "nav.prevChannel": return .init(.upArrow, modifiers: .option)
         case "nav.nextChannel": return .init(.downArrow, modifiers: .option)
         case "nav.prevUnread": return .init(.upArrow, modifiers: [.option, .shift])
@@ -22,6 +23,7 @@ enum CommandActions {
         case "call.toggleScreen": return .init("s", modifiers: [.command, .shift])
         case "call.toggleExpand": return .init("e", modifiers: [.command, .shift])
         case "call.leave": return .init("h", modifiers: [.command, .shift])
+        case "help.shortcuts": return .init("/", modifiers: .command)
         default: return nil
         }
     }
@@ -67,6 +69,7 @@ enum CommandActions {
         case "nav.bookmarks": app.showBookmarks = true
         case "nav.browseChannels": app.showChannelList = true
         case "nav.joinChannel": app.showJoinSheet = true
+        case "nav.newDM": app.showNewDM = true
         case "nav.prevChannel": app.switchToAdjacentChannel(.previous)
         case "nav.nextChannel": app.switchToAdjacentChannel(.next)
         case "nav.prevUnread": app.switchToAdjacentChannel(.previous, unreadOnly: true)
@@ -81,6 +84,7 @@ enum CommandActions {
         case "channel.toggleFavorite": app.activeChannel.map { app.toggleFavorite($0) }
         case "channel.toggleMute": app.activeChannel.map { app.toggleMuted($0) }
         case "channel.leave": app.activeChannel.map { app.partChannel($0) }
+        case "help.shortcuts": app.showHelp = true
         default: break
         }
     }

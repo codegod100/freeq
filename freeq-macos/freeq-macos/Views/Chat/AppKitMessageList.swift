@@ -90,6 +90,8 @@ struct AppKitMessageListView: NSViewRepresentable {
 
         private let cellIdentifier = NSUserInterfaceItemIdentifier("freeq.msgcell")
 
+        deinit { NotificationCenter.default.removeObserver(self) }
+
         func makeScrollView() -> NSScrollView {
             let table = ChatTableView()
             table.dataSource = self
@@ -132,6 +134,13 @@ struct AppKitMessageListView: NSViewRepresentable {
             // Breathing room: matches the legacy list's top padding + bottom
             // spacer so the last row never hugs the compose divider.
             scroll.contentInsets = NSEdgeInsets(top: 8, left: 0, bottom: 12, right: 0)
+
+            // Track scrolling so the hovered row's action bar can be clamped
+            // into the viewport as content moves under the clip view.
+            scroll.contentView.postsBoundsChangedNotifications = true
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(clipBoundsChanged),
+                name: NSView.boundsDidChangeNotification, object: scroll.contentView)
 
             self.scrollView = scroll
             self.tableView = table
@@ -323,7 +332,28 @@ struct AppKitMessageListView: NSViewRepresentable {
                 return c
             }()
             cell.host(content(for: items[row]))
+            cell.clamp.overscroll = overscroll(forRow: row)
             return cell
+        }
+
+        /// How far `row`'s top has scrolled above the visible top edge (0 when
+        /// fully below it). Drives the hover bar's downward clamp.
+        private func overscroll(forRow row: Int) -> CGFloat {
+            guard let table = tableView, let scroll = scrollView, row >= 0 else { return 0 }
+            return max(0, scroll.documentVisibleRect.minY - table.rect(ofRow: row).minY)
+        }
+
+        /// Refresh every visible cell's clamp — called as the list scrolls.
+        @objc private func clipBoundsChanged() {
+            guard let table = tableView else { return }
+            let range = table.rows(in: table.visibleRect)
+            guard range.length > 0 else { return }
+            for r in range.location..<(range.location + range.length) {
+                guard let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false)
+                    as? HostingCellView else { continue }
+                let value = overscroll(forRow: r)
+                if abs(cell.clamp.overscroll - value) > 0.5 { cell.clamp.overscroll = value }
+            }
         }
 
         /// The SwiftUI content for a row, with the app environment attached so
@@ -363,14 +393,18 @@ struct AppKitMessageListView: NSViewRepresentable {
 /// row height. The hosting view is created once and its `rootView` swapped on
 /// reuse — no per-reuse view-tree teardown.
 private final class HostingCellView: NSTableCellView {
+    /// Per-cell clamp the coordinator updates on scroll so the hovered row's
+    /// action bar stays inside the viewport. Injected into the hosted content.
+    let clamp = RowClamp()
     private var hosting: NSHostingView<AnyView>?
 
     func host(_ view: AnyView) {
+        let rooted = AnyView(view.environment(clamp))
         if let hosting {
-            hosting.rootView = view
+            hosting.rootView = rooted
             return
         }
-        let h = NSHostingView(rootView: view)
+        let h = NSHostingView(rootView: rooted)
         h.translatesAutoresizingMaskIntoConstraints = false
         h.sizingOptions = [.intrinsicContentSize]
         addSubview(h)

@@ -23,6 +23,27 @@ final class CommandRegistryTests: XCTestCase {
         XCTAssertNil(CommandRegistry.command("nope"))
     }
 
+    func testNewDMCommandIsRegistered() {
+        let dm = CommandRegistry.command("nav.newDM")
+        XCTAssertEqual(dm?.shortcutLabel, "⌘N")
+        XCTAssertEqual(dm?.category, CommandRegistry.navigation)
+        // Findable in the palette by intent.
+        for term in ["dm", "message", "pm"] {
+            let ranked = CommandMatcher.rank(query: term, in: CommandRegistry.all)
+            XCTAssertTrue(ranked.contains { $0.id == "nav.newDM" },
+                          "\"\(term)\" should surface New Direct Message")
+        }
+    }
+
+    func testHelpCommandIsRegistered() {
+        let help = CommandRegistry.command("help.shortcuts")
+        XCTAssertNotNil(help, "help.shortcuts must be in the registry (menu + ⌘K)")
+        XCTAssertEqual(help?.shortcutLabel, "⌘/")
+        // Discoverable in the palette by intent, not just exact title.
+        let ranked = CommandMatcher.rank(query: "help", in: CommandRegistry.all)
+        XCTAssertTrue(ranked.contains { $0.id == "help.shortcuts" })
+    }
+
     // MARK: - Matcher ranking
 
     func testTitlePrefixOutranksWordBoundary() {

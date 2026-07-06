@@ -28,9 +28,11 @@ enum AppearanceSetting: String, CaseIterable {
 
 @main
 struct FreeqApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var appState = AppState()
     @State private var showOnboarding = !UserDefaults.standard.bool(forKey: "freeq.onboardingComplete")
     @AppStorage("freeq.appearance") private var appearanceRaw = "system"
+    @Environment(\.scenePhase) private var scenePhase
 
     /// Menu item projected from the Command registry — same title,
     /// shortcut, availability, and handler the ⌘K palette uses.
@@ -63,6 +65,13 @@ struct FreeqApp: App {
                 .sheet(isPresented: $showOnboarding) {
                     OnboardingView()
                 }
+                .sheet(isPresented: $state.showHelp) {
+                    HelpView()
+                }
+                .sheet(isPresented: $state.showNewDM) {
+                    NewDMSheet()
+                        .environment(appState)
+                }
                 .onAppear {
                     AppearanceSetting.current.apply()
                     MetricKitReporter.shared.start()
@@ -87,8 +96,25 @@ struct FreeqApp: App {
                 .onChange(of: appState.totalUnread) { _, newValue in
                     NSApplication.shared.dockTile.badgeLabel = newValue > 0 ? "\(newValue)" : nil
                 }
+                .onChange(of: scenePhase) { _, phase in
+                    // Regaining focus means the user is now looking at the
+                    // open channel — clear its unread so the badge tracks
+                    // reality (previously unread only cleared on channel
+                    // switch, so a backgrounded-then-refocused window kept a
+                    // stale count on the buffer already on screen).
+                    if phase == .active, let channel = appState.activeChannel {
+                        appState.clearUnread(channel)
+                    }
+                }
         }
         .commands {
+            // Branded About panel (new dark-plate icon + version + credits)
+            // replacing the default "About freeq" item.
+            CommandGroup(replacing: .appInfo) {
+                Button("About freeq") {
+                    appDelegate.showAbout(nil)
+                }
+            }
             // All menu content projects from the Command registry
             // (CommandRegistry + CommandActions) — the ⌘K palette shows the
             // same commands, so the two can never drift.
@@ -102,10 +128,32 @@ struct FreeqApp: App {
                 commandButton("nav.nextChannel")
                 commandButton("nav.prevUnread")
                 commandButton("nav.nextUnread")
+
+                Divider()
+
+                // Jump to a favorite by number (⌃⌘1…9), matching the order
+                // shown under the sidebar's Favorites header. The submenu
+                // lists real channel names so the shortcuts are discoverable,
+                // and rebuilds as favorites change.
+                Menu("Go to Favorite") {
+                    let favs = appState.favoriteChannels
+                    if favs.isEmpty {
+                        Button("No favorites yet") {}.disabled(true)
+                    } else {
+                        ForEach(Array(favs.prefix(9).enumerated()), id: \.element.id) { idx, ch in
+                            Button(ch.name) { appState.switchToFavorite(idx) }
+                                .keyboardShortcut(
+                                    KeyEquivalent(Character("\(idx + 1)")),
+                                    modifiers: [.command, .control]
+                                )
+                        }
+                    }
+                }
             }
 
             CommandGroup(replacing: .newItem) {
                 commandButton("nav.quickSwitcher")
+                commandButton("nav.newDM")
                 commandButton("nav.search")
                 commandButton("nav.bookmarks")
                 commandButton("nav.browseChannels")
@@ -144,7 +192,8 @@ struct FreeqApp: App {
             }
 
             CommandGroup(replacing: .help) {
-                Button("freeq Help") {
+                commandButton("help.shortcuts")
+                Button("IRC Commands (/help)") {
                     if let ch = appState.activeChannelState {
                         ch.appendIfNew(ChatMessage(
                             id: UUID().uuidString, from: "system",

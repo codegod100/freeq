@@ -31,6 +31,7 @@ enum CommandRegistry {
     static let call = "Call"
     static let presence = "Presence"
     static let channel = "Channel"
+    static let help = "Help"
 
     static let all: [AppCommand] = [
         // Navigation
@@ -44,6 +45,8 @@ enum CommandRegistry {
                    shortcut: "⇧⌘L", keywords: ["list", "discover"]),
         AppCommand("nav.joinChannel", "Join Channel…", category: navigation,
                    shortcut: "⌘J", keywords: ["add"]),
+        AppCommand("nav.newDM", "New Direct Message…", category: navigation,
+                   shortcut: "⌘N", keywords: ["dm", "message", "pm", "whisper", "person"]),
         AppCommand("nav.prevChannel", "Previous Channel", category: navigation,
                    shortcut: "⌥↑", keywords: ["up"]),
         AppCommand("nav.nextChannel", "Next Channel", category: navigation,
@@ -80,6 +83,10 @@ enum CommandRegistry {
                    keywords: ["silence", "notifications"]),
         AppCommand("channel.leave", "Leave Channel", category: channel,
                    keywords: ["part", "close"]),
+
+        // Help
+        AppCommand("help.shortcuts", "Keyboard Shortcuts & Features", category: help,
+                   shortcut: "⌘/", keywords: ["help", "keys", "cheatsheet", "guide"]),
     ]
 
     static func command(_ id: String) -> AppCommand? {

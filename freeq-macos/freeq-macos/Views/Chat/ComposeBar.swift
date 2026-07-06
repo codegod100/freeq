@@ -13,6 +13,10 @@ struct ComposeBar: View {
     @State private var pendingUpload: PendingUpload?
     @State private var isUploading = false
     @State private var autocompleteIndex: Int = 0
+    /// Set when the user presses Esc while the autocomplete popup is open —
+    /// hides it until the draft changes again (so Esc dismisses the menu
+    /// instead of clearing the whole message).
+    @State private var autocompleteDismissed = false
     @State private var voiceRecorder: AVAudioRecorder?
     @State private var voiceRecordingURL: URL?
     @State private var voiceRecordingTime: TimeInterval = 0
@@ -154,33 +158,16 @@ struct ComposeBar: View {
             }
 
             // Autocomplete popup
-            AutocompletePopup(text: $text, selectedIndex: $autocompleteIndex, anchor: .zero)
+            AutocompletePopup(text: $text, selectedIndex: $autocompleteIndex,
+                              suppressed: autocompleteDismissed)
 
-            HStack(alignment: .bottom, spacing: 8) {
-                // File picker button
-                Button { pickFile() } label: {
-                    Image(systemName: "plus.circle")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(appState.authenticatedDID == nil ? Theme.textTertiary.opacity(0.45) : Theme.textSecondary)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .help("Attach file (images)")
-                .disabled(appState.authenticatedDID == nil)
-
-                Button {
-                    toggleVoiceRecording()
-                } label: {
-                    Image(systemName: isRecordingVoice ? "stop.circle.fill" : "mic.circle")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(isRecordingVoice ? Theme.danger : Theme.textSecondary)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .help(isRecordingVoice ? "Stop and send voice message" : "Record voice message")
-                .disabled(appState.authenticatedDID == nil || isUploadingVoice || pendingUpload != nil)
-
-                // Text editor
+            // Two-row composer: the text field spans the full width on its own
+            // row, and the action buttons sit on a compact row below it.
+            // (Previously everything shared one row, so the file/mic/format/
+            // emoji/send controls ate the width and the typing area was squeezed
+            // to a thin strip in a narrow window.)
+            VStack(spacing: 6) {
+                // Text editor — full width
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
                         Text("Message \(appState.activeChannel ?? "")…")
@@ -197,11 +184,20 @@ struct ComposeBar: View {
                         onHistoryPrev: recallHistoryPrevious,
                         onHistoryNext: recallHistoryNext,
                         members: appState.activeChannelState?.members.map(\.nick) ?? [],
-                        focusToken: focusToken
+                        focusToken: focusToken,
+                        autocompleteActive: { !currentSuggestions.isEmpty },
+                        autocompleteAccept: acceptAutocomplete,
+                        autocompleteMove: moveAutocomplete,
+                        autocompleteCancel: { autocompleteDismissed = true }
                     )
-                    .frame(minHeight: 32, maxHeight: 120)
+                    .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 120)
                     .fixedSize(horizontal: false, vertical: true)
+                    .onChange(of: text) { autocompleteDismissed = false }
                 }
+                // Establish full width BEFORE the rounded background/border are
+                // drawn — otherwise the box sizes to the placeholder's intrinsic
+                // width and renders as a narrow strip.
+                .frame(maxWidth: .infinity)
                 .padding(4)
                 .background(
                     RoundedRectangle(cornerRadius: 12)
@@ -211,46 +207,73 @@ struct ComposeBar: View {
                     RoundedRectangle(cornerRadius: 12)
                         .strokeBorder(isFocused ? Theme.accent.opacity(0.35) : Theme.borderSoft, lineWidth: 1)
                 )
-                .frame(maxWidth: .infinity)
 
-                // Format toolbar
-                FormatToolbar(text: $text)
-
-                // Emoji button (system picker)
-                Button {
-                    NSApp.orderFrontCharacterPalette(nil)
-                } label: {
-                    Image(systemName: "face.smiling")
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 28, height: 28)
-                }
-                .buttonStyle(.plain)
-                .help("Emoji (⌘⌃Space)")
-
-                // Cross-post toggle
-                if appState.authenticatedDID != nil {
-                    Button {
-                        crossPostBluesky.toggle()
-                    } label: {
-                        Image(systemName: crossPostBluesky ? "cloud.fill" : "cloud")
-                            .font(.caption)
-                            .foregroundStyle(crossPostBluesky ? Theme.blue : Theme.textSecondary)
-                            .frame(width: 24, height: 28)
+                // Action row: attachments + formatting on the left, send on the right.
+                HStack(spacing: 8) {
+                    // File picker button
+                    Button { pickFile() } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(appState.authenticatedDID == nil ? Theme.textTertiary.opacity(0.45) : Theme.textSecondary)
+                            .frame(width: 28, height: 28)
                     }
                     .buttonStyle(.plain)
-                    .help(crossPostBluesky ? "Cross-posting to Bluesky (click to disable)" : "Cross-post to Bluesky")
-                }
+                    .help("Attach file (images)")
+                    .disabled(appState.authenticatedDID == nil)
 
-                // Send button
-                Button { send() } label: {
-                    Image(systemName: isEditing ? "checkmark.circle.fill" : "arrow.up.circle.fill")
-                        .font(.system(size: 24, weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundColor(text.isEmpty && pendingUpload == nil ? Theme.textTertiary.opacity(0.55) : (isEditing ? Theme.warning : Theme.accent))
+                    Button {
+                        toggleVoiceRecording()
+                    } label: {
+                        Image(systemName: isRecordingVoice ? "stop.circle.fill" : "mic.circle")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(isRecordingVoice ? Theme.danger : Theme.textSecondary)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help(isRecordingVoice ? "Stop and send voice message" : "Record voice message")
+                    .disabled(appState.authenticatedDID == nil || isUploadingVoice || pendingUpload != nil)
+
+                    // Format toolbar
+                    FormatToolbar(text: $text)
+
+                    // Emoji button (system picker)
+                    Button {
+                        NSApp.orderFrontCharacterPalette(nil)
+                    } label: {
+                        Image(systemName: "face.smiling")
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundStyle(Theme.textSecondary)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Emoji (⌘⌃Space)")
+
+                    Spacer()
+
+                    // Cross-post toggle
+                    if appState.authenticatedDID != nil {
+                        Button {
+                            crossPostBluesky.toggle()
+                        } label: {
+                            Image(systemName: crossPostBluesky ? "cloud.fill" : "cloud")
+                                .font(.caption)
+                                .foregroundStyle(crossPostBluesky ? Theme.blue : Theme.textSecondary)
+                                .frame(width: 24, height: 28)
+                        }
+                        .buttonStyle(.plain)
+                        .help(crossPostBluesky ? "Cross-posting to Bluesky (click to disable)" : "Cross-post to Bluesky")
+                    }
+
+                    // Send button
+                    Button { send() } label: {
+                        Image(systemName: isEditing ? "checkmark.circle.fill" : "arrow.up.circle.fill")
+                            .font(.system(size: 24, weight: .semibold))
+                            .symbolRenderingMode(.hierarchical)
+                            .foregroundColor(text.isEmpty && pendingUpload == nil ? Theme.textTertiary.opacity(0.55) : (isEditing ? Theme.warning : Theme.accent))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(text.isEmpty && pendingUpload == nil)
                 }
-                .buttonStyle(.plain)
-                .disabled(text.isEmpty && pendingUpload == nil)
             }
             .padding(8)
             .background(
@@ -297,6 +320,34 @@ struct ComposeBar: View {
     // Input history (⌘↑/⌘↓ recall — plain ↑ stays edit-last)
     @State private var composeHistory = ComposeHistory()
 
+    // MARK: - Autocomplete keyboard handling
+
+    /// The suggestions currently shown in the popup (empty when dismissed) —
+    /// the composer's key handling accepts/navigates exactly these.
+    private var currentSuggestions: [ComposeAutocomplete.Suggestion] {
+        guard !autocompleteDismissed else { return [] }
+        let members = ComposeAutocomplete.members(from: appState.activeChannelState?.members ?? [])
+        return ComposeAutocomplete.suggestions(text: text, members: members)
+    }
+
+    /// Accept the highlighted suggestion (Tab/Return). Returns false when there
+    /// is nothing to accept, so the caller can fall through to its default.
+    private func acceptAutocomplete() -> Bool {
+        let items = currentSuggestions
+        guard !items.isEmpty else { return false }
+        let idx = min(max(0, autocompleteIndex), items.count - 1)
+        text = ComposeAutocomplete.accept(items[idx], in: text)
+        autocompleteIndex = 0
+        return true
+    }
+
+    /// Move the highlight up (-1) or down (+1), wrapping around.
+    private func moveAutocomplete(_ delta: Int) {
+        let count = currentSuggestions.count
+        guard count > 0 else { return }
+        autocompleteIndex = ((autocompleteIndex + delta) % count + count) % count
+    }
+
     private func send() {
         // Handle pending upload
         if pendingUpload != nil {
@@ -309,10 +360,16 @@ struct ComposeBar: View {
 
         composeHistory.record(trimmed)
 
+        // Convert :shortcode: emoji in plain messages (not slash-commands) so
+        // typing ":wave:" sends 👋 like every other chat app.
+        let outgoing = trimmed.hasPrefix("/")
+            ? trimmed
+            : ComposeAutocomplete.replacingShortcodes(trimmed)
+
         // All command/edit/reply/message handling lives in AppState so the UI
         // and the test-mode bridge share one code path.
         appState.onComposeMediaRequest = { pickFile() }
-        appState.submitInput(trimmed, target: target)
+        appState.submitInput(outgoing, target: target)
         text = ""
     }
 
@@ -648,6 +705,13 @@ struct ComposeTextView: NSViewRepresentable {
     /// on so re-renders that didn't change the token don't steal focus
     /// from the user mid-type.
     var focusToken: Int = 0
+    /// Autocomplete popup wiring: whether the popup is showing, accept the
+    /// highlighted item (returns true if handled), move the highlight
+    /// (±1), and dismiss it. Lets ↑/↓ navigate and Tab/Return accept.
+    var autocompleteActive: (() -> Bool)? = nil
+    var autocompleteAccept: (() -> Bool)? = nil
+    var autocompleteMove: ((Int) -> Void)? = nil
+    var autocompleteCancel: (() -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -674,11 +738,21 @@ struct ComposeTextView: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 4, height: 6)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
+        // Track the scroll view's width. Without `.width` in the autoresizing
+        // mask the text view keeps whatever (narrow) frame it had when
+        // makeNSView ran — before SwiftUI had laid the scroll view out — so
+        // the editable area renders as a thin column no matter how wide the
+        // bar is. With it, the text container (widthTracksTextView) follows.
+        textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
         textView.submitAction = onSubmit
         textView.upArrowAction = onUpArrow
         textView.historyPrevAction = onHistoryPrev
         textView.historyNextAction = onHistoryNext
+        textView.autocompleteActive = autocompleteActive
+        textView.autocompleteAccept = autocompleteAccept
+        textView.autocompleteMove = autocompleteMove
+        textView.autocompleteCancel = autocompleteCancel
 
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = false
@@ -697,6 +771,10 @@ struct ComposeTextView: NSViewRepresentable {
         textView.upArrowAction = onUpArrow
         textView.historyPrevAction = onHistoryPrev
         textView.historyNextAction = onHistoryNext
+        textView.autocompleteActive = autocompleteActive
+        textView.autocompleteAccept = autocompleteAccept
+        textView.autocompleteMove = autocompleteMove
+        textView.autocompleteCancel = autocompleteCancel
         textView.members = members
 
         // Honour focus-token bumps. Defer to the next runloop so the
@@ -745,6 +823,10 @@ class ComposeNSTextView: NSTextView {
     var upArrowAction: (() -> Void)?
     var historyPrevAction: (() -> Void)?
     var historyNextAction: (() -> Void)?
+    var autocompleteActive: (() -> Bool)?
+    var autocompleteAccept: (() -> Bool)?
+    var autocompleteMove: ((Int) -> Void)?
+    var autocompleteCancel: (() -> Void)?
     var members: [String] = []
     private var tabCompletionCandidates: [String] = []
     private var tabCompletionIndex: Int = 0
@@ -781,6 +863,27 @@ class ComposeNSTextView: NSTextView {
             historyNextAction?()
             return
         }
+
+        // When the autocomplete popup is open it captures navigation + accept,
+        // matching Slack/Discord: ↑/↓ move, Tab or Return accept, Esc dismiss.
+        // (Before this, Return sent "@zap" and Tab silently no-op'd.)
+        if autocompleteActive?() == true {
+            switch event.keyCode {
+            case 48:  // Tab
+                if autocompleteAccept?() == true { return }
+            case 36 where !event.modifierFlags.contains(.shift):  // Return
+                if autocompleteAccept?() == true { return }
+            case 125:  // Down
+                autocompleteMove?(1); return
+            case 126:  // Up
+                autocompleteMove?(-1); return
+            case 53:  // Esc — dismiss the menu, keep the draft
+                autocompleteCancel?(); return
+            default:
+                break
+            }
+        }
+
         // Enter without Shift = send
         if event.keyCode == 36 && !event.modifierFlags.contains(.shift) {
             resetTabCompletion()
@@ -799,7 +902,7 @@ class ComposeNSTextView: NSTextView {
             NotificationCenter.default.post(name: .cancelEdit, object: nil)
             return
         }
-        // Tab = nick completion
+        // Tab = in-place nick completion (IRC-style cycle) when no popup is up.
         if event.keyCode == 48 {
             performTabCompletion()
             return
