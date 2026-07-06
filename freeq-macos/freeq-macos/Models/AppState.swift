@@ -42,8 +42,14 @@ class AppState {
     var dmBuffers: [ChannelState] = []
     var activeChannel: String? = nil {
         didSet {
-            // Persist so the app reopens the last conversation on next launch.
-            if let activeChannel { UserDefaults.standard.set(activeChannel, forKey: LastChannel.key) }
+            // Persist so the app reopens the last conversation on next launch —
+            // but ONLY after launch restore has settled. During connect the
+            // first-joined channel auto-selects (see `.joined`), and persisting
+            // that transient pick would clobber the real last-open channel we
+            // still need to restore.
+            if didRestoreLastChannel, let activeChannel {
+                UserDefaults.standard.set(activeChannel, forKey: LastChannel.key)
+            }
         }
     }
     /// True once we've restored the last-open channel this launch, so a later
@@ -51,6 +57,10 @@ class AppState {
     @ObservationIgnored private var didRestoreLastChannel = false
     /// Guards the one-shot delayed fallback so it's scheduled only once.
     @ObservationIgnored private var restoreFallbackScheduled = false
+    /// The last-open channel as persisted at launch, captured up front so the
+    /// connect-time auto-selection can't overwrite it before we restore.
+    @ObservationIgnored private var pendingRestoreTarget: String? =
+        UserDefaults.standard.string(forKey: LastChannel.key)
     var unreadCounts: [String: Int] = [:]
     var mentionCounts: [String: Int] = [:]
     var autoJoinChannels: [String] = ["#freeq"]
@@ -864,14 +874,17 @@ class AppState {
     /// was left). Runs at most once per launch.
     private func attemptRestoreLastChannel() {
         guard !didRestoreLastChannel else { return }
-        let saved = UserDefaults.standard.string(forKey: LastChannel.key)
+        // Use the target captured at launch, not the live UserDefaults value —
+        // the latter gets clobbered by connect-time auto-selection.
+        let saved = pendingRestoreTarget
         let names = channels.map(\.name) + dmBuffers.map(\.name)
 
-        // The last-open conversation has joined — reopen it right away.
+        // The last-open conversation has joined — reopen it right away. Flip the
+        // flag FIRST so the didSet persists this (intended) selection.
         if let saved,
            let match = names.first(where: { $0.caseInsensitiveCompare(saved) == .orderedSame }) {
-            activeChannel = match
             didRestoreLastChannel = true
+            activeChannel = match
             return
         }
 
@@ -889,14 +902,13 @@ class AppState {
         restoreFallbackScheduled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
             guard let self, !self.didRestoreLastChannel else { return }
-            if let target = LastChannel.restore(
-                saved: UserDefaults.standard.string(forKey: LastChannel.key),
+            let target = LastChannel.restore(
+                saved: self.pendingRestoreTarget,
                 channels: self.channels.map(\.name),
                 dms: self.dmBuffers.map(\.name),
-                favorites: self.favorites) {
-                self.activeChannel = target
-            }
+                favorites: self.favorites)
             self.didRestoreLastChannel = true
+            if let target { self.activeChannel = target }
         }
     }
 
