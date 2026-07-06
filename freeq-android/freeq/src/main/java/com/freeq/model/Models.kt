@@ -251,17 +251,47 @@ class AppState(application: Application) : AndroidViewModel(application) {
     internal val prefs: SharedPreferences
         get() = getApplication<Application>().getSharedPreferences("freeq", Context.MODE_PRIVATE)
 
-    internal val securePrefs: SharedPreferences by lazy {
+    internal val securePrefs: SharedPreferences by lazy { buildSecurePrefs() }
+
+    private fun createEncryptedPrefs(): SharedPreferences {
         val masterKey = MasterKey.Builder(getApplication<Application>())
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        EncryptedSharedPreferences.create(
+        return EncryptedSharedPreferences.create(
             getApplication(),
             "freeq_secure",
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
+    }
+
+    /**
+     * Build the encrypted store, recovering from a corrupt keyset. On some
+     * devices the Keystore master key survives an uninstall in a bad state, so
+     * EncryptedSharedPreferences can't decrypt its own keyset and throws
+     * (AEADBadTagException) — which, unhandled, crashes AppState construction on
+     * launch. Reset the keyset + master-key alias and rebuild; stored secrets
+     * are re-derived on next login. Falls back to plain prefs if even that fails.
+     */
+    private fun buildSecurePrefs(): SharedPreferences {
+        return try {
+            createEncryptedPrefs()
+        } catch (e: Exception) {
+            android.util.Log.w("AppState", "Encrypted prefs unreadable, resetting keyset", e)
+            getApplication<Application>().deleteSharedPreferences("freeq_secure")
+            try {
+                val ks = java.security.KeyStore.getInstance("AndroidKeyStore")
+                ks.load(null)
+                ks.deleteEntry("_androidx_security_master_key_")
+            } catch (_: Exception) {}
+            try {
+                createEncryptedPrefs()
+            } catch (e2: Exception) {
+                android.util.Log.e("AppState", "Encrypted prefs unavailable; using plaintext prefs", e2)
+                getApplication<Application>().getSharedPreferences("freeq_secure_fallback", Context.MODE_PRIVATE)
+            }
+        }
     }
 
     val activeChannelState: ChannelState?
