@@ -1,17 +1,31 @@
 import Foundation
 
-/// Restore the last-open conversation on launch. Reopens where you left off,
-/// falling back to the first channel (then the first DM) when that target is
-/// gone, so a left/renamed channel never lands you on nothing.
+/// Restore the last-open conversation on launch. Priority, so you always land
+/// somewhere sensible even when the last channel is gone:
+///   1. the exact conversation you left off in,
+///   2. your first favorite channel (channels arrive in the sidebar's order),
+///   3. the #freeq lobby,
+///   4. any joined channel, then any DM.
 enum LastChannel {
     /// UserDefaults key for the persisted target name.
     static let key = "freeq.lastChannel"
 
-    static func restore(saved: String?, channels: [String], dms: [String]) -> String? {
+    static func restore(saved: String?, channels: [String], dms: [String],
+                        favorites: Set<String> = []) -> String? {
+        // 1. Exactly where you left off.
         if let saved {
             let match = (channels + dms).first { $0.caseInsensitiveCompare(saved) == .orderedSame }
             if let match { return match }
         }
+        // 2. First favorite (channels are passed in sidebar order).
+        if let fav = channels.first(where: { favorites.contains($0.lowercased()) }) {
+            return fav
+        }
+        // 3. The #freeq lobby.
+        if let lobby = channels.first(where: { $0.caseInsensitiveCompare("#freeq") == .orderedSame }) {
+            return lobby
+        }
+        // 4. Anything joined.
         return channels.first ?? dms.first
     }
 }

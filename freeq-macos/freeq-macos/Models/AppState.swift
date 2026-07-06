@@ -49,6 +49,8 @@ class AppState {
     /// True once we've restored the last-open channel this launch, so a later
     /// channel joining doesn't re-hijack the user's current selection.
     @ObservationIgnored private var didRestoreLastChannel = false
+    /// Guards the one-shot delayed fallback so it's scheduled only once.
+    @ObservationIgnored private var restoreFallbackScheduled = false
     var unreadCounts: [String: Int] = [:]
     var mentionCounts: [String: Int] = [:]
     var autoJoinChannels: [String] = ["#freeq"]
@@ -863,21 +865,38 @@ class AppState {
     private func attemptRestoreLastChannel() {
         guard !didRestoreLastChannel else { return }
         let saved = UserDefaults.standard.string(forKey: LastChannel.key)
-        let chanNames = channels.map(\.name)
-        let dmNames = dmBuffers.map(\.name)
-        let savedIsPresent = saved.map { s in
-            (chanNames + dmNames).contains { $0.caseInsensitiveCompare(s) == .orderedSame }
-        } ?? false
+        let names = channels.map(\.name) + dmBuffers.map(\.name)
 
-        // Wait for the saved target to appear; only fall back once every
-        // expected auto-join channel has loaded (so we don't prematurely
-        // land on the first channel while the real one is still joining).
-        guard savedIsPresent || (!chanNames.isEmpty && chanNames.count >= autoJoinChannels.count) else {
+        // The last-open conversation has joined — reopen it right away.
+        if let saved,
+           let match = names.first(where: { $0.caseInsensitiveCompare(saved) == .orderedSame }) {
+            activeChannel = match
+            didRestoreLastChannel = true
             return
         }
-        if let target = LastChannel.restore(saved: saved, channels: chanNames, dms: dmNames) {
-            activeChannel = target
-            didRestoreLastChannel = true
+
+        // It isn't here yet. Channels join incrementally and out of order, so a
+        // count-based fallback used to land us on the alphabetically-first
+        // channel before the real one finished joining. Instead, give the joins
+        // a moment to settle, then fall back through favorites → #freeq.
+        scheduleRestoreFallback()
+    }
+
+    /// One-shot delayed fallback: if the last-open channel never reappears,
+    /// land on the first favorite, then the #freeq lobby, then any channel.
+    private func scheduleRestoreFallback() {
+        guard !restoreFallbackScheduled else { return }
+        restoreFallbackScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            guard let self, !self.didRestoreLastChannel else { return }
+            if let target = LastChannel.restore(
+                saved: UserDefaults.standard.string(forKey: LastChannel.key),
+                channels: self.channels.map(\.name),
+                dms: self.dmBuffers.map(\.name),
+                favorites: self.favorites) {
+                self.activeChannel = target
+            }
+            self.didRestoreLastChannel = true
         }
     }
 

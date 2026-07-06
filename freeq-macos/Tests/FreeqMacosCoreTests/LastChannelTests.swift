@@ -46,4 +46,52 @@ final class LastChannelTests: XCTestCase {
             LastChannel.restore(saved: nil, channels: ["#freeq"], dms: []),
             "#freeq")
     }
+
+    // MARK: - Fallback priority (saved gone → favorite → #freeq → first)
+
+    func testFallsBackToFirstFavoriteWhenSavedGone() {
+        // Left #old; #dev is a favorite → prefer the favorite over the
+        // alphabetically-first channel and over the #freeq lobby.
+        XCTAssertEqual(
+            LastChannel.restore(saved: "#old", channels: ["#alpha", "#dev", "#freeq"],
+                                dms: [], favorites: ["#dev"]),
+            "#dev")
+    }
+
+    func testFirstFavoriteFollowsSidebarOrder() {
+        // Two favorites → the first one in the passed (sidebar) order wins.
+        XCTAssertEqual(
+            LastChannel.restore(saved: nil, channels: ["#alpha", "#beta", "#zeta"],
+                                dms: [], favorites: ["#zeta", "#beta"]),
+            "#beta")
+    }
+
+    func testFavoriteMatchIsCaseInsensitive() {
+        XCTAssertEqual(
+            LastChannel.restore(saved: nil, channels: ["#Dev"], dms: [], favorites: ["#dev"]),
+            "#Dev")
+    }
+
+    func testFallsBackToFreeqLobbyWhenNoFavorite() {
+        // No saved, no favorites → the #freeq lobby beats the alphabetically
+        // first channel.
+        XCTAssertEqual(
+            LastChannel.restore(saved: nil, channels: ["#alpha", "#freeq", "#zeta"],
+                                dms: [], favorites: []),
+            "#freeq")
+    }
+
+    func testFallsBackToFirstChannelWhenNoFavoriteOrFreeq() {
+        XCTAssertEqual(
+            LastChannel.restore(saved: "#gone", channels: ["#alpha", "#zeta"],
+                                dms: [], favorites: []),
+            "#alpha")
+    }
+
+    func testSavedStillWinsOverFavoriteAndFreeq() {
+        XCTAssertEqual(
+            LastChannel.restore(saved: "#dev", channels: ["#dev", "#freeq"],
+                                dms: [], favorites: ["#freeq"]),
+            "#dev")
+    }
 }
