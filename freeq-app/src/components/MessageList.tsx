@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo, memo } from 'react';
 import { useStore, type Message, type PinnedMessage } from '../store';
 import { getNick, requestHistory, sendReaction, sendUnreact } from '../irc/client';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
@@ -365,7 +365,7 @@ function InlineVideoPlayer({ url }: { url: string }) {
   );
 }
 
-export function MessageContent({ msg }: { msg: Message }) {
+function MessageContentImpl({ msg }: { msg: Message }) {
   const setLightbox = useStore((s) => s.setLightboxUrl);
 
   if (msg.isAction) {
@@ -600,7 +600,7 @@ function DateSeparator({ date }: { date: Date }) {
   );
 }
 
-function SystemMessage({ msg }: { msg: Message }) {
+function SystemMessageImpl({ msg }: { msg: Message }) {
   return (
     <div className="px-4 py-1 flex items-start gap-3">
       <span className="w-10 shrink-0" />
@@ -618,7 +618,7 @@ interface MessageProps {
   onNickClick: (nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => void;
 }
 
-function FullMessage({ msg, channel, onNickClick }: MessageProps) {
+function FullMessageImpl({ msg, channel, onNickClick }: MessageProps) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | undefined>();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -726,7 +726,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
   );
 }
 
-function GroupedMessage({ msg, channel }: MessageProps) {
+function GroupedMessageImpl({ msg, channel }: MessageProps) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | undefined>();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -794,6 +794,18 @@ function GroupedMessage({ msg, channel }: MessageProps) {
     </div>
   );
 }
+
+// Memoized row components. The store preserves each message object's identity
+// across appends (only the new message is a fresh object), and `channel` +
+// `onNickClick` are stable, so React.memo's shallow prop check lets every
+// unchanged row bail out — turning a per-message re-render + media-regex
+// re-parse of all ~1000 rows into a single new row. `MessageContent` is
+// wrapped too so its ~10 uncached media/link regexes don't run for unchanged
+// rows.
+export const MessageContent = memo(MessageContentImpl);
+const SystemMessage = memo(SystemMessageImpl);
+const FullMessage = memo(FullMessageImpl);
+const GroupedMessage = memo(GroupedMessageImpl);
 
 /** Verification badge for AT Protocol-authenticated users */
 function VerifiedBadge() {

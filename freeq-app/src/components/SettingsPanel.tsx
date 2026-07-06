@@ -2,6 +2,7 @@ import { useStore } from '../store';
 import { requestPermission } from '../lib/notifications';
 import { getPreferences, setPreferences } from '../lib/db';
 import { useState, useEffect } from 'react';
+import { AudioTest } from './AudioTest';
 
 interface SettingsPanelProps {
   open: boolean;
@@ -130,6 +131,11 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
                 await setPreferences({ sounds: v });
               }}
             />
+          </Section>
+
+          {/* Audio — local speaker + mic test */}
+          <Section title="Audio">
+            <AudioTest />
           </Section>
 
           {/* Privacy */}

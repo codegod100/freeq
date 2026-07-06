@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '../store';
-import { getAvInstanceId, getNick, leaveAvSession } from '../irc/client';
+import { getAvInstanceId, getClient, getNick, leaveAvSession } from '../irc/client';
 import { loadMoqComponents } from '../lib/moq-loader';
 import { broadcastName, computeParticipantSlots } from '../lib/av-mesh';
 import { getCachedProfile } from '../lib/profiles';
@@ -148,6 +148,44 @@ export function CallPanel() {
   // silently killed ALL local-dev AV.
   const moqOrigin = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/av/moq`;
 
+  // ── SFU access token ─────────────────────────────────────────
+  // The server mints a per-session MoQ token and delivers it as a
+  // +freeq.at/av-token TAGMSG right after our av-start/av-join (REST
+  // fallback: GET /api/v1/av/sessions/{id}/token). We fold it into the
+  // dial URL as ?jwt=…. Tokenless dialing still works while the server
+  // runs in migration mode; once FREEQ_AV_REQUIRE_TOKEN is enforced the
+  // token is what admits us to our session's media (and nothing else).
+  // moqUrlRef mirrors the state for element builders that run outside
+  // the React render cycle (buildPublishEl, the screen publisher).
+  const moqUrlRef = useRef(moqOrigin);
+  const [moqUrl, setMoqUrl] = useState(moqOrigin);
+  useEffect(() => {
+    const applyToken = (token: string | null) => {
+      const url = token ? `${moqOrigin}?jwt=${encodeURIComponent(token)}` : moqOrigin;
+      moqUrlRef.current = url;
+      setMoqUrl(url);
+    };
+    if (!sessionId) {
+      applyToken(null);
+      return;
+    }
+    // Test stubs implement only nick/raw — guard every SDK surface.
+    const c = getClient() as
+      | (NonNullable<ReturnType<typeof getClient>> & {
+          avTokenFor?: (sid: string) => string | null;
+        })
+      | null;
+    applyToken(typeof c?.avTokenFor === 'function' ? c.avTokenFor(sessionId) : null);
+    if (!c || typeof c.on !== 'function') return;
+    const onToken = (sid: string, token: string) => {
+      if (sid === sessionId) applyToken(token);
+    };
+    c.on('avToken', onToken);
+    return () => {
+      c.off?.('avToken', onToken);
+    };
+  }, [sessionId, moqOrigin]);
+
   // ── Device enumeration ──────────────────────────────────────
   // Device labels are blank until the matching permission is granted, so
   // this is (re)run after mic permission at call start, after the camera
@@ -188,7 +226,7 @@ export function CallPanel() {
     // function every subscriber uses to compute what to watch, so publish
     // and subscribe paths can never drift (a whole class of split bugs).
     const myBroadcast = broadcastName(sessionId, myNick, myInstance);
-    pub.setAttribute('url', moqOrigin);
+    pub.setAttribute('url', moqUrlRef.current);
     pub.setAttribute('name', myBroadcast);
     // `invisible` BEFORE `source`: moq-publish reacts to `source` by opening a
     // single getUserMedia. With `invisible` set first it grabs audio only, so a
@@ -277,6 +315,22 @@ export function CallPanel() {
     return () => { cancelled = true; cleanup(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [avAudioActive, sessionId]);
+
+  // ── Redial when the SFU URL gains its access token ──────────
+  // The +freeq.at/av-token TAGMSG can land a beat after the publisher was
+  // built (join → dial → token). In migration mode the tokenless dial
+  // already worked; once the server enforces tokens, this recreate is
+  // what upgrades the publish to an authenticated connection. Same
+  // recreate pattern as the camera toggle (an attribute rewrite alone
+  // doesn't re-dial reliably across moq-publish versions).
+  useEffect(() => {
+    const pub = pubEl;
+    if (!pub) return;
+    if (pub.getAttribute('url') === moqUrl) return;
+    stopPublishEl();
+    buildPublishEl(useStore.getState().avCameraOn);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moqUrl, pubEl]);
 
   // ── Sync mute state ─────────────────────────────────────────
   useEffect(() => {
@@ -400,7 +454,7 @@ export function CallPanel() {
     const pub = document.createElement('moq-publish') as MoqPublishEl;
     container.appendChild(pub);
     screenPubElRef.current = pub;
-    pub.setAttribute('url', moqOrigin);
+    pub.setAttribute('url', moqUrlRef.current);
     pub.setAttribute('name', screenName);
     // Video only — mute before `source` so no audio rendition is ever
     // published even if the browser hands us a display-audio track.
@@ -635,7 +689,7 @@ export function CallPanel() {
           <ScreenTile
             key={slot.broadcastKey + ':screen'}
             slot={slot}
-            moqOrigin={moqOrigin}
+            moqOrigin={moqUrl}
             fullscreen={fullscreen}
             onLiveChange={handleScreenLive}
           />
@@ -678,7 +732,7 @@ export function CallPanel() {
             <RemoteTile
               key={slot.broadcastKey}
               slot={slot}
-              moqOrigin={moqOrigin}
+              moqOrigin={moqUrl}
               fullscreen={fullscreen}
             />
           ))}
