@@ -351,6 +351,12 @@ struct SystemMessageRow: View {
 
 // MARK: - Message Row
 
+/// A tapped @mention, used to present that person's profile sheet.
+struct MentionTarget: Identifiable {
+    let id = UUID()
+    let nick: String
+}
+
 struct MessageRow: View {
     @Environment(AppState.self) private var appState
     /// Present only in the AppKit list; nil in the legacy list (no clamp).
@@ -379,6 +385,8 @@ struct MessageRow: View {
     // Safety (report/block) + identity proof presentation
     @State private var reportTarget: ReportTarget?
     @State private var showProof = false
+    /// A tapped @mention, presenting that person's profile.
+    @State private var mentionTarget: MentionTarget?
 
     private var isSelf: Bool {
         message.from.lowercased() == appState.nick.lowercased()
@@ -676,6 +684,33 @@ struct MessageRow: View {
             )
             .environment(appState)
         }
+        // Route @mention taps to the profile; real URLs open normally.
+        .environment(\.openURL, OpenURLAction(handler: handleMessageURL))
+        .sheet(item: $mentionTarget) { target in
+            UserProfileSheet(nick: target.nick)
+                .environment(appState)
+        }
+    }
+
+    /// Intercept `freeq://mention/<token>` links (open the profile); let every
+    /// other URL fall through to the system handler.
+    private func handleMessageURL(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "freeq", url.host == "mention" else { return .systemAction }
+        let token = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+        mentionTarget = MentionTarget(nick: resolveMentionNick(token))
+        return .handled
+    }
+
+    /// Resolve a mention token to a real nick: a channel member matching the
+    /// nick, then one matching the Bluesky handle, else the token as typed.
+    private func resolveMentionNick(_ token: String) -> String {
+        let members = appState.activeChannelState?.members ?? []
+        let lower = token.lowercased()
+        if let m = members.first(where: { $0.nick.lowercased() == lower }) { return m.nick }
+        if let m = members.first(where: {
+            ProfileCache.shared.profile(for: $0.nick)?.handle?.lowercased() == lower
+        }) { return m.nick }
+        return token
     }
 
     @ViewBuilder
@@ -812,8 +847,35 @@ struct MessageRow: View {
             result[run.range].foregroundColor = .accentColor
         }
 
+        // Highlight @mentions and make them tappable (opens the profile). Uses a
+        // freeq://mention/<token> link the row intercepts. Runs last so it can
+        // skip spans that are already real links (e.g. an @ inside a URL).
+        if let regex = Self.mentionRegex {
+            let ns = plain as NSString
+            for m in regex.matches(in: plain, range: NSRange(location: 0, length: ns.length)) {
+                // Skip emails: require the char before '@' to be a boundary.
+                let at = m.range.location
+                if at > 0, let s = UnicodeScalar(UInt32(ns.character(at: at - 1))),
+                   CharacterSet.alphanumerics.contains(s) { continue }
+                guard let r = Range(m.range, in: plain),
+                      let attrRange = Range(r, in: result),
+                      result[attrRange].link == nil else { continue }
+                let token = ns.substring(with: m.range(at: 1))
+                let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? token
+                if let url = URL(string: "freeq://mention/\(encoded)") {
+                    result[attrRange].link = url
+                }
+                result[attrRange].foregroundColor = .accentColor
+                result[attrRange].font = .body.weight(.semibold)
+            }
+        }
+
         return result
     }
+
+    /// `@nick` / `@handle.tld` — a leading letter/digit then nick/handle chars.
+    static let mentionRegex = try? NSRegularExpression(
+        pattern: "@([A-Za-z0-9][A-Za-z0-9._-]*)")
 }
 
 // MARK: - Hover Action Bar (Slack/Discord style)
