@@ -414,6 +414,7 @@ private fun MessageBubble(
     var showMenu by remember { mutableStateOf(false) }
     var showEmojiPicker by remember { mutableStateOf(false) }
     var showReportDialog by remember { mutableStateOf(false) }
+    var showProof by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     val isOwn = msg.from.equals(appState.nick.value, ignoreCase = true)
     // Sender identity: the server-bound DID from the channel member entry
@@ -592,9 +593,11 @@ private fun MessageBubble(
                             && !senderDid.startsWith("did:key:")) {
                             Icon(
                                 Icons.Default.CheckCircle,
-                                contentDescription = "Verified",
+                                contentDescription = "Verified — tap for proof",
                                 tint = FreeqColors.accent,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clickable { showProof = true }
                             )
                         }
                         // Federated: relayed from another server — peer-vouched,
@@ -830,6 +833,16 @@ private fun MessageBubble(
         }
 
         // Report reason picker — on choice: report (log) + block + snackbar
+        // Honest signature verification — the real proof behind the seal.
+        if (showProof && !senderDid.isNullOrEmpty()) {
+            VerifiedProofSheet(
+                did = senderDid,
+                handle = msg.from,
+                msgId = msg.id,
+                onDismiss = { showProof = false }
+            )
+        }
+
         if (showReportDialog) {
             ReportReasonDialog(
                 nick = msg.from,
