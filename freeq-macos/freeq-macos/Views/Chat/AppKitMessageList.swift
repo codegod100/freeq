@@ -400,11 +400,25 @@ private final class HostingCellView: NSTableCellView {
 
     func host(_ view: AnyView) {
         let rooted = AnyView(view.environment(clamp))
+        // On hover: stop clipping the (taller-than-row) action bar and lift this
+        // row's z above its neighbours so the overflow draws on top of them.
+        clamp.onHoverChanged = { [weak self] hovering in
+            guard let self else { return }
+            self.wantsLayer = true
+            self.layer?.masksToBounds = false
+            if let rowView = self.superview {
+                rowView.wantsLayer = true
+                rowView.layer?.masksToBounds = false
+                rowView.layer?.zPosition = hovering ? 1 : 0
+            }
+        }
         if let hosting {
             hosting.rootView = rooted
             return
         }
         let h = NSHostingView(rootView: rooted)
+        h.wantsLayer = true
+        h.layer?.masksToBounds = false
         h.translatesAutoresizingMaskIntoConstraints = false
         h.sizingOptions = [.intrinsicContentSize]
         addSubview(h)

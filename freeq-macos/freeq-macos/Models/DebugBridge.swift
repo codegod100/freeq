@@ -241,6 +241,10 @@ final class DebugBridge {
             ch.appendIfNew(ChatMessage(
                 id: id, from: app.nick, text: text,
                 isAction: false, timestamp: Date(), replyTo: nil))
+        case "hover":
+            // Force a message row into its hovered state so the hover action
+            // bar can be screenshot-verified. `#hover <id>` / `#hover` clears.
+            app.debugForceHoverMsgId = arg.isEmpty ? nil : arg
         case "snapshot":
             // Serialize key app state to JSON in the container so an external
             // smoke-test driver can ASSERT outcomes (not just "didn't crash").

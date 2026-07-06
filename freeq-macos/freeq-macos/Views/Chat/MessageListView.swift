@@ -81,6 +81,11 @@ struct MessageListView: View {
 /// never clips it. The bar rides the visible top of the message, Slack-style.
 @Observable final class RowClamp {
     var overscroll: CGFloat = 0
+    /// Set by the hosting cell; the row calls it on hover so the cell can lift
+    /// itself above its neighbours (and drop clipping) — otherwise the action
+    /// bar, which is taller than a compact/grouped row, is clipped by the cell
+    /// or painted over by the next row.
+    @ObservationIgnored var onHoverChanged: ((Bool) -> Void)?
 }
 
 // MARK: - Timeline model (shared by both list implementations)
@@ -367,7 +372,9 @@ struct MessageRow: View {
     @State private var isRowHovered = false
     @State private var isBarHovered = false
     @State private var hoverToken = 0
-    private var isHovered: Bool { isRowHovered || isBarHovered }
+    private var isHovered: Bool {
+        isRowHovered || isBarHovered || appState.debugForceHoverMsgId == message.id
+    }
 
     // Safety (report/block) + identity proof presentation
     @State private var reportTarget: ReportTarget?
@@ -648,6 +655,12 @@ struct MessageRow: View {
                         .onHover { isBarHovered = $0 }
                 }
             }
+        }
+        // Lift the hovered row above its neighbours (and drop cell clipping) so
+        // the action bar — taller than a grouped/compact row — isn't clipped or
+        // painted over by the next message.
+        .onChange(of: isHovered) { _, hovering in
+            rowClamp?.onHoverChanged?(hovering)
         }
         .contextMenu { messageContextMenu }
         .reportDialog($reportTarget) { t, reason in

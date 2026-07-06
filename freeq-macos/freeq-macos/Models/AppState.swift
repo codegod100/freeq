@@ -186,6 +186,9 @@ class AppState {
     var editingText: String?
     var replyingToMessage: ChatMessage?
     var scrollToMessageId: String?
+    /// Test-only: forces a message row into its hovered state (DebugBridge
+    /// `#hover <id>`) so the hover action bar can be screenshot-verified.
+    var debugForceHoverMsgId: String?
     var showSearch: Bool = false
     var showHelp: Bool = false
     var showNewDM: Bool = false
