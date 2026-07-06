@@ -25,6 +25,8 @@ html,body{height:100dvh;overflow:hidden}
 #status .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--bulma-grey);margin-right:4px}
 #status.connected .dot{background:var(--self);box-shadow:0 0 5px var(--self)}
 #messages a{color:var(--bulma-link-text)}
+.policy-tag{cursor:pointer}
+.policy-tag:hover{background:var(--bulma-link-text)!important;color:#fff!important}
 </style>
 </head>
 <body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:""}'>
@@ -33,9 +35,7 @@ html,body{height:100dvh;overflow:hidden}
     <div class="navbar-brand" style="min-height:2.5rem">
       <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
       <span class="navbar-item has-text-link py-1">#{{channel}}</span>
-      <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic">{{topic}}</span></span>
-      <span class="navbar-item py-1 is-hidden-mobile" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''"><button class="button is-small is-dark ml-2" type="button" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
-      <span class="navbar-item py-1 is-hidden-mobile" data-attr:style="$editing_topic ? '' : 'display:none'"><form class="field has-addons mb-0" data-signals="{topic_draft:''}" data-signals-merge data-on:submit="@post('/chat/{{channel}}/topic')"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" data-bind:topic_draft style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form></span>
+      <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic" data-attr:style="$editing_topic ? 'display:none' : ''">{{topic}}</span><form class="field has-addons mb-0" data-attr:style="$auth_handle == '' || !$editing_topic ? 'display:none' : ''" data-on:submit="@post('/chat/{{channel}}/topic')"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" data-bind:topic_draft style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form><button class="button is-small is-dark ml-2" type="button" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
     </div>
     <div class="navbar-end">
       <div class="navbar-item py-1">
@@ -55,12 +55,12 @@ html,body{height:100dvh;overflow:hidden}
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0" style="font-size:.65rem;letter-spacing:.05em;cursor:pointer" onclick="this.classList.toggle('collapsed');var u=this.nextElementSibling;if(u)u.style.display=u.style.display==='none'?'':'none'">&#x25BE; MY CHANNELS</p>
         <ul class="menu-list">
         {% for ch in channels -%}{% if ch.name in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1">{{ch.members}}</span></a></li>
+        <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1 policy-tag" title="Channel policy" onclick="event.preventDefault();event.stopPropagation();showPolicy('{{ch.name|replace(from="#",to="")}}');">{{ch.members}}</span></a></li>
         {% endif %}{%- endfor %}</ul>
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 collapsed" style="font-size:.65rem;letter-spacing:.05em;cursor:pointer" onclick="this.classList.toggle('collapsed');var u=this.nextElementSibling;if(u)u.style.display=u.style.display==='none'?'':'none'">&#x25B6; ALL CHANNELS</p>
         <ul class="menu-list" style="display:none">
         {% for ch in channels -%}{% if ch.name not in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1">{{ch.members}}</span></a></li>
+        <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1 policy-tag" title="Channel policy" onclick="event.preventDefault();event.stopPropagation();showPolicy('{{ch.name|replace(from="#",to="")}}');">{{ch.members}}</span></a></li>
         {% endif %}{%- endfor %}</ul>
       </div>
     </div>
@@ -83,7 +83,78 @@ html,body{height:100dvh;overflow:hidden}
     <a id="oauth-link" class="button is-link is-fullwidth" href="#">Open authorization page</a>
   </div></div>
 </div>
+<div class="modal" id="policy-modal">
+  <div class="modal-background" style="background:rgba(0,0,0,.7)" onclick="document.getElementById('policy-modal').classList.remove('is-active')"></div>
+  <div class="modal-content" style="max-width:600px"><div class="box">
+    <p class="has-text-weight-bold mb-2">Channel Policy: <span id="policy-channel-name"></span></p>
+    <div id="policy-body" class="is-size-7"><p class="has-text-grey">Loading…</p></div>
+  </div></div>
+</div>
 <script>
+function showPolicy(channel){
+  var modal=document.getElementById('policy-modal');
+  var body=document.getElementById('policy-body');
+  var name=document.getElementById('policy-channel-name');
+  modal.classList.add('is-active');
+  name.textContent='#'+channel;
+  body.innerHTML='<p class="has-text-grey">Loading…</p>';
+  fetch('/api/policy/'+encodeURIComponent(channel))
+    .then(function(r){return r.text().then(function(t){return {ok:r.ok,status:r.status,text:t}})})
+    .then(function(resp){
+      if(!resp.ok && resp.status===404){body.innerHTML='<p class="has-text-grey">No policy is set for this channel.</p>';return;}
+      if(!resp.ok){body.innerHTML='<p class="has-text-danger">Failed to load policy: '+resp.status+'</p>';return;}
+      try{var doc=JSON.parse(resp.text);body.innerHTML=renderPolicy(doc);}
+      catch(e){body.innerHTML='<p class="has-text-danger">Invalid response</p>';}
+    })
+    .catch(function(e){body.innerHTML='<p class="has-text-danger">Error: '+e.message+'</p>';});
+}
+function renderPolicy(data){
+  var p=data.policy||{};
+  var auth=data.authority_set;
+  var html='<div class="policy-visual">';
+  html+='<div class="level is-mobile mb-2" style="border-bottom:1px solid var(--bulma-border);padding-bottom:.5rem">';
+  html+='<div class="level-left"><div class="level-item"><span class="tag is-info is-light">Version '+(p.version||'?')+'</span></div></div>';
+  html+='<div class="level-right"><div class="level-item"><span class="has-text-grey">'+(p.effective_at?new Date(p.effective_at).toLocaleString():'')+'</span></div></div>';
+  html+='</div>';
+  html+='<h4 class="has-text-weight-semibold mb-1">To join this channel</h4>';
+  html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">'+renderRequirement(p.requirements)+'</div>';
+  if(auth&&auth.signers&&auth.signers.length){
+    html+='<h4 class="has-text-weight-semibold mb-1">Authorities <span class="tag is-small is-dark">threshold '+(auth.policy_threshold||1)+'</span></h4>';
+    html+='<ul class="mb-3">';
+    for(var i=0;i<auth.signers.length;i++){
+      var s=auth.signers[i];
+      html+='<li class="is-size-7 has-text-grey"><code style="background:transparent;padding:0">'+esc(s.did)+'</code>'+(s.label?' — '+esc(s.label):'')+'</li>';
+    }
+    html+='</ul>';
+  }
+  if(p.role_requirements&&Object.keys(p.role_requirements).length){
+    html+='<h4 class="has-text-weight-semibold mb-1">Role requirements</h4>';
+    html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">';
+    for(var role in p.role_requirements){
+      html+='<div class="mb-2"><span class="tag is-small is-link">'+esc(role)+'</span></div>';
+      html+=renderRequirement(p.role_requirements[role]);
+    }
+    html+='</div>';
+  }
+  html+='</div>';
+  html+='<details class="policy-raw"><summary class="has-text-grey" style="cursor:pointer;user-select:none">Raw JSON</summary>';
+  html+='<pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto;margin-top:.5rem">'+esc(JSON.stringify(data,null,2))+'</pre>';
+  html+='</details>';
+  return html;
+}
+function renderRequirement(req,depth){
+  if(!req)return '<p class="has-text-grey">No requirements</p>';
+  depth=depth||0;
+  var t=req.type;
+  if(t==='ACCEPT')return '<div class="mb-1"><span class="has-text-success">&#10003;</span> Accept the channel rules <code class="is-size-8">'+esc((req.hash||'').slice(0,12))+'</code></div>';
+  if(t==='PRESENT')return '<div class="mb-1"><span class="has-text-info">&#9679;</span> Present credential <span class="tag is-small is-light">'+esc(req.credential_type)+'</span>'+(req.issuer?' from <code>'+esc(req.issuer)+'</code>':'')+'</div>';
+  if(t==='PROVE')return '<div class="mb-1"><span class="has-text-warning">&#9679;</span> Prove capability <span class="tag is-small is-light">'+esc(req.proof_type)+'</span></div>';
+  if(t==='ALL'){var h='<div class="mb-1"><span class="tag is-small is-black">ALL of</span></div><ul class="ml-4" style="list-style:disc">';for(var i=0;i<req.requirements.length;i++)h+='<li>'+renderRequirement(req.requirements[i],depth+1)+'</li>';h+='</ul>';return h;}
+  if(t==='ANY'){var h='<div class="mb-1"><span class="tag is-small is-grey">ANY of</span></div><ul class="ml-4" style="list-style:disc">';for(var i=0;i<req.requirements.length;i++)h+='<li>'+renderRequirement(req.requirements[i],depth+1)+'</li>';h+='</ul>';return h;}
+  if(t==='NOT')return '<div class="mb-1"><span class="tag is-small is-danger">NOT</span> '+renderRequirement(req.requirement,depth+1)+'</div>';
+  return '<div class="mb-1"><code>'+esc(JSON.stringify(req))+'</code></div>';
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 (function(){var m=document.getElementById('messages');if(m){requestAnimationFrame(function(){requestAnimationFrame(function(){m.scrollTop=m.scrollHeight})});new MutationObserver(function(){m.scrollTop=m.scrollHeight}).observe(m,{childList:!0})}})();
 (function(){var inp=document.querySelector('#send-form input[name=msg]'),form=document.getElementById('send-form');if(!inp||!form)return;inp.addEventListener('paste',function(e){var items=e.clipboardData&&e.clipboardData.items;if(!items)return;for(var i=0;i<items.length;i++){if(items[i].type.indexOf('image/')!==0)continue;var file=items[i].getAsFile();if(!file)continue;e.preventDefault();form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:true}));var fd=new FormData;fd.append('file',file,'paste.'+(items[i].type.split('/')[1]||'png'));fd.append('channel','#{{channel}}');fetch('/upload',{method:'POST',body:fd}).then(function(r){var ct=r.headers.get('content-type')||'';var p=ct.includes('json')?r.json():r.text().then(function(t){throw new Error(t||'Upload failed')});return p.then(function(j){if(!r.ok)throw new Error(j.message||j.error||'Upload failed');return j.url})}).then(function(url){var start=inp.selectionStart||0,end=inp.selectionEnd||0,t=inp.value;inp.value=t.slice(0,start)+url+' '+t.slice(end);var pos=start+url.length+1;inp.setSelectionRange(pos,pos)}).catch(function(err){alert('Upload failed: '+err.message)}).finally(function(){form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:false}));inp.focus()});return}})})();
 (function(){

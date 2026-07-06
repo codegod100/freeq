@@ -69,12 +69,7 @@ async fn main() -> Result<()> {
         .route("/login", get(get_login).post(post_login))
         .route("/logout", post(post_logout))
         .route("/auth/status", get(get_auth_status))
-        .route(
-            "/chat",
-            get(|| async {
-                (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response()
-            }),
-        )
+        .route("/chat", get(get_channels_page))
         .route("/chat/{channel}", get(get_chat))
         .route("/chat/{channel}/events", get(get_channel_events))
         .route("/chat/{channel}/send", post(post_channel_send))
@@ -84,6 +79,7 @@ async fn main() -> Result<()> {
         .route("/upload", post(post_upload))
         .route("/datastar.js", get(get_datastar_js))
         .route("/api/channels", get(get_channels))
+        .route("/api/policy/{channel}", get(get_policy))
         .route(
             "/.well-known/oauth-client-metadata",
             get(get_oauth_client_metadata),
@@ -153,8 +149,7 @@ fn canonical_channel(s: &str) -> String {
 // ── GET / ───────────────────────────────────────────────────────────────
 
 async fn get_root() -> Response {
-    // Default to #general on the public deployment.
-    (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response()
+    (StatusCode::FOUND, [("Location", "/chat")], "").into_response()
 }
 // ── GET /login, POST /login ──────────────────────────────────────────────
 
@@ -183,7 +178,7 @@ async fn get_login(State(state): State<AppState>) -> Response {
 
 /// Return an HTML page that navigates to the given `auth_url` in the
 /// same tab, then polls `/auth/status` until authentication completes
-/// and redirects to `/chat/general`.
+/// and redirects to `/chat`.
 fn oauth_polling_page(auth_url: &str) -> String {
     let url = auth_url.replace('\'', "%27");
     format!(
@@ -216,14 +211,12 @@ a{{color:var(--c1)}}
   window.location.replace(url);
   const el = document.getElementById('status');
   let done = false;
-  async function check() {{
-    if (done) return;
     try {{
       const r = await fetch('/auth/status');
       const j = await r.json();
       if (j.authenticated) {{
         done = true;
-        window.location.replace('/chat/general');
+        window.location.replace('/chat');
         return;
       }}
     }} catch (e) {{}}
@@ -559,7 +552,7 @@ async fn get_auth_callback(
     session.request_reconnect();
 
     // Redirect to chat
-    let mut resp = (StatusCode::FOUND, [("Location", "/chat/general")], "").into_response();
+    let mut resp = (StatusCode::FOUND, [("Location", "/chat")], "").into_response();
     resp.headers_mut()
         .insert(header::SET_COOKIE, session_cookie_header(&sid));
     resp
@@ -582,6 +575,64 @@ async fn get_datastar_js() -> Response {
 
 // ── GET /chat and /chat/{channel} ──────────────────────────────────────
 
+/// Render the channel landing page. This replaces the old hardcoded
+/// redirect to #general; the user now picks a channel instead of being
+/// dumped into one.
+async fn get_channels_page(State(state): State<AppState>, req: axum::http::HeaderMap) -> Response {
+    let (sid, is_new) = session_id_from_request(&req);
+    let _ = state.session(&sid);
+
+    let channels = fetch_channels(&state).await.unwrap_or_default();
+    debug!(count = channels.len(), "fetched channel list for landing");
+
+    let session = state.session(&sid);
+    let auth = session.auth.lock().clone();
+    let (login_handle, auth_did, is_authenticated) = match &auth {
+        AuthState::Authenticated { handle, did, .. } => (handle.clone(), did.clone(), true),
+        AuthState::Guest => (String::new(), String::new(), false),
+    };
+    let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
+
+    let mut ctx = tera::Context::new();
+    ctx.insert("channels", &channels);
+    ctx.insert("login_handle", &login_handle);
+    ctx.insert("auth_did", &auth_did);
+    let login_handle_json = serde_json::to_string(&login_handle)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
+    let auth_did_json = serde_json::to_string(&auth_did)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
+    ctx.insert("login_handle_json", &login_handle_json);
+    ctx.insert("auth_did_json", &auth_did_json);
+    ctx.insert("is_authenticated", &is_authenticated);
+    ctx.insert("joined_channels", &joined);
+
+    let body = match state.tera.render("channels.html.tera", &ctx) {
+        Ok(html) => html,
+        Err(e) => {
+            error!("tera render error: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("template error: {e}"),
+            )
+                .into_response();
+        }
+    };
+
+    let mut resp = (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response();
+    if is_new {
+        resp.headers_mut()
+            .insert(header::SET_COOKIE, session_cookie_header(&sid));
+    }
+    resp
+}
+
 /// Render the chat shell for a given channel. The page lists known
 /// channels (fetched from the upstream) in a sidebar; clicking a
 /// channel navigates to its URL. The current channel name is baked
@@ -592,7 +643,7 @@ async fn get_chat(
     req: axum::http::HeaderMap,
 ) -> Response {
     // The path always has a {channel} segment now (the bare /chat
-    // route is handled by the redirect lambda above).
+    // route is handled by get_channels_page above).
     let channel = canonical_channel(&channel);
     let (sid, is_new) = session_id_from_request(&req);
     // Eagerly create the session so the SSE handler can find it
@@ -839,6 +890,16 @@ async fn get_channel_events(
                         let scroll = ExecuteScript::new("document.getElementById('messages').scrollTop = 999999");
                         yield Ok::<Event, std::convert::Infallible>(scroll.write_as_axum_sse_event());
                     }
+                    // --- WHOIS replies (311 / 312 / 319 / 330 / 318 / 401) ---
+                    if let Some(whois_text) = parse_whois_line(&line) {
+                        let ts = Utc::now().format("%H:%M:%S").to_string();
+                        let safe = html_escape(&whois_text);
+                        let html = format!(r#"<div class="notice"><span class="ts">{ts}</span><span class="body">{safe}</span></div>"#);
+                        let patch = PatchElements::new(html).selector("#messages").mode(ElementPatchMode::Append);
+                        yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
+                        let scroll = ExecuteScript::new("document.getElementById('messages').scrollTop = 999999");
+                        yield Ok::<Event, std::convert::Infallible>(scroll.write_as_axum_sse_event());
+                    }
                     // --- live member tracking (JOIN/PART/QUIT/MODE) ---
                     if let Some(change) = parse_member_change(&line) {
                         let member_html: Option<String> = {
@@ -986,6 +1047,36 @@ struct TopicSignals {
     topic_draft: String,
 }
 
+/// Parse a `/nick <newnick>` command from the input box.
+/// Returns the new nick if the message starts with a case-insensitive `/nick `
+/// prefix followed by a non-empty token; returns `None` otherwise.
+fn parse_nick_command(msg: &str) -> Option<&str> {
+    if msg.len() > 6
+        && msg
+            .get(..6)
+            .is_some_and(|p| p.eq_ignore_ascii_case("/nick "))
+    {
+        msg[6..].split_whitespace().next().map(str::trim)
+    } else {
+        None
+    }
+}
+
+/// Parse a `/whois <nick>` command from the input box.
+/// Returns the target nick if the message starts with a case-insensitive `/whois `
+/// prefix followed by a non-empty token; returns `None` otherwise.
+fn parse_whois_command(msg: &str) -> Option<&str> {
+    if msg.len() > 7
+        && msg
+            .get(..7)
+            .is_some_and(|p| p.eq_ignore_ascii_case("/whois "))
+    {
+        msg[7..].split_whitespace().next().map(str::trim)
+    } else {
+        None
+    }
+}
+
 async fn post_channel_send(
     State(state): State<AppState>,
     Path(channel): Path<String>,
@@ -1014,6 +1105,36 @@ async fn post_channel_send(
         return (StatusCode::SERVICE_UNAVAILABLE, "not connected yet").into_response();
     }
 
+    // Handle /nick command before channel-scoped checks.
+    if let Some(new_nick) = parse_nick_command(msg) {
+        let irc_tx = session.irc_tx.lock().clone();
+        if let Err(e) = irc_tx.send(format!("NICK {new_nick}\r\n")).await {
+            warn!(session = %sid, "NICK command failed: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
+        }
+        debug!(session = %sid, nick = %new_nick, "NICK queued to upstream");
+        let clear = PatchSignals::new(r#"{"msg":""}"#);
+        let clear_event = clear.write_as_axum_sse_event();
+        return Sse::new(async_stream::stream! {
+            yield Ok::<Event, std::convert::Infallible>(clear_event);
+        })
+        .into_response();
+    }
+    // Handle /whois command before channel-scoped checks.
+    if let Some(whois_nick) = parse_whois_command(msg) {
+        let irc_tx = session.irc_tx.lock().clone();
+        if let Err(e) = irc_tx.send(format!("WHOIS {whois_nick}\r\n")).await {
+            warn!(session = %sid, "WHOIS command failed: {e}");
+            return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
+        }
+        debug!(session = %sid, nick = %whois_nick, "WHOIS queued to upstream");
+        let clear = PatchSignals::new(r#"{"msg":""}"#);
+        let clear_event = clear.write_as_axum_sse_event();
+        return Sse::new(async_stream::stream! {
+            yield Ok::<Event, std::convert::Infallible>(clear_event);
+        })
+        .into_response();
+    }
     if !is_joined {
         debug!(session = %sid, channel = %target, "send rejected: not joined");
         return (StatusCode::SERVICE_UNAVAILABLE, "not joined").into_response();
@@ -1098,7 +1219,7 @@ async fn post_channel_part(
     session.joined.lock().remove(&target);
     let irc_tx = session.irc_tx.lock().clone();
     let _ = irc_tx.send(format!("PART {target}\r\n")).await;
-    let evt = ExecuteScript::new("window.location='/chat/general'");
+    let evt = ExecuteScript::new("window.location='/chat'");
     let event = evt.write_as_axum_sse_event();
     Sse::new(async_stream::stream! {
         yield Ok::<Event, std::convert::Infallible>(event);
@@ -1143,6 +1264,24 @@ async fn get_channels(State(state): State<AppState>) -> Response {
         .base
         .join("api/v1/channels")
         .expect("upstream URL is valid");
+    match state.http.get(url).send().await {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+    }
+}
+async fn get_policy(State(state): State<AppState>, Path(channel): Path<String>) -> Response {
+    let url = {
+        let mut u = state.upstream.base.clone();
+        {
+            let mut seg = u.path_segments_mut().expect("upstream URL is valid");
+            seg.extend(["api", "v1", "policy", &channel]);
+        }
+        u
+    };
     match state.http.get(url).send().await {
         Ok(r) => {
             let status = r.status();
@@ -1383,6 +1522,44 @@ fn parse_channel_error(line: &str, current_channel: &str) -> Option<&'static str
     match numeric {
         "442" => Some("You are not on that channel."),
         "482" => Some("You must be a channel operator to change the topic."),
+        _ => None,
+    }
+}
+
+/// Parse a WHOIS reply numeric (311/312/319/330/318/401) into a
+/// human-readable string. Returns `None` for non-WHOIS lines.
+fn parse_whois_line(line: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let mut tokens = rest.split_whitespace();
+    let _server = tokens.next()?;
+    let numeric = tokens.next()?;
+    let _me = tokens.next()?;
+    let nick = tokens.next()?;
+    let trailing = line.splitn(2, " :").nth(1).unwrap_or("");
+    match numeric {
+        "311" => {
+            // RPL_WHOISUSER: <nick> <user> <host> * :<realname>
+            let user = tokens.next()?;
+            let host = tokens.next()?;
+            Some(format!("{nick} is {user}@{host} ({trailing})"))
+        }
+        "312" => {
+            // RPL_WHOISSERVER: <nick> <server> :<server info>
+            let server = tokens.next()?;
+            Some(format!("{nick} using {server} ({trailing})"))
+        }
+        "319" => {
+            // RPL_WHOISCHANNELS: <nick> :<channels>
+            Some(format!("{nick} on {trailing}"))
+        }
+        "330" => {
+            // RPL_WHOISACCOUNT: <nick> <account> :is logged in as
+            let account = tokens.next()?;
+            Some(format!("{nick} is logged in as {account}"))
+        }
+        "318" => Some(format!("End of WHOIS for {nick}")),
+        "401" => Some(format!("{nick}: No such nick/channel")),
         _ => None,
     }
 }
@@ -1925,5 +2102,55 @@ mod tests {
             parse_topic_change(":op!u@h TOPIC #test :visit #test at https://x/y", "#test"),
             Some("visit #test at https://x/y".to_string())
         );
+    }
+    #[test]
+    fn parse_nick_command_variants() {
+        assert_eq!(parse_nick_command("/nick alice"), Some("alice"));
+        assert_eq!(parse_nick_command("/NICK Bob"), Some("Bob"));
+        assert_eq!(parse_nick_command("/nick   carol  "), Some("carol"));
+        assert_eq!(parse_nick_command("/nick dave extra"), Some("dave"));
+        assert_eq!(parse_nick_command("/nick"), None);
+        assert_eq!(parse_nick_command("/nick "), None);
+        assert_eq!(parse_nick_command("/nicksomeone"), None);
+        assert_eq!(parse_nick_command("hello"), None);
+    }
+    #[test]
+    fn parse_whois_command_variants() {
+        assert_eq!(parse_whois_command("/whois alice"), Some("alice"));
+        assert_eq!(parse_whois_command("/WHOIS Bob"), Some("Bob"));
+        assert_eq!(parse_whois_command("/whois   carol  "), Some("carol"));
+        assert_eq!(parse_whois_command("/whois dave extra"), Some("dave"));
+        assert_eq!(parse_whois_command("/whois"), None);
+        assert_eq!(parse_whois_command("/whois "), None);
+        assert_eq!(parse_whois_command("/whoissomeone"), None);
+    }
+
+    #[test]
+    fn parse_whois_line_variants() {
+        assert_eq!(
+            parse_whois_line(":srv 311 me alice ~user freeq/plc/abc * :Alice User"),
+            Some("alice is ~user@freeq/plc/abc (Alice User)".to_string())
+        );
+        assert_eq!(
+            parse_whois_line(":srv 312 me alice irc.freeq.at :freeq server"),
+            Some("alice using irc.freeq.at (freeq server)".to_string())
+        );
+        assert_eq!(
+            parse_whois_line(":srv 319 me alice :#general #rust"),
+            Some("alice on #general #rust".to_string())
+        );
+        assert_eq!(
+            parse_whois_line(":srv 330 me alice did:plc:xyz :is logged in as"),
+            Some("alice is logged in as did:plc:xyz".to_string())
+        );
+        assert_eq!(
+            parse_whois_line(":srv 318 me alice :End of /WHOIS list"),
+            Some("End of WHOIS for alice".to_string())
+        );
+        assert_eq!(
+            parse_whois_line(":srv 401 me alice :No such nick"),
+            Some("alice: No such nick/channel".to_string())
+        );
+        assert_eq!(parse_whois_line(":srv 001 me :welcome"), None);
     }
 }

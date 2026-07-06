@@ -53,6 +53,123 @@ pub struct AuthCredentials {
     pub dpop_nonce: Option<String>,
 }
 
+/// Registration phases for the upstream IRC connection.
+#[derive(Debug)]
+enum RegPhase {
+    WaitCapAck,
+    SaslChallenge,
+    SaslResult(&'static str),
+    Ready,
+}
+
+/// Parse a server NOTICE containing a rotated DPoP nonce.
+/// `:server NOTICE target :DPOP_NONCE <nonce>`
+fn parse_dpop_nonce_notice(line: &str) -> Option<&str> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let (_prefix, rest) = rest.split_once(' ')?;
+    let rest = rest.strip_prefix("NOTICE ")?;
+    let (_target, rest) = rest.split_once(' ')?;
+    let rest = rest.strip_prefix(':')?;
+    rest.strip_prefix("DPOP_NONCE ")
+}
+
+/// Apply a rotated DPoP nonce to both the in-flight credentials and the
+/// persisted OAuth session so reconnects after a webui restart don't reuse
+/// a stale nonce.
+fn apply_dpop_nonce(
+    auth_creds: &mut Option<AuthCredentials>,
+    session: &Arc<crate::state::SessionHandle>,
+    nonce: &str,
+) {
+    if let Some(creds) = auth_creds {
+        creds.dpop_nonce = Some(nonce.to_string());
+    }
+    if let crate::state::AuthState::Authenticated { oauth, .. } = &mut *session.auth.lock() {
+        oauth.dpop_nonce = Some(nonce.to_string());
+    }
+}
+
+/// Build and send the AUTHENTICATE response for a server-issued SASL challenge.
+async fn respond_to_sasl_challenge<W>(
+    challenge_b64: &str,
+    auth_creds: &mut Option<AuthCredentials>,
+    write: &mut W,
+    session: &Arc<crate::state::SessionHandle>,
+    channel: &str,
+    phase: &mut RegPhase,
+    sasl_deadline: &mut Option<tokio::time::Instant>,
+) -> Result<()>
+where
+    W: futures_util::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send,
+{
+    const SASL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let creds = auth_creds
+        .as_mut()
+        .expect("respond_to_sasl_challenge without creds");
+
+    let challenge: Challenge = match parse_challenge(challenge_b64) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("failed to parse SASL challenge, falling back to guest: {e}");
+            auth_creds.take();
+            let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
+            let _ = write
+                .send(WsMessage::Text(format!("JOIN {channel}\r\n").into()))
+                .await;
+            session.set_ws_state(crate::state::WsState::Ready);
+            *session.reg_phase.lock() = String::new();
+            *phase = RegPhase::Ready;
+            return Ok(());
+        }
+    };
+
+    let get_session_url = format!(
+        "{}/xrpc/com.atproto.server.getSession",
+        creds.pds_url.trim_end_matches('/')
+    );
+    let dpop_proof = match creds.dpop_key.proof(
+        "GET",
+        &get_session_url,
+        creds.dpop_nonce.as_deref(),
+        Some(&creds.access_token),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!("failed to build DPoP proof, falling back to guest: {e}");
+            auth_creds.take();
+            let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
+            let _ = write
+                .send(WsMessage::Text(format!("JOIN {channel}\r\n").into()))
+                .await;
+            session.set_ws_state(crate::state::WsState::Ready);
+            *session.reg_phase.lock() = String::new();
+            *phase = RegPhase::Ready;
+            return Ok(());
+        }
+    };
+
+    let payload = serde_json::json!({
+        "did": creds.did,
+        "signature": creds.access_token,
+        "method": "pds-oauth",
+        "pds_url": creds.pds_url,
+        "dpop_proof": dpop_proof,
+        "challenge_nonce": challenge.nonce,
+    });
+    let encoded =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+    let _ = write
+        .send(WsMessage::Text(
+            format!("AUTHENTICATE {encoded}\r\n").into(),
+        ))
+        .await;
+    *phase = RegPhase::SaslResult("waiting");
+    *session.reg_phase.lock() = "SaslResult(waiting)".to_string();
+    *sasl_deadline = Some(tokio::time::Instant::now() + SASL_TIMEOUT);
+    Ok(())
+}
+
 pub async fn fetch_history(
     state: &AppState,
     channel: &str,
@@ -221,13 +338,13 @@ pub async fn run_upstream_ws(
         .map(|a| super::sanitize_nick(&a.nick))
         .unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
     debug!(session = %session_id, %nick, authenticated = auth.is_some(), "upstream IRC registration");
+    // Start CAP negotiation before NICK/USER so the server delays
+    // registration until CAP END, giving us time to complete SASL.
+    ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
     ws.send(WsMessage::Text(format!("NICK {nick}\r\n").into()))
         .await?;
     ws.send(WsMessage::Text("USER webui 0 * :freeq-webui\r\n".into()))
         .await?;
-
-    // IRCv3 capability negotiation: request SASL and account-notify.
-    ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
     ws.send(WsMessage::Text("CAP REQ :sasl account-notify\r\n".into()))
         .await?;
 
@@ -238,13 +355,6 @@ pub async fn run_upstream_ws(
 
     // Registration state machine. We hold CAP END until SASL completes (or is
     // skipped) so the server doesn't finalize registration mid-handshake.
-    #[derive(Debug)]
-    enum RegPhase {
-        WaitCapAck,
-        SaslChallenge,
-        SaslResult(&'static str),
-        Ready,
-    }
     let mut phase = RegPhase::WaitCapAck;
     *session.reg_phase.lock() = "WaitCapAck".to_string();
     let mut auth_creds = auth;
@@ -314,15 +424,21 @@ pub async fn run_upstream_ws(
                         match phase {
                             RegPhase::WaitCapAck => {
                                 if let Some(caps) = parse_cap_ack(trimmed) {
-                            if caps.iter().any(|c| c.eq_ignore_ascii_case("sasl")) {
+                                    debug!(session = %session_id, ?caps, "CAP ACK parsed");
+                                    if caps.iter().any(|c| c.eq_ignore_ascii_case("sasl")) {
                                         if auth_creds.is_some() {
+                                            debug!(session = %session_id, "starting SASL ATPROTO-CHALLENGE");
                                             let _ = write.send(WsMessage::Text(
                                                 "AUTHENTICATE ATPROTO-CHALLENGE\r\n".into(),
                                             )).await;
                                             phase = RegPhase::SaslChallenge;
                                             *session.reg_phase.lock() = "SaslChallenge".to_string();
                                             continue;
+                                        } else {
+                                            debug!(session = %session_id, "sasl ACKed but no auth credentials");
                                         }
+                                    } else {
+                                        debug!(session = %session_id, "CAP ACK without sasl");
                                     }
                                     // No SASL (guest mode or server didn't ACK sasl) — finish reg.
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
@@ -334,6 +450,10 @@ pub async fn run_upstream_ws(
                                         break 'bridge;
                                     }
                                     continue;
+                                } else {
+                                    if !(trimmed.contains(" 001 ") || trimmed.contains(" 002 ") || trimmed.contains(" 003 ") || trimmed.contains(" 004 ")) {
+                                        debug!(session = %session_id, line = %trimmed, "CAP ACK not recognized");
+                                    }
                                 }
                                 // No CAP ACK yet — but if the server sent a 001 (RPL_WELCOME)
                                 // or any 00x numeric, it doesn't support CAP. Proceed as guest.
@@ -351,70 +471,24 @@ pub async fn run_upstream_ws(
                                 }
                             }
                             RegPhase::SaslChallenge => {
+                                if let Some(nonce) = parse_dpop_nonce_notice(trimmed) {
+                                    debug!(session = %session_id, nonce, "DPoP nonce rotated during SASL challenge");
+                                    apply_dpop_nonce(&mut auth_creds, &session, nonce);
+                                    continue;
+                                }
                                 if let Some(challenge_b64) = parse_authenticate_challenge(trimmed) {
-                                    let creds = auth_creds
-                                        .as_mut()
-                                        .expect("SaslChallenge without creds");
-
-                                    let challenge: Challenge = match parse_challenge(challenge_b64) {
-                                        Ok(c) => c,
-                                        Err(e) => {
-                                            warn!("failed to parse SASL challenge, falling back to guest: {e}");
-                                            auth_creds = None;
-                                            let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
-                                            let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    session.set_ws_state(WsState::Ready);
-                                    *session.reg_phase.lock() = String::new();
-                                            phase = RegPhase::Ready;
-                                            if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
-                                                break 'bridge;
-                                            }
-                                            continue;
-                                        }
-                                    };
-
-                                    let get_session_url = format!(
-                                        "{}/xrpc/com.atproto.server.getSession",
-                                        creds.pds_url.trim_end_matches('/')
-                                    );
-                                    let dpop_proof = match creds.dpop_key.proof(
-                                        "GET",
-                                        &get_session_url,
-                                        creds.dpop_nonce.as_deref(),
-                                        Some(&creds.access_token),
-                                    ) {
-                                        Ok(p) => p,
-                                        Err(e) => {
-                                            warn!("failed to build DPoP proof, falling back to guest: {e}");
-                                            auth_creds = None;
-                                            let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
-                                            let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    session.set_ws_state(WsState::Ready);
-                                    *session.reg_phase.lock() = String::new();
-                                            phase = RegPhase::Ready;
-                                            if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
-                                                break 'bridge;
-                                            }
-                                            continue;
-                                        }
-                                    };
-
-                                    let payload = serde_json::json!({
-                                        "did": creds.did,
-                                        "signature": creds.access_token,
-                                        "method": "pds-oauth",
-                                        "pds_url": creds.pds_url,
-                                        "dpop_proof": dpop_proof,
-                                        "challenge_nonce": challenge.nonce,
-                                    });
-                                    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                                        .encode(payload.to_string().as_bytes());
-                                    let _ = write.send(WsMessage::Text(
-                                        format!("AUTHENTICATE {encoded}\r\n").into(),
-                                    )).await;
-                                    phase = RegPhase::SaslResult("waiting");
-                                    *session.reg_phase.lock() = "SaslResult(waiting)".to_string();
-                                    sasl_deadline = Some(tokio::time::Instant::now() + SASL_TIMEOUT);
+                                    if let Err(e) = respond_to_sasl_challenge(
+                                        challenge_b64,
+                                        &mut auth_creds,
+                                        &mut write,
+                                        &session,
+                                        &channel,
+                                        &mut phase,
+                                        &mut sasl_deadline,
+                                    ).await {
+                                        warn!("SASL challenge response failed: {e}");
+                                        break 'bridge;
+                                    }
                                     continue;
                                 }
                             }
@@ -436,7 +510,7 @@ pub async fn run_upstream_ws(
                                     sasl_deadline = None;
                                     // Try refreshing the OAuth token before giving up.
                                     let mut refreshed = false;
-                                    if let Some(ref creds) = auth_creds {
+                                    if let Some(creds) = &auth_creds {
                                         if creds.refresh_token.is_some() {
                                             let mut temp = freeq_sdk::oauth::OAuthSession {
                                                 did: creds.did.clone(),
@@ -453,7 +527,7 @@ pub async fn run_upstream_ws(
                                                 Ok(()) => {
                                                     info!(session = %session_id, "token refreshed; updating session and reconnecting");
                                                     let mut guard = session.auth.lock();
-                                                    if let AuthState::Authenticated { ref mut oauth, .. } = *guard {
+                                                    if let AuthState::Authenticated { oauth, .. } = &mut *guard {
                                                         oauth.access_token = temp.access_token.clone();
                                                         oauth.refresh_token = temp.refresh_token.clone();
                                                         oauth.dpop_nonce = temp.dpop_nonce.clone();
@@ -472,7 +546,7 @@ pub async fn run_upstream_ws(
                                         break 'bridge;
                                     }
                                     warn!("SASL authentication failed; proceeding as guest");
-                                    auth_creds = None;
+                                    auth_creds.take();
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
                                     debug!(session = %session_id, "ws_state → Ready");
@@ -484,7 +558,27 @@ pub async fn run_upstream_ws(
                                     }
                                     continue;
                                 }
-                                // Server may send AUTHENTICATE + during SASL; ignore and wait for 903/904.
+                                if let Some(nonce) = parse_dpop_nonce_notice(trimmed) {
+                                    debug!(session = %session_id, nonce, "DPoP nonce rotated during SASL result");
+                                    apply_dpop_nonce(&mut auth_creds, &session, nonce);
+                                    continue;
+                                }
+                                if let Some(challenge_b64) = parse_authenticate_challenge(trimmed) {
+                                    debug!(session = %session_id, "server re-issued SASL challenge (DPoP retry)");
+                                    if let Err(e) = respond_to_sasl_challenge(
+                                        challenge_b64,
+                                        &mut auth_creds,
+                                        &mut write,
+                                        &session,
+                                        &channel,
+                                        &mut phase,
+                                        &mut sasl_deadline,
+                                    ).await {
+                                        warn!("SASL challenge response failed: {e}");
+                                        break 'bridge;
+                                    }
+                                    continue;
+                                }
                             }
                             RegPhase::Ready => {}
                         }
@@ -559,20 +653,19 @@ fn parse_cap_ack(line: &str) -> Option<Vec<&str>> {
     let mut parts = line.split_whitespace();
     let _prefix = parts.next()?;
     let cap = parts.next()?;
-    let star_or_nick = parts.next()?;
+    let _target = parts.next()?;
     let ack = parts.next()?;
     if !cap.eq_ignore_ascii_case("CAP") {
-        return None;
-    }
-    if star_or_nick != "*" && !star_or_nick.starts_with(':') {
         return None;
     }
     if !ack.eq_ignore_ascii_case("ACK") {
         return None;
     }
-    let last = parts.next()?;
-    let caps = last.strip_prefix(':').unwrap_or(last);
-    Some(caps.split_whitespace().collect())
+    let first = parts.next()?;
+    let first = first.strip_prefix(':').unwrap_or(first);
+    let mut caps = vec![first];
+    caps.extend(parts);
+    Some(caps)
 }
 
 /// Parse the server's `AUTHENTICATE <challenge>` prompt.
@@ -736,5 +829,37 @@ mod tests {
 
         client.abort();
         server.abort();
+    }
+    #[test]
+    fn parse_cap_ack_accepts_star_and_nick_targets() {
+        assert_eq!(
+            parse_cap_ack(":server CAP * ACK :sasl account-notify"),
+            Some(vec!["sasl", "account-notify"])
+        );
+        assert_eq!(
+            parse_cap_ack(":server CAP nandi.uk ACK :sasl account-notify"),
+            Some(vec!["sasl", "account-notify"])
+        );
+        assert_eq!(parse_cap_ack(":server CAP * NAK :sasl"), None);
+        assert_eq!(parse_cap_ack(":server 001 nandi.uk :welcome"), None);
+    }
+    #[test]
+    fn parse_dpop_nonce_notice_extracts_nonce() {
+        assert_eq!(
+            parse_dpop_nonce_notice(":irc.freeq.at NOTICE nandi.uk :DPOP_NONCE abc123"),
+            Some("abc123")
+        );
+        assert_eq!(
+            parse_dpop_nonce_notice(":irc.freeq.at NOTICE * :DPOP_NONCE xyz-789"),
+            Some("xyz-789")
+        );
+        assert_eq!(
+            parse_dpop_nonce_notice(":irc.freeq.at NOTICE nandi.uk :hello"),
+            None
+        );
+        assert_eq!(
+            parse_dpop_nonce_notice(":irc.freeq.at 001 nandi.uk :welcome"),
+            None
+        );
     }
 }

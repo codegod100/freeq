@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>freeq - channels</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
+<style>
+:root{--nick-1:#7ab7ff;--nick-2:#f78b6c;--nick-3:#c792ea;--nick-4:#ffd166;--nick-5:#06d6a0;--nick-6:#ef476f;--nick-7:#f4a261;--nick-8:#90e0ef;--self:#5cdb95}
+html,body{height:100dvh;overflow:hidden}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#1a1a2e}::-webkit-scrollbar-thumb{background:#333;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:#888}
+*{scrollbar-width:thin;scrollbar-color:#333 #1a1a2e}
+#status .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--bulma-grey);margin-right:4px}
+#status.connected .dot{background:var(--self);box-shadow:0 0 5px var(--self)}
+</style>
+</head>
+<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},connected:false}'>
+<section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
+  <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
+    <div class="navbar-brand" style="min-height:2.5rem">
+      <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
+      <span class="navbar-item has-text-grey-light py-1">channels</span>
+    </div>
+    <div class="navbar-end">
+      <div class="navbar-item py-1">
+        <form data-signals="{channel:''}" data-on:submit="@post('/chat/_new/join')" data-signals-merge class="field has-addons">
+          <div class="control"><input class="input is-small" type="text" name="channel" placeholder="join #…" autocomplete="off" data-bind:channel style="width:80px"></div>
+          <div class="control"><button class="button is-small is-link" type="submit">+</button></div>
+        </form>
+      </div>
+      <span class="navbar-item has-text-success is-size-7 py-1" data-attr:style="$auth_handle == '' ? 'display:none' : ''">&#x1f512; <span data-text="$auth_handle"></span></span>
+      <div class="navbar-item py-1" data-attr:style="$auth_handle == '' ? '' : 'display:none'"><a class="button is-small is-link is-outlined" href="/login">Sign in</a></div>
+      <div class="navbar-item py-1 is-size-7"><span id="status"><span class="dot"></span> <span>connecting…</span></span></div>
+    </div>
+  </nav>
+  <div class="columns is-gapless is-mobile" style="flex:1;min-height:0;margin-top:0">
+    <div class="column is-narrow" style="width:220px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
+      <div class="menu">
+        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0" style="font-size:.65rem;letter-spacing:.05em">JOINED</p>
+        <ul class="menu-list">
+        {% for ch in channels -%}{% if ch.name in joined_channels %}
+        <li><a class="is-size-7 py-1 px-2" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1">{{ch.members}}</span></a></li>
+        {% endif %}{%- endfor %}</ul>
+        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0" style="font-size:.65rem;letter-spacing:.05em">ALL CHANNELS</p>
+        <ul class="menu-list">
+        {% for ch in channels -%}{% if ch.name not in joined_channels %}
+        <li><a class="is-size-7 py-1 px-2" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1">{{ch.members}}</span></a></li>
+        {% endif %}{%- endfor %}</ul>
+      </div>
+    </div>
+    <div class="column" style="display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:0">
+      <p class="has-text-grey-light is-size-5 has-text-centered">Select a channel from the sidebar<br>or join a new one above.</p>
+    </div>
+  </div>
+</section>
+<script src="/datastar.js"></script>
+</body>
+</html>
