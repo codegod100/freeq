@@ -106,6 +106,14 @@ struct ChatDetailView: View {
             }
         }
         .navigationBarTitleDisplayMode(.inline)
+        // Handoff: advertise the open conversation so it can resume on the
+        // user's Mac/iPad. Routed by freeqApp's onContinueUserActivity.
+        .userActivity(FreeqActivity.channel, isActive: !channelName.isEmpty) { activity in
+            activity.title = channelName
+            activity.userInfo = ["channel": channelName]
+            activity.isEligibleForHandoff = true
+            activity.targetContentIdentifier = channelName
+        }
         .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
@@ -135,6 +143,15 @@ struct ChatDetailView: View {
             }
 
             ToolbarItemGroup(placement: .topBarTrailing) {
+                // Favorite toggle — pins this conversation to the top of the
+                // list. Available for channels and DMs.
+                Button(action: { appState.toggleFavorite(channelName) }) {
+                    Image(systemName: appState.isFavorite(channelName) ? "star.fill" : "star")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(appState.isFavorite(channelName) ? .yellow : Theme.textSecondary)
+                }
+                .accessibilityLabel(appState.isFavorite(channelName) ? "Remove from favorites" : "Add to favorites")
+
                 if isChannel {
                     // Voice call — green when in this call, accent when a
                     // session is active but we haven't joined, muted otherwise.
@@ -181,6 +198,9 @@ struct ChatDetailView: View {
         }
         .onAppear {
             appState.activeChannel = channelName
+            // Snapshot how much you missed BEFORE markRead clears it, so the
+            // "while you were away" card knows there's a backlog to summarize.
+            appState.awayCardCounts[channelName] = appState.unreadCounts[channelName] ?? 0
             appState.markRead(channelName)
         }
         .onDisappear {

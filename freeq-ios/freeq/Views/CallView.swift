@@ -23,7 +23,7 @@ struct CallView: View {
                 controlsBar
             }
         }
-        .background(Color(.systemBackground).opacity(0.95))
+        .background(Theme.bgPrimary.opacity(0.95))
     }
 
     private var participantGrid: some View {
@@ -33,7 +33,7 @@ struct CallView: View {
                 VStack(spacing: 4) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 8)
-                            .fill(Color(.secondarySystemBackground))
+                            .fill(Theme.bgSecondary)
                             .frame(width: 100, height: 75)
 
                         if appState.isCameraOn, let cap = appState.localPreviewCapture {
@@ -42,15 +42,15 @@ struct CallView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 8))
                         } else {
                             Text(String(appState.currentNick?.prefix(2).uppercased() ?? "Me"))
-                                .font(.title2)
+                                .font(.fqTitle)
                                 .fontWeight(.bold)
-                                .foregroundColor(.accentColor)
+                                .foregroundColor(Theme.accent)
                         }
                     }
 
                     Text("You")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .font(.fqCaption2)
+                        .foregroundColor(Theme.textSecondary)
                 }
 
                 // Remote participants — video tile when frames are arriving,
@@ -60,7 +60,7 @@ struct CallView: View {
                     VStack(spacing: 4) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 8)
-                                .fill(Color(.secondarySystemBackground))
+                                .fill(Theme.bgSecondary)
                                 .frame(width: 100, height: 75)
 
                             RemoteVideoTile(appState: appState, nick: nick)
@@ -70,15 +70,15 @@ struct CallView: View {
 
                             if !appState.participantsWithVideo.contains(nick) {
                                 Text(String(nick.prefix(2).uppercased()))
-                                    .font(.title2)
+                                    .font(.fqTitle)
                                     .fontWeight(.bold)
-                                    .foregroundColor(.accentColor)
+                                    .foregroundColor(Theme.accent)
                             }
                         }
 
                         Text(nick)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .font(.fqCaption2)
+                            .foregroundColor(Theme.textSecondary)
                             .lineLimit(1)
                     }
                 }
@@ -100,8 +100,8 @@ struct CallView: View {
                         }
 
                         Label(nick, systemImage: "rectangle.on.rectangle")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                            .font(.fqCaption2)
+                            .foregroundColor(Theme.textSecondary)
                             .lineLimit(1)
                     }
                 }
@@ -149,7 +149,7 @@ struct CallView: View {
                 Spacer()
                 HStack {
                     Label("\(nick) — screen", systemImage: "rectangle.on.rectangle")
-                        .font(.caption)
+                        .font(.fqCaption)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -176,7 +176,7 @@ struct CallView: View {
             : appState.participantsWithVideo.contains(nick)
         ZStack {
             RoundedRectangle(cornerRadius: 14)
-                .fill(Color(.secondarySystemBackground))
+                .fill(Theme.bgSecondary)
 
             if isLocal, appState.isCameraOn, let cap = appState.localPreviewCapture {
                 LocalPreviewView(capture: cap)
@@ -190,7 +190,7 @@ struct CallView: View {
             if !hasVideo {
                 Text(String(nick.prefix(2).uppercased()))
                     .font(.fqLargeTitle.weight(.bold))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(Theme.accent)
             }
 
             // Name label, bottom-left.
@@ -198,7 +198,7 @@ struct CallView: View {
                 Spacer()
                 HStack {
                     Text(isLocal ? "You" : nick)
-                        .font(.caption)
+                        .font(.fqCaption)
                         .fontWeight(.medium)
                         .foregroundColor(.white)
                         .lineLimit(1)
@@ -221,12 +221,12 @@ struct CallView: View {
             // while the transport is recovering (never a modal alert).
             HStack(spacing: 6) {
                 Circle()
-                    .fill(appState.callTransportStatus == nil ? Color.green : Color.orange)
+                    .fill(appState.callTransportStatus == nil ? Theme.success : Theme.warning)
                     .frame(width: 8, height: 8)
 
                 Text(appState.callTransportStatus
                     ?? "Voice (\(appState.callParticipants.count + 1))")
-                    .font(.subheadline)
+                    .font(.fqSubheadline)
                     .fontWeight(.medium)
                     .foregroundColor(appState.callTransportStatus == nil ? .green : .orange)
                     .lineLimit(1)
@@ -235,59 +235,80 @@ struct CallView: View {
             Spacer()
 
             // Expand / collapse the call to fill the screen
-            Button(action: { appState.isCallExpanded.toggle() }) {
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                appState.isCallExpanded.toggle()
+            }) {
                 Image(systemName: appState.isCallExpanded
                     ? "arrow.down.right.and.arrow.up.left"
                     : "arrow.up.left.and.arrow.down.right")
                     .font(.system(size: 16))
                     .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(Color(.systemGray4))
+                    .frame(width: 44, height: 44)
+                    .background(Theme.bgTertiary)
                     .clipShape(Circle())
             }
+            .accessibilityLabel(appState.isCallExpanded ? "Collapse call" : "Expand call")
 
             // Speaker — loud speaker vs handset receiver
-            Button(action: { appState.toggleSpeaker() }) {
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                appState.toggleSpeaker()
+            }) {
                 Image(systemName: appState.isSpeakerOn ? "speaker.wave.2.fill" : "ear")
                     .font(.system(size: 16))
                     .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(appState.isSpeakerOn ? Color.accentColor : Color(.systemGray4))
+                    .frame(width: 44, height: 44)
+                    .background(appState.isSpeakerOn ? Theme.accent : Theme.bgTertiary)
                     .clipShape(Circle())
             }
+            .accessibilityLabel("Speaker")
+            .accessibilityValue(appState.isSpeakerOn ? "On" : "Off")
 
             // Mute
-            Button(action: { appState.toggleMute() }) {
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                appState.toggleMute()
+            }) {
                 Image(systemName: appState.isMuted ? "mic.slash.fill" : "mic.fill")
                     .font(.system(size: 16))
                     .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(appState.isMuted ? Color.red : Color(.systemGray4))
+                    .frame(width: 44, height: 44)
+                    .background(appState.isMuted ? Theme.danger : Theme.bgTertiary)
                     .clipShape(Circle())
             }
+            .accessibilityLabel(appState.isMuted ? "Unmute microphone" : "Mute microphone")
 
             // Camera
-            Button(action: { appState.toggleCamera() }) {
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                appState.toggleCamera()
+            }) {
                 Image(systemName: appState.isCameraOn ? "video.fill" : "video.slash.fill")
                     .font(.system(size: 16))
                     .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(appState.isCameraOn ? Color.accentColor : Color(.systemGray4))
+                    .frame(width: 44, height: 44)
+                    .background(appState.isCameraOn ? Theme.accent : Theme.bgTertiary)
                     .clipShape(Circle())
             }
+            .accessibilityLabel(appState.isCameraOn ? "Turn camera off" : "Turn camera on")
 
             // Leave
-            Button(action: { appState.leaveCall() }) {
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                appState.leaveCall()
+            }) {
                 Image(systemName: "phone.down.fill")
                     .font(.system(size: 16))
                     .foregroundColor(.white)
-                    .frame(width: 40, height: 40)
-                    .background(Color.red)
+                    .frame(width: 44, height: 44)
+                    .background(Theme.danger)
                     .clipShape(Circle())
             }
+            .accessibilityLabel("Leave call")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
-        .background(Color(.secondarySystemBackground))
+        .background(Theme.bgSecondary)
     }
 }

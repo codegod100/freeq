@@ -14,7 +14,7 @@ struct MotdSheet: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 

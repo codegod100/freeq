@@ -253,7 +253,7 @@ struct AudioRecorderSheet: View {
     @State private var permissionDenied = false
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -557,7 +557,7 @@ struct MediaPreviewSheet: View {
     @FocusState private var captionFocused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 

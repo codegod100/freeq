@@ -2553,6 +2553,8 @@ public enum FreeqEvent {
     )
     case chatHistoryTarget(nick: String, timestamp: String?
     )
+    case readMarker(target: String, timestamp: String?
+    )
     case whoisReply(nick: String, info: String
     )
     case notice(text: String
@@ -2629,13 +2631,16 @@ public struct FfiConverterTypeFreeqEvent: FfiConverterRustBuffer {
         case 18: return .chatHistoryTarget(nick: try FfiConverterString.read(from: &buf), timestamp: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 19: return .whoisReply(nick: try FfiConverterString.read(from: &buf), info: try FfiConverterString.read(from: &buf)
+        case 19: return .readMarker(target: try FfiConverterString.read(from: &buf), timestamp: try FfiConverterOptionString.read(from: &buf)
         )
         
-        case 20: return .notice(text: try FfiConverterString.read(from: &buf)
+        case 20: return .whoisReply(nick: try FfiConverterString.read(from: &buf), info: try FfiConverterString.read(from: &buf)
         )
         
-        case 21: return .disconnected(reason: try FfiConverterString.read(from: &buf)
+        case 21: return .notice(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 22: return .disconnected(reason: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -2751,19 +2756,25 @@ public struct FfiConverterTypeFreeqEvent: FfiConverterRustBuffer {
             FfiConverterOptionString.write(timestamp, into: &buf)
             
         
-        case let .whoisReply(nick,info):
+        case let .readMarker(target,timestamp):
             writeInt(&buf, Int32(19))
+            FfiConverterString.write(target, into: &buf)
+            FfiConverterOptionString.write(timestamp, into: &buf)
+            
+        
+        case let .whoisReply(nick,info):
+            writeInt(&buf, Int32(20))
             FfiConverterString.write(nick, into: &buf)
             FfiConverterString.write(info, into: &buf)
             
         
         case let .notice(text):
-            writeInt(&buf, Int32(20))
+            writeInt(&buf, Int32(21))
             FfiConverterString.write(text, into: &buf)
             
         
         case let .disconnected(reason):
-            writeInt(&buf, Int32(21))
+            writeInt(&buf, Int32(22))
             FfiConverterString.write(reason, into: &buf)
             
         }

@@ -3,6 +3,7 @@ import AVFoundation
 
 struct ComposeView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
     @State private var completions: [String] = []
@@ -149,7 +150,11 @@ struct ComposeView: View {
                                     .font(.system(size: 15, weight: .bold))
                                     .foregroundColor(Color(hex: "04121a"))
                             }
+                            .frame(width: 44, height: 44)  // 44pt hit target
+                            .contentShape(Circle())
                         }
+                        .accessibilityLabel(appState.editingMessage != nil ? "Save edit" : "Send message")
+                        .keyboardShortcut(.return, modifiers: .command)  // ⌘↩ send (hardware keyboard / iPad)
                         .transition(.scale.combined(with: .opacity))
                     } else if appState.authenticatedDID != nil {
                         micButton
@@ -168,7 +173,7 @@ struct ComposeView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .animation(.spring(response: 0.32, dampingFraction: 0.7), value: canSend)
-                .background(.ultraThinMaterial)
+                .modifier(ComposeBarBackground())
                 .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
                 .opacity(isRecording ? 0 : 1)
 
@@ -353,7 +358,7 @@ struct ComposeView: View {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 22))
                     .foregroundColor(Theme.accent)
-                    .symbolEffect(.pulse, isActive: true)
+                    .symbolEffect(.pulse, isActive: !reduceMotion)
             }
         }
         .padding(.horizontal, 12)
@@ -671,5 +676,17 @@ struct ComposeView: View {
         let mins = Int(t) / 60
         let secs = Int(t) % 60
         return String(format: "%d:%02d", mins, secs)
+    }
+}
+
+/// Compose-bar chrome: genuine iOS 26 Liquid Glass where available, the
+/// ultra-thin material as a graceful fallback on iOS 18–25.
+private struct ComposeBarBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: Rectangle())
+        } else {
+            content.background(.ultraThinMaterial)
+        }
     }
 }

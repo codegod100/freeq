@@ -79,6 +79,20 @@ struct SettingsTab: View {
                             .foregroundColor(Theme.textMuted)
                     }
 
+                    // Audio — local speaker + mic test
+                    Section {
+                        NavigationLink {
+                            AudioTestView()
+                        } label: {
+                            Label("Test Speaker & Microphone", systemImage: "waveform.circle")
+                                .foregroundColor(Theme.textPrimary)
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+                    } header: {
+                        Text("Audio")
+                            .foregroundColor(Theme.textMuted)
+                    }
+
                     // Connection
                     Section {
                         HStack {

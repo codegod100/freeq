@@ -6,6 +6,7 @@ import WidgetKit
 struct FreeqWidgetBundle: WidgetBundle {
     var body: some Widget {
         CallLiveActivity()
+        FreeqUnreadWidget()
     }
 }
 
@@ -41,11 +42,23 @@ struct CallLiveActivity: Widget {
                     }
                 }
                 Spacer()
-                if context.state.isMuted {
-                    Image(systemName: "mic.slash.fill")
-                        .foregroundStyle(.orange)
-                        .font(.system(size: 16))
+                // Interactive mute + end-call controls on the lock screen.
+                Button(intent: ToggleMuteIntent()) {
+                    Image(systemName: context.state.isMuted ? "mic.slash.fill" : "mic.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(context.state.isMuted ? .orange : .white)
+                        .frame(width: 40, height: 34)
+                        .background(.white.opacity(0.12), in: Capsule())
                 }
+                .buttonStyle(.plain)
+                Button(intent: EndCallIntent()) {
+                    Image(systemName: "phone.down.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 40, height: 34)
+                        .background(.red, in: Capsule())
+                }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -83,15 +96,29 @@ struct CallLiveActivity: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    HStack {
+                    HStack(spacing: 10) {
                         Text(timerInterval: context.state.startedAt...Date.distantFuture, countsDown: false)
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.secondary)
                         Spacer()
-                        // Tapping anywhere falls through to deep-link → main app.
-                        Text("Tap to open")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
+                        // Interactive controls — run in the app process via
+                        // LiveActivityIntent → NotificationCenter → AppState.
+                        Button(intent: ToggleMuteIntent()) {
+                            Image(systemName: context.state.isMuted ? "mic.slash.fill" : "mic.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(context.state.isMuted ? .orange : .white)
+                                .frame(width: 44, height: 34)
+                                .background(.white.opacity(0.12), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        Button(intent: EndCallIntent()) {
+                            Image(systemName: "phone.down.fill")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 44, height: 34)
+                                .background(.red, in: Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 4)
                 }

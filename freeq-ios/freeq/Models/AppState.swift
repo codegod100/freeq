@@ -4,6 +4,7 @@ import CoreSpotlight
 import Foundation
 import os.log
 import SwiftUI
+import WidgetKit
 
 /// Auth-path diagnostic log. Visible in Console.app attached to the device.
 /// We log credential-clearing events with the decision inputs so we can tell
@@ -155,13 +156,35 @@ class ChannelState: ObservableObject, Identifiable {
     }
 
     private var messageIds: Set<String> = []
+    /// id → index into `messages`. Makes findMessage / reactions / edits /
+    /// deletes / reply resolution O(1) instead of a linear scan of the whole
+    /// (unbounded) transcript on every TAGMSG and every reply row. Rebuilt
+    /// when indices shift (out-of-order history insert); updated in place on
+    /// the common in-order live append.
+    private var messageIndex: [String: Int] = [:]
 
     func findMessage(byId id: String) -> Int? {
-        messages.firstIndex(where: { $0.id == id })
+        messageIndex[id]
     }
 
     func memberInfo(for nick: String) -> MemberInfo? {
         members.first(where: { $0.nick.lowercased() == nick.lowercased() })
+    }
+
+    private func rebuildMessageIndex() {
+        messageIndex.removeAll(keepingCapacity: true)
+        for (i, m) in messages.enumerated() { messageIndex[m.id] = i }
+    }
+
+    /// Adopt another buffer's transcript (used when a DM buffer is renamed
+    /// after a peer NICK change). Copies the messages AND rebuilds the dedup
+    /// set + index — previously only `messages` was copied, leaving the dedup
+    /// Set empty so the next live/history message re-appended and duplicated
+    /// the whole transcript.
+    func adoptMessages(from other: ChannelState) {
+        messages = other.messages
+        messageIds = Set(messages.map(\.id))
+        rebuildMessageIndex()
     }
 
     /// Append a message only if its ID hasn't been seen before.
@@ -170,12 +193,16 @@ class ChannelState: ObservableObject, Identifiable {
         guard !messageIds.contains(msg.id) else { return }
         messageIds.insert(msg.id)
 
-        // If the message is older than the last message, insert in sorted position
+        // If the message is older than the last message, insert in sorted
+        // position (history backfill) — this shifts subsequent indices, so
+        // rebuild the map. The common live case appends at the end (O(1)).
         if let last = messages.last, msg.timestamp < last.timestamp {
             let idx = messages.firstIndex(where: { $0.timestamp > msg.timestamp }) ?? messages.endIndex
             messages.insert(msg, at: idx)
+            rebuildMessageIndex()
         } else {
             messages.append(msg)
+            messageIndex[msg.id] = messages.count - 1
         }
         // Update last activity for sorting
         if msg.timestamp > lastActivity {
@@ -190,6 +217,9 @@ class ChannelState: ObservableObject, Identifiable {
             if let newId = newId {
                 messages[idx].id = newId
                 messageIds.insert(newId)
+                // Re-key the index: the slot is unchanged, only its id moved.
+                messageIndex.removeValue(forKey: originalId)
+                messageIndex[newId] = idx
             }
         }
     }
@@ -293,6 +323,10 @@ class AppState: ObservableObject {
 
     @Published var connectionState: ConnectionState = .disconnected
     @Published var nick: String = ""
+    /// Cross-device read markers (draft/read-marker): target (lowercased) →
+    /// latest read timestamp. Forward-only, enforced server-side. Stored so
+    /// the unread-divider / catch-up UI can consume it.
+    var readMarkers: [String: String] = [:]
     @Published var serverAddress: String = ServerConfig.ircServer
     @Published var authBrokerBase: String = ServerConfig.authBrokerBase
     @Published var channels: [ChannelState] = []
@@ -316,6 +350,12 @@ class AppState: ObservableObject {
     /// Muted channels — no notifications, no badge increment
     @Published var mutedChannels: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(mutedChannels), forKey: "freeq.mutedChannels") }
+    }
+
+    /// Favorited channels/DMs, pinned to the top of the list. Stored by exact
+    /// name so it round-trips through UserDefaults.
+    @Published var favorites: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(favorites), forKey: "freeq.favorites") }
     }
 
     /// DM peers the user has explicitly closed. Stored lowercased so we
@@ -945,6 +985,10 @@ class AppState: ObservableObject {
     /// Read position tracking — channel name -> last read message ID
     @Published var lastReadMessageIds: [String: String] = [:]
 
+    /// Unread count captured the instant a channel is opened, BEFORE markRead
+    /// clears it — powers the "while you were away" summary card. Session-only.
+    @Published var awayCardCounts: [String: Int] = [:]
+
     /// Theme
     @Published var isDarkTheme: Bool = true
 
@@ -1007,6 +1051,18 @@ class AppState: ObservableObject {
 
     init() {
         AppState.shared = self
+        // Interactive Live Activity buttons (mute / end call) post here; the
+        // intent runs in this process so the notification reaches us directly.
+        NotificationCenter.default.addObserver(
+            forName: .freeqCallControl, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let action = note.object as? String else { return }
+            switch CallControlAction(rawValue: action) {
+            case .toggleMute: self.toggleMute()
+            case .endCall: self.leaveCall()
+            case .none: break
+            }
+        }
         reconcileDeploymentChange()
         if let savedNick = UserDefaults.standard.string(forKey: "freeq.nick") {
             nick = savedNick
@@ -1034,6 +1090,9 @@ class AppState: ObservableObject {
         }
         if let savedMuted = UserDefaults.standard.stringArray(forKey: "freeq.mutedChannels") {
             mutedChannels = Set(savedMuted)
+        }
+        if let savedFavorites = UserDefaults.standard.stringArray(forKey: "freeq.favorites") {
+            favorites = Set(savedFavorites)
         }
         if let savedClosed = UserDefaults.standard.stringArray(forKey: "freeq.closedDMs") {
             closedDMs = Set(savedClosed)
@@ -1736,6 +1795,25 @@ class AppState: ObservableObject {
     func updateBadgeCount() {
         let total = unreadCounts.filter { !mutedChannels.contains($0.key) }.values.reduce(0, +)
         UNUserNotificationCenter.current().setBadgeCount(total)
+        updateWidgetSnapshot(total: total)
+    }
+
+    /// Publish the widget snapshot (App Group) and nudge WidgetKit to reload.
+    /// Cheap and idempotent; called whenever unread changes.
+    private func updateWidgetSnapshot(total: Int) {
+        let top = unreadCounts
+            .filter { $0.value > 0 && !mutedChannels.contains($0.key) }
+            .sorted { $0.value > $1.value }
+            .prefix(4)
+            .map { SharedStore.ChannelUnread(name: $0.key, unread: $0.value) }
+        let snapshot = SharedStore.Snapshot(
+            totalUnread: total,
+            topChannels: Array(top),
+            connected: connectionState == .registered,
+            updatedAt: Date()
+        )
+        SharedStore.write(snapshot)
+        WidgetCenter.shared.reloadTimelines(ofKind: "FreeqUnreadWidget")
     }
 
     func toggleMute(_ channel: String) {
@@ -1748,6 +1826,21 @@ class AppState: ObservableObject {
 
     func isMuted(_ channel: String) -> Bool {
         mutedChannels.contains(channel)
+    }
+
+    // MARK: - Favorites
+
+    func isFavorite(_ channel: String) -> Bool {
+        favorites.contains(channel)
+    }
+
+    func toggleFavorite(_ channel: String) {
+        if favorites.contains(channel) {
+            favorites.remove(channel)
+        } else {
+            favorites.insert(channel)
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     func toggleTheme() {
@@ -1982,7 +2075,7 @@ class AppState: ObservableObject {
         if let idx = dmBuffers.firstIndex(where: { $0.name.lowercased() == oldNick.lowercased() }) {
             let old = dmBuffers[idx]
             let renamed = ChannelState(name: newNick)
-            renamed.messages = old.messages
+            renamed.adoptMessages(from: old)
             renamed.members = old.members
             renamed.topic = old.topic
             renamed.typingUsers = old.typingUsers
@@ -2138,6 +2231,11 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             let target = ircMsg.target
             let from = ircMsg.fromNick
             let isSelf = from.lowercased() == state.nick.lowercased()
+            // A blocked sender's message still lands in the buffer (filtered at
+            // render, so unblocking restores it) but must not ring, badge, or
+            // haptic — block is the advertised safety remedy, so it has to
+            // suppress notifications too (by nick AND DID).
+            let senderBlocked = !isSelf && state.isBlocked(nick: from, did: ircMsg.account)
 
             // Prefetch avatar using DID if available (from account-tag)
             if let did = ircMsg.account {
@@ -2209,11 +2307,14 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             if target.hasPrefix("#") {
                 let ch = state.getOrCreateChannel(target)
                 ch.appendIfNew(msg)
-                state.incrementUnread(target)
+                if !senderBlocked { state.incrementUnread(target) }
                 ch.typingUsers.removeValue(forKey: from)
 
-                // Notify on mention (skip if muted)
-                if !isSelf && ircMsg.text.lowercased().contains(state.nick.lowercased()) && !state.isMuted(target) {
+                // Notify on mention (skip if muted, blocked, or our nick is
+                // empty — an empty nick makes `contains` match every message).
+                let mentioned = !state.nick.isEmpty
+                    && ircMsg.text.range(of: state.nick, options: .caseInsensitive) != nil
+                if !isSelf && !senderBlocked && mentioned && !state.isMuted(target) {
                     NotificationManager.shared.sendMessageNotification(
                         from: from, text: ircMsg.text, channel: target, isMention: true
                     )
@@ -2228,10 +2329,10 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 state.closedDMs.remove(bufferName.lowercased())
                 let dm = state.getOrCreateDM(bufferName)
                 dm.appendIfNew(msg)
-                state.incrementUnread(bufferName)
+                if !senderBlocked { state.incrementUnread(bufferName) }
 
-                // Always notify on DMs
-                if !isSelf {
+                // Always notify on DMs (unless blocked)
+                if !isSelf && !senderBlocked {
                     NotificationManager.shared.sendMessageNotification(
                         from: from, text: ircMsg.text, channel: bufferName
                     )
@@ -2505,6 +2606,12 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     }
                 }
             }
+
+        case .readMarker(let target, let timestamp):
+            // draft/read-marker — cross-device read state (forward-only,
+            // enforced server-side). Store the latest marker so the unread
+            // divider / catch-up UI can consume it. No standalone UI yet.
+            if let timestamp { state.readMarkers[target.lowercased()] = timestamp }
         }
     }
 }

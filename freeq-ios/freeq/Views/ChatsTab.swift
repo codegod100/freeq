@@ -44,43 +44,15 @@ struct ChatsTab: View {
                             .listRowBackground(Theme.danger)
                         }
 
-                        ForEach(filteredConversations, id: \.name) { conv in
-                            NavigationLink(value: conv.name) {
-                                ChatRow(conversation: conv, unreadCount: appState.unreadCounts[conv.name] ?? 0)
+                        if showFavoritesSection {
+                            Section("Favorites") {
+                                ForEach(favoriteConversations, id: \.name) { conversationRow($0) }
                             }
-                            .listRowBackground(Theme.bgSecondary)
-                            .listRowSeparatorTint(Theme.border)
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) {
-                                    if conv.name.hasPrefix("#") {
-                                        appState.partChannel(conv.name)
-                                    } else {
-                                        appState.closeDM(conv.name)
-                                    }
-                                } label: {
-                                    Label(conv.name.hasPrefix("#") ? "Leave" : "Close", systemImage: "arrow.right.square")
-                                }
+                            Section(navTitle) {
+                                ForEach(otherConversations, id: \.name) { conversationRow($0) }
                             }
-                            .swipeActions(edge: .leading) {
-                                Button {
-                                    appState.toggleMute(conv.name)
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                } label: {
-                                    Label(
-                                        appState.isMuted(conv.name) ? "Unmute" : "Mute",
-                                        systemImage: appState.isMuted(conv.name) ? "bell.fill" : "bell.slash.fill"
-                                    )
-                                }
-                                .tint(Theme.warning)
-
-                                Button {
-                                    appState.markRead(conv.name)
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                } label: {
-                                    Label("Read", systemImage: "checkmark.circle")
-                                }
-                                .tint(Theme.accent)
-                            }
+                        } else {
+                            ForEach(filteredConversations, id: \.name) { conversationRow($0) }
                         }
                     }
                     .listStyle(.plain)
@@ -147,6 +119,84 @@ struct ChatsTab: View {
                     appState.activeChannel = nick
                     navigationPath.append(nick)
                 }
+            }
+        }
+    }
+
+    /// Favorited conversations, pinned to a top section (any name; works for
+    /// channels and DMs). Order follows the base sort (alpha / recency).
+    private var favoriteConversations: [ChannelState] {
+        filteredConversations.filter { appState.isFavorite($0.name) }
+    }
+
+    private var otherConversations: [ChannelState] {
+        filteredConversations.filter { !appState.isFavorite($0.name) }
+    }
+
+    /// Only split into Favorites / rest when there are favorites and we're not
+    /// filtering by search (a search should show one flat result list).
+    private var showFavoritesSection: Bool {
+        searchText.isEmpty && !favoriteConversations.isEmpty
+    }
+
+    /// One conversation row: navigation link + swipe actions + a press-and-hold
+    /// context menu (favorite / mute / mark-read / leave).
+    @ViewBuilder
+    private func conversationRow(_ conv: ChannelState) -> some View {
+        let isChannel = conv.name.hasPrefix("#") || conv.name.hasPrefix("&")
+        NavigationLink(value: conv.name) {
+            ChatRow(conversation: conv, unreadCount: appState.unreadCounts[conv.name] ?? 0)
+        }
+        .listRowBackground(Theme.bgSecondary)
+        .listRowSeparatorTint(Theme.border)
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                if isChannel { appState.partChannel(conv.name) } else { appState.closeDM(conv.name) }
+            } label: {
+                Label(isChannel ? "Leave" : "Close", systemImage: "arrow.right.square")
+            }
+        }
+        .swipeActions(edge: .leading) {
+            Button {
+                appState.toggleFavorite(conv.name)
+            } label: {
+                Label(appState.isFavorite(conv.name) ? "Unfavorite" : "Favorite",
+                      systemImage: appState.isFavorite(conv.name) ? "star.slash.fill" : "star.fill")
+            }
+            .tint(.yellow)
+
+            Button {
+                appState.toggleMute(conv.name)
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } label: {
+                Label(appState.isMuted(conv.name) ? "Unmute" : "Mute",
+                      systemImage: appState.isMuted(conv.name) ? "bell.fill" : "bell.slash.fill")
+            }
+            .tint(Theme.warning)
+        }
+        .contextMenu {
+            Button {
+                appState.toggleFavorite(conv.name)
+            } label: {
+                Label(appState.isFavorite(conv.name) ? "Remove from Favorites" : "Add to Favorites",
+                      systemImage: appState.isFavorite(conv.name) ? "star.slash" : "star")
+            }
+            Button {
+                appState.toggleMute(conv.name)
+            } label: {
+                Label(appState.isMuted(conv.name) ? "Unmute" : "Mute",
+                      systemImage: appState.isMuted(conv.name) ? "bell" : "bell.slash")
+            }
+            Button {
+                appState.markRead(conv.name)
+            } label: {
+                Label("Mark as Read", systemImage: "checkmark.circle")
+            }
+            Divider()
+            Button(role: .destructive) {
+                if isChannel { appState.partChannel(conv.name) } else { appState.closeDM(conv.name) }
+            } label: {
+                Label(isChannel ? "Leave Channel" : "Close", systemImage: "arrow.right.square")
             }
         }
     }

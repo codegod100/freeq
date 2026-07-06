@@ -19,8 +19,13 @@ struct BlueskyEmbed: View {
     }
 
     var body: some View {
-        if let post = post {
-            Link(destination: URL(string: "https://bsky.app/profile/\(handle)/post/\(rkey)")!) {
+        // handle/rkey come from the wire; percent-encode and guard so a
+        // malformed value can't trap on URL(string:)!.
+        let encHandle = handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? handle
+        let encRkey = rkey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? rkey
+        if let post = post,
+           let postURL = URL(string: "https://bsky.app/profile/\(encHandle)/post/\(encRkey)") {
+            Link(destination: postURL) {
                 VStack(alignment: .leading, spacing: 8) {
                     // Author
                     HStack(spacing: 8) {

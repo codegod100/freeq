@@ -66,7 +66,7 @@ struct ImagePreviewSheet: View {
     @FocusState private var captionFocused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 

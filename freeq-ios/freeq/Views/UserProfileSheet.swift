@@ -46,7 +46,7 @@ struct UserProfileSheet: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -204,8 +204,9 @@ struct UserProfileSheet: View {
                             }
 
                             // View on Bluesky
-                            if let p = profile {
-                                Link(destination: URL(string: "https://bsky.app/profile/\(p.handle)")!) {
+                            if let p = profile,
+                               let profileURL = URL(string: "https://bsky.app/profile/\((p.handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? p.handle))") {
+                                Link(destination: profileURL) {
                                     HStack(spacing: 8) {
                                         Image(systemName: "arrow.up.right")
                                             .font(.system(size: 13))

@@ -158,5 +158,11 @@ cat > freeq-ios/FreeqSDK.xcframework/Info.plist << 'EOF'
 EOF
 fi
 
+# Stamp the FFI source fingerprint so the app's "Check Rust FFI freshness"
+# build phase can detect a stale xcframework vs regenerated bindings.
+echo "==> Stamping Rust FFI source fingerprint..."
+"$REPO_ROOT/freeq-ios/scripts/ffi-source-fingerprint.sh" \
+    > "$REPO_ROOT/freeq-ios/FreeqSDK.xcframework/ios-arm64/ffi-source.sha256"
+
 echo "==> Done! xcframework at freeq-ios/FreeqSDK.xcframework"
 echo "    Swift bindings at freeq-ios/Generated/freeq.swift"

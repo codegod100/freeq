@@ -29,9 +29,12 @@
 		2BE87DF57370DD8D23D5857C /* MessageActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C24850A65B3ED49F5C323EEA /* MessageActions.swift */; };
 		2DAA75F33F0F0DF1E697A19A /* WatchSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 893A3A695627ED14710AD125 /* WatchSession.swift */; };
 		328A732022FC49EB4D04542C /* ToastView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E434E1E24A88662FBDFFCA35 /* ToastView.swift */; };
+		3388DF50A1619B493BB018C1 /* CallControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EA2E012985430B01C97EBC /* CallControlIntents.swift */; };
 		33F2DF2666D58E3874E4B4C9 /* WatchKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = ED2B936BFFD2FB65A3BBA961 /* WatchKit.framework */; };
 		3752BB3B1DC74EFFB3D5FB13 /* BufferRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E69472A0DAAB1972CC0FB351 /* BufferRoutingTests.swift */; };
+		398FB4288B111CB2E4FBD016 /* SplitRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E30BF0C98AC2E9B7A006E95 /* SplitRootView.swift */; };
 		3DE43AC9D91A05A551A0C97F /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */; };
+		45EE47A41295B02CF2A3A689 /* AudioTestView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09AFFD5DE516371B6CC31172 /* AudioTestView.swift */; };
 		4D812AA5D08CF45A2F27BF72 /* IntelligenceService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */; };
 		4F32549F7429803BCF26DE25 /* VideoFeedView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6AF979D760370C0C44E53D1C /* VideoFeedView.swift */; };
 		590DB15E36CC6FECFC8FB1B6 /* ActivityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 5402990427FB4D600E4D9BA6 /* ActivityKit.framework */; };
@@ -39,6 +42,7 @@
 		5E8956E8A2AEB6B4ED4F5649 /* StepUpAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5A82F11FAB31980C3BD38DB /* StepUpAuth.swift */; };
 		60A3F828F885713C7D9FA3FB /* MotdSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5770C0CB2F73315874C61C7 /* MotdSheet.swift */; };
 		60D412BDDBD48D2DF28501C4 /* AuthSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EE05180089D95AD96D9B76 /* AuthSession.swift */; };
+		60E7923544EB738884871D51 /* freeqLiveActivity.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = B43788F5890429BF64CC12CC /* freeqLiveActivity.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		62B8CBF5B228608CF2E5BCF6 /* AvSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B3200A9C4EB97C507BCBA97D /* AvSessionTests.swift */; };
 		62CD219C257D8D55C7419990 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0115700FA5AE53FD60E9FEAA /* CoreAudio.framework */; };
 		6B98C423EE9A7D82D1973063 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DDE25216F85C26CCEE21C66 /* NetworkMonitor.swift */; };
@@ -51,14 +55,18 @@
 		7DD2F0049B92D709EA8B4910 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 77A2F5FB32DA2A3EA346FB5C /* AVFAudio.framework */; };
 		8051F4C388919E36E3F7D21B /* ChannelSettingsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C9AB6B0F16CF373F92D0294D /* ChannelSettingsSheet.swift */; };
 		80DC207188B4EA44C3787CA2 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = D528FB66B3A58A4A06E4379C /* Notifications.swift */; };
+		83A5C0410F5BA87B169691A9 /* AppIntents.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 797AA7726B164D6F5656D5EE /* AppIntents.framework */; };
 		8BEC773AE22BCFA9F1F3E701 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9DFC6E8F6927C989B299B239 /* Network.framework */; };
+		90E36A9344A176609A6BFAB1 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FEC306B6E024D2BBF561BE /* SharedStore.swift */; };
 		91C1537B636D828A2764A878 /* FreeqIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88E010DFF61E21BE28AF989C /* FreeqIntents.swift */; };
 		921A10E0801AE63FDE98EB69 /* BufferDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 550FE647399F6788D3F2E0F9 /* BufferDetailView.swift */; };
 		928C6971DC2E4A47CED47A35 /* CallActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7278D584F74B58B9922F23BC /* CallActivityAttributes.swift */; };
 		95571CB3A530D8A2555D2BE3 /* AppState.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB66829DE40DA60667ECBB43 /* AppState.swift */; };
+		968D06E61F78B48BE723CCA8 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FEC306B6E024D2BBF561BE /* SharedStore.swift */; };
 		9ADC4B8DCD3BCB087C8FF8C2 /* ChatDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01B51AD480FA3889B5B5D29 /* ChatDetailView.swift */; };
 		A03375CBD6C2B0D82185AFA1 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D567BC948344D3BCA2F31223 /* SwiftUI.framework */; };
 		A6E303F99C6393665AE44025 /* ThreadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83E16EC2E4202D7B88D8DEDE /* ThreadView.swift */; };
+		AA5C84EC4D1A8D5C37828312 /* CallControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EA2E012985430B01C97EBC /* CallControlIntents.swift */; };
 		B198511552ED975806FF24E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CC6F468E7EEBA9A6B686019 /* ContentView.swift */; };
 		B2DF4E800D832B107555FD28 /* CallActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7278D584F74B58B9922F23BC /* CallActivityAttributes.swift */; };
 		B757EEF191C41D1327706DB2 /* FreeqSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71E14BE7827AB5FE22AC3FF6 /* FreeqSDK.xcframework */; };
@@ -73,12 +81,14 @@
 		CE133BCB1C065B2B2EEEB0B2 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F30B75033F6333978D7F0E /* PeopleView.swift */; };
 		D0209F9328C9586D5B2849DE /* ConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5623F20307924888306278FF /* ConnectView.swift */; };
 		D0358591360DD63CE1830E92 /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE51C9015AF7D1E917C5BFC0 /* MarkdownText.swift */; };
+		D5642F5E361D42D539291B69 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FEC306B6E024D2BBF561BE /* SharedStore.swift */; };
 		D5CD91A1A07CD8436C37FC84 /* WatchPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */; };
 		D9574E81D14BBFA1BF8A463D /* freeq.swift in Sources */ = {isa = PBXBuildFile; fileRef = B439EEC100CBED133D3260B2 /* freeq.swift */; };
 		D96D2C4DCB89EED18C1AED57 /* ComposeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E160E4F6AA98C972AA5B794 /* ComposeView.swift */; };
 		DD3E3EE1D2C986B904CB5D82 /* PhotoPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C517F4469AC28926160BA7 /* PhotoPicker.swift */; };
 		DEFDB6EC3FA34DAA0295C7CA /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = B28D17294C06F964661A5E97 /* KeychainHelper.swift */; };
 		DF5C0556FF5AC209D6B65CC2 /* VerifiedProofSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 959D2D11B77277E11CBCB348 /* VerifiedProofSheet.swift */; };
+		E4A6EAC9BD855433858D2F7A /* CallControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EA2E012985430B01C97EBC /* CallControlIntents.swift */; };
 		E51D087B116EE63A4FA6AAF9 /* Safety.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26DE5AC40702B5E286A3DED3 /* Safety.swift */; };
 		E54F6F22FE39E885EFCBE309 /* SettingsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B107817CBF9268860E40AC0 /* SettingsTab.swift */; };
 		E5597772C5D44A3D46FD0F8A /* WatchPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */; };
@@ -94,6 +104,7 @@
 		F7C61B31B1D336F554B9F657 /* BufferListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D97CC3F5A8E1F52F2C940FF /* BufferListView.swift */; };
 		F984D50CE55E26A76B8B7B8D /* ChatsTab.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4A25735A9E045465A3F1BAD /* ChatsTab.swift */; };
 		FACB4B51AB62E6D09EB8121A /* CallKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81C362339EDE04DE16E1064E /* CallKitManager.swift */; };
+		FDE5E359F82F3C4B1F520647 /* FreeqWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 933008C0AA1EEB82FD56DE5D /* FreeqWidgets.swift */; };
 		FF41A75897B0A7362F61B210 /* CallLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = A725C856D7878BE6382208F3 /* CallLiveActivity.swift */; };
 /* End PBXBuildFile section */
 
@@ -105,11 +116,34 @@
 			remoteGlobalIDString = 715097527A8802437490DEDD;
 			remoteInfo = freeq;
 		};
+		869DAC998A9EF2F08C26821A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1FEB93A706F8184FE3E2C445 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 8FB43BFB4C70E7C933CE0D5C;
+			remoteInfo = freeqLiveActivity;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		C96E85383E63CFBE9587C782 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				60E7923544EB738884871D51 /* freeqLiveActivity.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		00499E45672763D6A58D9A8A /* freeq.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = freeq.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0115700FA5AE53FD60E9FEAA /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
+		03FEC306B6E024D2BBF561BE /* SharedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStore.swift; sourceTree = "<group>"; };
+		09AFFD5DE516371B6CC31172 /* AudioTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioTestView.swift; sourceTree = "<group>"; };
 		0CFEA027394A64C46A1780F5 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
 		0F2B162069D9FEB43A008621 /* JoinChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinChannelSheet.swift; sourceTree = "<group>"; };
 		13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPayloads.swift; sourceTree = "<group>"; };
@@ -123,6 +157,7 @@
 		34D75D9768B423C15C80F711 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		39851CF7C369A289DB8E3E93 /* MemberListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberListView.swift; sourceTree = "<group>"; };
 		3A59A5F928CAB65BE2BEF71E /* LinkPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreview.swift; sourceTree = "<group>"; };
+		40EA2E012985430B01C97EBC /* CallControlIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallControlIntents.swift; sourceTree = "<group>"; };
 		427121549BC7B078C6A911D1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4601D5B9F9DC30C03EDC4344 /* freeqWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = freeqWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		471DB6E8285B3DE882A52E79 /* YouTubeThumb.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YouTubeThumb.swift; sourceTree = "<group>"; };
@@ -136,6 +171,7 @@
 		59139B7746A5521BDD375C83 /* freeqWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = freeqWatchApp.swift; sourceTree = "<group>"; };
 		5B107817CBF9268860E40AC0 /* SettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTab.swift; sourceTree = "<group>"; };
 		5DDE25216F85C26CCEE21C66 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
+		5E30BF0C98AC2E9B7A006E95 /* SplitRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitRootView.swift; sourceTree = "<group>"; };
 		607BA33EFE4FD90620B86761 /* PresenceDot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceDot.swift; sourceTree = "<group>"; };
 		652094AB12E394FEA901DE7E /* AudioToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AudioToolbox.framework; path = System/Library/Frameworks/AudioToolbox.framework; sourceTree = SDKROOT; };
 		6AF979D760370C0C44E53D1C /* VideoFeedView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoFeedView.swift; sourceTree = "<group>"; };
@@ -145,6 +181,7 @@
 		75671806EACCE62066D1B53F /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		77A2F5FB32DA2A3EA346FB5C /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
 		78CD9FF3B40DF51F4177AA84 /* CallCameraCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallCameraCapture.swift; sourceTree = "<group>"; };
+		797AA7726B164D6F5656D5EE /* AppIntents.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AppIntents.framework; path = System/Library/Frameworks/AppIntents.framework; sourceTree = SDKROOT; };
 		7A31629FF3AFE028388F95C8 /* PhoneWatchBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhoneWatchBridge.swift; sourceTree = "<group>"; };
 		7C22534FE12207F730D56732 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		7D7683ED921B13F8CF675C3D /* VoiceTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceTranscriber.swift; sourceTree = "<group>"; };
@@ -159,6 +196,8 @@
 		908FF04F8C100160DE7BABD5 /* StatusEditorSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusEditorSheet.swift; sourceTree = "<group>"; };
 		90CFA49BA9803132D1A9979D /* AvMediaFlowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvMediaFlowTests.swift; sourceTree = "<group>"; };
 		91D4028719D43D3BBF97FA82 /* SpotlightIndexer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpotlightIndexer.swift; sourceTree = "<group>"; };
+		91F044172E9ED1953844ED0F /* freeqLiveActivity.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = freeqLiveActivity.entitlements; sourceTree = "<group>"; };
+		933008C0AA1EEB82FD56DE5D /* FreeqWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreeqWidgets.swift; sourceTree = "<group>"; };
 		959D2D11B77277E11CBCB348 /* VerifiedProofSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifiedProofSheet.swift; sourceTree = "<group>"; };
 		95D94CB373FB8CFD1EAD366F /* UserProfileSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserProfileSheet.swift; sourceTree = "<group>"; };
 		9A3E250AEA65FB526452DDC0 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = System/Library/Frameworks/WidgetKit.framework; sourceTree = SDKROOT; };
@@ -167,6 +206,7 @@
 		9E160E4F6AA98C972AA5B794 /* ComposeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeView.swift; sourceTree = "<group>"; };
 		A5770C0CB2F73315874C61C7 /* MotdSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MotdSheet.swift; sourceTree = "<group>"; };
 		A725C856D7878BE6382208F3 /* CallLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallLiveActivity.swift; sourceTree = "<group>"; };
+		A8B3ACAA832092748A58D823 /* freeq.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = freeq.entitlements; sourceTree = "<group>"; };
 		A968D5C7244372A54881C91E /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConfig.swift; sourceTree = "<group>"; };
 		B28D17294C06F964661A5E97 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		B3200A9C4EB97C507BCBA97D /* AvSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvSessionTests.swift; sourceTree = "<group>"; };
@@ -230,6 +270,7 @@
 				A03375CBD6C2B0D82185AFA1 /* SwiftUI.framework in Frameworks */,
 				E9AE8C52F18B1C58ACB180F0 /* WidgetKit.framework in Frameworks */,
 				590DB15E36CC6FECFC8FB1B6 /* ActivityKit.framework in Frameworks */,
+				83A5C0410F5BA87B169691A9 /* AppIntents.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -254,6 +295,8 @@
 			isa = PBXGroup;
 			children = (
 				A725C856D7878BE6382208F3 /* CallLiveActivity.swift */,
+				91F044172E9ED1953844ED0F /* freeqLiveActivity.entitlements */,
+				933008C0AA1EEB82FD56DE5D /* FreeqWidgets.swift */,
 				4B104E4524C40F44A9FDE40D /* Info.plist */,
 			);
 			path = freeqLiveActivity;
@@ -263,6 +306,7 @@
 			isa = PBXGroup;
 			children = (
 				5402990427FB4D600E4D9BA6 /* ActivityKit.framework */,
+				797AA7726B164D6F5656D5EE /* AppIntents.framework */,
 				652094AB12E394FEA901DE7E /* AudioToolbox.framework */,
 				77A2F5FB32DA2A3EA346FB5C /* AVFAudio.framework */,
 				0115700FA5AE53FD60E9FEAA /* CoreAudio.framework */,
@@ -290,6 +334,7 @@
 		61E33474A1CF28E1773E8788 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				09AFFD5DE516371B6CC31172 /* AudioTestView.swift */,
 				58407D4C1041AA5F085B8CDC /* BlueskyEmbed.swift */,
 				1613B43E3F87D0A8567A57BB /* CallView.swift */,
 				7209B1DA2E14FE9EC7681E46 /* CatchUpDigestSheet.swift */,
@@ -318,6 +363,7 @@
 				F40F27BC70CA9C7E4307D2A3 /* SearchSheet.swift */,
 				5B107817CBF9268860E40AC0 /* SettingsTab.swift */,
 				34D75D9768B423C15C80F711 /* SidebarView.swift */,
+				5E30BF0C98AC2E9B7A006E95 /* SplitRootView.swift */,
 				908FF04F8C100160DE7BABD5 /* StatusEditorSheet.swift */,
 				83E16EC2E4202D7B88D8DEDE /* ThreadView.swift */,
 				E434E1E24A88662FBDFFCA35 /* ToastView.swift */,
@@ -378,6 +424,8 @@
 			isa = PBXGroup;
 			children = (
 				7278D584F74B58B9922F23BC /* CallActivityAttributes.swift */,
+				40EA2E012985430B01C97EBC /* CallControlIntents.swift */,
+				03FEC306B6E024D2BBF561BE /* SharedStore.swift */,
 				13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */,
 			);
 			path = freeqShared;
@@ -388,6 +436,7 @@
 			children = (
 				7C22534FE12207F730D56732 /* Assets.xcassets */,
 				4CC6F468E7EEBA9A6B686019 /* ContentView.swift */,
+				A8B3ACAA832092748A58D823 /* freeq.entitlements */,
 				D10926193239F585762C38F1 /* freeqApp.swift */,
 				CAB74C30074754BEE8F190DE /* PrivacyInfo.xcprivacy */,
 				4C056AC763D7872C28041B3E /* Theme.swift */,
@@ -443,13 +492,16 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 0F105F8BFDF6546C63D2203F /* Build configuration list for PBXNativeTarget "freeq" */;
 			buildPhases = (
+				504456F61385749656F9C659 /* Check Rust FFI freshness */,
 				C5CAD8FF792DB1121C984617 /* Sources */,
 				62F2BE05AD35A2334555DE91 /* Resources */,
 				323F50C5F8CC41EF7DA22A4A /* Frameworks */,
+				C96E85383E63CFBE9587C782 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				A96A68657492C20E953380C4 /* PBXTargetDependency */,
 			);
 			name = freeq;
 			packageProductDependencies = (
@@ -555,6 +607,28 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
+/* Begin PBXShellScriptBuildPhase section */
+		504456F61385749656F9C659 /* Check Rust FFI freshness */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Check Rust FFI freshness";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/scripts/check-ffi-source-fresh.sh\"";
+		};
+/* End PBXShellScriptBuildPhase section */
+
 /* Begin PBXSourcesBuildPhase section */
 		3B14AD7198975090F90FF8F8 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
@@ -573,6 +647,8 @@
 				921A10E0801AE63FDE98EB69 /* BufferDetailView.swift in Sources */,
 				F7C61B31B1D336F554B9F657 /* BufferListView.swift in Sources */,
 				225C9CA8B4202A0AA15DD60C /* CallActivityAttributes.swift in Sources */,
+				E4A6EAC9BD855433858D2F7A /* CallControlIntents.swift in Sources */,
+				968D06E61F78B48BE723CCA8 /* SharedStore.swift in Sources */,
 				E5597772C5D44A3D46FD0F8A /* WatchPayloads.swift in Sources */,
 				2DAA75F33F0F0DF1E697A19A /* WatchSession.swift in Sources */,
 				6CF94674DE60637F09B1C0B1 /* freeqWatchApp.swift in Sources */,
@@ -584,12 +660,14 @@
 			buildActionMask = 2147483647;
 			files = (
 				95571CB3A530D8A2555D2BE3 /* AppState.swift in Sources */,
+				45EE47A41295B02CF2A3A689 /* AudioTestView.swift in Sources */,
 				60D412BDDBD48D2DF28501C4 /* AuthSession.swift in Sources */,
 				E64ACA5D2EE7181CC0ACBF67 /* AvatarCache.swift in Sources */,
 				BBBACE23B6893E0329291726 /* BlueskyEmbed.swift in Sources */,
 				C188CB44680B51C598EEDA18 /* BlueskyGraph.swift in Sources */,
 				B2DF4E800D832B107555FD28 /* CallActivityAttributes.swift in Sources */,
 				ECAFF392124C53BB4F56182B /* CallCameraCapture.swift in Sources */,
+				3388DF50A1619B493BB018C1 /* CallControlIntents.swift in Sources */,
 				FACB4B51AB62E6D09EB8121A /* CallKitManager.swift in Sources */,
 				B851BB1F9C23ED67884D5621 /* CallMicCapture.swift in Sources */,
 				0D90DB6A860ED297CC10A2CF /* CallView.swift in Sources */,
@@ -629,7 +707,9 @@
 				B792746D241CB91D4B15E377 /* SearchSheet.swift in Sources */,
 				7CE09F1FC8607BC12D448A0D /* ServerConfig.swift in Sources */,
 				E54F6F22FE39E885EFCBE309 /* SettingsTab.swift in Sources */,
+				90E36A9344A176609A6BFAB1 /* SharedStore.swift in Sources */,
 				2319759DBFF8EEDBBA34CD02 /* SidebarView.swift in Sources */,
+				398FB4288B111CB2E4FBD016 /* SplitRootView.swift in Sources */,
 				1D0A256D49EDDC69B0E09E66 /* SpotlightIndexer.swift in Sources */,
 				6D8E851C233BB10642BA1220 /* StatusEditorSheet.swift in Sources */,
 				5E8956E8A2AEB6B4ED4F5649 /* StepUpAuth.swift in Sources */,
@@ -652,7 +732,10 @@
 			buildActionMask = 2147483647;
 			files = (
 				928C6971DC2E4A47CED47A35 /* CallActivityAttributes.swift in Sources */,
+				AA5C84EC4D1A8D5C37828312 /* CallControlIntents.swift in Sources */,
 				FF41A75897B0A7362F61B210 /* CallLiveActivity.swift in Sources */,
+				FDE5E359F82F3C4B1F520647 /* FreeqWidgets.swift in Sources */,
+				D5642F5E361D42D539291B69 /* SharedStore.swift in Sources */,
 				1F2A16FBB786A03B28150914 /* WatchPayloads.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -660,6 +743,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		A96A68657492C20E953380C4 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 8FB43BFB4C70E7C933CE0D5C /* freeqLiveActivity */;
+			targetProxy = 869DAC998A9EF2F08C26821A /* PBXContainerItemProxy */;
+		};
 		ED0B35AF332BD6C1C3705D15 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = 715097527A8802437490DEDD /* freeq */;
@@ -761,6 +849,7 @@
 		76A94779B55F22F1396F8B51 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = freeqLiveActivity/freeqLiveActivity.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 3DT7XF7L4R;
 				INFOPLIST_FILE = freeqLiveActivity/Info.plist;
@@ -801,6 +890,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = freeq/freeq.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -890,6 +980,7 @@
 		B7FAF49B51E90FB5E9DF351B /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = freeqLiveActivity/freeqLiveActivity.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				DEVELOPMENT_TEAM = 3DT7XF7L4R;
 				INFOPLIST_FILE = freeqLiveActivity/Info.plist;
@@ -925,6 +1016,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = freeq/freeq.entitlements;
 				CODE_SIGN_IDENTITY = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

@@ -7,7 +7,7 @@ struct JoinChannelSheet: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 

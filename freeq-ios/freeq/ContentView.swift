@@ -15,13 +15,22 @@ import SwiftUI
 /// Logout now, not as a 45-second cliff on the cold-launch spinner.
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     var body: some View {
         Group {
-            // Show MainTabView for either a persisted session (cold-launch
-            // instant render from cache) or a live registered connection.
+            // Show the main experience for either a persisted session
+            // (cold-launch instant render from cache) or a live connection.
             if appState.hasSavedSession || appState.connectionState == .registered {
-                MainTabView()
+                // Regular width (iPad, landscape) → two-column split view;
+                // compact (iPhone) → the bottom-tab layout, untouched.
+                Group {
+                    if horizontalSizeClass == .regular {
+                        SplitRootView()
+                    } else {
+                        MainTabView()
+                    }
+                }
                     .safeAreaInset(edge: .top, spacing: 0) {
                         if appState.connectionState != .registered {
                             ConnectionStatusBanner()

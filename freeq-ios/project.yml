@@ -14,6 +14,10 @@ targets:
           - Info.plist
       - path: Generated/freeq.swift
       - path: freeqShared
+    preBuildScripts:
+      - name: Check Rust FFI freshness
+        script: '"$SRCROOT/scripts/check-ffi-source-fresh.sh"'
+        basedOnDependencyAnalysis: false
     info:
       path: freeq/Info.plist
       properties:
@@ -31,6 +35,9 @@ targets:
         NSSpeechRecognitionUsageDescription: "freeq transcribes your voice messages on-device so they're searchable and accessible. The audio never leaves your phone for transcription."
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
+        # Handoff — continue an open conversation on another device.
+        NSUserActivityTypes:
+          - at.freeq.channel
         CFBundleURLTypes:
           - CFBundleURLName: at.freeq.auth
             CFBundleURLSchemes:
@@ -43,6 +50,7 @@ targets:
         DEVELOPMENT_TEAM: 3DT7XF7L4R
         CODE_SIGN_IDENTITY: "Apple Development"
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: freeq/freeq.entitlements
         OTHER_LDFLAGS:
           - "-ObjC"
           - "-lc++"   # libfreeq_sdk_ffi.a transitively links openh264 (C++)
@@ -55,7 +63,8 @@ targets:
       - sdk: Network.framework
       - sdk: Security.framework
       - sdk: WatchConnectivity.framework
-      # - target: freeqLiveActivity   # temporarily disabled until provisioning is set up in Xcode
+      - target: freeqLiveActivity
+        embed: true
       # - target: freeqWatch
       #   embed: true
 
@@ -76,12 +85,14 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: at.freeq.ios.liveactivity
         DEVELOPMENT_TEAM: 3DT7XF7L4R
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: freeqLiveActivity/freeqLiveActivity.entitlements
         IPHONEOS_DEPLOYMENT_TARGET: "18.0"
         SWIFT_EMIT_LOC_STRINGS: "YES"
     dependencies:
       - sdk: SwiftUI.framework
       - sdk: WidgetKit.framework
       - sdk: ActivityKit.framework
+      - sdk: AppIntents.framework
 
   freeqWatch:
     type: application

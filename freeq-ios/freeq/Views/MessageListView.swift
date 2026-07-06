@@ -16,6 +16,33 @@ struct MessageListView: View {
     @State private var isNearBottom = true
     /// Throttle so a rapid scroll-up doesn't spam CHATHISTORY requests.
     @State private var lastHistoryFetch: Date = .distantPast
+    /// Celebratory reaction burst — set when you add a positive reaction.
+    @State private var reactionBurst: ReactionBurstEvent? = nil
+    /// Channels whose "while you were away" card the user dismissed this view.
+    @State private var awayCardDismissed: Set<String> = []
+
+    /// Show the on-device catch-up card when you open a channel with a real
+    /// backlog and on-device intelligence is available.
+    private var showAwayCard: Bool {
+        (appState.awayCardCounts[channel.name] ?? 0) >= 4
+            && !awayCardDismissed.contains(channel.name)
+            && IntelligenceService.shared.isAvailable
+    }
+
+    private func dismissAwayCard() {
+        awayCardDismissed.insert(channel.name)
+        appState.awayCardCounts[channel.name] = 0
+    }
+
+    /// Emoji that get a floating particle burst when you react with them.
+    private static let celebratoryReactions: Set<String> = ["❤️", "🎉", "🔥", "😂", "👍"]
+
+    /// Fire a particle burst if `emoji` is celebratory (called from every
+    /// reaction-add path). Reduce Motion suppresses the visual in the view.
+    private func celebrate(_ emoji: String) {
+        guard Self.celebratoryReactions.contains(emoji) else { return }
+        reactionBurst = ReactionBurstEvent(emoji: emoji)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -196,12 +223,43 @@ struct MessageListView: View {
                         .cornerRadius(14)
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
                     }
+                    .accessibilityLabel("Scroll to latest messages")
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .animation(.spring(response: 0.3), value: showScrollButton)
                 }
+
+                // Celebratory reaction burst — floats up from the bottom.
+                if let burst = reactionBurst {
+                    ReactionBurstView(emoji: burst.emoji)
+                        .id(burst.id)
+                        .allowsHitTesting(false)
+                        .onAppear {
+                            // Clear after the animation so it can retrigger.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                                if reactionBurst?.id == burst.id { reactionBurst = nil }
+                            }
+                        }
+                }
+
+                // "While you were away" — a floating, on-device catch-up card
+                // pinned to the top when you open a channel with a backlog.
+                if showAwayCard {
+                    VStack {
+                        WhileYouWereAwayCard(
+                            channel: channel,
+                            missed: appState.awayCardCounts[channel.name] ?? 0,
+                            onDismiss: { withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { dismissAwayCard() } }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                        Spacer()
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .animation(.spring(response: 0.45, dampingFraction: 0.85), value: showAwayCard)
             .onChange(of: channel.messages.count) {
                 onNewMessages(proxy: proxy)
             }
@@ -307,6 +365,7 @@ struct MessageListView: View {
         // Quick reactions
         ForEach(["👍", "❤️", "😂", "🎉"], id: \.self) { emoji in
             Button(action: {
+                celebrate(emoji)
                 appState.sendReaction(target: channel.name, msgId: msg.id, emoji: emoji)
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }) {
@@ -386,26 +445,37 @@ struct MessageListView: View {
     // MARK: - Typing Indicator
 
     private var typingIndicator: some View {
-        HStack(spacing: 8) {
+        let typers = channel.activeTypers
+        return HStack(spacing: 8) {
+            // Whoever's actually typing, as overlapping avatars — the indicator
+            // feels human when you can see who it is, not anonymous dots.
+            HStack(spacing: -8) {
+                ForEach(Array(typers.prefix(3)), id: \.self) { nick in
+                    UserAvatar(nick: nick, size: 22)
+                        .overlay(Circle().strokeBorder(Theme.bgPrimary, lineWidth: 2))
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+
             // Animated bouncing dots
             TypingDots()
 
-            let typers = channel.activeTypers
             if typers.count == 1 {
-                Text("\(typers[0]) is typing...")
+                Text("\(typers[0]) is typing…")
                     .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             } else if typers.count == 2 {
-                Text("\(typers[0]) and \(typers[1]) are typing...")
+                Text("\(typers[0]) and \(typers[1]) are typing…")
                     .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             } else if typers.count > 2 {
-                Text("\(typers.count) people are typing...")
+                Text("\(typers.count) people are typing…")
                     .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             }
         }
-        .padding(.leading, 68)
+        .padding(.leading, 20)
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: typers)
     }
 
     // MARK: - Unread Separator
@@ -523,9 +593,13 @@ struct MessageListView: View {
         let isSelf = msg.from.lowercased() == appState.nick.lowercased()
         let mention = isMention(msg) && !isSelf
         let pinned = channel.pins.contains(msg.id)
+        // Resolve the sender's member entry once — it was previously scanned
+        // three times per header row (verified badge, name prefix, signed
+        // proof), each an O(members) lowercased linear search.
+        let member = channel.memberInfo(for: msg.from)
         // Verification is DID-anchored (identity we resolved), not "has an
         // avatar" — one consistent definition of verified across the app.
-        let verified = msg.origin == nil && channel.memberInfo(for: msg.from)?.did != nil
+        let verified = msg.origin == nil && member?.did != nil
 
         VStack(alignment: .leading, spacing: 0) {
             // Reply context — tap to open thread
@@ -550,9 +624,14 @@ struct MessageListView: View {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Button(action: { profileTarget = ProfileNickTarget(nick: msg.from, origin: msg.origin) }) {
                                 HStack(spacing: 4) {
-                                    Text((channel.memberInfo(for: msg.from)?.prefix ?? "") + msg.from)
+                                    Text((member?.prefix ?? "") + msg.from)
                                         .font(.fqSubheadline.weight(.bold))
                                         .foregroundColor(Theme.nickColor(for: msg.from))
+                                        // A DID-verified person just spoke — sweep the
+                                        // name with the signal glow once, so freeq's
+                                        // "provably a real person" is felt, not just read.
+                                        // Only for live arrivals, never history scroll-in.
+                                        .signalShimmer(active: verified && msg.timestamp.timeIntervalSinceNow > -8)
 
                                     if verified {
                                         VerifiedBadge(size: 12)
@@ -575,9 +654,10 @@ struct MessageListView: View {
                                 .foregroundColor(Theme.textMuted)
 
                             if msg.origin == nil && msg.isSigned {
-                                let senderDID = channel.memberInfo(for: msg.from)?.did
+                                let senderDID = member?.did
                                 Button {
                                     if let did = senderDID {
+                                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
                                         proofTarget = ProofTarget(did: did, handle: nil, msgId: msg.id)
                                     }
                                 } label: {
@@ -652,6 +732,7 @@ struct MessageListView: View {
         }
         // Double-tap to react with ❤️
         .onTapGesture(count: 2) {
+            celebrate("❤️")
             appState.sendReaction(target: channel.name, msgId: msg.id, emoji: "❤️")
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
@@ -702,6 +783,7 @@ struct MessageListView: View {
                     if isMine {
                         channel.removeReaction(msgId: msg.id, emoji: emoji, from: appState.nick)
                     } else {
+                        celebrate(emoji)
                         channel.applyReaction(msgId: msg.id, emoji: emoji, from: appState.nick)
                     }
                     appState.toggleReaction(target: channel.name, msgId: msg.id, emoji: emoji, currentlyMine: isMine)
@@ -727,6 +809,8 @@ struct MessageListView: View {
                 }
                 .buttonStyle(.plain)
                 .sensoryFeedback(.impact(weight: .light), trigger: isMine)
+                .accessibilityLabel("\(emoji) reaction, \(nicks.count)")
+                .accessibilityHint(isMine ? "Double-tap to remove your reaction" : "Double-tap to react")
             }
         }
     }
@@ -741,6 +825,16 @@ struct MessageListView: View {
     private static let ytPattern = try! NSRegularExpression(
         pattern: #"(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})"#
     )
+
+    // Markdown inline patterns — compiled once (they were being recompiled on
+    // every render of every visible row; NSRegularExpression construction is
+    // expensive). Mirrors the cached bsky/yt patterns above.
+    private static let mdCodeBlock = try! NSRegularExpression(pattern: #"```(?:\w*\n?)?([\s\S]*?)```"#)
+    private static let mdBold = try! NSRegularExpression(pattern: #"\*\*(.+?)\*\*"#)
+    private static let mdItalic = try! NSRegularExpression(pattern: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#)
+    private static let mdStrike = try! NSRegularExpression(pattern: #"~~(.+?)~~"#)
+    private static let mdInlineCode = try! NSRegularExpression(pattern: #"(?<!`)`(?!`)([^`\n]+)(?<!`)`(?!`)"#)
+    private static let mdURL = try! NSRegularExpression(pattern: #"https?://[^\s<>\]\)]+"#)
 
     @ViewBuilder
     private func messageBody(_ msg: ChatMessage) -> some View {
@@ -961,69 +1055,54 @@ struct MessageListView: View {
         var result = AttributedString(text)
         let nsRange = NSRange(text.startIndex..., in: text)
 
+        // Fonts use Dynamic-Type text styles (not fixed .system(size:)) so
+        // formatted message text scales with the user's content-size setting.
+
         // Code blocks: ```text``` (must be before inline code)
-        let codeBlockPattern = #"```(?:\w*\n?)?([\s\S]*?)```"#
-        if let regex = try? NSRegularExpression(pattern: codeBlockPattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 13, design: .monospaced)
-                    result[range].backgroundColor = Theme.bgTertiary
-                }
+        for match in Self.mdCodeBlock.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.callout, design: .monospaced)
+                result[range].backgroundColor = Theme.bgTertiary
             }
         }
 
         // Bold: **text**
-        let boldPattern = #"\*\*(.+?)\*\*"#
-        if let regex = try? NSRegularExpression(pattern: boldPattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 15, weight: .bold)
-                }
+        for match in Self.mdBold.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.body, weight: .bold)
             }
         }
 
         // Italic: *text* (but not **text**)
-        let italicPattern = #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#
-        if let regex = try? NSRegularExpression(pattern: italicPattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 15).italic()
-                }
+        for match in Self.mdItalic.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.body).italic()
             }
         }
 
         // Strikethrough: ~~text~~
-        let strikePattern = #"~~(.+?)~~"#
-        if let regex = try? NSRegularExpression(pattern: strikePattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].strikethroughStyle = .single
-                    result[range].foregroundColor = Theme.textMuted
-                }
+        for match in Self.mdStrike.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].strikethroughStyle = .single
+                result[range].foregroundColor = Theme.textMuted
             }
         }
 
         // Inline code: `text` (skip if inside code block)
-        let codePattern = #"(?<!`)`(?!`)([^`\n]+)(?<!`)`(?!`)"#
-        if let regex = try? NSRegularExpression(pattern: codePattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 14, design: .monospaced)
-                    result[range].backgroundColor = Theme.bgTertiary
-                }
+        for match in Self.mdInlineCode.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.body, design: .monospaced)
+                result[range].backgroundColor = Theme.bgTertiary
             }
         }
 
         // Clickable URLs
-        let urlPattern = #"https?://[^\s<>\]\)]+"#
-        if let regex = try? NSRegularExpression(pattern: urlPattern) {
-            for match in regex.matches(in: text, range: nsRange) {
-                if let swiftRange = Range(match.range, in: text),
-                   let attrRange = Range(match.range, in: result),
-                   let url = URL(string: String(text[swiftRange])) {
-                    result[attrRange].link = url
-                    result[attrRange].foregroundColor = Theme.accent
-                }
+        for match in Self.mdURL.matches(in: text, range: nsRange) {
+            if let swiftRange = Range(match.range, in: text),
+               let attrRange = Range(match.range, in: result),
+               let url = URL(string: String(text[swiftRange])) {
+                result[attrRange].link = url
+                result[attrRange].foregroundColor = Theme.accent
             }
         }
 
@@ -1126,6 +1205,7 @@ struct EmojiPickerSheet: View {
 
 struct TypingDots: View {
     @State private var animating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 3) {
@@ -1133,9 +1213,10 @@ struct TypingDots: View {
                 Circle()
                     .fill(Theme.textMuted)
                     .frame(width: 6, height: 6)
-                    .offset(y: animating ? -4 : 2)
+                    .offset(y: (animating && !reduceMotion) ? -4 : 2)
                     .animation(
-                        .easeInOut(duration: 0.4)
+                        reduceMotion ? nil :
+                            .easeInOut(duration: 0.4)
                             .repeatForever(autoreverses: true)
                             .delay(Double(i) * 0.15),
                         value: animating
@@ -1143,6 +1224,7 @@ struct TypingDots: View {
             }
         }
         .onAppear { animating = true }
+        .accessibilityLabel("Typing")
     }
 }
 
@@ -1347,6 +1429,8 @@ struct InlineAudioPlayer: View {
                 }
             }
             .disabled(isDownloading)
+            .accessibilityLabel(loadError ? "Voice message failed to load"
+                                 : isPlaying ? "Pause voice message" : "Play voice message")
 
             VStack(alignment: .leading, spacing: 6) {
                 // Label
@@ -1580,26 +1664,32 @@ extension MessageListView {
 
 struct ShimmerModifier: ViewModifier {
     @State private var phase: CGFloat = -1.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
             .overlay(
                 GeometryReader { geo in
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.clear, .white.opacity(0.08), .clear],
-                                startPoint: .leading,
-                                endPoint: .trailing
+                    // Reduce Motion: skip the sweeping highlight (a static
+                    // placeholder tint stands in) so loading skeletons don't
+                    // animate for users who've asked the system not to.
+                    if !reduceMotion {
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.clear, .white.opacity(0.08), .clear],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
                             )
-                        )
-                        .frame(width: geo.size.width * 0.6)
-                        .offset(x: geo.size.width * phase)
-                        .onAppear {
-                            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                                phase = 1.5
+                            .frame(width: geo.size.width * 0.6)
+                            .offset(x: geo.size.width * phase)
+                            .onAppear {
+                                withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                                    phase = 1.5
+                                }
                             }
-                        }
+                    }
                 }
                 .clipped()
             )
@@ -1609,5 +1699,181 @@ struct ShimmerModifier: ViewModifier {
 extension View {
     func shimmering() -> some View {
         modifier(ShimmerModifier())
+    }
+
+    /// One-time signal-glow sweep across the content when `active` — used to
+    /// make a verified identity's arrival feel special. No-op under Reduce
+    /// Motion.
+    func signalShimmer(active: Bool) -> some View {
+        modifier(SignalShimmerOnce(active: active))
+    }
+}
+
+/// On-device "while you were away" catch-up card. Streams a one-sentence
+/// summary of the backlog in, Apple-Intelligence style, then sits until
+/// dismissed. Private + on-device — no other IRC client can do this.
+struct WhileYouWereAwayCard: View {
+    let channel: ChannelState
+    let missed: Int
+    let onDismiss: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var summary = ""
+    @State private var loading = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.signalGradient)
+                    .symbolEffect(.pulse, isActive: loading && !reduceMotion)
+                Text("While you were away")
+                    .font(.fqFootnote.weight(.semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer()
+                Text("\(missed)")
+                    .font(.fqCaption2.weight(.bold))
+                    .foregroundColor(Theme.accent)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Theme.accent.opacity(0.15), in: Capsule())
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Theme.textMuted)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss summary")
+            }
+
+            if loading && summary.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.7).tint(Theme.accent)
+                    Text("Summarizing on-device…")
+                        .font(.fqCaption).foregroundColor(Theme.textMuted)
+                }
+            } else {
+                Text(summary.isEmpty ? "Nothing much — you're basically caught up." : summary)
+                    .font(.fqCallout)
+                    .foregroundColor(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .animation(.easeOut(duration: 0.15), value: summary)
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        .task {
+            // Summarize the backlog that arrived while away (API caps at 40).
+            let msgs = Array(channel.messages.suffix(min(missed + 2, 40)))
+            let result = await IntelligenceService.shared.summarizeStreaming(msgs, in: channel.name) { partial in
+                summary = partial
+                loading = false
+            }
+            loading = false
+            if summary.isEmpty, let result { summary = result }
+        }
+    }
+}
+
+/// Identifies a single reaction burst so the overlay retriggers on each react.
+struct ReactionBurstEvent: Identifiable {
+    let id = UUID()
+    let emoji: String
+}
+
+/// A short burst of the reacted emoji that floats up and fades — iMessage-style
+/// screen joy for a celebratory reaction. One particle system, ~1.2s, then
+/// gone. No-op under Reduce Motion.
+struct ReactionBurstView: View {
+    let emoji: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animate = false
+
+    private let count = 14
+
+    var body: some View {
+        GeometryReader { geo in
+            if !reduceMotion {
+                ZStack {
+                    ForEach(0..<count, id: \.self) { i in
+                        Particle(emoji: emoji, index: i, count: count, size: geo.size, animate: animate)
+                    }
+                }
+                .onAppear {
+                    withAnimation(.easeOut(duration: 1.2)) { animate = true }
+                }
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private struct Particle: View {
+        let emoji: String
+        let index: Int
+        let count: Int
+        let size: CGSize
+        let animate: Bool
+
+        // Deterministic pseudo-random spread from the index so we don't need a
+        // random source (which SwiftUI would re-roll on every re-render).
+        private var seed: Double { Double((index * 2654435761) % 1000) / 1000.0 }
+        private var seed2: Double { Double((index * 40503) % 1000) / 1000.0 }
+
+        var body: some View {
+            let startX = size.width * (0.2 + 0.6 * seed)
+            let drift = CGFloat((seed2 - 0.5) * 120)
+            let rise = size.height * CGFloat(0.45 + 0.35 * seed2)
+            let scale = 0.7 + 0.9 * seed
+
+            Text(emoji)
+                .font(.system(size: 26))
+                .scaleEffect(animate ? scale : 0.2)
+                .position(
+                    x: startX + (animate ? drift : 0),
+                    y: size.height - 90 - (animate ? rise : 0)
+                )
+                .rotationEffect(.degrees(animate ? Double((seed - 0.5) * 90) : 0))
+                .opacity(animate ? 0 : 1)
+        }
+    }
+}
+
+/// A single left-to-right highlight sweep, masked to the content's shape, that
+/// plays once when it appears. Distinct from `ShimmerModifier` (which loops for
+/// loading skeletons) — this is a one-shot celebratory glint.
+struct SignalShimmerOnce: ViewModifier {
+    let active: Bool
+    @State private var phase: CGFloat = -1.0
+    @State private var done = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if active && !reduceMotion && !done {
+                    GeometryReader { geo in
+                        LinearGradient(
+                            colors: [.clear, Theme.accentLight, Theme.accent, .clear],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .frame(width: geo.size.width * 0.55)
+                        .offset(x: geo.size.width * phase)
+                        .blendMode(.plusLighter)
+                        .mask(content)
+                        .allowsHitTesting(false)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.85)) { phase = 1.7 }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { done = true }
+                        }
+                    }
+                }
+            }
     }
 }

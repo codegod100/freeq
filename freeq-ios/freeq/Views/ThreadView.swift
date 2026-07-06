@@ -43,7 +43,7 @@ struct ThreadView: View {
     @StateObject private var avatarCache = AvatarCache.shared
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 

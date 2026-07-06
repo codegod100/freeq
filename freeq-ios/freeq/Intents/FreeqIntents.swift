@@ -133,6 +133,32 @@ struct ReadLatestIntent: AppIntent {
     }
 }
 
+// MARK: - Start call
+
+struct StartCallIntent: AppIntent {
+    static var title: LocalizedStringResource = "Start Call"
+    static var description = IntentDescription("Start or join the voice call in a freeq channel.")
+    static var openAppWhenRun: Bool = true
+
+    @Parameter(title: "Channel", requestValueDialog: "Which channel?")
+    var channel: ChannelEntity
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        guard let state = AppState.shared else {
+            throw $channel.needsValueError("freeq isn't running yet — open the app first.")
+        }
+        // Calls are channel-only; route to the channel and start/join voice.
+        let name = channel.id
+        guard name.hasPrefix("#") || name.hasPrefix("&") else {
+            return .result()
+        }
+        state.activeChannel = name
+        state.startOrJoinVoice(channel: name)
+        return .result()
+    }
+}
+
 // MARK: - Shortcuts surfacing
 
 struct FreeqShortcuts: AppShortcutsProvider {
@@ -163,6 +189,15 @@ struct FreeqShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Read Latest",
             systemImageName: "speaker.wave.2"
+        )
+        AppShortcut(
+            intent: StartCallIntent(),
+            phrases: [
+                "Start a call in \(\.$channel) on \(.applicationName)",
+                "Join the call in \(\.$channel) on \(.applicationName)"
+            ],
+            shortTitle: "Start Call",
+            systemImageName: "phone.fill"
         )
     }
 }
