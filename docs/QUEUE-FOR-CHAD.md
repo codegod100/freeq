@@ -135,6 +135,12 @@ On chad@tech.blueyard.com (see memory: deploy = git pull + build + restart):
       keep working, new scoped clients get server-enforced isolation)
 - [ ] freeq-auth-broker with S3 (dead sessions → 401; ends the
       "Reconnecting… forever instead of sign-in" class for everyone)
+- [ ] freeq-server with AV session tokens (2026-07-05, backward-compatible:
+      server mints + delivers per-session MoQ JWTs, web client already sends
+      them; legacy clients still connect). Later, once iOS/macOS/Android app
+      layers pass the token through, set `FREEQ_AV_REQUIRE_TOKEN=1` on the
+      service to close the open-SFU hole for good — same coordinated-flip
+      pattern as S2. Details: docs/AV-ARCHITECTURE.md §Security.
 After the server deploy, say the word and the native FFI + web get flipped
 to the scoped dial URL (client patches will be ready and noted in the log).
 

@@ -224,13 +224,33 @@ CREATE TABLE av_artifacts (
 
 ### Security (current state)
 
-**Not production-ready.** The MoQ SFU has no authentication:
-- `auth_config.public = Some("/")` — all paths public
-- No channel membership check on WebSocket upgrade
-- No session participant verification
-- Broadcast names are guessable (`{session_id}/{nick}`)
+**Session-token auth implemented (2026-07-05), enforcement behind a flag.**
 
-Before production: add JWT tokens issued on session join, validated on SFU connect.
+The SFU mints per-session JWTs (HS256, key at `{data_dir}/av-token-key.secret`,
+0600, persisted across restarts):
+
+- **Minting:** on a successful `av-start`/`av-join` the server sends the joiner
+  a directed TAGMSG with `+freeq.at/av-token` + `+freeq.at/av-id`. REST
+  fallback: `GET /api/v1/av/sessions/{id}/token` (Bearer session whose DID is
+  an active participant).
+- **Claims:** publish+subscribe scoped to `{sid}/…` and `s/{sid}/…` only —
+  a token for call A grants *nothing* in call B (guessable broadcast names no
+  longer matter). 24h expiry.
+- **Presenting:** clients append `?jwt=<token>` to the dial URL. Both
+  transports honor it (QUIC via `AuthParams::from_url`, WebSocket via the
+  upgrade query string). Web client + JS SDK wired; native FFI preserves any
+  query string on `server_url` so Swift/Kotlin layers can pass the token
+  without a UDL change.
+- **Enforcement:** `FREEQ_AV_REQUIRE_TOKEN=1` makes tokens mandatory
+  (tokenless connects rejected). Default is migration mode — legacy clients
+  still connect at the public root, with a startup warning. Flip the env var
+  once all shipped clients send tokens (same coordinated-rollout pattern as
+  `SCOPED_SESSIONS`). An invalid token is rejected in BOTH modes — it never
+  falls back to public access.
+
+Remaining before the flip: iOS/macOS/Android app layers must read the
+`avToken` event (or av-token TAGMSG) and append it to the FFI `server_url`;
+agent clients (eliza, claude-mcp, freeq-av-client) likewise.
 
 ### Feature flags
 
