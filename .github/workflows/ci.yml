@@ -165,3 +165,23 @@ jobs:
       - name: Run interaction smoke test
         working-directory: freeq-macos
         run: ./scripts/smoke.sh
+
+  android-unit:
+    name: Android Client (JVM unit tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Mirrors ios-swift / macos-swift: runs the pure-logic JVM unit suite
+      # (routers, reconnect, batching, unread, pin cache). The FFI Kotlin
+      # bindings are checked in and the tests don't load the native lib, so no
+      # Rust toolchain, NDK, or emulator is needed. Compiling the test variant
+      # also compiles the app's Kotlin, so this catches build breaks too.
+      - name: Run unit tests
+        working-directory: freeq-android
+        run: ./gradlew testFreeqDebugUnitTest
