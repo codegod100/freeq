@@ -209,6 +209,7 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/api/v1/signing-key", get(api_signing_key))
         .route("/api/v1/signing-keys/{did}", get(api_did_signing_key))
         .route("/api/v1/verify/{msgid}", get(api_verify_message))
+        .route("/api/v1/channels/{name}/evidence", get(api_channel_evidence))
         .route("/api/v1/actors/{did}", get(api_actor_identity))
         .route(
             "/api/v1/channels/{name}/agent-capabilities",
@@ -233,6 +234,7 @@ pub fn router(state: Arc<SharedState>) -> Router {
         // AV SFU WebSocket endpoint (MoQ over WebSocket for browser/native clients)
         .route("/av/moq", get(av_moq_ws_root))
         .route("/av/moq/{*path}", get(av_moq_ws))
+        .route("/api/v1/av/sessions/{id}/token", get(api_av_session_token))
         // AV sessions
         .route("/api/v1/sessions", get(api_sessions_list))
         .route("/api/v1/sessions/{id}", get(api_session_detail))
@@ -1034,6 +1036,102 @@ async fn api_actor_identity(
     }
 
     Ok(Json(result))
+}
+
+/// GET /api/v1/channels/{name}/evidence?limit=&before=
+///
+/// Exports a self-contained, offline-verifiable evidence bundle for a channel:
+/// the message range, each message's `+freeq.at/sig`, the per-DID client
+/// signing keys and the server signing key needed to check them, and a
+/// server signature over the whole bundle. `freeq-verify` (the offline CLI)
+/// recomputes each message's canonical form
+/// (`{did}\0{channel}\0{text}\0{timestamp}`) and checks the signatures with no
+/// server contact — so a third party who trusts neither the participants nor
+/// the server can confirm nothing was altered.
+///
+/// Authorization mirrors CHATHISTORY/search: public channels export openly,
+/// restricted (+i/+k) channels require a member Bearer.
+async fn api_channel_evidence(
+    State(state): State<Arc<SharedState>>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let channel = authorize_channel_read(&state, &name, &headers)
+        .map_err(|code| (code, "not authorized to read this channel".to_string()))?;
+
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000)
+        .min(5000);
+    let before = params.get("before").and_then(|s| s.parse::<u64>().ok());
+
+    let rows = state
+        .with_db(|db| db.get_messages(&channel, limit, before))
+        .unwrap_or_default();
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    // Collect the per-DID client signing keys referenced by these messages.
+    let mut did_keys = serde_json::Map::new();
+    {
+        let keys = state.did_msg_keys.lock();
+        for row in &rows {
+            if let Some(did) = &row.sender_did
+                && !did_keys.contains_key(did)
+                && let Some(pk) = keys.get(did)
+            {
+                did_keys.insert(did.clone(), serde_json::Value::String(pk.clone()));
+            }
+        }
+    }
+
+    let messages: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "msgid": r.msgid,
+                "channel": r.channel,
+                "sender": r.sender,
+                "sender_did": r.sender_did,
+                "text": r.text,
+                "timestamp": r.timestamp,
+                "signature": r.tags.get("+freeq.at/sig"),
+            })
+        })
+        .collect();
+
+    let server_pubkey = b64.encode(state.msg_signing_key.verifying_key().as_bytes());
+
+    // Everything except the signature, canonicalized, then server-signed so the
+    // bundle itself is tamper-evident.
+    let mut bundle = serde_json::json!({
+        "bundle_version": "1",
+        "server_name": state.server_name,
+        "server_public_key": server_pubkey,
+        "channel": channel,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "message_count": messages.len(),
+        "did_keys": did_keys,
+        "messages": messages,
+    });
+
+    let canonical = freeq_sdk::canonical::canonicalize(&bundle)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("canonicalize: {e}")))?;
+    let sig = {
+        use ed25519_dalek::Signer;
+        state.msg_signing_key.sign(canonical.as_bytes())
+    };
+    if let Some(obj) = bundle.as_object_mut() {
+        obj.insert(
+            "bundle_signature".to_string(),
+            serde_json::Value::String(b64.encode(sig.to_bytes())),
+        );
+    }
+
+    Ok(Json(bundle))
 }
 
 async fn api_verify_message(
@@ -3571,17 +3669,21 @@ fn html_escape(s: &str) -> String {
 }
 
 /// WebSocket MoQ endpoint (root path) — upgrades to MoQ session through the SFU cluster.
+/// The `?jwt=` query param carries the session token (mirrors the QUIC
+/// transport, where `AuthParams::from_url` parses the same param).
 #[cfg(feature = "av-native")]
 async fn av_moq_ws_root(
     ws: axum::extract::WebSocketUpgrade,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     State(state): State<Arc<crate::server::SharedState>>,
 ) -> impl IntoResponse {
+    let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
     let sfu = state.sfu_state.lock().clone();
     match sfu {
         // qmux requires "webtransport" subprotocol for MoQ framing over WebSocket
         Some(sfu) => ws
             .protocols(["webtransport"])
-            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, String::new(), socket))
+            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, String::new(), jwt, socket))
             .into_response(),
         None => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -3605,15 +3707,17 @@ async fn av_moq_ws_root() -> impl IntoResponse {
 async fn av_moq_ws(
     ws: axum::extract::WebSocketUpgrade,
     Path(path): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     State(state): State<Arc<crate::server::SharedState>>,
 ) -> impl IntoResponse {
     tracing::info!(path = %path, "MoQ WebSocket upgrade with path");
 
+    let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
     let sfu = state.sfu_state.lock().clone();
     match sfu {
         Some(sfu) => ws
             .protocols(["webtransport"])
-            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, socket))
+            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, jwt, socket))
             .into_response(),
         None => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -3625,6 +3729,67 @@ async fn av_moq_ws(
 
 #[cfg(not(feature = "av-native"))]
 async fn av_moq_ws() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "AV not enabled",
+    )
+}
+
+/// GET /api/v1/av/sessions/{id}/token — mint a MoQ access token for an AV
+/// session. Requires a Bearer IRC session whose DID is an active participant
+/// (clients av-join over IRC before dialing the SFU, so this always holds by
+/// the time they need a token). The same token is also pushed over IRC as a
+/// `+freeq.at/av-token` TAGMSG on av-start/av-join; this endpoint exists for
+/// clients that find request/response easier than tag parsing (the web app).
+#[cfg(feature = "av-native")]
+async fn api_av_session_token(
+    Path(id): Path<String>,
+    State(state): State<Arc<crate::server::SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let Some(caller) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+
+    let is_active_participant = {
+        let mgr = state.av_sessions.lock();
+        mgr.get(&id)
+            .map(|s| {
+                s.participants
+                    .values()
+                    .any(|p| p.did == caller && p.left_at.is_none())
+            })
+            .unwrap_or(false)
+    };
+    if !is_active_participant {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "not an active participant of this session" })),
+        );
+    }
+
+    let sfu = state.sfu_state.lock().clone();
+    let Some(token) = sfu.and_then(|sfu| sfu.mint_session_token(&id)) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "SFU token minting unavailable" })),
+        );
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "token": token,
+            "expires_in": crate::av_sfu::AV_TOKEN_TTL_SECS,
+        })),
+    )
+}
+
+#[cfg(not(feature = "av-native"))]
+async fn api_av_session_token() -> impl IntoResponse {
     (
         axum::http::StatusCode::SERVICE_UNAVAILABLE,
         "AV not enabled",

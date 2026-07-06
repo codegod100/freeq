@@ -47,18 +47,87 @@ pub fn moq_scope_path(url_path: &str) -> String {
         .to_string()
 }
 
+/// Default lifetime of a minted session token. Long enough to cover any
+/// realistic call (tokens are only checked at connect/redial time), short
+/// enough that a leaked token goes stale within a day.
+#[cfg(feature = "av-native")]
+pub const AV_TOKEN_TTL_SECS: u64 = 24 * 60 * 60;
+
 /// Shared SFU state, accessible from the web server for WebSocket MoQ connections.
 #[cfg(feature = "av-native")]
 pub struct SfuState {
     pub cluster: moq_relay::Cluster,
     pub auth: moq_relay::Auth,
     pub conn_id: AtomicU64,
+    /// HS256 key used to mint per-session MoQ access tokens (None if key
+    /// setup failed — the SFU then runs open, as before tokens existed).
+    pub token_key: Option<Arc<moq_token::Key>>,
+    /// When true (FREEQ_AV_REQUIRE_TOKEN=1), connections without a valid
+    /// `?jwt=` token are rejected. When false the SFU stays open for
+    /// legacy clients while tokens are minted, delivered, and honored.
+    pub require_token: bool,
+}
+
+#[cfg(feature = "av-native")]
+impl SfuState {
+    /// Mint a session-scoped MoQ JWT. The claims grant publish+subscribe
+    /// under BOTH namespaces a client may root at — `{sid}/…` (legacy
+    /// clients dialing `/av/moq` with absolute broadcast paths) and
+    /// `s/{sid}/…` (S2 scoped clients dialing `/av/moq/s/{sid}` with
+    /// relative paths) — and nothing else. A token for call A can never
+    /// reach call B's media, closing the guessable-broadcast-name hole.
+    pub fn mint_session_token(&self, session_id: &str) -> Option<String> {
+        let key = self.token_key.as_ref()?;
+        let now = std::time::SystemTime::now();
+        let claims = moq_token::Claims {
+            root: String::new(),
+            publish: vec![session_id.to_string(), format!("s/{session_id}")],
+            subscribe: vec![session_id.to_string(), format!("s/{session_id}")],
+            cluster: false,
+            expires: Some(now + std::time::Duration::from_secs(AV_TOKEN_TTL_SECS)),
+            issued: Some(now),
+        };
+        match key.encode(&claims) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                tracing::warn!(session = %session_id, "failed to mint AV token: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Load the SFU token-minting key from `{data_dir}/av-token-key.secret`,
+/// generating (and persisting with 0600) a fresh HS256 key on first run.
+#[cfg(feature = "av-native")]
+fn load_or_generate_token_key(path: &std::path::Path) -> anyhow::Result<moq_token::Key> {
+    if path.exists() {
+        crate::secrets::tighten_permissions(path);
+        match moq_token::Key::from_file(path) {
+            Ok(k) => return Ok(k),
+            Err(e) => tracing::warn!(
+                path = %path.display(),
+                "Corrupt AV token key, regenerating: {e}"
+            ),
+        }
+    }
+    let key = moq_token::Key::generate(moq_token::Algorithm::HS256, None)?;
+    // Same base64url(JSON) format Key::to_file writes, but through
+    // secrets::write_secret so the file lands with 0600.
+    let json = key.to_str()?;
+    let encoded = {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json.as_bytes())
+    };
+    crate::secrets::write_secret(path, encoded.as_bytes())?;
+    tracing::info!(path = %path.display(), "Generated AV SFU token key");
+    Ok(key)
 }
 
 /// Initialize the SFU cluster and return shared state.
 /// Also spawns the QUIC accept loop if a port is provided.
 #[cfg(feature = "av-native")]
-pub async fn init_sfu(quic_port: Option<u16>) -> anyhow::Result<Arc<SfuState>> {
+pub async fn init_sfu(quic_port: Option<u16>, data_dir: &str) -> anyhow::Result<Arc<SfuState>> {
     use moq_relay::{Auth, AuthConfig, Cluster, ClusterConfig};
 
     // QUIC server config (also used for cluster's internal client)
@@ -66,8 +135,40 @@ pub async fn init_sfu(quic_port: Option<u16>) -> anyhow::Result<Arc<SfuState>> {
     client_config.max_streams = Some(moq_relay::DEFAULT_MAX_STREAMS);
     let client = client_config.init()?;
 
+    // Token key: minted per session, delivered to participants over IRC
+    // (`+freeq.at/av-token` TAGMSG) and REST, verified by the relay via
+    // the `?jwt=` query param on both QUIC and WebSocket transports.
+    let key_path = std::path::Path::new(data_dir).join("av-token-key.secret");
+    let token_key = match load_or_generate_token_key(&key_path) {
+        Ok(k) => Some(Arc::new(k)),
+        Err(e) => {
+            tracing::error!("AV token key setup failed (SFU stays open): {e}");
+            None
+        }
+    };
+
+    let require_token = std::env::var("FREEQ_AV_REQUIRE_TOKEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
     let mut auth_config = AuthConfig::default();
-    auth_config.public = Some("/".to_string()); // All paths public for staging
+    if token_key.is_some() {
+        auth_config.key = Some(key_path.to_string_lossy().into_owned());
+    }
+    if require_token && token_key.is_some() {
+        // Enforcing: every connection must present a valid session token.
+        auth_config.public = None;
+        tracing::info!("AV SFU auth: session tokens REQUIRED (FREEQ_AV_REQUIRE_TOKEN)");
+    } else {
+        // Migration mode: tokenless (legacy) clients still connect at the
+        // public root; token-bearing clients get scoped claims. Flip
+        // FREEQ_AV_REQUIRE_TOKEN=1 once all clients send tokens.
+        auth_config.public = Some("/".to_string());
+        tracing::warn!(
+            "AV SFU auth: OPEN (legacy clients allowed). Tokens are minted and \
+             verified; set FREEQ_AV_REQUIRE_TOKEN=1 to enforce once clients are updated."
+        );
+    }
     let auth = Auth::new(auth_config).await?;
 
     let cluster = Cluster::new(ClusterConfig::default(), client);
@@ -82,6 +183,8 @@ pub async fn init_sfu(quic_port: Option<u16>) -> anyhow::Result<Arc<SfuState>> {
         cluster,
         auth,
         conn_id: AtomicU64::new(0),
+        token_key,
+        require_token,
     });
 
     // Optionally start QUIC accept loop (for direct connections bypassing HTTP proxy)
@@ -198,10 +301,12 @@ async fn handle_quic_connection(
 }
 
 /// Handle a WebSocket upgrade for MoQ — called from the web server's route handler.
+/// `jwt` is the session token from the `?jwt=` query param, if the client sent one.
 #[cfg(feature = "av-native")]
 pub async fn handle_ws_moq(
     state: Arc<SfuState>,
     path: String,
+    jwt: Option<String>,
     socket: axum::extract::ws::WebSocket,
 ) {
     use futures::{SinkExt, StreamExt};
@@ -212,7 +317,7 @@ pub async fn handle_ws_moq(
     // normalizes its URL path, so both transports root identically.
     let params = moq_relay::AuthParams {
         path: moq_scope_path(&path),
-        jwt: None,
+        jwt,
         register: None,
     };
 
@@ -366,6 +471,156 @@ mod tests {
         assert_ne!(
             moq_scope_path("/av/moq/s/aaa"),
             moq_scope_path("/av/moq/s/bbb")
+        );
+    }
+}
+
+/// Token mint/verify round-trips against the same `moq_relay::Auth` the
+/// SFU runs — proving a session token opens exactly its own session (in
+/// both legacy and scoped namespaces) and nothing else.
+#[cfg(all(test, feature = "av-native"))]
+mod token_tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    async fn state_with_key(dir: &std::path::Path, require: bool) -> Arc<SfuState> {
+        let key_path = dir.join("av-token-key.secret");
+        let key = super::load_or_generate_token_key(&key_path).expect("key");
+
+        let mut auth_config = moq_relay::AuthConfig::default();
+        auth_config.key = Some(key_path.to_string_lossy().into_owned());
+        auth_config.public = if require { None } else { Some("/".to_string()) };
+        let auth = moq_relay::Auth::new(auth_config).await.expect("auth");
+
+        let mut client_config = moq_native::ClientConfig::default();
+        client_config.max_streams = Some(moq_relay::DEFAULT_MAX_STREAMS);
+        let client = client_config.init().expect("client");
+        let cluster = moq_relay::Cluster::new(moq_relay::ClusterConfig::default(), client);
+
+        Arc::new(SfuState {
+            cluster,
+            auth,
+            conn_id: AtomicU64::new(0),
+            token_key: Some(Arc::new(key)),
+            require_token: require,
+        })
+    }
+
+    #[tokio::test]
+    async fn key_persists_across_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("av-token-key.secret");
+        let k1 = super::load_or_generate_token_key(&key_path).unwrap();
+        let k2 = super::load_or_generate_token_key(&key_path).unwrap();
+        // A token minted before "restart" still verifies after.
+        let claims = moq_token::Claims {
+            publish: vec!["sid".into()],
+            subscribe: vec!["sid".into()],
+            ..Default::default()
+        };
+        let token = k1.encode(&claims).unwrap();
+        assert!(k2.decode(&token).is_ok());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "token key must be 0600");
+        }
+    }
+
+    #[tokio::test]
+    async fn token_opens_own_session_both_namespaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_key(dir.path(), true).await;
+        let token = state.mint_session_token("01SESSION").expect("mint");
+
+        // Legacy dial: /av/moq (root "") with absolute broadcast paths.
+        let verified = state
+            .auth
+            .verify(&moq_relay::AuthParams {
+                path: moq_scope_path("/av/moq"),
+                jwt: Some(token.clone()),
+                register: None,
+            })
+            .expect("legacy dial should verify");
+        let can = |paths: &[moq_lite::PathOwned], p: &str| {
+            use moq_lite::AsPath;
+            paths.iter().any(|allowed| p.as_path().has_prefix(allowed))
+        };
+        assert!(can(&verified.publish, "01SESSION/alice~i1"));
+        assert!(can(&verified.subscribe, "01SESSION/bob~i2"));
+        assert!(!can(&verified.publish, "01OTHER/alice~i1"));
+        assert!(!can(&verified.subscribe, "01OTHER/bob~i2"));
+
+        // Scoped dial: /av/moq/s/{sid} with relative paths.
+        let verified = state
+            .auth
+            .verify(&moq_relay::AuthParams {
+                path: moq_scope_path("/av/moq/s/01SESSION"),
+                jwt: Some(token.clone()),
+                register: None,
+            })
+            .expect("scoped dial should verify");
+        assert!(can(&verified.publish, "alice~i1"));
+        assert!(can(&verified.subscribe, "bob~i2"));
+
+        // Scoped dial into a DIFFERENT session: the connection is admitted
+        // (root "" is a prefix of every path) but claim reduction strips
+        // every publish/subscribe grant — zero access to that session's
+        // media, which is the security property we need.
+        let other = state
+            .auth
+            .verify(&moq_relay::AuthParams {
+                path: moq_scope_path("/av/moq/s/01OTHER"),
+                jwt: Some(token),
+                register: None,
+            })
+            .expect("cross-session dial verifies but must carry no grants");
+        assert!(
+            other.publish.is_empty() && other.subscribe.is_empty(),
+            "token for one session must grant nothing in another: {other:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tokenless_rejected_when_required_allowed_when_open() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let enforcing = state_with_key(dir.path(), true).await;
+        assert!(
+            enforcing
+                .auth
+                .verify(&moq_relay::AuthParams {
+                    path: moq_scope_path("/av/moq"),
+                    jwt: None,
+                    register: None,
+                })
+                .is_err(),
+            "tokenless connect must be rejected in enforcing mode"
+        );
+
+        let open = state_with_key(dir.path(), false).await;
+        assert!(
+            open.auth
+                .verify(&moq_relay::AuthParams {
+                    path: moq_scope_path("/av/moq"),
+                    jwt: None,
+                    register: None,
+                })
+                .is_ok(),
+            "tokenless connect stays allowed in migration mode"
+        );
+
+        // Garbage token is rejected in BOTH modes (never falls back to public).
+        assert!(
+            open.auth
+                .verify(&moq_relay::AuthParams {
+                    path: moq_scope_path("/av/moq"),
+                    jwt: Some("garbage".into()),
+                    register: None,
+                })
+                .is_err(),
+            "invalid token must not fall back to public access"
         );
     }
 }

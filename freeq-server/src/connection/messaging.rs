@@ -5,7 +5,14 @@ use super::Connection;
 use super::helpers::{normalize_channel, s2s_broadcast, s2s_next_event_id};
 use crate::irc::{self, Message};
 use crate::server::SharedState;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Prune every N inserts per channel rather than on every message — see the
+/// prune call site. Process-static (like `S2S_RATE_LIMITS`), keyed by channel.
+static PRUNE_COUNTERS: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+const PRUNE_INTERVAL: u32 = 256;
 
 /// Verify a client-provided signature, or server-sign as fallback.
 ///
@@ -859,10 +866,28 @@ pub(super) fn handle_privmsg_with_multiline(
                 )
             });
 
-            // Prune old messages if configured
+            // Prune old messages if configured — but only periodically, not on
+            // every message. Pruning is a DELETE behind the single global DB
+            // mutex; running it per-message doubled the blocking DB round-trips
+            // on the hot path for no benefit (the in-memory history is already
+            // capped above). Pruning every PRUNE_INTERVAL inserts keeps the DB
+            // at most `max + PRUNE_INTERVAL` rows transiently.
             let max = state.config.max_messages_per_channel;
             if max > 0 {
-                state.with_db(|db| db.prune_messages(target, max));
+                let should_prune = {
+                    let mut counters = PRUNE_COUNTERS.lock();
+                    let c = counters.entry(target.to_string()).or_insert(0);
+                    *c += 1;
+                    if *c >= PRUNE_INTERVAL {
+                        *c = 0;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_prune {
+                    state.with_db(|db| db.prune_messages(target, max));
+                }
             }
         }
 
@@ -2634,6 +2659,7 @@ fn handle_av_tagmsg(
                                                         sid.clone(),
                                                         sfu.cluster.clone(),
                                                         sfu.auth.clone(),
+                                                        sfu.mint_session_token(&sid),
                                                         room_handle,
                                                         room_events,
                                                     );
@@ -2666,6 +2692,9 @@ fn handle_av_tagmsg(
                         vec![&nick, &format!("AV session started: {session_id}")],
                     );
                     send_to(state, &conn.id, format!("{notice}\r\n"));
+
+                    // MoQ access token for the creator (they dial the SFU next)
+                    send_av_token(state, &conn.id, &nick, &session_id);
 
                     // Broadcast via S2S
                     broadcast_av_s2s(
@@ -2796,6 +2825,9 @@ fn handle_av_tagmsg(
                         send_to(state, &conn.id, format!("{ticket_notice}\r\n"));
                     }
 
+                    // MoQ access token for the joiner (they dial the SFU next)
+                    send_av_token(state, &conn.id, &nick, &session_id);
+
                     // Ensure bridge is running for this session.
                     // The bridge may have been cleaned up if the session creator disconnected
                     // while other participants remained (session stayed active but bridge was orphaned).
@@ -2814,6 +2846,7 @@ fn handle_av_tagmsg(
                                             session_id.clone(),
                                             sfu.cluster.clone(),
                                             sfu.auth.clone(),
+                                            sfu.mint_session_token(&session_id),
                                             room_handle,
                                             room_events,
                                         );
@@ -3083,6 +3116,32 @@ pub fn broadcast_av_state_pub(
         title,
     );
 }
+
+/// Send the joiner their MoQ access token for a session as a directed
+/// TAGMSG (`+freeq.at/av-token` + `+freeq.at/av-id`). Clients append it to
+/// the SFU dial URL as `?jwt=…`; the same token is available via
+/// `GET /api/v1/av/sessions/{id}/token`. JWTs are base64url+dots so the
+/// value needs no IRC tag-escaping.
+#[cfg(feature = "av-native")]
+fn send_av_token(state: &Arc<SharedState>, conn_id: &str, nick: &str, session_id: &str) {
+    let sfu = state.sfu_state.lock().clone();
+    let Some(token) = sfu.and_then(|sfu| sfu.mint_session_token(session_id)) else {
+        return;
+    };
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("+freeq.at/av-token".to_string(), token);
+    tags.insert("+freeq.at/av-id".to_string(), session_id.to_string());
+    let tag_msg = super::super::irc::Message {
+        tags,
+        prefix: Some(state.server_name.clone()),
+        command: "TAGMSG".to_string(),
+        params: vec![nick.to_string()],
+    };
+    send_to(state, conn_id, format!("{tag_msg}\r\n"));
+}
+
+#[cfg(not(feature = "av-native"))]
+fn send_av_token(_state: &Arc<SharedState>, _conn_id: &str, _nick: &str, _session_id: &str) {}
 
 /// Broadcast AV session state to all channel members via TAGMSG.
 fn broadcast_av_state(

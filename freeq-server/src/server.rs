@@ -1221,6 +1221,32 @@ fn load_msg_signing_key(data_dir: &str) -> ed25519_dalek::SigningKey {
     key
 }
 
+/// Load or generate the persistent HMAC key that signs membership
+/// attestations (`{data_dir}/attestation-key.secret`, 0600).
+fn load_attestation_key(data_dir: &str) -> [u8; 32] {
+    let key_path = std::path::Path::new(data_dir).join("attestation-key.secret");
+    if key_path.exists() {
+        crate::secrets::tighten_permissions(&key_path);
+        if let Ok(data) = std::fs::read(&key_path)
+            && let Ok(bytes) = <[u8; 32]>::try_from(data.as_slice())
+        {
+            tracing::info!("Loaded attestation key from {}", key_path.display());
+            return bytes;
+        }
+        tracing::warn!(
+            "Corrupt attestation key at {}, regenerating",
+            key_path.display()
+        );
+    }
+    let key: [u8; 32] = rand::random();
+    if let Err(e) = crate::secrets::write_secret(&key_path, &key) {
+        tracing::error!("Failed to persist attestation key: {e}");
+    } else {
+        tracing::info!("Generated attestation signing key at {}", key_path.display());
+    }
+    key
+}
+
 /// Install the agent-assist LLM provider into the process-wide slot
 /// based on `ServerConfig.llm_*` fields. No-op if the provider is
 /// `None` / `"none"` / unset.
@@ -1536,9 +1562,17 @@ impl Server {
                 match crate::policy::PolicyStore::open(&policy_db_path) {
                     Ok(store) => {
                         let authority_did = format!("did:web:{}", self.config.server_name);
-                        Some(Arc::new(crate::policy::PolicyEngine::new(
+                        // Persistent attestation key: an ephemeral key (the
+                        // old PolicyEngine::new path) invalidated every
+                        // outstanding membership attestation on restart, so
+                        // Continuous-validity channels silently re-gated all
+                        // members after a server bounce.
+                        let attestation_key =
+                            load_attestation_key(self.config.data_dir.as_deref().unwrap_or("."));
+                        Some(Arc::new(crate::policy::PolicyEngine::with_key(
                             store,
                             authority_did,
+                            attestation_key,
                         )))
                     }
                     Err(e) => {
@@ -1782,7 +1816,8 @@ impl Server {
                 .unwrap_or(4443);
             {
                 let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-                match crate::av_sfu::init_sfu(Some(sfu_port)).await {
+                let data_dir = self.config.data_dir.as_deref().unwrap_or(".");
+                match crate::av_sfu::init_sfu(Some(sfu_port), data_dir).await {
                     Ok(sfu) => *state.sfu_state.lock() = Some(sfu),
                     Err(e) => tracing::error!("AV SFU init failed: {e}"),
                 }
@@ -4811,6 +4846,10 @@ mod s2s_adversarial_tests {
             iroh_router: Mutex::new(None),
             av_sessions: Mutex::new(crate::av::AvSessionManager::new()),
             av_media: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            sfu_state: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            av_bridges: Mutex::new(std::collections::HashMap::new()),
             s2s_manager: Mutex::new(None),
             cluster_doc: crate::crdt::ClusterDoc::new("test-server-id"),
             db: db.map(Mutex::new),

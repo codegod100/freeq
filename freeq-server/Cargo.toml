@@ -51,14 +51,19 @@ iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc53
 moq-relay = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, optional = true }
 moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, features = ["noq", "iroh", "aws-lc-rs"], optional = true }
 moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", optional = true }
+moq-token = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", optional = true }
 qmux = { version = "0.0.5", default-features = false, features = ["ws"], optional = true }
 futures = { version = "0.3", optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false, optional = true }
 toml = "0.8"
+# OIDC ID-token signature verification (JWKS). `aws_lc_rs` matches
+# moq-token's backend choice — enabling BOTH jsonwebtoken backends makes
+# the crate panic at runtime until a provider is installed manually.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
 
 [features]
 default = []
-av-native = ["iroh-live", "moq-relay", "moq-native", "moq-lite", "qmux", "futures", "rustls"]  # Enable iroh-live + SFU (QUIC + WebSocket)
+av-native = ["iroh-live", "moq-relay", "moq-native", "moq-lite", "moq-token", "qmux", "futures", "rustls"]  # Enable iroh-live + SFU (QUIC + WebSocket)
 
 [dev-dependencies]
 freeq-sdk = { path = "../freeq-sdk" }

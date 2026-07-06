@@ -20,6 +20,7 @@ pub fn start_bridge(
     session_id: String,
     cluster: moq_relay::Cluster,
     auth: moq_relay::Auth,
+    jwt: Option<String>,
     room_handle: iroh_live::rooms::RoomHandle,
     room_events: iroh_live::rooms::RoomEvents,
 ) -> BridgeHandle {
@@ -39,9 +40,10 @@ pub fn start_bridge(
     let room2 = room_handle.clone();
     let mut rx1 = shutdown.1.clone();
     let bridged_set = bridged_broadcasts.clone();
+    let jwt2 = jwt.clone();
     let moq_to_room = tokio::spawn(async move {
         if let Err(e) =
-            run_moq_to_room(&sid, &cluster2, &auth2, &room2, &mut rx1, &bridged_set).await
+            run_moq_to_room(&sid, &cluster2, &auth2, jwt2, &room2, &mut rx1, &bridged_set).await
         {
             tracing::warn!(session = %sid, error = %e, "MoQ→Room bridge ended");
         }
@@ -53,7 +55,8 @@ pub fn start_bridge(
     let bridged_set2 = bridged_broadcasts;
     let room_to_moq = tokio::spawn(async move {
         if let Err(e) =
-            run_room_to_moq(&sid2, &cluster, &auth, room_events, &mut rx2, &bridged_set2).await
+            run_room_to_moq(&sid2, &cluster, &auth, jwt, room_events, &mut rx2, &bridged_set2)
+                .await
         {
             tracing::warn!(session = %sid2, error = %e, "Room→MoQ bridge ended");
         }
@@ -79,13 +82,14 @@ async fn run_moq_to_room(
     session_id: &str,
     cluster: &moq_relay::Cluster,
     auth: &moq_relay::Auth,
+    jwt: Option<String>,
     room_handle: &iroh_live::rooms::RoomHandle,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     bridged_broadcasts: &std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
 ) -> anyhow::Result<()> {
     let params = moq_relay::AuthParams {
         path: String::new(),
-        jwt: None,
+        jwt,
         register: None,
     };
     let token = auth.verify(&params)?;
@@ -212,13 +216,14 @@ async fn run_room_to_moq(
     session_id: &str,
     cluster: &moq_relay::Cluster,
     auth: &moq_relay::Auth,
+    jwt: Option<String>,
     mut room_events: iroh_live::rooms::RoomEvents,
     shutdown: &mut tokio::sync::watch::Receiver<bool>,
     bridged_broadcasts: &std::sync::Arc<parking_lot::Mutex<std::collections::HashSet<String>>>,
 ) -> anyhow::Result<()> {
     let params = moq_relay::AuthParams {
         path: String::new(),
-        jwt: None,
+        jwt,
         register: None,
     };
     let token = auth.verify(&params)?;

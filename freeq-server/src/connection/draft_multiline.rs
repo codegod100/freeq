@@ -883,6 +883,10 @@ mod tests {
             iroh_router: Mutex::new(None),
             av_sessions: Mutex::new(crate::av::AvSessionManager::new()),
             av_media: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            sfu_state: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            av_bridges: Mutex::new(std::collections::HashMap::new()),
             s2s_manager: Mutex::new(None),
             cluster_doc: crate::crdt::ClusterDoc::new("test-server-id"),
             db: None,

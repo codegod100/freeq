@@ -401,7 +401,27 @@ pub(super) fn handle_policy(
                 );
                 send_fn(state, session_id, format!("{reply}\r\n"));
             } else {
-                // No OAuth configured — fall back to public membership check
+                // No OAuth configured. The public-API fallback below can NOT
+                // prove the caller owns the GitHub account they name — anyone
+                // can claim any public org member's username — yet it stores a
+                // `github_membership` credential that satisfies PRESENT
+                // requirements and role escalation exactly like the OAuth-
+                // verified one. Fail closed unless the operator explicitly
+                // opts into the spoofable check (dev/demo only).
+                let allow_unverified = std::env::var("FREEQ_ALLOW_UNVERIFIED_GITHUB")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if !allow_unverified {
+                    for line in [
+                        "GitHub verification is not available: no GitHub OAuth app is configured.",
+                        "Ask the operator to set GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET (the public-API fallback cannot prove account ownership and is disabled; FREEQ_ALLOW_UNVERIFIED_GITHUB=1 enables it for dev/demo).",
+                    ] {
+                        let reply = Message::from_server(server_name, "NOTICE", vec![nick, line]);
+                        send_fn(state, session_id, format!("{reply}\r\n"));
+                    }
+                    return;
+                }
+                // Fall back to public membership check (opt-in, unverified).
                 // This requires the user to also provide their GitHub username
                 if msg.params.len() < 5 {
                     let reply = Message::from_server(
