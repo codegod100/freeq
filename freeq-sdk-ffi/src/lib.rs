@@ -1283,11 +1283,24 @@ mod av_impl {
         } else {
             format!("{session_id}/{leaf}")
         };
-        let moq_url_str = if SCOPED_SESSIONS {
-            format!("{server_url}/av/moq/s/{session_id}")
-        } else {
-            format!("{server_url}/av/moq")
+        // Any query string on `server_url` is preserved onto the dial URL —
+        // this is how the app layer passes the per-session MoQ access token
+        // (`?jwt=<token>`, delivered by the server as a `+freeq.at/av-token`
+        // TAGMSG after av-join). No UDL change needed: callers append the
+        // query to the server URL they already pass in.
+        let (base_url, query) = match server_url.split_once('?') {
+            Some((base, q)) => (base.trim_end_matches('/').to_string(), Some(q.to_string())),
+            None => (server_url.trim_end_matches('/').to_string(), None),
         };
+        let mut moq_url_str = if SCOPED_SESSIONS {
+            format!("{base_url}/av/moq/s/{session_id}")
+        } else {
+            format!("{base_url}/av/moq")
+        };
+        if let Some(q) = query {
+            moq_url_str.push('?');
+            moq_url_str.push_str(&q);
+        }
         let moq_url: url::Url = moq_url_str
             .parse()
             .map_err(|_| FreeqError::InvalidArgument)?;

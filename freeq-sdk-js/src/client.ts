@@ -65,6 +65,11 @@ export class FreeqClient extends EventEmitter {
 
   private _avSessions = new Map<string, AvSession>();
   private _activeAvSession: string | null = null;
+  /** Session id → MoQ access token (`+freeq.at/av-token` TAGMSG, sent by
+   *  the server right after av-start/av-join). Appended to the SFU dial
+   *  URL as `?jwt=…`; without it the SFU rejects the connection once the
+   *  server enforces tokens (FREEQ_AV_REQUIRE_TOKEN). */
+  private _avTokens = new Map<string, string>();
 
   // ── Internal caches and timer state ───────────────────────────────
   /** Lowercase nick → DID. Populated from numeric 330 (WHOIS) and from
@@ -129,6 +134,12 @@ export class FreeqClient extends EventEmitter {
   /** Active AV session ID we're participating in. */
   get activeAvSession(): string | null { return this._activeAvSession; }
 
+  /** MoQ access token for an AV session (from `+freeq.at/av-token`), or
+   *  null if none received yet. Append to the SFU URL as `?jwt=…`. */
+  avTokenFor(sessionId: string): string | null {
+    return this._avTokens.get(sessionId) ?? null;
+  }
+
   /** Server origin for API calls. */
   get serverOrigin(): string {
     if (this.opts.serverOrigin) return this.opts.serverOrigin;
@@ -191,6 +202,7 @@ export class FreeqClient extends EventEmitter {
     this.batches.clear();
     this._avSessions.clear();
     this._activeAvSession = null;
+    this._avTokens.clear();
     this._encryptedChannels.clear();
     this._currentAway = null;
     // Clear internal caches and timer state.
@@ -1722,6 +1734,15 @@ export class FreeqClient extends EventEmitter {
             msg.tags['+freeq.at/av-actor'] || '',
             parseInt(msg.tags['+freeq.at/av-participants'] || '0', 10),
             msg.tags['+freeq.at/av-title']);
+        }
+
+        // Per-session MoQ access token, sent as a directed TAGMSG after
+        // our av-start/av-join. Stored for avTokenFor(); apps append it
+        // to the SFU dial URL as `?jwt=…`.
+        const avToken = msg.tags['+freeq.at/av-token'];
+        if (avToken && avId) {
+          this._avTokens.set(avId, avToken);
+          this.emit('avToken', avId, avToken);
         }
         break;
       }

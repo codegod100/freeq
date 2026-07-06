@@ -42,6 +42,8 @@ export {
   loadDelegation,
   loadOrMintDelegation,
   buildDelegation,
+  signDelegation,
+  canonicalizeForSigning,
 } from "./delegation.js";
 export type {
   DelegationCert,

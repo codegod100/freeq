@@ -130,6 +130,10 @@ export interface FreeqEvents {
   /** Fired when an AV ticket is received. */
   avTicket: (sessionId: string, ticket: string) => void;
 
+  /** Fired when a MoQ access token for an AV session is received
+   *  (`+freeq.at/av-token`). Append to the SFU dial URL as `?jwt=…`. */
+  avToken: (sessionId: string, token: string) => void;
+
   /** Fired when the join gate (policy acceptance) is required. */
   joinGateRequired: (channel: string) => void;
 

@@ -62,6 +62,11 @@ export interface FreeqBotCreateOptions {
   // ── Optional ─────────────────────────────────────────────────────────
   /** Override the parent dir for bot state. Defaults to `~/.freeq/bots`. */
   root?: string;
+  /** Path to the owner's ed25519 seed (32 bytes; the file `freeq-bot-id
+   *  --creator-key` reads). When set, the delegation cert is SIGNED by the
+   *  owner — the server shows `_verified: true` provided the owner has
+   *  registered this key via MSGSIG. Unset → unsigned/declarative cert. */
+  creatorKeyPath?: string;
   /** Actor class declared via AGENT REGISTER. Default `"agent"`. */
   actorClass?: ActorClass;
   /** Initial PRESENCE state. Default `"active"`. Carried by heartbeats
@@ -196,6 +201,7 @@ export class FreeqBot {
       certPath: join(stateDir, "delegation.json"),
       agentDid: identity.did,
       ownerDid: opts.ownerDid,
+      creatorKeyPath: opts.creatorKeyPath,
     });
 
     const client = new FreeqClient({
