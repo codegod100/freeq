@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
         .route("/chat/{channel}/part", post(post_channel_part))
         .route("/chat/{channel}/topic", post(post_channel_topic))
         .route("/chat/{channel}/react", post(post_channel_react))
+        .route("/chat/{channel}/unreact", post(post_channel_unreact))
         .route("/upload", post(post_upload))
         .route("/datastar.js", get(get_datastar_js))
         .route("/api/channels", get(get_channels))
@@ -213,6 +214,7 @@ a{{color:var(--c1)}}
   window.location.replace(url);
   const el = document.getElementById('status');
   let done = false;
+  async function check() {{
     try {{
       const r = await fetch('/auth/status');
       const j = await r.json();
@@ -1010,26 +1012,21 @@ async fn get_channel_events(
                         continue;
                     }
                     // --- live reactions via TAGMSG ---
+                    // Emit a DataStar PatchSignals event that flips the
+                    // `my_reactions[msgid]` toggle for the given emoji. This
+                    // updates the `data-class:mine` highlight on the matching
+                    // chip. We do NOT recompute the count/title — those come
+                    // from the server-rendered HTML and converge on the next
+                    // CHATHISTORY replay (refresh or reconnect).
                     if let Some((msgid, emoji)) = parse_tagmsg_reaction(&line) {
                         if should_emit(&line, &channel) {
-                            let (tags, _) = parse_irc_tags(&line);
-                            let nick = line
-                                .trim_start_matches('@')
-                                .split(' ')
-                                .next()
-                                .and_then(|prefix| prefix.split('!').next())
-                                .unwrap_or("?");
-                            let msgid_escaped = html_escape(&msgid);
-                            let emoji_escaped = html_escape(&emoji);
-                            let nick_escaped = html_escape(nick);
-                            let js = format!(
-                                "updateReactionChip('{}','{}','{}')",
-                                msgid_escaped.replace('\\', "\\\\").replace('\'', "\\'"),
-                                emoji_escaped.replace('\\', "\\\\").replace('\'', "\\'"),
-                                nick_escaped.replace('\\', "\\\\").replace('\'', "\\'")
-                            );
-                            let script = ExecuteScript::new(js);
-                            yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
+                            // Compute the *new* my_reactions[msgid] array by
+                            // appending `emoji` (server has already deduped).
+                            let payload = serde_json::json!({
+                                "my_reactions": {msgid.clone(): [emoji.clone()]}
+                            });
+                            let patch = PatchSignals::new(payload.to_string());
+                            yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
                         }
                         continue;
                     }
@@ -1283,6 +1280,67 @@ async fn post_channel_react(
     })
     .into_response()
 }
+
+/// Send a TAGMSG with `+freeq.at/unreact` and `+reply` tags to remove the
+/// current user's reaction on a target message.
+async fn post_channel_unreact(
+    State(state): State<AppState>,
+    Path(channel): Path<String>,
+    req: axum::http::HeaderMap,
+    ReadSignals(signals): ReadSignals<ReactSignals>,
+) -> Response {
+    let (sid, _is_new) = session_id_from_request(&req);
+    let session = state.session(&sid);
+
+    let target = canonical_channel(&channel);
+    let msgid = signals.msgid.trim();
+    let emoji = signals.emoji.trim();
+    if msgid.is_empty() || emoji.is_empty() {
+        return (StatusCode::BAD_REQUEST, "msgid and emoji required").into_response();
+    }
+    if emoji.len() > 32 || emoji.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return (StatusCode::BAD_REQUEST, "invalid emoji").into_response();
+    }
+    if msgid.len() > 64
+        || msgid
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid msgid").into_response();
+    }
+
+    let ws_state = session.get_ws_state();
+    let is_joined = session.joined.lock().contains(&target);
+    if ws_state != WsState::Ready {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not connected yet").into_response();
+    }
+    if !is_joined {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not joined").into_response();
+    }
+
+    let safe_emoji = emoji
+        .replace('\\', "\\\\")
+        .replace(';', "\\:")
+        .replace(' ', "\\s");
+    let safe_msgid = msgid
+        .replace('\\', "\\\\")
+        .replace(';', "\\:")
+        .replace(' ', "\\s");
+    let cmd = format!("@+freeq.at/unreact={safe_emoji};+reply={safe_msgid} TAGMSG {target}\\r\\n");
+
+    let irc_tx = session.irc_tx.lock().clone();
+    if let Err(e) = irc_tx.send(cmd).await {
+        warn!(session = %sid, "unreact to upstream failed: {e}");
+        return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
+    }
+    debug!(session = %sid, channel = %target, msgid, emoji, "unreact queued to upstream");
+    let ok_event = ExecuteScript::new("void 0").write_as_axum_sse_event();
+    Sse::new(async_stream::stream! {
+        yield Ok::<Event, std::convert::Infallible>(ok_event);
+    })
+    .into_response()
+}
+
 async fn post_channel_join(
     State(state): State<AppState>,
     Path(_path_chan): Path<String>,
@@ -1567,16 +1625,18 @@ fn render_reaction_chips(
         } else {
             format!("{emoji} {count}")
         };
+        let mid_attr = msgid.unwrap_or("");
         chips.push_str(&format!(
-            r#"<span class="reaction-chip" title="{title}" data-emoji="{emoji}">{label}</span>"#,
+            r#"<button type="button" class="reaction-chip" title="{title}" data-emoji="{emoji}" data-msgid="{mid}" data-class:mine="window.isReacted('{mid}','{emoji}')?'':''" onclick="window.toggleReaction('{mid}','{emoji}')">{label}</button>"#,
             title = html_escape(&title),
             emoji = html_escape(emoji),
-            label = html_escape(&label)
+            label = html_escape(&label),
+            mid = html_escape(mid_attr)
         ));
     }
     if let Some(mid) = msgid {
         chips.push_str(&format!(
-            r#"<button class="react-btn" type="button" onclick="showReactPicker('{mid}')" title="React">+</button>"#
+            r#"<button class="react-btn" type="button" data-on:click="window.openReactPicker('{mid}')" title="React">+</button>"#
         ));
     }
     chips.push_str("</span>");

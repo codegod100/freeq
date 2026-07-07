@@ -33,21 +33,60 @@ html,body{height:100dvh;overflow:hidden}
 .reactions{display:inline-flex;flex-wrap:wrap;gap:3px;margin-left:6px;vertical-align:middle}
 .reaction-chip{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;background:rgba(255,255,255,.07);border:1px solid var(--bulma-border);border-radius:999px;font-size:.75rem;line-height:1.2;cursor:default;user-select:none}
 .reaction-chip:hover{background:rgba(255,255,255,.12)}
-.react-btn{display:inline-flex;align-items:center;justify-content:center;width:1.2rem;height:1.2rem;padding:0;background:transparent;border:1px dashed var(--bulma-border);border-radius:999px;color:var(--bulma-grey);font-size:.7rem;cursor:pointer;opacity:0;transition:opacity .15s}
-#messages .msg:hover .react-btn,#messages .msg:focus-within .react-btn{opacity:.6}
-.react-btn:hover{opacity:1!important;background:rgba(255,255,255,.08);color:var(--bulma-link-text);border-style:solid}
-#react-picker{position:absolute;display:none;z-index:50;background:var(--bulma-body-background-color);border:1px solid var(--bulma-border);border-radius:.5rem;padding:.4rem;box-shadow:0 4px 16px rgba(0,0,0,.4)}
+.reaction-chip.mine{background:rgba(92,219,149,.25);border-color:rgba(92,219,149,.5)}
+.react-btn{display:inline-flex;align-items:center;justify-content:center;width:1.2rem;height:1.2rem;padding:0;background:transparent;border:1px dashed var(--bulma-border);border-radius:999px;color:var(--bulma-grey);font-size:.7rem;cursor:pointer;opacity:.5;transition:opacity .15s}
+#messages .msg:hover .react-btn,#messages .msg:focus-within .react-btn{opacity:1}
+.menu,.menu-list,.menu-list li{width:100%}
+.channel-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:.25rem;padding:0 .25rem 0 0;width:100%}
+.channel-row .channel-link{display:block;min-width:0;padding:.25rem .5rem;border-radius:var(--bulma-radius-small);color:var(--bulma-text);text-decoration:none;overflow-wrap:anywhere}
+.channel-row .channel-link.is-active,.channel-row .channel-link:hover{background:var(--bulma-link);color:#fff}
+.channel-row .policy-tag{cursor:pointer;border:0}
+.mobile-btn{display:none;align-items:center;justify-content:center;width:2.5rem;height:2.5rem;background:transparent;border:0;color:var(--bulma-link-text);font-size:1.25rem;cursor:pointer}
+.mobile-btn:hover{background:rgba(255,255,255,.08)}
+#mobile-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:90;display:none}
+#mobile-backdrop.open{display:block}
+#react-picker{position:absolute;display:none;z-index:100;background:var(--bulma-body-background-color);border:1px solid var(--bulma-border);border-radius:.5rem;padding:.4rem;box-shadow:0 4px 16px rgba(0,0,0,.4)}
 #react-picker.open{display:flex;gap:4px}
 #react-picker button{background:transparent;border:0;padding:.25rem .4rem;font-size:1.25rem;border-radius:.3rem;cursor:pointer;line-height:1}
 #react-picker button:hover{background:rgba(255,255,255,.12)}
+@media(max-width:1024px){
+ .navbar{flex-wrap:wrap}
+ .navbar-brand{width:100%;justify-content:space-between;align-items:center}
+ .navbar-brand>.navbar-item:first-child{flex-shrink:0}
+ .navbar-brand #channel-topic{display:none}
+ .navbar-brand .topic-edit{display:none}
+ .navbar-end{justify-content:space-between;width:100%;padding:0 .5rem;display:flex}
+ .navbar-end .navbar-item{padding:.25rem .3rem}
+ .navbar-end .field.has-addons{width:100%}
+ .navbar-end .field.has-addons .control.is-expanded{display:flex}
+ .navbar-end .field.has-addons .input{width:100%}
+ .mobile-btn{display:flex!important}
+ body{overflow-x:hidden}
+ .columns{position:relative;overflow-x:hidden}
+ #sidebar,#member-panel{position:fixed;top:0;bottom:0;width:260px;max-width:80vw;background:var(--bulma-body-background-color);z-index:100;transition:transform .2s ease;transform:translateX(-110%);display:flex;flex-direction:column;padding:0;box-shadow:4px 0 16px rgba(0,0,0,.4)}
+ #sidebar{left:0;border-right:1px solid var(--bulma-border)}
+ #member-panel{right:0;border-left:1px solid var(--bulma-border);transform:translateX(110%);box-shadow:-4px 0 16px rgba(0,0,0,.4)}
+ #sidebar.open,#member-panel.open{transform:translateX(0)}
+ #messages .msg{font-size:.9rem;grid-template-columns:42px 1fr;padding:.15rem 0}
+ #messages .ts{font-size:.7rem}
+ #send-form .input,#send-form .button{height:2.4rem;font-size:1rem}
+ #send-form .input{padding:.5rem .75rem}
+ #sidebar .menu-list a,#sidebar .menu-label{padding:.5rem .75rem;font-size:.9rem}
+ .modal-content{margin:.75rem;max-width:calc(100vw - 1.5rem)!important}
+}
+@media(max-width:1024px) and (max-height:500px){
+ #send-form .input,#send-form .button{height:2rem;font-size:.9rem}
+}
 </style>
 </head>
-<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:""}' data-auth-handle="{{login_handle}}">
+<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:"",my_reactions:{},picker_msgid:"",picker_open:false}' data-auth-handle="{{login_handle}}">
 <section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
   <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
     <div class="navbar-brand" style="min-height:2.5rem">
+      <button class="mobile-btn" type="button" onclick="toggleSidebar()" aria-label="Channels">&#x2630;</button>
       <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
       <span class="navbar-item has-text-link py-1">#{{channel}}</span>
+      <button class="mobile-btn" type="button" onclick="toggleMembers()" aria-label="Members">&#x1F465;</button>
       <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic" data-attr:style="$editing_topic ? 'display:none' : ''">{{topic}}</span><form class="field has-addons mb-0" data-attr:style="$auth_handle == '' || !$editing_topic ? 'display:none' : ''" data-on:submit="@post('/chat/{{channel}}/topic')"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" data-bind:topic_draft style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form><button class="button is-small is-dark ml-2" type="button" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
     </div>
     <div class="navbar-end">
@@ -63,17 +102,17 @@ html,body{height:100dvh;overflow:hidden}
     </div>
   </nav>
   <div class="columns is-gapless is-mobile" style="flex:1;min-height:0;margin-top:0">
-    <div class="column is-narrow" style="width:165px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
+    <div class="column is-narrow" id="sidebar" style="width:165px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
       <div class="menu">
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle" data-target="my-channels" style="font-size:.65rem;letter-spacing:.05em">MY CHANNELS</p>
         <ul class="menu-list" id="my-channels">
         {% for ch in channels -%}{% if ch.name in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1 policy-tag" title="Channel policy" onclick="event.preventDefault();event.stopPropagation();showPolicy('{{ch.name|replace(from="#",to="")}}');">{{ch.members}}</span></a></li>
+        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
         {% endif %}{%- endfor %}</ul>
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle collapsed" data-target="all-channels" style="font-size:.65rem;letter-spacing:.05em">ALL CHANNELS</p>
         <ul class="menu-list" id="all-channels" style="display:none">
         {% for ch in channels -%}{% if ch.name not in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1 policy-tag" title="Channel policy" onclick="event.preventDefault();event.stopPropagation();showPolicy('{{ch.name|replace(from="#",to="")}}');">{{ch.members}}</span></a></li>
+        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
         {% endif %}{%- endfor %}</ul>
       </div>
     </div>
@@ -87,7 +126,7 @@ html,body{height:100dvh;overflow:hidden}
     </div>
     <div class="column is-narrow is-size-7" style="width:165px;overflow-y:auto;border-left:1px solid var(--bulma-border);padding:.3rem .4rem" id="member-panel"><div class="has-text-grey">-</div></div>
   </div>
-</section><div id="react-picker" role="menu" aria-label="React with emoji"></div>
+</section><div id="react-picker" role="menu" aria-label="React with emoji" data-show="$picker_open"><input type="hidden" data-bind:picker_open /><input type="hidden" data-bind:picker_msgid /></div><div id="mobile-backdrop" onclick="closeDrawers()"></div>
 <div class="modal" id="oauth-modal">
   <div class="modal-background" style="background:rgba(0,0,0,.7)" onclick="document.getElementById('oauth-modal').classList.remove('is-active')"></div>
   <div class="modal-content" style="max-width:500px"><div class="box">
@@ -116,51 +155,102 @@ function bindSidebarToggles(){
   });
 }
 bindSidebarToggles();
+
+// Mobile drawer helpers. On screens > 768px wide the sidebars render inline
+// (per the default flex layout); on mobile the CSS positions them off-screen
+// and toggles transform via the .open class. The backdrop dims the page.
+function isMobile(){return window.matchMedia('(max-width: 768px)').matches;}
+function toggleSidebar(){
+  var s=document.getElementById('sidebar');
+  var m=document.getElementById('member-panel');
+  var b=document.getElementById('mobile-backdrop');
+  if(!s)return;
+  var open=!s.classList.contains('open');
+  s.classList.toggle('open',open);
+  if(m)m.classList.remove('open');
+  if(b)b.classList.toggle('open',open);
+}
+function toggleMembers(){
+  var s=document.getElementById('sidebar');
+  var m=document.getElementById('member-panel');
+  var b=document.getElementById('mobile-backdrop');
+  if(!m)return;
+  var open=!m.classList.contains('open');
+  m.classList.toggle('open',open);
+  if(s)s.classList.remove('open');
+  if(b)b.classList.toggle('open',open);
+}
+function closeDrawers(){
+  var s=document.getElementById('sidebar');
+  var m=document.getElementById('member-panel');
+  var b=document.getElementById('mobile-backdrop');
+  if(s)s.classList.remove('open');
+  if(m)m.classList.remove('open');
+  if(b)b.classList.remove('open');
+}
+window.toggleSidebar=toggleSidebar;
+window.toggleMembers=toggleMembers;
+window.closeDrawers=closeDrawers;
 (function(){
   var picker=document.getElementById('react-picker');
   if(!picker)return;
   var EMOJIS=['👍','❤️','😂','🔥','😮','👎','🎉','🤔'];
-  picker.innerHTML=EMOJIS.map(function(e){return '<button type="button" data-emoji="'+e+'">'+e+'</button>';}).join('');
-  var currentMsgid=null;
-  function close(){picker.classList.remove('open');currentMsgid=null;}
-  function position(btn){
-    var r=btn.getBoundingClientRect();
-    picker.style.left=(r.left+window.scrollX)+'px';
-    picker.style.top=(r.bottom+window.scrollY+4)+'px';
-  }
-  window.showReactPicker=function(msgid){
-    var evt=window.event;
-    if(evt){evt.preventDefault();evt.stopPropagation();}
-    var btn=evt&&evt.currentTarget?evt.currentTarget:null;
-    if(currentMsgid===msgid&&picker.classList.contains('open')){close();return;}
-    currentMsgid=msgid;
-    if(btn)position(btn);
-    else{picker.style.left='50%';picker.style.top='50%';}
-    picker.classList.add('open');
-  };
-  picker.addEventListener('click',function(e){
-    var b=e.target.closest('button[data-emoji]');
-    if(!b||!currentMsgid)return;
-    var emoji=b.getAttribute('data-emoji');
-    var msgid=currentMsgid;
-    close();
-    var myNick=document.body.getAttribute('data-auth-handle')||'you';
-    window.updateReactionChip(msgid,emoji,myNick);
-    var fd={msgid:msgid,emoji:emoji};
-    var url='/chat/{{channel}}/react';
-    fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(fd),credentials:'same-origin'}).then(function(r){
-      if(!r.ok){console.error('react failed',r.status);return;}
-    }).catch(function(err){console.error('react error',err)});
+  picker.innerHTML=EMOJIS.map(function(e){
+    return '<button type="button" data-emoji="'+e+'" onclick="reactFromPicker(\''+e+'\')">'+e+'</button>';
+  }).join('');
+  // Close on outside click via a tiny dispatch on the hidden input.
+  document.addEventListener('click',function(ev){
+    if(picker.contains(ev.target))return;
+    if(ev.target.classList&&ev.target.classList.contains('react-btn'))return;
+    var el=document.querySelector('input[data-bind\x3apicker_open]');
+    if(!el)return;
+    el.value='false';
+    el.dispatchEvent(new Event('input',{bubbles:true}));
   });
-  document.addEventListener('click',function(e){
-    if(!picker.classList.contains('open'))return;
-    if(e.target===picker||picker.contains(e.target))return;
-    if(e.target.classList&&e.target.classList.contains('react-btn'))return;
-    close();
-  });
-  document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
 })();
 
+// Signal-mutating helpers. The `+` button calls openReactPicker(msgid) to
+// show the picker. Picker buttons call reactFromPicker(emoji) to toggle the
+// reaction and POST to the server. Both use the standard `data-bind` input +
+// `input` event pattern so DataStar picks up the change.
+function openReactPicker(msgid){
+  try{
+    msgid=String(msgid||'');
+    if(!msgid)return;
+    function setSignal(name,value){
+      var el=document.querySelector('input[data-bind\\x3a'+name+']');
+      if(!el){console.warn('openReactPicker: no input for',name);return;}
+      el.value=value;
+      el.dispatchEvent(new Event('input',{bubbles:true}));
+    }
+    setSignal('picker_msgid',msgid);
+    setSignal('picker_open','true');
+  }catch(e){console.error('openReactPicker failed',e);}
+}
+function reactFromPicker(emoji){
+  try{
+    emoji=String(emoji||'');
+    if(!emoji)return;
+    var midEl=document.querySelector('input[data-bind\\x3apicker_msgid]');
+    var mid=midEl?String(midEl.value||''):'';
+    if(!mid)return;
+    var body=document.body;
+    var sigs={};
+    try{sigs=JSON.parse(body.getAttribute('data-signals')||'{}');}catch(e){}
+    sigs.my_reactions=sigs.my_reactions||{};
+    var list=sigs.my_reactions[mid]||[];
+    var has=list.indexOf(emoji)>=0;
+    list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
+    sigs.my_reactions[mid]=list;
+    body.setAttribute('data-signals',JSON.stringify(sigs));
+    var poEl=document.querySelector('input[data-bind\\x3apicker_open]');
+    if(poEl){poEl.value='false';poEl.dispatchEvent(new Event('input',{bubbles:true}));}
+    var url='/chat/{{channel}}/'+(has?'unreact':'react');
+    fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:mid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
+      if(!r.ok)console.error((has?'unreact':'react')+' failed',r.status);
+    });
+  }catch(e){console.error('reactFromPicker failed',e);}
+}
 // Insert or update a reaction chip on the message with the given msgid.
 // Called by the SSE handler when a live TAGMSG reaction arrives.
 window.updateReactionChip=function(msgid,emoji,nick){
@@ -254,6 +344,60 @@ function renderPolicy(data){
       html+=renderRequirement(p.role_requirements[role]);
     }
     html+='</div>';
+
+// Check if a (msgid, emoji) is in the current user's reaction set.
+function isReacted(msgid,emoji){
+  msgid=String(msgid||'');emoji=String(emoji||'');
+  if(!msgid||!emoji)return false;
+  var sigs={};
+  try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+  var list=(sigs.my_reactions&&sigs.my_reactions[msgid])||[];
+  return list.indexOf(emoji)>=0;
+}
+
+// Toggle a chip's reaction. Reads $my_reactions[msgid] from the body signal,
+// flips the entry for the given emoji, writes the signal back, then POSTs.
+function toggleReaction(msgid,emoji){
+  msgid=String(msgid||'');emoji=String(emoji||'');
+  if(!msgid||!emoji)return;
+  var sigs={};
+  try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+  sigs.my_reactions=sigs.my_reactions||{};
+  var list=sigs.my_reactions[msgid]||[];
+  var has=list.indexOf(emoji)>=0;
+  list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
+  sigs.my_reactions[msgid]=list;
+  document.body.setAttribute('data-signals',JSON.stringify(sigs));
+  // Re-render this row's chip set with the new .mine state.
+  var row=document.querySelector('.msg[data-msgid="'+msgid.replace(/"/g,'\\"')+'"]');
+  if(row){
+    var chips=row.querySelectorAll('.reaction-chip');
+    for(var i=0;i<chips.length;i++){
+      var e=chips[i].getAttribute('data-emoji');
+      if(!e)continue;
+      if(e===emoji){
+        if(has)chips[i].classList.remove('mine');
+        else chips[i].classList.add('mine');
+      }
+    }
+  }
+  var url='/chat/{{channel}}/'+(has?'unreact':'react');
+  fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:msgid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
+    if(!r.ok){
+      // Roll back local state on server rejection.
+      try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+      sigs.my_reactions=sigs.my_reactions||{};
+      var l=sigs.my_reactions[msgid]||[];
+      l=has?l.concat([emoji]):l.filter(function(e){return e!==emoji;});
+      sigs.my_reactions[msgid]=l;
+      document.body.setAttribute('data-signals',JSON.stringify(sigs));
+      console.error((has?'unreact':'react')+' failed',r.status);
+    }
+  });
+}
+window.isReacted=isReacted;
+window.toggleReaction=toggleReaction;
+
   }
   html+='</div>';
   html+='<details class="policy-raw"><summary class="has-text-grey" style="cursor:pointer;user-select:none">Raw JSON</summary>';
