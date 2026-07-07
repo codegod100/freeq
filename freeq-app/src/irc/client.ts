@@ -537,6 +537,15 @@ function wireEvents(c: FreeqClient) {
     }
   });
 
+  // End-of-NAMES: replace the roster with the server's authoritative snapshot.
+  // This is what makes a self-JOIN clear / nick collision / reconnect unable to
+  // leave the member list showing only live-joined members (the bug where
+  // everyone delivered via NAMES — zapnap, etc. — vanished).
+  c.on('membersSync', (channel, members) => {
+    s().setMembers(channel, members);
+    for (const m of members) if (m.did) prefetchProfiles([m.did]);
+  });
+
   c.on('memberDid', (nick, did) => {
     s().updateMemberDid(nick, did);
   });

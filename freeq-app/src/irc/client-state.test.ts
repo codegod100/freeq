@@ -508,3 +508,43 @@ describe('reconnect channel persistence', () => {
     expect(ch).toEqual(['#fallback']);
   });
 });
+
+describe('setMembers — end-of-NAMES roster replace (vanishing-members fix)', () => {
+  it('replaces a roster left with only live-joined members after a self-JOIN clear', () => {
+    // Reproduce the bug: self joins (live), roster cleared on self-JOIN, self
+    // re-added live — so only the local session is present.
+    s().addMember('#freeq', { nick: 'me' });
+    s().clearMembers('#freeq');
+    s().addMember('#freeq', { nick: 'me' });
+    expect(s().channels.get('#freeq')!.members.size).toBe(1);
+
+    // End-of-NAMES sync delivers the server's authoritative roster → replace.
+    s().setMembers('#freeq', [
+      { nick: 'me', isOp: true },
+      { nick: 'zapnap', isOp: true },
+      { nick: 'yolo' },
+      { nick: 'pbanhardt' },
+    ]);
+    const members = s().channels.get('#freeq')!.members;
+    expect(members.size).toBe(4);
+    expect(members.has('zapnap')).toBe(true);
+    expect(members.has('yolo')).toBe(true);
+    expect(members.has('pbanhardt')).toBe(true);
+    expect(members.get('zapnap')!.isOp).toBe(true);
+  });
+
+  it('drops members no longer in the NAMES snapshot', () => {
+    s().setMembers('#c', [{ nick: 'alice' }, { nick: 'bob' }]);
+    s().setMembers('#c', [{ nick: 'alice' }]); // bob left; a fresh NAMES omits him
+    expect(s().channels.get('#c')!.members.has('bob')).toBe(false);
+    expect(s().channels.get('#c')!.members.has('alice')).toBe(true);
+  });
+
+  it('preserves enriched fields (DID) by nick across a sync', () => {
+    s().addMember('#d', { nick: 'alice', did: 'did:plc:alice' });
+    s().setMembers('#d', [{ nick: 'alice', isOp: true }]); // NAMES carries no DID
+    const alice = s().channels.get('#d')!.members.get('alice')!;
+    expect(alice.did).toBe('did:plc:alice');
+    expect(alice.isOp).toBe(true);
+  });
+});

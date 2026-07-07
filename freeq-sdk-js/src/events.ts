@@ -85,8 +85,14 @@ export interface FreeqEvents {
   /** Fired when a channel mode changes. */
   modeChanged: (channel: string, mode: string, arg: string | undefined, setBy: string) => void;
 
-  /** Fired when NAMES list is received for a channel. */
+  /** Fired for each NAMES (353) line — incremental, additive. */
   membersList: (channel: string, members: Array<Partial<Member> & { nick: string }>) => void;
+
+  /** Fired once at end-of-NAMES (366) with the FULL accumulated roster for a
+   *  channel. Consumers should REPLACE the channel's member set with this — it
+   *  is the server's authoritative roster, so a self-JOIN clear, nick
+   *  collision, or reconnect can never leave the list half-populated. */
+  membersSync: (channel: string, members: Array<Partial<Member> & { nick: string }>) => void;
 
   /** Fired when a member's DID is discovered (via WHOIS). */
   memberDid: (nick: string, did: string) => void;

@@ -52,6 +52,11 @@ export class FreeqClient extends EventEmitter {
 
   private autoJoinChannels: string[] = [];
   private _joinedChannels = new Set<string>();
+  /** Accumulates NAMES (353) lines per channel between the start of a NAMES
+   *  reply and its 366 terminator, so the full roster can be emitted atomically
+   *  as `membersSync`. A key present = a NAMES sequence is in progress; 366
+   *  deletes it, so the next reply starts fresh. */
+  private _namesAccum = new Map<string, Array<Partial<Member> & { nick: string }>>();
 
   private backgroundWhois = new Set<string>();
   private echoPlaintextCache = new Map<string, { plaintext: string; ts: number }>();
@@ -1774,11 +1779,24 @@ export class FreeqClient extends EventEmitter {
           });
         }
         this.emit('membersList', channel, members);
+        // Accumulate for the atomic end-of-NAMES `membersSync` (366). A fresh
+        // sequence (no key yet, because 366 deleted it) starts a new array.
+        const key = (channel || '').toLowerCase();
+        const acc = this._namesAccum.get(key) ?? [];
+        acc.push(...members);
+        this._namesAccum.set(key, acc);
         break;
       }
 
       case '366': {
         const namesChannel = msg.params[1];
+        // Emit the FULL accumulated roster so consumers can replace the member
+        // set atomically — immune to a self-JOIN clear / collision / reconnect
+        // leaving it half-populated. Then end the sequence so the next NAMES
+        // reply starts fresh.
+        const key = (namesChannel || '').toLowerCase();
+        this.emit('membersSync', namesChannel, this._namesAccum.get(key) ?? []);
+        this._namesAccum.delete(key);
         this.requestHistory({ target: namesChannel, mode: 'latest' });
         break;
       }

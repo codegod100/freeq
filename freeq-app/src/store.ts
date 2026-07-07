@@ -195,6 +195,10 @@ export interface Store {
   // Actions — members
   clearMembers: (channel: string) => void;
   addMember: (channel: string, member: Partial<Member> & { nick: string }) => void;
+  /** Replace the whole roster with the server's authoritative NAMES snapshot
+   *  (end-of-NAMES). Fixes the case where a self-JOIN clear / nick collision /
+   *  reconnect left the list with only live-joined members. */
+  setMembers: (channel: string, members: Array<Partial<Member> & { nick: string }>) => void;
   removeMember: (channel: string, nick: string) => void;
   removeUserFromAll: (nick: string, reason: string) => void;
   renameUser: (oldNick: string, newNick: string) => void;
@@ -497,6 +501,32 @@ export const useStore = create<Store>((set, get) => ({
       away: existing?.away,
       actorClass: member.actorClass ?? existing?.actorClass,
     });
+    channels.set(channel.toLowerCase(), ch);
+    return { channels };
+  }),
+
+  setMembers: (channel, members) => set((s) => {
+    const channels = new Map(s.channels);
+    const ch = getOrCreateChannel(channels, channel);
+    const prev = new Map(ch.members); // keep enriched fields (did/handle/…) by nick
+    ch.members.clear();
+    for (const member of members) {
+      if (!member.nick || !member.nick.trim()) continue;
+      const key = member.nick.toLowerCase();
+      const existing = prev.get(key);
+      ch.members.set(key, {
+        nick: member.nick,
+        did: member.did ?? existing?.did,
+        handle: member.handle ?? existing?.handle,
+        displayName: member.displayName ?? existing?.displayName,
+        avatarUrl: member.avatarUrl ?? existing?.avatarUrl,
+        isOp: member.isOp ?? false,
+        isHalfop: member.isHalfop ?? false,
+        isVoiced: member.isVoiced ?? false,
+        away: existing?.away,
+        actorClass: member.actorClass ?? existing?.actorClass,
+      });
+    }
     channels.set(channel.toLowerCase(), ch);
     return { channels };
   }),
