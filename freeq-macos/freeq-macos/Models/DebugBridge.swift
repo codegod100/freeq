@@ -245,6 +245,13 @@ final class DebugBridge {
             // Force a message row into its hovered state so the hover action
             // bar can be screenshot-verified. `#hover <id>` / `#hover` clears.
             app.debugForceHoverMsgId = arg.isEmpty ? nil : arg
+        case "sysmsg":
+            // Inject a join/part/quit system line (empty `from`) into the active
+            // channel — lets the harness screenshot-verify the coalesced row.
+            guard let ch = app.activeChannelState else { return }
+            ch.appendIfNew(ChatMessage(
+                id: "sys-\(ch.messages.count)-\(arg.hashValue)", from: "", text: arg,
+                isAction: false, timestamp: Date(), replyTo: nil))
         case "snapshot":
             // Serialize key app state to JSON in the container so an external
             // smoke-test driver can ASSERT outcomes (not just "didn't crash").

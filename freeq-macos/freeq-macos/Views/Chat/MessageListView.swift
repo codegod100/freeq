@@ -98,6 +98,10 @@ struct RowModel: Equatable, Identifiable {
     var message: ChatMessage
     var showsDateSeparator: Bool
     var showHeader: Bool
+    /// When set, this row represents a coalesced run of ≥2 consecutive
+    /// join/part/quit lines (rendered as one collapsible summary instead of a
+    /// pill per event — kills reconnect-storm spam while keeping the record).
+    var coalescedSystem: [ChatMessage]? = nil
     var id: String { message.id }
 }
 
@@ -109,13 +113,39 @@ enum MessageListTimeline {
         var out: [RowModel] = []
         out.reserveCapacity(messages.count)
         var prev: ChatMessage?
-        for msg in messages {
-            out.append(RowModel(
-                message: msg,
-                showsDateSeparator: MessageTimeline.showsDateSeparator(
-                    before: msg.timestamp, previous: prev?.timestamp),
-                showHeader: showsHeader(prev: prev, current: msg)))
-            prev = msg
+        var i = 0
+        while i < messages.count {
+            let msg = messages[i]
+            // A live join/part/quit line is a system message (empty `from`) that
+            // isn't a deletion tombstone.
+            if msg.from.isEmpty && !msg.isDeleted {
+                var run: [ChatMessage] = []
+                var j = i
+                while j < messages.count, messages[j].from.isEmpty, !messages[j].isDeleted {
+                    run.append(messages[j])
+                    j += 1
+                }
+                let first = run[0]
+                let sep = MessageTimeline.showsDateSeparator(
+                    before: first.timestamp, previous: prev?.timestamp)
+                out.append(RowModel(
+                    message: first,
+                    showsDateSeparator: sep,
+                    showHeader: false,
+                    // Only fold when there's an actual run — a lone join/leave
+                    // still renders as a normal single pill.
+                    coalescedSystem: run.count >= 2 ? run : nil))
+                prev = run.last
+                i = j
+            } else {
+                out.append(RowModel(
+                    message: msg,
+                    showsDateSeparator: MessageTimeline.showsDateSeparator(
+                        before: msg.timestamp, previous: prev?.timestamp),
+                    showHeader: showsHeader(prev: prev, current: msg)))
+                prev = msg
+                i += 1
+            }
         }
         return out
     }
@@ -147,7 +177,9 @@ struct MessageTimelineRowContent: View {
             if row.showsDateSeparator {
                 DateSeparatorView(date: row.message.timestamp)
             }
-            if row.message.isDeleted {
+            if let run = row.coalescedSystem {
+                CoalescedSystemRow(events: run)
+            } else if row.message.isDeleted {
                 DeletedMessageRow(message: row.message)
             } else if row.message.from.isEmpty {
                 SystemMessageRow(message: row.message)
@@ -346,6 +378,94 @@ struct SystemMessageRow: View {
         if message.text.contains("left") || message.text.contains("quit") { return "arrow.left.circle" }
         if message.text.contains("kicked") { return "xmark.circle" }
         return "info.circle"
+    }
+}
+
+/// A coalesced run of consecutive join/part/quit lines, shown as one compact
+/// pill ("nap reconnected 4×" / "3 joined · 1 left") that expands on click to
+/// the individual events. Documents the churn without a pill per event, and —
+/// like `SystemMessageRow` — honours the freeq.showJoinPart toggle.
+struct CoalescedSystemRow: View {
+    let events: [ChatMessage]
+    @AppStorage("freeq.showJoinPart") private var showJoinPart = true
+    @State private var expanded = false
+
+    var body: some View {
+        if showJoinPart {
+            VStack(spacing: 3) {
+                Button { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.left.arrow.right.circle")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.textTertiary)
+                        Text(summary)
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(Theme.textTertiary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Theme.systemPill))
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("\(events.count) presence changes — click to \(expanded ? "collapse" : "expand")")
+
+                if expanded {
+                    VStack(spacing: 2) {
+                        ForEach(events) { event in
+                            HStack(spacing: 4) {
+                                Image(systemName: icon(for: event.text))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Theme.textTertiary)
+                                Text(event.text)
+                                    .font(.caption2)
+                                    .foregroundStyle(Theme.textTertiary)
+                                Text(formatTime(event.timestamp))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(Theme.textTertiary.opacity(0.7))
+                            }
+                        }
+                    }
+                    .padding(.top, 1)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, alignment: .center)
+        }
+    }
+
+    private func icon(for text: String) -> String {
+        if text.contains("joined") { return "arrow.right.circle" }
+        if text.contains("left") || text.contains("quit") { return "arrow.left.circle" }
+        if text.contains("kicked") { return "xmark.circle" }
+        return "info.circle"
+    }
+
+    /// "nap reconnected 4×" when it's one person's churn, else "3 joined · 1 left".
+    private var summary: String {
+        var joins = 0, leaves = 0, other = 0
+        var nicks = Set<String>()
+        for e in events {
+            let t = e.text
+            if let nick = t.split(separator: " ").first { nicks.insert(nick.lowercased()) }
+            if t.contains("joined") { joins += 1 }
+            else if t.contains("left") || t.contains("quit") { leaves += 1 }
+            else { other += 1 }
+        }
+        if nicks.count == 1, let nick = events.first?.text.split(separator: " ").first.map(String.init) {
+            if joins > 0 && leaves > 0 { return "\(nick) reconnected \(min(joins, leaves))×" }
+            if joins > 0 { return "\(nick) joined \(joins)×" }
+            if leaves > 0 { return "\(nick) left \(leaves)×" }
+        }
+        var parts: [String] = []
+        if joins > 0 { parts.append("\(joins) joined") }
+        if leaves > 0 { parts.append("\(leaves) left") }
+        if other > 0 { parts.append("\(other) event\(other == 1 ? "" : "s")") }
+        return parts.joined(separator: " · ")
     }
 }
 
