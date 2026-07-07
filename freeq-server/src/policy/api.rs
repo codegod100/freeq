@@ -23,6 +23,7 @@ use std::sync::Arc;
 pub fn routes() -> Router<Arc<SharedState>> {
     Router::new()
         .route("/api/v1/policy/{channel}", get(get_policy))
+        .route("/api/v1/policy/{channel}/rules", get(get_policy_rules))
         .route("/api/v1/policy/{channel}/history", get(get_policy_chain))
         .route("/api/v1/policy/{channel}/join", post(join_channel))
         .route(
@@ -79,6 +80,13 @@ struct PolicyResponse {
     authority_set: Option<AuthoritySet>,
 }
 
+#[derive(Debug, Serialize)]
+struct PolicyRulesResponse {
+    channel: String,
+    hash: String,
+    text: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct LogQuery {
     since: Option<i64>,
@@ -128,6 +136,50 @@ async fn get_policy(
             .into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, "No policy for this channel").into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Return the human-readable rules text for a channel's current policy.
+///
+/// Additive companion to `get_policy` — mirrors its visibility (public
+/// readable, no auth). 404 when the channel has no policy, or when the
+/// policy has no stored rules text (legacy policies, or policies received
+/// over S2S which carry only the hash).
+async fn get_policy_rules(
+    State(state): State<Arc<SharedState>>,
+    Path(channel): Path<String>,
+) -> impl IntoResponse {
+    let engine = match get_engine(&state) {
+        Ok(e) => e,
+        Err(e) => return e.into_response(),
+    };
+    let channel_id = normalize_channel(&channel);
+
+    let policy = match engine.get_policy(&channel_id) {
+        Ok(Some(p)) => p,
+        Ok(None) => return (StatusCode::NOT_FOUND, "No policy for this channel").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+
+    // Extract the ACCEPT hash from the requirement tree.
+    let mut hashes = HashSet::new();
+    collect_hashes_from_req(&policy.requirements, &mut hashes);
+    let hash = match hashes.into_iter().next() {
+        Some(h) => h,
+        None => {
+            return (StatusCode::NOT_FOUND, "Policy has no rules text").into_response();
+        }
+    };
+
+    match engine.get_rules_text(&hash) {
+        Ok(Some(text)) => Json(PolicyRulesResponse {
+            channel: channel_id,
+            hash,
+            text,
+        })
+        .into_response(),
+        Ok(None) => (StatusCode::NOT_FOUND, "No stored rules text for this policy").into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

@@ -374,6 +374,20 @@ impl PolicyEngine {
         self.store.get_current_policy(channel_id)
     }
 
+    /// Persist the human-readable rules text keyed by its hash.
+    /// The hash stays the verification source of truth; this is auxiliary so
+    /// the plaintext can be read back later (see POLICY <ch> RULES).
+    pub fn store_rules_text(&self, hash: &str, text: &str) -> Result<(), PolicyError> {
+        self.store.store_rules_text(hash, text)
+    }
+
+    /// Retrieve the human-readable rules text for a hash, if stored locally.
+    /// Returns None for legacy policies (set before text was persisted) or
+    /// policies received over S2S (which carry only the hash).
+    pub fn get_rules_text(&self, hash: &str) -> Result<Option<String>, PolicyError> {
+        self.store.get_rules_text(hash)
+    }
+
     /// Verify the signature on an attestation.
     pub fn verify_attestation(&self, attestation: &MembershipAttestation) -> bool {
         let sig = attestation.signature.clone();
@@ -896,6 +910,46 @@ mod tests {
             .build_evidence("did:plc:nobody", HashSet::new())
             .unwrap();
         assert!(evidence.credentials.is_empty());
+    }
+
+    #[test]
+    fn test_rules_text_store_and_read() {
+        let engine = test_engine();
+        let rules_text = "Be nice.\nNo spam.\nRespect others.";
+        let rules_hash = canonical::sha256_hex(rules_text.as_bytes());
+
+        // Create a policy the way POLICY SET does, and store the rules text.
+        engine
+            .create_channel_policy(
+                "#rules",
+                Requirement::Accept {
+                    hash: rules_hash.clone(),
+                },
+                std::collections::BTreeMap::new(),
+            )
+            .unwrap();
+        engine.store_rules_text(&rules_hash, rules_text).unwrap();
+
+        // Read it back by hash — should match exactly.
+        assert_eq!(
+            engine.get_rules_text(&rules_hash).unwrap().as_deref(),
+            Some(rules_text)
+        );
+
+        // Unknown hash (e.g. legacy policy / S2S-only) returns None.
+        let unknown = canonical::sha256_hex(b"never stored");
+        assert_eq!(engine.get_rules_text(&unknown).unwrap(), None);
+    }
+
+    #[test]
+    fn test_rules_text_dedupes_by_hash() {
+        let engine = test_engine();
+        let text = "Shared rules";
+        let hash = canonical::sha256_hex(text.as_bytes());
+        // Storing twice is idempotent (content-addressed).
+        engine.store_rules_text(&hash, text).unwrap();
+        engine.store_rules_text(&hash, text).unwrap();
+        assert_eq!(engine.get_rules_text(&hash).unwrap().as_deref(), Some(text));
     }
 
     #[test]

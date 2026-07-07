@@ -4,6 +4,7 @@
 //! POLICY <channel> SET-ROLE <role> <requirement_json> — Add role escalation requirement
 //! POLICY <channel> VERIFY github <username> <org>     — Verify GitHub org membership
 //! POLICY <channel> INFO                               — Show current policy
+//! POLICY <channel> RULES                              — Show the human-readable rules text
 //! POLICY <channel> ACCEPT                             — Accept policy + present credentials
 //! POLICY <channel> CLEAR                              — Remove policy (ops only)
 
@@ -46,7 +47,7 @@ pub(super) fn handle_policy(
             "NOTICE",
             vec![
                 nick,
-                "Usage: POLICY <channel> SET|SET-ROLE|VERIFY|INFO|ACCEPT|CLEAR",
+                "Usage: POLICY <channel> SET|SET-ROLE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
             ],
         );
         send_fn(state, session_id, format!("{reply}\r\n"));
@@ -98,6 +99,16 @@ pub(super) fn handle_policy(
             };
 
             let rules_hash = canonical::sha256_hex(rules_text.as_bytes());
+
+            // Persist the plaintext rules keyed by their hash so they can be
+            // read back later (POLICY <ch> RULES / GET .../rules). The hash
+            // remains the verification source of truth; this is additive.
+            // NOTE: rules text is stored only on the setting server — it is not
+            // propagated over S2S, so peers that receive this policy get only
+            // the hash and their RULES command reports "text not available".
+            if let Err(e) = engine.store_rules_text(&rules_hash, &rules_text) {
+                tracing::warn!(channel = %channel, error = %e, "Failed to store policy rules text");
+            }
 
             // Check if channel already has a policy
             let result = match engine.get_policy(channel) {
@@ -569,6 +580,73 @@ pub(super) fn handle_policy(
             }
         },
 
+        "RULES" => match engine.get_policy(channel) {
+            Ok(Some(policy)) => {
+                // Pull the ACCEPT hash out of the requirement tree, then look
+                // up the plaintext we stored at SET time. The hash is included
+                // in the output so the reader can independently verify the text.
+                let hash = extract_accept_hash(&policy.requirements).into_iter().next();
+                match hash {
+                    Some(h) => match engine.get_rules_text(&h) {
+                        Ok(Some(text)) => {
+                            let header = format!("Rules for {channel} (rules_hash={h}):");
+                            let reply =
+                                Message::from_server(server_name, "NOTICE", vec![nick, &header]);
+                            send_fn(state, session_id, format!("{reply}\r\n"));
+                            // One NOTICE per line, like the INFO arm.
+                            for line in text.split('\n') {
+                                let reply =
+                                    Message::from_server(server_name, "NOTICE", vec![nick, line]);
+                                send_fn(state, session_id, format!("{reply}\r\n"));
+                            }
+                        }
+                        Ok(None) => {
+                            let msg = format!(
+                                "Rules text isn't available for this policy (rules_hash={h}; set before rules were stored, or received over S2S). Ask an op to re-run POLICY {channel} SET <rules>."
+                            );
+                            let reply =
+                                Message::from_server(server_name, "NOTICE", vec![nick, &msg]);
+                            send_fn(state, session_id, format!("{reply}\r\n"));
+                        }
+                        Err(e) => {
+                            let reply = Message::from_server(
+                                server_name,
+                                "NOTICE",
+                                vec![nick, &format!("Policy error: {e}")],
+                            );
+                            send_fn(state, session_id, format!("{reply}\r\n"));
+                        }
+                    },
+                    None => {
+                        // Policy exists but has no ACCEPT requirement (e.g. a
+                        // pure PRESENT/PROVE policy) — there are no rules to read.
+                        let reply = Message::from_server(
+                            server_name,
+                            "NOTICE",
+                            vec![nick, "This policy has no rules text (no ACCEPT requirement)"],
+                        );
+                        send_fn(state, session_id, format!("{reply}\r\n"));
+                    }
+                }
+            }
+            Ok(None) => {
+                let reply = Message::from_server(
+                    server_name,
+                    "NOTICE",
+                    vec![nick, &format!("{channel} has no policy (open join)")],
+                );
+                send_fn(state, session_id, format!("{reply}\r\n"));
+            }
+            Err(e) => {
+                let reply = Message::from_server(
+                    server_name,
+                    "NOTICE",
+                    vec![nick, &format!("Policy error: {e}")],
+                );
+                send_fn(state, session_id, format!("{reply}\r\n"));
+            }
+        },
+
         "ACCEPT" => {
             let did = match &conn.authenticated_did {
                 Some(d) => d.clone(),
@@ -910,7 +988,7 @@ pub(super) fn handle_policy(
                 "NOTICE",
                 vec![
                     nick,
-                    "Usage: POLICY <channel> SET|SET-ROLE|REQUIRE|VERIFY|INFO|ACCEPT|CLEAR",
+                    "Usage: POLICY <channel> SET|SET-ROLE|REQUIRE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
                 ],
             );
             send_fn(state, session_id, format!("{reply}\r\n"));

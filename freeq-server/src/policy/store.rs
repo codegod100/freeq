@@ -122,6 +122,17 @@ impl PolicyStore {
                 created_at TEXT NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (log_id, tree_size)
             );
+
+            -- Human-readable rules text, content-addressed by its sha256 hash.
+            -- The hash remains the source of truth for verification (stored in
+            -- the policy's ACCEPT requirement); this table is auxiliary, letting
+            -- clients read back the plaintext an op typed at SET time. Identical
+            -- rules dedupe naturally since the hash is the primary key.
+            CREATE TABLE IF NOT EXISTS rules_texts (
+                rules_hash TEXT PRIMARY KEY,
+                rules_text TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
             ",
         )?;
         Ok(())
@@ -282,6 +293,38 @@ impl PolicyStore {
             }
             None => Ok(None),
         }
+    }
+
+    // ─── Rules Text ──────────────────────────────────────────────────────
+
+    /// Store the human-readable rules text keyed by its sha256 hash.
+    /// Content-addressed, so identical rules dedupe (INSERT OR IGNORE).
+    /// Auxiliary to the hash, which stays the verification source of truth.
+    pub fn store_rules_text(&self, hash: &str, text: &str) -> Result<(), PolicyError> {
+        let db = self.db.lock();
+        db.execute(
+            "INSERT OR IGNORE INTO rules_texts (rules_hash, rules_text) VALUES (?1, ?2)",
+            params![hash, text],
+        )
+        .map_err(|e| PolicyError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Get the human-readable rules text for a given hash, if stored.
+    /// Returns None for hashes with no stored text (e.g. legacy policies set
+    /// before rules text was persisted, or policies received over S2S which
+    /// only carry the hash).
+    pub fn get_rules_text(&self, hash: &str) -> Result<Option<String>, PolicyError> {
+        let db = self.db.lock();
+        let text: Option<String> = db
+            .query_row(
+                "SELECT rules_text FROM rules_texts WHERE rules_hash = ?1",
+                params![hash],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| PolicyError::Database(e.to_string()))?;
+        Ok(text)
     }
 
     // ─── Join Receipts ───────────────────────────────────────────────────
