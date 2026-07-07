@@ -23,6 +23,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tower_http::cors::CorsLayer;
 
 use crate::server::SharedState;
+// OAuth primitives now live in the shared engine crate. `generate_random_string`
+// is re-exported because `crate::web::generate_random_string` is referenced from
+// connection::login; `urlencod` is the local alias for the engine's `urlencode`.
+pub use freeq_oauth::generate_random_string;
+use freeq_oauth::{ClientProvider, build_client_id, generate_pkce, urlencode as urlencod};
 
 // ── WebSocket ↔ IRC bridge ─────────────────────────────────────────────
 
@@ -326,9 +331,32 @@ pub fn router(state: Arc<SharedState>) -> Router {
     }
 
     // Apply state, then merge verifier (which has its own state already applied)
-    let mut final_app = app.with_state(state);
+    let mut final_app = app.with_state(state.clone());
     if let Some(vr) = verifier_router {
         final_app = final_app.merge(vr);
+    }
+    // Embedded broker: with no separate broker configured (BROKER_SHARED_SECRET
+    // unset), serve the broker's /session + graph endpoints in-process, backed
+    // by an ephemeral in-memory store and a LocalWriter into our own state. A
+    // separate broker (secret set) uses the /auth/broker/* receiver path instead.
+    if let Some(store) = state.embedded_session_store.clone() {
+        let broker_state = Arc::new(freeq_auth_broker::BrokerState {
+            // client_id is stored per-session, so these are unused by the
+            // /session + graph paths.
+            config: freeq_auth_broker::BrokerConfig {
+                public_url: String::new(),
+                freeq_server_url: String::new(),
+                shared_secret: String::new(),
+            },
+            writer: Arc::new(LocalWriter {
+                state: state.clone(),
+            }),
+            // Same store instance auth_callback persists into.
+            store,
+            pending: tokio::sync::Mutex::new(Default::default()),
+            refresh_locks: tokio::sync::Mutex::new(Default::default()),
+        });
+        final_app = final_app.merge(freeq_auth_broker::session_router(broker_state));
     }
     // Security headers as outermost layer so they apply to all responses
     // including static files served via fallback_service
@@ -1986,6 +2014,56 @@ async fn auth_broker_web_token(
     }))
 }
 
+/// [`freeq_auth_broker::SessionWriter`] that writes into this server's own
+/// in-process state — the embedded equivalent of the standalone broker's
+/// HMAC push. Mirrors the `/auth/broker/*` receiver bodies.
+pub struct LocalWriter {
+    pub state: Arc<SharedState>,
+}
+
+#[async_trait::async_trait]
+impl freeq_auth_broker::SessionWriter for LocalWriter {
+    async fn mint_web_token(
+        &self,
+        did: &str,
+        handle: &str,
+    ) -> Result<(String, String), anyhow::Error> {
+        let token = generate_random_string(32);
+        self.state.web_auth_tokens.lock().insert(
+            token.clone(),
+            (did.to_string(), handle.to_string(), std::time::Instant::now()),
+        );
+        Ok((token, mobile_nick_from_handle(handle)))
+    }
+
+    async fn push_session(
+        &self,
+        p: &freeq_auth_broker::SessionPush<'_>,
+    ) -> Result<(), anyhow::Error> {
+        self.state.web_sessions.lock().insert(
+            (p.did.to_string(), crate::server::OauthPurpose::Login),
+            crate::server::WebSession {
+                did: p.did.to_string(),
+                handle: p.handle.to_string(),
+                pds_url: p.pds_url.to_string(),
+                access_token: p.access_token.to_string(),
+                dpop_key_b64: p.dpop_key_b64.to_string(),
+                dpop_nonce: p.dpop_nonce.map(str::to_string),
+                created_at: std::time::Instant::now(),
+                granted_scope: p.granted_scope.to_string(),
+            },
+        );
+        // Upload token for mobile clients that can't prove session ownership
+        // via WebSocket session_dids (stored server-side, 5-min TTL).
+        let upload_token = generate_random_string(32);
+        self.state
+            .upload_tokens
+            .lock()
+            .insert(upload_token, (p.did.to_string(), std::time::Instant::now()));
+        Ok(())
+    }
+}
+
 async fn auth_broker_session(
     State(state): State<Arc<SharedState>>,
     headers: axum::http::HeaderMap,
@@ -2187,6 +2265,47 @@ async fn safe_outbound_client(
     Ok((parsed, client))
 }
 
+/// An outbound refusal carrying the exact `(status, message)`
+/// [`safe_outbound_client`] would have returned, so the engine's generic
+/// `anyhow` error can be mapped back to the original response at the handler
+/// boundary (preserving the CTF-07/08/09 4xx-fast-generic behavior).
+#[derive(Debug, thiserror::Error)]
+#[error("{msg}")]
+struct OutboundRefused {
+    status: StatusCode,
+    msg: &'static str,
+}
+
+/// [`freeq_oauth::ClientProvider`] backed by [`safe_outbound_client`]: SSRF
+/// validation + DNS pinning per URL. Used for OAuth discovery, where every hop
+/// (PDS → auth server) is attacker-influenced.
+struct SsrfClients {
+    timeout: std::time::Duration,
+}
+
+impl freeq_oauth::ClientProvider for SsrfClients {
+    async fn client_for(&self, url: &str) -> anyhow::Result<reqwest::Client> {
+        match safe_outbound_client(url, self.timeout).await {
+            Ok((_parsed, client)) => Ok(client),
+            Err((status, msg)) => Err(OutboundRefused { status, msg }.into()),
+        }
+    }
+}
+
+/// Map an engine discovery/validation error back to an HTTP response. An SSRF
+/// refusal keeps its original `(status, message)`; a metadata fetch/parse
+/// failure (which happens over an already-validated client) is a generic 502.
+fn map_outbound_err(e: anyhow::Error) -> (StatusCode, String) {
+    if let Some(r) = e.downcast_ref::<OutboundRefused>() {
+        (r.status, r.msg.to_string())
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            "Upstream metadata fetch failed".to_string(),
+        )
+    }
+}
+
 fn derive_web_origin(headers: &axum::http::HeaderMap) -> (String, String) {
     let raw_host = headers
         .get("host")
@@ -2214,28 +2333,6 @@ fn derive_web_origin_from_config(config: &crate::config::ServerConfig) -> (Strin
         "https"
     };
     (format!("{scheme}://{host}"), scheme.to_string())
-}
-
-/// Build OAuth client_id. Loopback uses http://localhost?... form;
-/// production uses {origin}/client-metadata.json.
-fn build_client_id(web_origin: &str, redirect_uri: &str) -> String {
-    if web_origin.starts_with("http://127.")
-        || web_origin.starts_with("http://192.168.")
-        || web_origin.starts_with("http://10.")
-    {
-        // Loopback client — use http://localhost form per AT Protocol spec.
-        // Same union as the production client-metadata.json (with the
-        // legacy transition:generic kept for refresh-token grace period).
-        let scope = "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic";
-        format!(
-            "http://localhost?redirect_uri={}&scope={}",
-            urlencod(redirect_uri),
-            urlencod(scope),
-        )
-    } else {
-        // Production — client_id is the URL of the client-metadata.json document
-        format!("{web_origin}/client-metadata.json")
-    }
 }
 
 // ── OAuth endpoints for web client ─────────────────────────────────────
@@ -2346,97 +2443,39 @@ async fn auth_login(
         )
     })?;
 
-    // Discover authorization server. SSRF-guard every external URL the
-    // DID document points us at — the document is attacker-controlled.
-    // CTF-07/08/09 regression tests pin this.
-    let pr_url = format!(
-        "{}/.well-known/oauth-protected-resource",
-        pds_url.trim_end_matches('/')
-    );
-    let (_pr_parsed, pr_client) = safe_outbound_client(&pr_url, std::time::Duration::from_secs(8))
+    // Discover the authorization server through the shared engine. Every hop
+    // (PDS → auth server) is attacker-influenced via the DID document, so the
+    // provider SSRF-validates + DNS-pins a fresh client per URL. CTF-07/08/09
+    // regression tests pin this.
+    let provider = SsrfClients {
+        timeout: std::time::Duration::from_secs(8),
+    };
+    let auth_meta = freeq_oauth::discovery::discover_auth_server(&provider, &pds_url)
         .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let pr_meta: serde_json::Value = pr_client
-        .get(&pr_url)
-        .send()
+        .map_err(map_outbound_err)?;
+    let authorization_endpoint = auth_meta.authorization_endpoint.as_str();
+    let token_endpoint = auth_meta.token_endpoint.as_str();
+    let par_endpoint = auth_meta
+        .pushed_authorization_request_endpoint
+        .as_deref()
+        .ok_or((StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
+    // Validate the endpoints the auth-server metadata named — these go straight
+    // from PDS-controlled JSON into URLs we redirect to / POST credentials to,
+    // so the SSRF surface extends past the metadata fetches.
+    provider
+        .client_for(authorization_endpoint)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "PDS metadata fetch failed".to_string(),
-            )
-        })?
-        .json()
+        .map_err(map_outbound_err)?;
+    provider
+        .client_for(token_endpoint)
         .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "PDS metadata parse failed".to_string(),
-            )
-        })?;
-
-    let auth_server = pr_meta["authorization_servers"][0]
-        .as_str()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "No authorization server".to_string(),
-            )
-        })?;
-
-    let as_url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        auth_server.trim_end_matches('/')
-    );
-    let (_as_parsed, as_client) = safe_outbound_client(&as_url, std::time::Duration::from_secs(8))
-        .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let auth_meta: serde_json::Value = as_client
-        .get(&as_url)
-        .send()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Auth server metadata failed".to_string(),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Auth server metadata parse failed".to_string(),
-            )
-        })?;
-
-    let authorization_endpoint = auth_meta["authorization_endpoint"]
-        .as_str()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "No authorization_endpoint".to_string(),
-            )
-        })?;
-    let token_endpoint = auth_meta["token_endpoint"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No token_endpoint".to_string()))?;
-    let par_endpoint = auth_meta["pushed_authorization_request_endpoint"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
-    // Validate every endpoint the auth-server metadata named — these go
-    // straight from PDS-controlled JSON into URLs we POST credentials
-    // to, so the SSRF surface extends past the metadata fetches.
-    let _ = safe_outbound_client(authorization_endpoint, std::time::Duration::from_secs(8))
-        .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let _ = safe_outbound_client(token_endpoint, std::time::Duration::from_secs(8))
-        .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let (_par_parsed, par_client) =
-        safe_outbound_client(par_endpoint, std::time::Duration::from_secs(10))
-            .await
-            .map_err(|(s, m)| (s, m.to_string()))?;
+        .map_err(map_outbound_err)?;
+    let par_client = SsrfClients {
+        timeout: std::time::Duration::from_secs(10),
+    }
+    .client_for(par_endpoint)
+    .await
+    .map_err(map_outbound_err)?;
 
     // Build redirect URI and client_id. Default purpose for `/auth/login`
     // is `Login` — narrow `atproto` scope only. Phase-2 step-up flows
@@ -2452,84 +2491,23 @@ async fn auth_login(
     let (code_verifier, code_challenge) = generate_pkce();
     let oauth_state = generate_random_string(16);
 
-    // PAR request
-    let params = [
-        ("response_type", "code"),
-        ("client_id", &client_id),
-        ("redirect_uri", &redirect_uri),
-        ("code_challenge", &code_challenge),
-        ("code_challenge_method", "S256"),
-        ("scope", scope),
-        ("state", &oauth_state),
-        ("login_hint", &handle),
-    ];
-
-    // Try without nonce first
-    let dpop_proof = dpop_key
-        .proof("POST", par_endpoint, None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP proof failed: {e}"),
-            )
-        })?;
-    // Use the SSRF-validated par_client (DNS-pinned + timeout). Error
-    // strings are deliberately generic — the PDS body could otherwise
-    // be reflected into our error response.
-    let resp = par_client
-        .post(par_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR failed".to_string()))?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let par_resp: serde_json::Value = if status.as_u16() == 400 && dpop_nonce.is_some() {
-        // Retry with nonce
-        let nonce = dpop_nonce.as_deref().unwrap();
-        let dpop_proof2 = dpop_key
-            .proof("POST", par_endpoint, Some(nonce), None)
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DPoP retry failed".to_string(),
-                )
-            })?;
-        let resp2 = par_client
-            .post(par_endpoint)
-            .header("DPoP", &dpop_proof2)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR retry failed".to_string()))?;
-        if !resp2.status().is_success() {
-            return Err((StatusCode::BAD_GATEWAY, "PAR retry failed".to_string()));
-        }
-        resp2
-            .json()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR parse failed".to_string()))?
-    } else if status.is_success() {
-        resp.json()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR parse failed".to_string()))?
-    } else {
-        return Err((StatusCode::BAD_GATEWAY, format!("PAR failed ({status})")));
-    };
-
-    let request_uri = par_resp["request_uri"].as_str().ok_or_else(|| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "No request_uri in PAR response".to_string(),
-        )
-    })?;
+    // Shared engine performs the PAR + DPoP nonce dance over the
+    // SSRF-validated par_client (DNS-pinned + timeout). The error is mapped to
+    // a generic string — the PDS body must not be reflected into our response.
+    let par = freeq_oauth::discovery::pushed_authorization_request(
+        &par_client,
+        par_endpoint,
+        &client_id,
+        &redirect_uri,
+        &code_challenge,
+        &oauth_state,
+        &handle,
+        scope,
+        &dpop_key,
+    )
+    .await
+    .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR failed".to_string()))?;
+    let request_uri = par.request_uri.as_str();
 
     // Store pending session
     let now = SystemTime::now()
@@ -2638,86 +2616,36 @@ async fn auth_step_up(
     // URL they like), so without these the server happily fetches from
     // 127.0.0.1, 169.254.169.254 (cloud metadata service), 10.x.x.x,
     // etc. CTF-07 regression test pins this.
-    let pr_url = format!(
-        "{}/.well-known/oauth-protected-resource",
-        pds_url.trim_end_matches('/')
-    );
-    let (_pr_parsed, pr_client) = safe_outbound_client(&pr_url, std::time::Duration::from_secs(8))
+    // Discover through the shared engine; the provider SSRF-validates + pins
+    // each attacker-influenced hop. Same path as auth_login. CTF-07 pins this.
+    let provider = SsrfClients {
+        timeout: std::time::Duration::from_secs(8),
+    };
+    let auth_meta = freeq_oauth::discovery::discover_auth_server(&provider, &pds_url)
         .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let pr_meta: serde_json::Value = pr_client
-        .get(&pr_url)
-        .send()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "PDS metadata fetch failed".to_string(),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "PDS metadata parse failed".to_string(),
-            )
-        })?;
-    let auth_server = pr_meta["authorization_servers"][0].as_str().ok_or((
-        StatusCode::BAD_GATEWAY,
-        "No authorization server".to_string(),
-    ))?;
-    let as_url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        auth_server.trim_end_matches('/')
-    );
-    let (_as_parsed, as_client) = safe_outbound_client(&as_url, std::time::Duration::from_secs(8))
-        .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let auth_meta: serde_json::Value = as_client
-        .get(&as_url)
-        .send()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Auth server metadata failed".to_string(),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|_| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "Auth server metadata parse failed".to_string(),
-            )
-        })?;
-    let authorization_endpoint = auth_meta["authorization_endpoint"].as_str().ok_or((
-        StatusCode::BAD_GATEWAY,
-        "No authorization_endpoint".to_string(),
-    ))?;
-    let token_endpoint = auth_meta["token_endpoint"]
-        .as_str()
-        .ok_or((StatusCode::BAD_GATEWAY, "No token_endpoint".to_string()))?;
-    let par_endpoint = auth_meta["pushed_authorization_request_endpoint"]
-        .as_str()
+        .map_err(map_outbound_err)?;
+    let authorization_endpoint = auth_meta.authorization_endpoint.as_str();
+    let token_endpoint = auth_meta.token_endpoint.as_str();
+    let par_endpoint = auth_meta
+        .pushed_authorization_request_endpoint
+        .as_deref()
         .ok_or((StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
-    // The auth-server metadata is fully attacker-controlled too — the
-    // PDS could point at evil.com for token / par. Validate before we
-    // POST credentials there. We don't need to keep the
-    // `_authorize_parsed` since the user-redirect is built from the
-    // string verbatim — but we DO need to confirm it's safe to redirect
-    // to (we won't 30x a user to localhost either).
-    let _ = safe_outbound_client(authorization_endpoint, std::time::Duration::from_secs(8))
+    // The auth-server metadata is attacker-controlled too — validate the
+    // endpoints it named before we redirect a user to / POST credentials to them.
+    provider
+        .client_for(authorization_endpoint)
         .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let _ = safe_outbound_client(token_endpoint, std::time::Duration::from_secs(8))
+        .map_err(map_outbound_err)?;
+    provider
+        .client_for(token_endpoint)
         .await
-        .map_err(|(s, m)| (s, m.to_string()))?;
-    let (_par_parsed, par_client) =
-        safe_outbound_client(par_endpoint, std::time::Duration::from_secs(10))
-            .await
-            .map_err(|(s, m)| (s, m.to_string()))?;
+        .map_err(map_outbound_err)?;
+    let par_client = SsrfClients {
+        timeout: std::time::Duration::from_secs(10),
+    }
+    .client_for(par_endpoint)
+    .await
+    .map_err(map_outbound_err)?;
 
     let redirect_uri = format!("{web_origin}/auth/callback");
     let scope = purpose.requested_scope();
@@ -2727,79 +2655,23 @@ async fn auth_step_up(
     let (code_verifier, code_challenge) = generate_pkce();
     let oauth_state = generate_random_string(16);
 
-    let params = [
-        ("response_type", "code"),
-        ("client_id", &client_id),
-        ("redirect_uri", &redirect_uri),
-        ("code_challenge", &code_challenge),
-        ("code_challenge_method", "S256"),
-        ("scope", scope),
-        ("state", &oauth_state),
-        ("login_hint", &login_session.handle),
-    ];
-
-    // PAR with DPoP (handles nonce retry the same way as auth_login).
-    // Use the SSRF-validated `par_client` instead of a fresh
-    // reqwest::Client::new() — the client is DNS-pinned + has a
-    // timeout. Error messages are deliberately generic so we don't
-    // reflect attacker-controlled URLs back in the response body.
-    let dpop_proof = dpop_key
-        .proof("POST", par_endpoint, None, None)
-        .map_err(|_| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "DPoP proof failed".to_string(),
-            )
-        })?;
-    let resp = par_client
-        .post(par_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR failed".to_string()))?;
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let par_resp: serde_json::Value = if status.as_u16() == 400 && dpop_nonce.is_some() {
-        let nonce = dpop_nonce.as_deref().unwrap();
-        let dpop_proof2 = dpop_key
-            .proof("POST", par_endpoint, Some(nonce), None)
-            .map_err(|_| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "DPoP retry failed".to_string(),
-                )
-            })?;
-        let resp2 = par_client
-            .post(par_endpoint)
-            .header("DPoP", &dpop_proof2)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR retry failed".to_string()))?;
-        if !resp2.status().is_success() {
-            return Err((StatusCode::BAD_GATEWAY, "PAR retry failed".to_string()));
-        }
-        resp2
-            .json()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR parse failed".to_string()))?
-    } else if status.is_success() {
-        resp.json()
-            .await
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR parse failed".to_string()))?
-    } else {
-        return Err((StatusCode::BAD_GATEWAY, format!("PAR failed ({status})")));
-    };
-    let request_uri = par_resp["request_uri"].as_str().ok_or((
-        StatusCode::BAD_GATEWAY,
-        "No request_uri in PAR response".to_string(),
-    ))?;
+    // Shared engine performs the PAR + DPoP nonce dance over the
+    // SSRF-validated par_client (DNS-pinned + timeout). The error is mapped to
+    // a generic string so we don't reflect attacker-controlled body/URLs back.
+    let par = freeq_oauth::discovery::pushed_authorization_request(
+        &par_client,
+        par_endpoint,
+        &client_id,
+        &redirect_uri,
+        &code_challenge,
+        &oauth_state,
+        &login_session.handle,
+        scope,
+        &dpop_key,
+    )
+    .await
+    .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR failed".to_string()))?;
+    let request_uri = par.request_uri.as_str();
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -2906,84 +2778,29 @@ async fn auth_callback(
             )
         })?;
 
+    // Shared engine performs the code exchange + DPoP nonce-retry dance.
+    // No SSRF client here: the token_endpoint was already SSRF-validated in
+    // auth_login/auth_step_up before it was stored in `pending`. On failure
+    // render the OAuth result page (this handler has no mobile-redirect
+    // branch — that happens later, after the identity is known).
     let client = reqwest::Client::new();
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", pending.redirect_uri.as_str()),
-        ("client_id", pending.client_id.as_str()),
-        ("code_verifier", pending.code_verifier.as_str()),
-    ];
-
-    // Try without nonce
-    let dpop_proof = dpop_key
-        .proof("POST", &pending.token_endpoint, None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP proof failed: {e}"),
-            )
-        })?;
-    let resp = client
-        .post(&pending.token_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Token exchange failed: {e}"),
-            )
-        })?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let token_resp: serde_json::Value =
-        if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
-            let nonce = dpop_nonce.as_deref().unwrap();
-            let dpop_proof2 = dpop_key
-                .proof("POST", &pending.token_endpoint, Some(nonce), None)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("DPoP retry failed: {e}"),
-                    )
-                })?;
-            let resp2 = client
-                .post(&pending.token_endpoint)
-                .header("DPoP", &dpop_proof2)
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token retry failed: {e}")))?;
-            if !resp2.status().is_success() {
-                let text = resp2.text().await.unwrap_or_default();
-                return Ok(oauth_result_page(
-                    &format!("Token exchange failed: {text}"),
-                    None,
-                ));
-            }
-            resp2
-                .json()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-        } else if status.is_success() {
-            resp.json()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-        } else {
-            let text = resp.text().await.unwrap_or_default();
-            return Ok(oauth_result_page(
-                &format!("Token exchange failed ({status}): {text}"),
-                None,
-            ));
-        };
+    let exchanged = match freeq_oauth::flow::exchange_code(
+        &client,
+        &pending.token_endpoint,
+        code,
+        &pending.code_verifier,
+        &pending.redirect_uri,
+        &pending.client_id,
+        &dpop_key,
+        None,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => return Ok(oauth_result_page(&e.to_string(), None)),
+    };
+    let token_resp = exchanged.token_response;
+    let dpop_nonce = exchanged.dpop_nonce;
 
     let access_token = token_resp["access_token"]
         .as_str()
@@ -3017,12 +2834,51 @@ async fn auth_callback(
         Some(token)
     };
 
+    // Embedded durable session (Login only): persist the broker session
+    // (refresh token + client_id) into the in-process store and issue a
+    // broker_token, so /session can silently refresh without a re-login.
+    let broker_token = match (is_step_up, state.embedded_session_store.as_ref()) {
+        (false, Some(store)) => {
+            if let Some(refresh_token) = token_resp["refresh_token"].as_str() {
+                let bt = generate_random_string(32);
+                let now = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let rec = freeq_auth_broker::BrokerSessionRecord {
+                    broker_token: bt.clone(),
+                    did: pending.did.clone(),
+                    handle: pending.handle.clone(),
+                    pds_url: pending.pds_url.clone(),
+                    token_endpoint: pending.token_endpoint.clone(),
+                    refresh_token: refresh_token.to_string(),
+                    dpop_key_b64: pending.dpop_key_b64.clone(),
+                    dpop_nonce: dpop_nonce.clone(),
+                    client_id: pending.client_id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                match store.insert(&rec).await {
+                    Ok(()) => Some(bt),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "embedded session persist failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
     let result = crate::server::OAuthResult {
         did: pending.did.clone(),
         handle: pending.handle.clone(),
         access_jwt: access_token.to_string(),
         pds_url: pending.pds_url.clone(),
         web_token,
+        broker_token,
         created_at: SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -3129,8 +2985,9 @@ p {{ color: #a0a0b0; margin: 8px 0; }}
     if pending.mobile {
         let nick = mobile_nick_from_handle(&pending.handle);
         let redirect = format!(
-            "freeq://auth?token={}&nick={}&did={}&handle={}",
+            "freeq://auth?token={}&broker_token={}&nick={}&did={}&handle={}",
             urlencod(result.web_token.as_deref().unwrap_or("")),
+            urlencod(result.broker_token.as_deref().unwrap_or("")),
             urlencod(&nick),
             urlencod(&result.did),
             urlencod(&result.handle),
@@ -3309,28 +3166,6 @@ p {{ color: #a6adc8; }}
 {script}
 </body></html>"#
     )
-}
-
-fn generate_pkce() -> (String, String) {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-    let verifier = generate_random_string(32);
-    let hash = Sha256::digest(verifier.as_bytes());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
-    (verifier, challenge)
-}
-
-pub fn generate_random_string(len: usize) -> String {
-    use base64::Engine;
-    use rand::RngCore;
-    let mut bytes = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
-}
-
-fn urlencod(s: &str) -> String {
-    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 
 /// Derive an IRC nick from an AT Protocol handle.

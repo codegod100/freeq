@@ -14,11 +14,17 @@ use std::collections::HashMap;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use anyhow::{Context, Result, bail};
+// base64 + Digest are only used by the test helpers now that DpopKey/PKCE
+// moved to freeq-oauth; Sha256 is still used at module level (HKDF).
+#[cfg(test)]
 use base64::Engine;
+#[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+#[cfg(test)]
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -229,23 +235,6 @@ pub fn derive_session_key(machine_secret: &[u8], did: &str) -> [u8; 32] {
     key
 }
 
-/// Authorization server metadata (RFC 8414 / AT Protocol extensions).
-#[derive(Debug, Clone, Deserialize)]
-struct AuthServerMetadata {
-    issuer: String,
-    authorization_endpoint: String,
-    token_endpoint: String,
-    #[serde(default)]
-    pushed_authorization_request_endpoint: Option<String>,
-}
-
-/// Protected resource metadata for discovering the authorization server.
-#[derive(Debug, Clone, Deserialize)]
-struct ProtectedResourceMetadata {
-    #[serde(default)]
-    authorization_servers: Vec<String>,
-}
-
 /// Token response from the authorization server.
 #[derive(Debug, Clone, Deserialize)]
 struct TokenResponse {
@@ -254,88 +243,10 @@ struct TokenResponse {
     sub: Option<String>,
 }
 
-/// A DPoP (Demonstrating Proof-of-Possession) key pair.
-#[derive(Debug, Clone)]
-pub struct DpopKey {
-    signing_key: p256::ecdsa::SigningKey,
-}
-
-impl DpopKey {
-    pub fn generate() -> Self {
-        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
-        Self { signing_key }
-    }
-
-    /// Serialize the private key as base64url for caching.
-    pub fn to_base64url(&self) -> String {
-        URL_SAFE_NO_PAD.encode(self.signing_key.to_bytes())
-    }
-
-    /// Deserialize from base64url.
-    pub fn from_base64url(s: &str) -> Result<Self> {
-        let bytes = URL_SAFE_NO_PAD.decode(s)?;
-        let signing_key = p256::ecdsa::SigningKey::from_slice(&bytes)
-            .map_err(|e| anyhow::anyhow!("Invalid DPoP key: {e}"))?;
-        Ok(Self { signing_key })
-    }
-
-    fn jwk(&self) -> serde_json::Value {
-        let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(false);
-        let x = URL_SAFE_NO_PAD.encode(point.x().unwrap());
-        let y = URL_SAFE_NO_PAD.encode(point.y().unwrap());
-        serde_json::json!({
-            "kty": "EC",
-            "crv": "P-256",
-            "x": x,
-            "y": y,
-        })
-    }
-
-    /// Create a DPoP proof JWT for a request.
-    ///
-    /// When `access_token` is provided, includes the `ath` (access token hash)
-    /// claim as required by RFC 9449 §4.2 when the proof accompanies a token.
-    pub fn proof(
-        &self,
-        method: &str,
-        url: &str,
-        nonce: Option<&str>,
-        access_token: Option<&str>,
-    ) -> Result<String> {
-        use p256::ecdsa::{Signature, signature::Signer};
-
-        let header = serde_json::json!({
-            "typ": "dpop+jwt",
-            "alg": "ES256",
-            "jwk": self.jwk(),
-        });
-
-        let mut payload = serde_json::json!({
-            "jti": generate_random_string(16),
-            "htm": method,
-            "htu": url,
-            "iat": chrono::Utc::now().timestamp(),
-        });
-        if let Some(nonce) = nonce {
-            payload["nonce"] = serde_json::Value::String(nonce.to_string());
-        }
-        if let Some(token) = access_token {
-            // ath = base64url(SHA-256(access_token))
-            let hash = Sha256::digest(token.as_bytes());
-            payload["ath"] = serde_json::Value::String(URL_SAFE_NO_PAD.encode(hash));
-        }
-
-        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
-        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
-        let signing_input = format!("{header_b64}.{payload_b64}");
-
-        let sig: Signature = self.signing_key.sign(signing_input.as_bytes());
-        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
-
-        Ok(format!("{signing_input}.{sig_b64}"))
-    }
-}
+// DPoP key + proof now live in the shared engine crate. Re-exported so the
+// `freeq_sdk::oauth::DpopKey` path stays stable for downstream consumers
+// (freeq-server, freeq-sdk-ffi, etc.).
+pub use freeq_oauth::DpopKey;
 
 /// Perform the full OAuth login flow for a Bluesky/AT Protocol handle.
 ///
@@ -453,49 +364,19 @@ fn check_token_did(resolved_did: &str, token_did: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Discover the authorization server for a PDS.
-async fn discover_auth_server(pds_url: &str) -> Result<AuthServerMetadata> {
-    let client = reqwest::Client::new();
-
-    let pr_url = format!(
-        "{}/.well-known/oauth-protected-resource",
-        pds_url.trim_end_matches('/')
-    );
-    let pr_meta: ProtectedResourceMetadata = client
-        .get(&pr_url)
-        .send()
-        .await
-        .context("Failed to fetch protected resource metadata")?
-        .error_for_status()
-        .context("Protected resource metadata request failed")?
-        .json()
-        .await
-        .context("Failed to parse protected resource metadata")?;
-
-    let auth_server = pr_meta
-        .authorization_servers
-        .first()
-        .context("No authorization servers listed")?;
-
-    let as_url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        auth_server.trim_end_matches('/')
-    );
-    let auth_meta: AuthServerMetadata = client
-        .get(&as_url)
-        .send()
-        .await
-        .context("Failed to fetch authorization server metadata")?
-        .error_for_status()
-        .context("Authorization server metadata request failed")?
-        .json()
-        .await
-        .context("Failed to parse authorization server metadata")?;
-
-    Ok(auth_meta)
+/// Discover the authorization server for a PDS. Thin wrapper over the shared
+/// engine; the loopback CLI flow talks only to the user's own PDS, so a plain
+/// client (no SSRF guard) is fine.
+async fn discover_auth_server(pds_url: &str) -> Result<freeq_oauth::discovery::AuthServerMetadata> {
+    freeq_oauth::discovery::discover_auth_server(
+        &freeq_oauth::SharedClient(reqwest::Client::new()),
+        pds_url,
+    )
+    .await
 }
 
-/// Pushed Authorization Request (PAR).
+/// Pushed Authorization Request (PAR). Delegates the request + DPoP nonce
+/// dance to the shared engine, then builds the authorization URL to open.
 #[allow(clippy::too_many_arguments)]
 async fn push_authorization_request(
     par_endpoint: &str,
@@ -507,84 +388,24 @@ async fn push_authorization_request(
     login_hint: &str,
     dpop_key: &DpopKey,
 ) -> Result<String> {
-    let client = reqwest::Client::new();
-
-    let params = [
-        ("response_type", "code"),
-        ("client_id", client_id),
-        ("redirect_uri", redirect_uri),
-        ("code_challenge", code_challenge),
-        ("code_challenge_method", "S256"),
-        // Narrow scope. SDK callers that need PDS write access do a
-        // separate auth round with a wider scope rather than asking for
-        // it on every login.
-        ("scope", "atproto"),
-        ("state", state),
-        ("login_hint", login_hint),
-    ];
-
-    // Try without DPoP nonce first
-    let dpop_proof = dpop_key.proof("POST", par_endpoint, None, None)?;
-    let resp = client
-        .post(par_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .context("PAR request failed")?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // If we got a use_dpop_nonce error, retry with the nonce
-    if status.as_u16() == 400
-        && let Some(ref nonce) = dpop_nonce
-    {
-        let dpop_proof_retry = dpop_key.proof("POST", par_endpoint, Some(nonce), None)?;
-        let resp2 = client
-            .post(par_endpoint)
-            .header("DPoP", &dpop_proof_retry)
-            .form(&params)
-            .send()
-            .await
-            .context("PAR retry request failed")?;
-
-        if !resp2.status().is_success() {
-            let status = resp2.status();
-            let text = resp2.text().await.unwrap_or_default();
-            bail!("PAR failed ({status}): {text}");
-        }
-
-        let par_resp: serde_json::Value = resp2.json().await?;
-        let request_uri = par_resp["request_uri"]
-            .as_str()
-            .context("No request_uri in PAR response")?;
-
-        return Ok(format!(
-            "{authorization_endpoint}?client_id={}&request_uri={}",
-            urlencod(client_id),
-            urlencod(request_uri),
-        ));
-    }
-
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        bail!("PAR failed ({status}): {text}");
-    }
-
-    let par_resp: serde_json::Value = resp.json().await?;
-    let request_uri = par_resp["request_uri"]
-        .as_str()
-        .context("No request_uri in PAR response")?;
-
+    let par = freeq_oauth::discovery::pushed_authorization_request(
+        &reqwest::Client::new(),
+        par_endpoint,
+        client_id,
+        redirect_uri,
+        code_challenge,
+        state,
+        login_hint,
+        // Narrow scope; SDK callers that need PDS write access do a separate
+        // wider-scope auth round rather than asking for it on every login.
+        "atproto",
+        dpop_key,
+    )
+    .await?;
     Ok(format!(
         "{authorization_endpoint}?client_id={}&request_uri={}",
         urlencod(client_id),
-        urlencod(request_uri),
+        urlencod(&par.request_uri),
     ))
 }
 
@@ -667,85 +488,32 @@ async fn exchange_code(
     client_id: &str,
     dpop_key: &DpopKey,
 ) -> Result<(String, Option<String>)> {
-    let client = reqwest::Client::new();
-
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", client_id),
-        ("code_verifier", code_verifier),
-    ];
-
-    // First attempt
-    let dpop_proof = dpop_key.proof("POST", token_endpoint, None, None)?;
-    let resp = client
-        .post(token_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .context("Token exchange request failed")?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    // Retry with DPoP nonce if needed
-    if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
-        let nonce = dpop_nonce.as_deref().unwrap();
-        let dpop_proof_retry = dpop_key.proof("POST", token_endpoint, Some(nonce), None)?;
-        let resp2 = client
-            .post(token_endpoint)
-            .header("DPoP", &dpop_proof_retry)
-            .form(&params)
-            .send()
-            .await
-            .context("Token exchange retry failed")?;
-
-        if !resp2.status().is_success() {
-            let status = resp2.status();
-            let text = resp2.text().await.unwrap_or_default();
-            bail!("Token exchange failed ({status}): {text}");
-        }
-
-        let token_resp: TokenResponse = resp2
-            .json()
-            .await
-            .context("Failed to parse token response")?;
-        return Ok((token_resp.access_token, token_resp.sub));
-    }
-
-    if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
-        bail!("Token exchange failed ({status}): {text}");
-    }
-
-    let token_resp: TokenResponse = resp
-        .json()
-        .await
+    // Shared engine handles the DPoP nonce-retry dance; the loopback CLI
+    // flow has no SSRF concern (it talks to the user's own PDS) so a plain
+    // client is fine.
+    let exchanged = freeq_oauth::flow::exchange_code(
+        &reqwest::Client::new(),
+        token_endpoint,
+        code,
+        code_verifier,
+        redirect_uri,
+        client_id,
+        dpop_key,
+        None,
+    )
+    .await?;
+    let token_resp: TokenResponse = serde_json::from_value(exchanged.token_response)
         .context("Failed to parse token response")?;
     Ok((token_resp.access_token, token_resp.sub))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-fn generate_pkce() -> (String, String) {
-    let verifier = generate_random_string(32);
-    let hash = Sha256::digest(verifier.as_bytes());
-    let challenge = URL_SAFE_NO_PAD.encode(hash);
-    (verifier, challenge)
-}
-
-fn generate_random_string(len: usize) -> String {
-    use rand::RngCore;
-    let mut bytes = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(&bytes)
-}
+// PKCE + random-string generation are byte-identical to the shared engine;
+// re-use them. (This file keeps its own `urlencod` for now — it preserves
+// `-_.~` where the engine's percent-encodes them, and this flow's exact wire
+// output isn't covered by the characterization suite yet.)
+use freeq_oauth::{generate_pkce, generate_random_string};
 
 /// Probe the PDS getSession endpoint to discover the required DPoP nonce.
 /// Returns None if no nonce is required or if the probe fails.
@@ -901,9 +669,9 @@ mod tests {
         let encoded = key.to_base64url();
         let decoded = DpopKey::from_base64url(&encoded).expect("roundtrip");
         assert_eq!(
-            key.jwk(),
-            decoded.jwk(),
-            "public JWK must survive roundtrip"
+            key.to_base64url(),
+            decoded.to_base64url(),
+            "private key must survive roundtrip"
         );
     }
 
@@ -1034,7 +802,7 @@ mod tests {
         assert_eq!(loaded.handle, session.handle);
         assert_eq!(loaded.access_token, session.access_token);
         assert_eq!(loaded.pds_url, session.pds_url);
-        assert_eq!(loaded.dpop_key.jwk(), session.dpop_key.jwk());
+        assert_eq!(loaded.dpop_key.to_base64url(), session.dpop_key.to_base64url());
         let _ = std::fs::remove_file(&path);
     }
 
