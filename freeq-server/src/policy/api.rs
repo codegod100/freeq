@@ -824,6 +824,8 @@ fn flatten_requirements(
 ) {
     use super::types::Requirement;
     match req {
+        // Open join gate — nothing for the user to satisfy.
+        Requirement::Open => {}
         Requirement::Accept { hash } => {
             let satisfied = evidence.accepted_hashes.contains(hash);
             out.push(RequirementStatus {

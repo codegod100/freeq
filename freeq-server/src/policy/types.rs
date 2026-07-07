@@ -188,6 +188,11 @@ fn default_mmd() -> i64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Requirement {
+    /// No join gate — always satisfied. Represents an open channel: the
+    /// absence of any requirement to join. A policy may still carry
+    /// `role_requirements` (e.g. op gating) while its base join gate is `Open`.
+    Open,
+
     /// User must accept a rules document (identified by hash).
     Accept { hash: String },
 

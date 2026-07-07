@@ -71,9 +71,10 @@ fn validate_inner(req: &Requirement, depth: u32, node_count: &mut u32) -> Result
     }
 
     match req {
-        Requirement::Accept { .. } | Requirement::Present { .. } | Requirement::Prove { .. } => {
-            Ok(())
-        }
+        Requirement::Open
+        | Requirement::Accept { .. }
+        | Requirement::Present { .. }
+        | Requirement::Prove { .. } => Ok(()),
         Requirement::All { requirements } | Requirement::Any { requirements } => {
             if requirements.is_empty() {
                 return Err("ALL/ANY must have at least one sub-requirement".to_string());
@@ -102,6 +103,9 @@ fn eval_inner(
     }
 
     match req {
+        // Open channel — no join gate, always satisfied.
+        Requirement::Open => EvalResult::Satisfied,
+
         Requirement::Accept { hash } => {
             if evidence.accepted_hashes.contains(hash) {
                 EvalResult::Satisfied
@@ -256,6 +260,27 @@ mod tests {
         let mut ev = empty_evidence();
         ev.proofs.insert("github_repo_write_access".into());
         assert!(evaluate(&req, &ev).is_satisfied());
+    }
+
+    #[test]
+    fn test_open_always_satisfied() {
+        // Open join gate is satisfied even with zero evidence.
+        assert!(evaluate(&Requirement::Open, &empty_evidence()).is_satisfied());
+    }
+
+    #[test]
+    fn test_open_validates() {
+        // Open is a structurally valid requirement (unlike empty ALL/ANY).
+        assert!(validate_structure(&Requirement::Open).is_ok());
+    }
+
+    #[test]
+    fn test_open_roundtrips_json() {
+        // Wire form is {"type":"OPEN"}; deserializes back to Open.
+        let j = serde_json::to_string(&Requirement::Open).unwrap();
+        assert_eq!(j, r#"{"type":"OPEN"}"#);
+        let back: Requirement = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, Requirement::Open);
     }
 
     #[test]

@@ -2241,6 +2241,7 @@ version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
  "axum",
  "base64",
  "chrono",
@@ -2521,6 +2522,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
  "automerge",
  "axum",
  "base64",
@@ -2528,6 +2530,7 @@ dependencies = [
  "chrono",
  "clap",
  "ed25519-dalek 2.2.0",
+ "freeq-auth-broker",
  "freeq-oauth",
  "freeq-sdk",
  "futures",
@@ -2553,6 +2556,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",

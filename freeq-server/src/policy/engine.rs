@@ -621,6 +621,104 @@ mod tests {
     }
 
     #[test]
+    fn test_open_join_gate_still_gates_op_role() {
+        // Open base join gate: anyone joins with zero evidence, but the op
+        // role still requires its credential. This is the "open by default,
+        // roles still gated" shape (#freeq-style, minus the rules acceptance).
+        let engine = test_engine();
+
+        let mut role_reqs = std::collections::BTreeMap::new();
+        role_reqs.insert(
+            "op".to_string(),
+            Requirement::Present {
+                credential_type: "github_repo".into(),
+                issuer: Some("did:web:irc.freeq.at:verify".into()),
+            },
+        );
+
+        engine
+            .create_channel_policy("#lobby", Requirement::Open, role_reqs)
+            .unwrap();
+
+        // Stranger with no evidence at all joins as a plain member.
+        let empty = UserEvidence {
+            accepted_hashes: HashSet::new(),
+            credentials: vec![],
+            proofs: HashSet::new(),
+        };
+        match engine.process_join("#lobby", "did:plc:stranger", &empty).unwrap() {
+            JoinResult::Confirmed { attestation, .. } => assert_eq!(attestation.role, "member"),
+            other => panic!("open join should confirm as member, got {:?}", other),
+        }
+
+        // Collaborator presenting the github_repo credential is opped.
+        let with_cred = UserEvidence {
+            accepted_hashes: HashSet::new(),
+            credentials: vec![Credential {
+                credential_type: "github_repo".into(),
+                issuer: "did:web:irc.freeq.at:verify".into(),
+            }],
+            proofs: HashSet::new(),
+        };
+        match engine.process_join("#lobby", "did:plc:collab", &with_cred).unwrap() {
+            JoinResult::Confirmed { attestation, .. } => assert_eq!(attestation.role, "op"),
+            other => panic!("collaborator should be opped, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_preserves_roles_and_endpoints() {
+        // Simulates POLICY SET replacing only the join gate: role requirements
+        // and credential endpoints must survive a rules change.
+        use crate::policy::types::CredentialEndpoint;
+        let engine = test_engine();
+
+        let mut role_reqs = std::collections::BTreeMap::new();
+        role_reqs.insert(
+            "op".to_string(),
+            Requirement::Present {
+                credential_type: "github_repo".into(),
+                issuer: Some("did:web:irc.freeq.at:verify".into()),
+            },
+        );
+        let mut endpoints = std::collections::BTreeMap::new();
+        endpoints.insert(
+            "github_repo".to_string(),
+            CredentialEndpoint {
+                issuer: "did:web:irc.freeq.at:verify".into(),
+                url: "/verify/github/start?repo=chad/freeq".into(),
+                label: "GitHub Repo Collaborator".into(),
+                description: None,
+            },
+        );
+
+        engine
+            .update_channel_policy_with_endpoints(
+                "#c",
+                Requirement::Accept { hash: "v1".into() },
+                role_reqs.clone(),
+                endpoints.clone(),
+            )
+            .err(); // no existing policy yet — create one first
+        engine
+            .create_channel_policy("#c", Requirement::Accept { hash: "v1".into() }, role_reqs.clone())
+            .unwrap();
+        // Now change the rules gate while preserving roles + endpoints.
+        let updated = engine
+            .update_channel_policy_with_endpoints(
+                "#c",
+                Requirement::Accept { hash: "v2".into() },
+                role_reqs.clone(),
+                endpoints.clone(),
+            )
+            .unwrap();
+
+        assert_eq!(updated.requirements, Requirement::Accept { hash: "v2".into() });
+        assert!(updated.role_requirements.contains_key("op"));
+        assert!(updated.credential_endpoints.contains_key("github_repo"));
+    }
+
+    #[test]
     fn test_policy_update_chains() {
         let engine = test_engine();
         let hash1 = canonical::sha256_hex(b"rules v1");

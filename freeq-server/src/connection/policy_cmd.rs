@@ -1,6 +1,7 @@
 //! IRC POLICY command handler.
 //!
-//! POLICY <channel> SET <rules_text>                   — Create/update ACCEPT-only policy
+//! POLICY <channel> SET <rules_text>                   — Set an ACCEPT join gate (rules), preserving roles
+//! POLICY <channel> OPEN                               — Open join gate (no rules), preserving roles
 //! POLICY <channel> SET-ROLE <role> <requirement_json> — Add role escalation requirement
 //! POLICY <channel> VERIFY github <username> <org>     — Verify GitHub org membership
 //! POLICY <channel> INFO                               — Show current policy
@@ -47,7 +48,7 @@ pub(super) fn handle_policy(
             "NOTICE",
             vec![
                 nick,
-                "Usage: POLICY <channel> SET|SET-ROLE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
+                "Usage: POLICY <channel> SET|OPEN|SET-ROLE|REQUIRE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
             ],
         );
         send_fn(state, session_id, format!("{reply}\r\n"));
@@ -112,14 +113,18 @@ pub(super) fn handle_policy(
 
             // Check if channel already has a policy
             let result = match engine.get_policy(channel) {
-                Ok(Some(_)) => {
-                    // Update existing
-                    engine.update_channel_policy(
+                Ok(Some(current)) => {
+                    // Update the join gate to the new rules, but PRESERVE any
+                    // existing role requirements (e.g. op → github credential)
+                    // and credential endpoints. Changing the rules text must not
+                    // silently drop op-gating.
+                    engine.update_channel_policy_with_endpoints(
                         channel,
                         Requirement::Accept {
                             hash: rules_hash.clone(),
                         },
-                        BTreeMap::new(),
+                        current.role_requirements.clone(),
+                        current.credential_endpoints.clone(),
                     )
                 }
                 Ok(None) => {
@@ -799,6 +804,85 @@ pub(super) fn handle_policy(
             }
         }
 
+        "OPEN" => {
+            // POLICY <channel> OPEN — set the join gate to Open (no rules to
+            // accept, anyone may join) while PRESERVING any role requirements
+            // (e.g. op → github credential) and credential endpoints. Use this
+            // when you want an open channel that still gates op/roles.
+            if !is_channel_op(
+                state,
+                channel,
+                session_id,
+                conn.authenticated_did.as_deref(),
+            ) {
+                let reply = Message::from_server(
+                    server_name,
+                    "482",
+                    vec![nick, channel, "You're not channel operator"],
+                );
+                send_fn(state, session_id, format!("{reply}\r\n"));
+                return;
+            }
+
+            let result = match engine.get_policy(channel) {
+                Ok(Some(current)) => engine.update_channel_policy_with_endpoints(
+                    channel,
+                    Requirement::Open,
+                    current.role_requirements.clone(),
+                    current.credential_endpoints.clone(),
+                ),
+                Ok(None) => engine
+                    .create_channel_policy(channel, Requirement::Open, BTreeMap::new())
+                    .map(|(p, _)| p),
+                Err(e) => {
+                    let reply = Message::from_server(
+                        server_name,
+                        "NOTICE",
+                        vec![nick, &format!("Policy error: {e}")],
+                    );
+                    send_fn(state, session_id, format!("{reply}\r\n"));
+                    return;
+                }
+            };
+
+            match result {
+                Ok(policy) => {
+                    let notice = format!(
+                        "Join gate for {channel} set to OPEN (version {}) — anyone may join; role requirements preserved",
+                        policy.version
+                    );
+                    let reply = Message::from_server(server_name, "NOTICE", vec![nick, &notice]);
+                    send_fn(state, session_id, format!("{reply}\r\n"));
+
+                    let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
+                    let auth_set_json = engine
+                        .store()
+                        .get_authority_set(&policy.authority_set_hash)
+                        .ok()
+                        .flatten()
+                        .and_then(|a| serde_json::to_string(&a).ok());
+                    s2s_broadcast(
+                        state,
+                        crate::s2s::S2sMessage::PolicySync {
+                            event_id: s2s_next_event_id(state),
+                            channel: channel.to_string(),
+                            policy_json: serde_json::to_string(&policy).ok(),
+                            authority_set_json: auth_set_json,
+                            origin,
+                        },
+                    );
+                }
+                Err(e) => {
+                    let reply = Message::from_server(
+                        server_name,
+                        "NOTICE",
+                        vec![nick, &format!("Failed to set open join gate: {e}")],
+                    );
+                    send_fn(state, session_id, format!("{reply}\r\n"));
+                }
+            }
+        }
+
         "REQUIRE" => {
             // POLICY #channel REQUIRE <credential_type> issuer=<did> url=<verify_url> label=<Button Text>
             // Adds a credential endpoint to the policy (UX metadata).
@@ -988,7 +1072,7 @@ pub(super) fn handle_policy(
                 "NOTICE",
                 vec![
                     nick,
-                    "Usage: POLICY <channel> SET|SET-ROLE|REQUIRE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
+                    "Usage: POLICY <channel> SET|OPEN|SET-ROLE|REQUIRE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
                 ],
             );
             send_fn(state, session_id, format!("{reply}\r\n"));
@@ -1061,6 +1145,7 @@ fn extract_accept_hash(req: &Requirement) -> HashSet<String> {
 /// Human-readable description of a requirement.
 fn describe_requirement(req: &Requirement) -> String {
     match req {
+        Requirement::Open => "OPEN (no join gate — anyone may join)".to_string(),
         Requirement::Accept { hash } => format!("ACCEPT({}...)", &hash[..12.min(hash.len())]),
         Requirement::Present {
             credential_type,
