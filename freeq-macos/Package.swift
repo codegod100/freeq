@@ -44,6 +44,7 @@ let package = Package(
                 "ServerConfig.swift",
                 "ChatMessage.swift",
                 "ChannelState.swift",
+                "ChannelPolicy.swift",
                 "ChannelCrypto.swift",
                 "ChannelE2eeState.swift",
                 "ChannelHydration.swift",

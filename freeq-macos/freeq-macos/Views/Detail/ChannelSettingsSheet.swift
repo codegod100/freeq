@@ -14,6 +14,15 @@ struct ChannelSettingsSheet: View {
     @State private var roleCredentialType: String = "github_repo"
     @State private var policyStatus: String?
 
+    // Current (server-side) policy — read-only view so ops can SEE the join
+    // gate, roles, and verifiers, not just blindly write them.
+    @State private var currentPolicy: ChannelPolicyDoc?
+    @State private var currentRules: String?
+    @State private var policyLoading = false
+    @State private var policyLoadError: String?
+    @State private var policyLoadedOnce = false
+    @State private var rulesPrefilled = false
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -71,6 +80,37 @@ struct ChannelSettingsSheet: View {
                             }
                         }
                         .padding(4)
+                    }
+
+                    // Current policy (read-only view)
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("Current Policy")
+                                    .font(.caption.weight(.semibold))
+                                if let v = currentPolicy?.version {
+                                    Text("v\(v)")
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if policyLoading {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Button {
+                                        Task { await loadPolicy() }
+                                    } label: {
+                                        Image(systemName: "arrow.clockwise")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("Refresh")
+                                }
+                            }
+
+                            currentPolicyBody
+                        }
+                        .padding(4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
                     // Policy / join gates
@@ -208,6 +248,84 @@ struct ChannelSettingsSheet: View {
         }
         .frame(width: 540, height: 700)
         .onAppear { newTopic = "" }
+        .task { await loadPolicy() }
+    }
+
+    /// The body of the read-only "Current Policy" box: loading / error / none /
+    /// details (join gate, rules text, role gating, verifiers).
+    @ViewBuilder
+    private var currentPolicyBody: some View {
+        if let err = policyLoadError {
+            Label("Couldn't load policy: \(err)", systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        } else if currentPolicy == nil {
+            if policyLoadedOnce {
+                Label("No policy set — this channel is open to join.", systemImage: "lock.open")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Loading…").font(.caption).foregroundStyle(.secondary)
+            }
+        } else if let policy = currentPolicy {
+            VStack(alignment: .leading, spacing: 10) {
+                // Join gate
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Join gate")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                    Text(policy.requirements.describe())
+                        .font(.caption)
+                    Text(policy.requirements.technical())
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .textSelection(.enabled)
+                }
+
+                // Rules text (the thing you actually want to read)
+                if let rules = currentRules, !rules.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Rules")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                        Text(rules)
+                            .font(.caption)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if case .accept = policy.requirements {
+                    Text("Rules text not stored for this policy (set before rules storage, or received over S2S).")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+
+                // Role gating (e.g. op → github credential)
+                if !policy.roleRequirements.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Role requirements")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                        ForEach(policy.roleRequirements.sorted(by: { $0.key < $1.key }), id: \.key) { entry in
+                            Text("\(entry.key): \(entry.value.describe())")
+                                .font(.caption)
+                        }
+                    }
+                }
+
+                // Verifiers / credential endpoints
+                if !policy.credentialEndpoints.isEmpty {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Verifiers")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                        ForEach(policy.credentialEndpoints.sorted(by: { $0.key < $1.key }), id: \.key) { entry in
+                            Text("\(entry.value.label) (\(entry.key))")
+                                .font(.caption)
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private var verifierPlaceholder: String {
@@ -222,6 +340,58 @@ struct ChannelSettingsSheet: View {
     private func sendPolicy(_ command: String) {
         appState.sendRaw("POLICY \(channel.name) \(command)")
         policyStatus = "Sent: POLICY \(channel.name) \(command)"
+        // Re-read after the server has had a moment to persist the new version.
+        Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            await loadPolicy()
+        }
+    }
+
+    /// Fetch the channel's current policy (and rules text) from the REST API so
+    /// the sheet can display what's actually in effect. Read-only.
+    @MainActor
+    private func loadPolicy() async {
+        policyLoading = true
+        policyLoadError = nil
+        defer { policyLoading = false; policyLoadedOnce = true }
+
+        let base = ServerConfig.apiBaseUrl
+        let enc = channel.name.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? channel.name
+
+        // Policy document.
+        if let url = URL(string: "\(base)/api/v1/policy/\(enc)") {
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if code == 404 {
+                    currentPolicy = nil
+                } else if code == 200 {
+                    currentPolicy = try JSONDecoder().decode(ChannelPolicyDoc.self, from: data)
+                } else {
+                    policyLoadError = "HTTP \(code)"
+                }
+            } catch {
+                policyLoadError = error.localizedDescription
+            }
+        }
+
+        // Human-readable rules text (may 404 even when a policy exists, if the
+        // policy predates rules-text storage or arrived over S2S).
+        currentRules = nil
+        if let url = URL(string: "\(base)/api/v1/policy/\(enc)/rules") {
+            if let (data, response) = try? await URLSession.shared.data(from: url),
+               (response as? HTTPURLResponse)?.statusCode == 200,
+               let rules = try? JSONDecoder().decode(ChannelPolicyRules.self, from: data) {
+                currentRules = rules.text
+            }
+        }
+
+        // Seed the editable Rules field with the real text once (don't clobber
+        // in-progress edits on later refreshes).
+        if !rulesPrefilled, let text = currentRules, !text.isEmpty {
+            policyRules = text
+            rulesPrefilled = true
+        }
     }
 
     private func addVerifier() {
