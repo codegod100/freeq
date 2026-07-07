@@ -4,7 +4,12 @@
 <meta charset="utf-8">
 <title>freeq — sign in</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
-<link rel="icon" href="data:,">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" href="/icon-192.png">
 <style>
 :root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--self:#5cdb95;--c1:#7ab7ff}
 *{box-sizing:border-box} html,body{height:100%;margin:0}
@@ -39,5 +44,10 @@ button:hover{filter:brightness(1.15)}
 </form>
 <a class="guest" href="/chat/general">Continue as guest</a>
 </div>
+<script>
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(function(e){console.error('SW registration failed',e);});
+}
+</script>
 </body>
 </html>

@@ -4,7 +4,12 @@
 <meta charset="utf-8">
 <title>freeq - channels</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
-<link rel="icon" href="data:,">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" href="/icon-192.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
 <style>
 :root{--nick-1:#7ab7ff;--nick-2:#f78b6c;--nick-3:#c792ea;--nick-4:#ffd166;--nick-5:#06d6a0;--nick-6:#ef476f;--nick-7:#f4a261;--nick-8:#90e0ef;--self:#5cdb95}
@@ -100,5 +105,10 @@ function closeSidebar(){
 })();
 </script>
 <script src="/datastar.js"></script>
+<script>
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(function(e){console.error('SW registration failed',e);});
+}
+</script>
 </body>
 </html>

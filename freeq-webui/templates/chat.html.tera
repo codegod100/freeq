@@ -4,7 +4,12 @@
 <meta charset="utf-8">
 <title>freeq - #{{channel}}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
-<link rel="icon" href="data:,">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" href="/icon-192.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
 <script src="/datastar.js"></script>
 <style>
@@ -126,7 +131,7 @@ html,body{height:100dvh;overflow:hidden}
     </div>
     <div class="column is-narrow is-size-7" style="width:165px;overflow-y:auto;border-left:1px solid var(--bulma-border);padding:.3rem .4rem" id="member-panel"><div class="has-text-grey">-</div></div>
   </div>
-</section><div id="react-picker" role="menu" aria-label="React with emoji" data-show="$picker_open"><input type="hidden" data-bind:picker_open /><input type="hidden" data-bind:picker_msgid /></div><div id="mobile-backdrop" onclick="closeDrawers()"></div>
+</section><div id="react-picker" role="menu" aria-label="React with emoji" data-show="$picker_open"><input type="hidden" id="picker-open-input" data-bind:picker_open /><input type="hidden" id="picker-msgid-input" data-bind:picker_msgid /></div><div id="mobile-backdrop" onclick="closeDrawers()"></div>
 <div class="modal" id="oauth-modal">
   <div class="modal-background" style="background:rgba(0,0,0,.7)" onclick="document.getElementById('oauth-modal').classList.remove('is-active')"></div>
   <div class="modal-content" style="max-width:500px"><div class="box">
@@ -202,7 +207,7 @@ window.closeDrawers=closeDrawers;
   document.addEventListener('click',function(ev){
     if(picker.contains(ev.target))return;
     if(ev.target.classList&&ev.target.classList.contains('react-btn'))return;
-    var el=document.querySelector('input[data-bind\x3apicker_open]');
+    var el=document.getElementById('picker-open-input');
     if(!el)return;
     el.value='false';
     el.dispatchEvent(new Event('input',{bubbles:true}));
@@ -218,7 +223,7 @@ function openReactPicker(msgid){
     msgid=String(msgid||'');
     if(!msgid)return;
     function setSignal(name,value){
-      var el=document.querySelector('input[data-bind\\x3a'+name+']');
+      var el=document.getElementById(name==='picker_open'?'picker-open-input':'picker-msgid-input');
       if(!el){console.warn('openReactPicker: no input for',name);return;}
       el.value=value;
       el.dispatchEvent(new Event('input',{bubbles:true}));
@@ -231,7 +236,7 @@ function reactFromPicker(emoji){
   try{
     emoji=String(emoji||'');
     if(!emoji)return;
-    var midEl=document.querySelector('input[data-bind\\x3apicker_msgid]');
+    var midEl=document.getElementById('picker-msgid-input');
     var mid=midEl?String(midEl.value||''):'';
     if(!mid)return;
     var body=document.body;
@@ -243,7 +248,7 @@ function reactFromPicker(emoji){
     list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
     sigs.my_reactions[mid]=list;
     body.setAttribute('data-signals',JSON.stringify(sigs));
-    var poEl=document.querySelector('input[data-bind\\x3apicker_open]');
+    var poEl=document.getElementById('picker-open-input');
     if(poEl){poEl.value='false';poEl.dispatchEvent(new Event('input',{bubbles:true}));}
     var url='/chat/{{channel}}/'+(has?'unreact':'react');
     fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:mid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
@@ -251,100 +256,6 @@ function reactFromPicker(emoji){
     });
   }catch(e){console.error('reactFromPicker failed',e);}
 }
-// Insert or update a reaction chip on the message with the given msgid.
-// Called by the SSE handler when a live TAGMSG reaction arrives.
-window.updateReactionChip=function(msgid,emoji,nick){
-  msgid=String(msgid||'');emoji=String(emoji||'');nick=String(nick||'');
-  if(!msgid)return;
-  var row=document.querySelector('.msg[data-msgid="'+msgid.replace(/"/g,'\\"')+'"]');
-  if(!row)return;
-  var body=row.querySelector('.body');
-  if(!body)return;
-  var container=body.querySelector('.reactions');
-  if(!container){
-    container=document.createElement('span');
-    container.className='reactions';
-    body.appendChild(container);
-  }
-  var chips=container.querySelectorAll('.reaction-chip');
-  var target=null;
-  for(var i=0;i<chips.length;i++){
-    if(chips[i].getAttribute('data-emoji')===emoji){target=chips[i];break;}
-  }
-  var reactors=(target?target.getAttribute('title'):'').split(',').map(function(s){return s.trim()}).filter(Boolean);
-  if(reactors.indexOf(nick)===-1)reactors.push(nick);
-  var title=reactors.join(', ');
-  var label=reactors.length>1?emoji+' '+reactors.length:emoji;
-  if(target){
-    target.setAttribute('title',title);
-    target.textContent=label;
-  }else{
-    var chip=document.createElement('span');
-    chip.className='reaction-chip';
-    chip.setAttribute('data-emoji',emoji);
-    chip.setAttribute('title',title);
-    chip.textContent=label;
-    var btn=container.querySelector('.react-btn');
-    if(btn)container.insertBefore(chip,btn);
-    else container.appendChild(chip);
-  }
-  if(!container.querySelector('.react-btn')){
-    var mid=msgid;
-    var b=document.createElement('button');
-    b.type='button';
-    b.className='react-btn';
-    b.setAttribute('title','React');
-    b.textContent='+';
-    b.setAttribute('onclick',"showReactPicker('"+mid.replace(/'/g,"\\'")+"')");
-    container.appendChild(b);
-  }
-};
-
-function showPolicy(channel){
-  var modal=document.getElementById('policy-modal');
-  var body=document.getElementById('policy-body');
-  var name=document.getElementById('policy-channel-name');
-  modal.classList.add('is-active');
-  name.textContent='#'+channel;
-  body.innerHTML='<p class="has-text-grey">Loading…</p>';
-  fetch('/api/policy/'+encodeURIComponent(channel))
-    .then(function(r){return r.text().then(function(t){return {ok:r.ok,status:r.status,text:t}})})
-    .then(function(resp){
-      if(!resp.ok && resp.status===404){body.innerHTML='<p class="has-text-grey">No policy is set for this channel.</p>';return;}
-      if(!resp.ok){body.innerHTML='<p class="has-text-danger">Failed to load policy: '+resp.status+'</p>';return;}
-      try{var doc=JSON.parse(resp.text);body.innerHTML=renderPolicy(doc);}
-      catch(e){body.innerHTML='<p class="has-text-danger">Invalid response</p>';}
-    })
-    .catch(function(e){body.innerHTML='<p class="has-text-danger">Error: '+e.message+'</p>';});
-}
-function renderPolicy(data){
-  var p=data.policy||{};
-  var auth=data.authority_set;
-  var html='<div class="policy-visual">';
-  html+='<div class="level is-mobile mb-2" style="border-bottom:1px solid var(--bulma-border);padding-bottom:.5rem">';
-  html+='<div class="level-left"><div class="level-item"><span class="tag is-info is-light">Version '+(p.version||'?')+'</span></div></div>';
-  html+='<div class="level-right"><div class="level-item"><span class="has-text-grey">'+(p.effective_at?new Date(p.effective_at).toLocaleString():'')+'</span></div></div>';
-  html+='</div>';
-  html+='<h4 class="has-text-weight-semibold mb-1">To join this channel</h4>';
-  html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">'+renderRequirement(p.requirements)+'</div>';
-  if(auth&&auth.signers&&auth.signers.length){
-    html+='<h4 class="has-text-weight-semibold mb-1">Authorities <span class="tag is-small is-dark">threshold '+(auth.policy_threshold||1)+'</span></h4>';
-    html+='<ul class="mb-3">';
-    for(var i=0;i<auth.signers.length;i++){
-      var s=auth.signers[i];
-      html+='<li class="is-size-7 has-text-grey"><code style="background:transparent;padding:0">'+esc(s.did)+'</code>'+(s.label?' — '+esc(s.label):'')+'</li>';
-    }
-    html+='</ul>';
-  }
-  if(p.role_requirements&&Object.keys(p.role_requirements).length){
-    html+='<h4 class="has-text-weight-semibold mb-1">Role requirements</h4>';
-    html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">';
-    for(var role in p.role_requirements){
-      html+='<div class="mb-2"><span class="tag is-small is-link">'+esc(role)+'</span></div>';
-      html+=renderRequirement(p.role_requirements[role]);
-    }
-    html+='</div>';
-
 // Check if a (msgid, emoji) is in the current user's reaction set.
 function isReacted(msgid,emoji){
   msgid=String(msgid||'');emoji=String(emoji||'');
@@ -398,6 +309,59 @@ function toggleReaction(msgid,emoji){
 window.isReacted=isReacted;
 window.toggleReaction=toggleReaction;
 
+function showPolicy(channel){
+  var modal=document.getElementById('policy-modal');
+  var body=document.getElementById('policy-body');
+  var name=document.getElementById('policy-channel-name');
+  modal.classList.add('is-active');
+  name.textContent='#'+channel;
+  body.innerHTML='<p class="has-text-grey">Loading…</p>';
+  Promise.all([
+    fetch('/api/policy/'+encodeURIComponent(channel)).then(function(r){return r.text().then(function(t){return {ok:r.ok,status:r.status,text:t}})}),
+    fetch('/api/policy/'+encodeURIComponent(channel)+'/rules').then(function(r){return r.text().then(function(t){return {ok:r.ok,status:r.status,text:t}})})
+  ]).then(function(resps){
+    var policyResp=resps[0],rulesResp=resps[1];
+    if(!policyResp.ok && policyResp.status===404){body.innerHTML='<p class="has-text-grey">No policy is set for this channel.</p>';return;}
+    if(!policyResp.ok){body.innerHTML='<p class="has-text-danger">Failed to load policy: '+policyResp.status+'</p>';return;}
+    var rulesText=null;
+    if(rulesResp.ok){
+      try{var rulesDoc=JSON.parse(rulesResp.text);rulesText=rulesDoc.text||null;}catch(e){}
+    }
+    try{var doc=JSON.parse(policyResp.text);body.innerHTML=renderPolicy(doc,rulesText);}
+    catch(e){body.innerHTML='<p class="has-text-danger">Invalid response</p>';}
+  }).catch(function(e){body.innerHTML='<p class="has-text-danger">Error: '+e.message+'</p>';});
+}
+function renderPolicy(data,rulesText){
+  var p=data.policy||{};
+  var auth=data.authority_set;
+  var html='<div class="policy-visual">';
+  html+='<div class="level is-mobile mb-2" style="border-bottom:1px solid var(--bulma-border);padding-bottom:.5rem">';
+  html+='<div class="level-left"><div class="level-item"><span class="tag is-info is-light">Version '+(p.version||'?')+'</span></div></div>';
+  html+='<div class="level-right"><div class="level-item"><span class="has-text-grey">'+(p.effective_at?new Date(p.effective_at).toLocaleString():'')+'</span></div></div>';
+  html+='</div>';
+  if(rulesText){
+    html+='<h4 class="has-text-weight-semibold mb-1">Channel rules</h4>';
+    html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15);white-space:pre-wrap;overflow-wrap:anywhere">'+esc(rulesText)+'</div>';
+  }
+  html+='<h4 class="has-text-weight-semibold mb-1">To join this channel</h4>';
+  html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">'+renderRequirement(p.requirements)+'</div>';
+  if(auth&&auth.signers&&auth.signers.length){
+    html+='<h4 class="has-text-weight-semibold mb-1">Authorities <span class="tag is-small is-dark">threshold '+(auth.policy_threshold||1)+'</span></h4>';
+    html+='<ul class="mb-3">';
+    for(var i=0;i<auth.signers.length;i++){
+      var s=auth.signers[i];
+      html+='<li class="is-size-7 has-text-grey"><code style="background:transparent;padding:0">'+esc(s.did)+'</code>'+(s.label?' — '+esc(s.label):'')+'</li>';
+    }
+    html+='</ul>';
+  }
+  if(p.role_requirements&&Object.keys(p.role_requirements).length){
+    html+='<h4 class="has-text-weight-semibold mb-1">Role requirements</h4>';
+    html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">';
+    for(var role in p.role_requirements){
+      html+='<div class="mb-2"><span class="tag is-small is-link">'+esc(role)+'</span></div>';
+      html+=renderRequirement(p.role_requirements[role]);
+    }
+    html+='</div>';
   }
   html+='</div>';
   html+='<details class="policy-raw"><summary class="has-text-grey" style="cursor:pointer;user-select:none">Raw JSON</summary>';
@@ -455,6 +419,11 @@ function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').repl
   connect();
   {% endif %}
 })();
+</script>
+<script>
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(function(e){console.error('SW registration failed',e);});
+}
 </script>
 </body>
 </html>

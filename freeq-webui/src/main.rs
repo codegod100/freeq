@@ -80,8 +80,13 @@ async fn main() -> Result<()> {
         .route("/chat/{channel}/unreact", post(post_channel_unreact))
         .route("/upload", post(post_upload))
         .route("/datastar.js", get(get_datastar_js))
+        .route("/manifest.json", get(get_manifest_json))
+        .route("/sw.js", get(get_service_worker))
+        .route("/icon-192.png", get(get_icon_192))
+        .route("/icon-512.png", get(get_icon_512))
         .route("/api/channels", get(get_channels))
         .route("/api/policy/{channel}", get(get_policy))
+        .route("/api/policy/{channel}/rules", get(get_policy_rules))
         .route("/api/rules/{hash}", get(get_rule))
         .route(
             "/.well-known/oauth-client-metadata",
@@ -577,6 +582,49 @@ async fn get_datastar_js() -> Response {
         .into_response()
 }
 
+/// Serve the PWA web app manifest.
+async fn get_manifest_json() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/manifest+json; charset=utf-8")],
+        include_str!("../static/manifest.json"),
+    )
+        .into_response()
+}
+
+/// Serve the service worker.
+async fn get_service_worker() -> Response {
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
+        include_str!("../static/sw.js"),
+    )
+        .into_response()
+}
+
+/// Serve the 192x192 PWA icon.
+async fn get_icon_192() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../static/icon-192.png"),
+    )
+        .into_response()
+}
+
+/// Serve the 512x512 PWA icon.
+async fn get_icon_512() -> Response {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/png")],
+        include_bytes!("../static/icon-512.png"),
+    )
+        .into_response()
+}
+
 // ── GET /chat and /chat/{channel} ──────────────────────────────────────
 
 /// Render the channel landing page. This replaces the old hardcoded
@@ -586,8 +634,22 @@ async fn get_channels_page(State(state): State<AppState>, req: axum::http::Heade
     let (sid, is_new) = session_id_from_request(&req);
     let _ = state.session(&sid);
 
-    let channels = fetch_channels(&state).await.unwrap_or_default();
+    let mut channels = fetch_channels(&state).await.unwrap_or_default();
     debug!(count = channels.len(), "fetched channel list for landing");
+
+    let session = state.session(&sid);
+    let joined: std::collections::HashSet<String> = session.joined.lock().iter().cloned().collect();
+    let existing: std::collections::HashSet<String> = channels.iter().map(|c| c.name.to_lowercase()).collect();
+    for ch in joined {
+        let c = canonical_channel(&ch);
+        if !existing.contains(&c.to_lowercase()) {
+            channels.push(crate::upstream::UpstreamChannel {
+                name: c,
+                topic: String::new(),
+                members: 0,
+            });
+        }
+    }
 
     let session = state.session(&sid);
     let auth = session.auth.lock().clone();
@@ -657,8 +719,26 @@ async fn get_chat(
     // Fetch the channel list from the upstream. If it fails (e.g. the
     // upstream is down), we still render the page with an empty list —
     // the chat itself works once the WS reconnects.
-    let channels = fetch_channels(&state).await.unwrap_or_default();
+    let mut channels = fetch_channels(&state).await.unwrap_or_default();
     debug!(channel = %channel, count = channels.len(), "fetched channel list");
+
+    // Merge any channels the user has joined locally but that the upstream
+    // public channel list does not include (e.g. private or policy-gated
+    // channels). Otherwise they disappear from the sidebar after joining.
+    let session = state.session(&sid);
+    let joined: std::collections::HashSet<String> = session.joined.lock().iter().cloned().collect();
+    let existing: std::collections::HashSet<String> = channels.iter().map(|c| c.name.to_lowercase()).collect();
+    for ch in joined {
+        let c = canonical_channel(&ch);
+        if !existing.contains(&c.to_lowercase()) {
+            channels.push(crate::upstream::UpstreamChannel {
+                name: c,
+                topic: String::new(),
+                members: 0,
+            });
+        }
+    }
+
     let topic = channels
         .iter()
         .find(|c| c.name.eq_ignore_ascii_case(&channel))
@@ -683,7 +763,6 @@ async fn get_chat(
     ctx.insert("initial_messages_html", &initial_messages_html);
 
     // Auth state for the navbar.
-    let session = state.session(&sid);
     let auth = session.auth.lock().clone();
     let (login_handle, auth_did, is_authenticated) = match &auth {
         AuthState::Authenticated { handle, did, .. } => (handle.clone(), did.clone(), true),
@@ -1463,6 +1542,25 @@ async fn get_policy(State(state): State<AppState>, Path(channel): Path<String>) 
         Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
     }
 }
+/// Proxy the channel rules text endpoint.
+async fn get_policy_rules(State(state): State<AppState>, Path(channel): Path<String>) -> Response {
+    let url = {
+        let mut u = state.upstream.base.clone();
+        {
+            let mut seg = u.path_segments_mut().expect("upstream URL is valid");
+            seg.extend(["api", "v1", "policy", &channel, "rules"]);
+        }
+        u
+    };
+    match state.http.get(url).send().await {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+    }
+}
 
 async fn get_rule(State(state): State<AppState>, Path(hash): Path<String>) -> Response {
     let url = {
@@ -1490,8 +1588,9 @@ fn should_emit(line: &str, current_channel: &str) -> bool {
     if line.starts_with("PING ") || line.starts_with("PONG ") {
         return false;
     }
-    // Server numerics look like `:host 001 nick :welcome...`. Skip them.
-    let Some(rest) = line.strip_prefix(':') else {
+    // Strip IRCv3 message tags (`@key=value ...`) before parsing the prefix.
+    let after_tags = parse_irc_tags(line).1;
+    let Some(rest) = after_tags.strip_prefix(':') else {
         return true;
     };
     let Some(sp) = rest.find(' ') else {
@@ -1636,7 +1735,7 @@ fn render_reaction_chips(
     }
     if let Some(mid) = msgid {
         chips.push_str(&format!(
-            r#"<button class="react-btn" type="button" data-on:click="window.openReactPicker('{mid}')" title="React">+</button>"#
+            r#"<button class="react-btn" type="button" onclick="openReactPicker('{mid}')" title="React">+</button>"#
         ));
     }
     chips.push_str("</span>");
@@ -2352,6 +2451,18 @@ mod tests {
     #[test]
     fn should_emit_skips_numerics() {
         assert!(!should_emit(":srv 001 alice :Welcome to freeq", "#test"));
+    }
+
+    #[test]
+    fn should_emit_filters_tagged_privmsg_to_other_channel() {
+        assert!(!should_emit(
+            "@msgid=abc :alice!u@h PRIVMSG #freeq :hello",
+            "#test"
+        ));
+        assert!(should_emit(
+            "@msgid=abc :alice!u@h PRIVMSG #test :hello",
+            "#test"
+        ));
     }
 
     #[test]
