@@ -27,6 +27,9 @@ html,body{height:100dvh;overflow:hidden}
 #messages a{color:var(--bulma-link-text)}
 .policy-tag{cursor:pointer}
 .policy-tag:hover{background:var(--bulma-link-text)!important;color:#fff!important}
+.sidebar-toggle{display:flex;align-items:center;gap:.35rem;cursor:pointer;user-select:none}
+.sidebar-toggle::before{content:'';display:inline-block;width:0;height:0;border-left:.35rem solid transparent;border-right:.35rem solid transparent;border-top:.45rem solid currentColor;transition:transform .15s ease}
+.sidebar-toggle.collapsed::before{transform:rotate(-90deg)}
 </style>
 </head>
 <body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:""}'>
@@ -52,13 +55,13 @@ html,body{height:100dvh;overflow:hidden}
   <div class="columns is-gapless is-mobile" style="flex:1;min-height:0;margin-top:0">
     <div class="column is-narrow" style="width:165px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
       <div class="menu">
-        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0" style="font-size:.65rem;letter-spacing:.05em;cursor:pointer" onclick="this.classList.toggle('collapsed');var u=this.nextElementSibling;if(u)u.style.display=u.style.display==='none'?'':'none'">&#x25BE; MY CHANNELS</p>
-        <ul class="menu-list">
+        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle" data-target="my-channels" style="font-size:.65rem;letter-spacing:.05em">MY CHANNELS</p>
+        <ul class="menu-list" id="my-channels">
         {% for ch in channels -%}{% if ch.name in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
         <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1 policy-tag" title="Channel policy" onclick="event.preventDefault();event.stopPropagation();showPolicy('{{ch.name|replace(from="#",to="")}}');">{{ch.members}}</span></a></li>
         {% endif %}{%- endfor %}</ul>
-        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 collapsed" style="font-size:.65rem;letter-spacing:.05em;cursor:pointer" onclick="this.classList.toggle('collapsed');var u=this.nextElementSibling;if(u)u.style.display=u.style.display==='none'?'':'none'">&#x25B6; ALL CHANNELS</p>
-        <ul class="menu-list" style="display:none">
+        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle collapsed" data-target="all-channels" style="font-size:.65rem;letter-spacing:.05em">ALL CHANNELS</p>
+        <ul class="menu-list" id="all-channels" style="display:none">
         {% for ch in channels -%}{% if ch.name not in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
         <li><a class="is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span><span class="tag is-rounded is-dark is-small ml-1 policy-tag" title="Channel policy" onclick="event.preventDefault();event.stopPropagation();showPolicy('{{ch.name|replace(from="#",to="")}}');">{{ch.members}}</span></a></li>
         {% endif %}{%- endfor %}</ul>
@@ -91,6 +94,19 @@ html,body{height:100dvh;overflow:hidden}
   </div></div>
 </div>
 <script>
+function bindSidebarToggles(){
+  document.querySelectorAll('.sidebar-toggle').forEach(function(el){
+    el.addEventListener('click',function(){
+      var id=el.getAttribute('data-target');
+      var ul=id?document.getElementById(id):el.nextElementSibling;
+      if(!ul)return;
+      var collapsed=el.classList.toggle('collapsed');
+      ul.style.display=collapsed?'none':'';
+    });
+  });
+}
+bindSidebarToggles();
+
 function showPolicy(channel){
   var modal=document.getElementById('policy-modal');
   var body=document.getElementById('policy-body');

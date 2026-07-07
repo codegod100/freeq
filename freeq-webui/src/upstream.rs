@@ -32,6 +32,35 @@ pub struct UpstreamHistoryMessage {
     pub sender: String,
     pub text: String,
     pub timestamp: i64,
+    #[serde(default)]
+    pub msgid: Option<String>,
+    #[serde(default)]
+    pub tags: std::collections::HashMap<String, String>,
+}
+
+impl UpstreamHistoryMessage {
+    /// Parse the `+freeq.at/reactions` tag into emoji -> nicker map.
+    /// Format: `emoji1:nick1,nick2;emoji2:nick3`.
+    pub fn reactions(&self) -> std::collections::HashMap<String, Vec<String>> {
+        let mut map = std::collections::HashMap::new();
+        let Some(raw) = self.tags.get("+freeq.at/reactions") else {
+            return map;
+        };
+        for group in raw.split(';') {
+            let Some((emoji, nicks)) = group.split_once(':') else {
+                continue;
+            };
+            let nicks: Vec<String> = nicks
+                .split(',')
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !nicks.is_empty() {
+                map.insert(emoji.to_string(), nicks);
+            }
+        }
+        map
+    }
 }
 
 // ── AT Protocol OAuth-backed auth helpers ────────────────────────────────
@@ -355,8 +384,12 @@ pub async fn run_upstream_ws(
 
     // Registration state machine. We hold CAP END until SASL completes (or is
     // skipped) so the server doesn't finalize registration mid-handshake.
-    let mut phase = RegPhase::WaitCapAck;
+    write.send(WsMessage::Text(
+        "CAP REQ :sasl account-notify message-tags\r\n".into(),
+    ))
+    .await?;
     *session.reg_phase.lock() = "WaitCapAck".to_string();
+    let mut phase = RegPhase::WaitCapAck;
     let mut auth_creds = auth;
     let mut pending: Vec<String> = Vec::new();
     const SASL_TIMEOUT: Duration = Duration::from_secs(10);

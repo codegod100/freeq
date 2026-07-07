@@ -76,10 +76,12 @@ async fn main() -> Result<()> {
         .route("/chat/{channel}/join", post(post_channel_join))
         .route("/chat/{channel}/part", post(post_channel_part))
         .route("/chat/{channel}/topic", post(post_channel_topic))
+        .route("/chat/{channel}/react", post(post_channel_react))
         .route("/upload", post(post_upload))
         .route("/datastar.js", get(get_datastar_js))
         .route("/api/channels", get(get_channels))
         .route("/api/policy/{channel}", get(get_policy))
+        .route("/api/rules/{hash}", get(get_rule))
         .route(
             "/.well-known/oauth-client-metadata",
             get(get_oauth_client_metadata),
@@ -717,10 +719,13 @@ async fn get_chat(
 
     let mut resp = (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store, no-cache, must-revalidate"),
+        ],
         body,
     )
-        .into_response();
+    .into_response();
     if is_new {
         resp.headers_mut()
             .insert(header::SET_COOKIE, session_cookie_header(&sid));
@@ -1004,11 +1009,49 @@ async fn get_channel_events(
                         }
                         continue;
                     }
+                    // --- live reactions via TAGMSG ---
+                    if let Some((msgid, emoji)) = parse_tagmsg_reaction(&line) {
+                        if should_emit(&line, &channel) {
+                            let (tags, _) = parse_irc_tags(&line);
+                            let nick = line
+                                .trim_start_matches('@')
+                                .split(' ')
+                                .next()
+                                .and_then(|prefix| prefix.split('!').next())
+                                .unwrap_or("?");
+                            let msgid_escaped = html_escape(&msgid);
+                            let emoji_escaped = html_escape(&emoji);
+                            let nick_escaped = html_escape(nick);
+                            let js = format!(
+                                "updateReactionChip('{}','{}','{}')",
+                                msgid_escaped.replace('\\', "\\\\").replace('\'', "\\'"),
+                                emoji_escaped.replace('\\', "\\\\").replace('\'', "\\'"),
+                                nick_escaped.replace('\\', "\\\\").replace('\'', "\\'")
+                            );
+                            let script = ExecuteScript::new(js);
+                            yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
+                        }
+                        continue;
+                    }
                     // --- messages (channel-filtered) ---
                     if should_emit(&line, &channel) {
                         let html = render_irc_line(&line);
+                        let (line_tags, _) = parse_irc_tags(&line);
+                        if let Some(m) = line_tags.get("msgid") {
+                            // Replace any prior row with the same msgid so a
+                            // replayed PRIVMSG (e.g. CHATHISTORY) doesn't
+                            // duplicate an already-displayed message.
+                            let escaped = m.replace('\\', "\\\\").replace('\'', "\\'");
+                            let prep = ExecuteScript::new(format!(
+                                "(function(){{var s=document.querySelector('.msg[data-msgid=\"{}\"]');if(s)s.remove();}})();",
+                                escaped
+                            ));
+                            yield Ok::<Event, std::convert::Infallible>(prep.write_as_axum_sse_event());
+                        }
                         let patch = PatchElements::new(html).selector("#messages").mode(ElementPatchMode::Append);
                         yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
+                        let scroll = ExecuteScript::new("document.getElementById('messages').scrollTop = 999999");
+                        yield Ok::<Event, std::convert::Infallible>(scroll.write_as_axum_sse_event());
                     } else {
                         trace!(session = %sid, line = %line.trim_end(), "line not emitted to client");
                     }
@@ -1045,6 +1088,12 @@ struct JoinSignals {
 #[derive(Deserialize)]
 struct TopicSignals {
     topic_draft: String,
+}
+
+#[derive(Deserialize)]
+struct ReactSignals {
+    msgid: String,
+    emoji: String,
 }
 
 /// Parse a `/nick <newnick>` command from the input box.
@@ -1166,6 +1215,71 @@ async fn post_channel_send(
         yield Ok::<Event, std::convert::Infallible>(echo_event);
         yield Ok::<Event, std::convert::Infallible>(scroll_event);
         yield Ok::<Event, std::convert::Infallible>(clear_event);
+    })
+    .into_response()
+}
+/// Send a reaction to a target message. Sends a TAGMSG with `+react` and
+/// `+reply` tags. The server persists the reaction and relays it to all
+/// channel members, including the sender.
+async fn post_channel_react(
+    State(state): State<AppState>,
+    Path(channel): Path<String>,
+    req: axum::http::HeaderMap,
+    ReadSignals(signals): ReadSignals<ReactSignals>,
+) -> Response {
+    let (sid, _is_new) = session_id_from_request(&req);
+    let session = state.session(&sid);
+
+    let target = canonical_channel(&channel);
+    let msgid = signals.msgid.trim();
+    let emoji = signals.emoji.trim();
+    if msgid.is_empty() || emoji.is_empty() {
+        return (StatusCode::BAD_REQUEST, "msgid and emoji required").into_response();
+    }
+    // Reject obvious garbage in the emoji slot (control chars, spaces,
+    // very long input). A real reaction is a short unicode string.
+    if emoji.len() > 32 || emoji.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return (StatusCode::BAD_REQUEST, "invalid emoji").into_response();
+    }
+    if msgid.len() > 64
+        || msgid
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+    {
+        return (StatusCode::BAD_REQUEST, "invalid msgid").into_response();
+    }
+
+    let ws_state = session.get_ws_state();
+    let is_joined = session.joined.lock().contains(&target);
+    if ws_state != WsState::Ready {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not connected yet").into_response();
+    }
+    if !is_joined {
+        return (StatusCode::SERVICE_UNAVAILABLE, "not joined").into_response();
+    }
+
+    // Escape emoji for the IRC tag value: backslash, semicolon, space, and
+    // CR/LF are special in the IRCv3 tag grammar. IRCv3 tag values are
+    // escaped, but emoji are typically safe unicode. We still guard.
+    let safe_emoji = emoji
+        .replace('\\', "\\\\")
+        .replace(';', "\\:")
+        .replace(' ', "\\s");
+    let safe_msgid = msgid
+        .replace('\\', "\\\\")
+        .replace(';', "\\:")
+        .replace(' ', "\\s");
+    let cmd = format!("@+react={safe_emoji};+reply={safe_msgid} TAGMSG {target}\r\n");
+
+    let irc_tx = session.irc_tx.lock().clone();
+    if let Err(e) = irc_tx.send(cmd).await {
+        warn!(session = %sid, "react to upstream failed: {e}");
+        return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
+    }
+    debug!(session = %sid, channel = %target, msgid, emoji, "reaction queued to upstream");
+    let ok_event = ExecuteScript::new("void 0").write_as_axum_sse_event();
+    Sse::new(async_stream::stream! {
+        yield Ok::<Event, std::convert::Infallible>(ok_event);
     })
     .into_response()
 }
@@ -1292,6 +1406,25 @@ async fn get_policy(State(state): State<AppState>, Path(channel): Path<String>) 
     }
 }
 
+async fn get_rule(State(state): State<AppState>, Path(hash): Path<String>) -> Response {
+    let url = {
+        let mut u = state.upstream.base.clone();
+        {
+            let mut seg = u.path_segments_mut().expect("upstream URL is valid");
+            seg.extend(["api", "v1", "rules", &hash]);
+        }
+        u
+    };
+    match state.http.get(url).send().await {
+        Ok(r) => {
+            let status = r.status();
+            let body = r.text().await.unwrap_or_default();
+            (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response(),
+    }
+}
+
 // ── IRC line formatting ─────────────────────────────────────────────────
 
 fn should_emit(line: &str, current_channel: &str) -> bool {
@@ -1353,13 +1486,129 @@ fn extract_irc_target(after_prefix: &str) -> Option<&str> {
         _ => None,
     }
 }
+/// Parse IRCv3 message tags from the leading `@key=value;...` block.
+/// Returns the tag map and the remainder of the line (after the leading space).
+fn unescape_tag_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(':') => out.push(';'),
+                Some('s') => out.push(' '),
+                Some('\\') => out.push('\\'),
+                Some('r') => out.push('\r'),
+                Some('n') => out.push('\n'),
+                Some(other) => { out.push('\\'); out.push(other); }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn parse_irc_tags(line: &str) -> (std::collections::HashMap<String, String>, &str) {
+    let mut tags = std::collections::HashMap::new();
+    let line = line.trim_end_matches(['\r', '\n']);
+    let Some(rest) = line.strip_prefix('@') else {
+        return (tags, line);
+    };
+    let Some((tag_part, after)) = rest.split_once(' ') else {
+        return (tags, line);
+    };
+    for item in tag_part.split(';') {
+        if let Some((k, v)) = item.split_once('=') {
+            tags.insert(k.to_string(), unescape_tag_value(v));
+        } else if !item.is_empty() {
+            tags.insert(item.to_string(), String::new());
+        }
+    }
+    (tags, after)
+}
+
+/// Parse `+freeq.at/reactions` tag value into emoji -> nicker map.
+/// Format: `emoji1:nick1,nick2;emoji2:nick3`.
+fn parse_reactions_tag(value: &str) -> std::collections::HashMap<String, Vec<String>> {
+    let mut map = std::collections::HashMap::new();
+    for group in value.split(';') {
+        let Some((emoji, nicks)) = group.split_once(':') else {
+            continue;
+        };
+        let nicks: Vec<String> = nicks
+            .split(',')
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !nicks.is_empty() {
+            map.insert(emoji.to_string(), nicks);
+        }
+    }
+    map
+}
+
+/// Render reaction chips for a message. `msgid` may be empty for rows that
+/// don't support reactions (fallback rendering).
+fn render_reaction_chips(
+    msgid: Option<&str>,
+    reactions: &std::collections::HashMap<String, Vec<String>>,
+) -> String {
+    // No msgid → can't react. Render nothing.
+    if msgid.is_none() && reactions.is_empty() {
+        return String::new();
+    }
+    let mut chips = String::from(r#"<span class="reactions">"#);
+    for (emoji, nicks) in reactions {
+        let title = nicks.join(", ");
+        let count = nicks.len();
+        let label = if count == 1 {
+            emoji.clone()
+        } else {
+            format!("{emoji} {count}")
+        };
+        chips.push_str(&format!(
+            r#"<span class="reaction-chip" title="{title}" data-emoji="{emoji}">{label}</span>"#,
+            title = html_escape(&title),
+            emoji = html_escape(emoji),
+            label = html_escape(&label)
+        ));
+    }
+    if let Some(mid) = msgid {
+        chips.push_str(&format!(
+            r#"<button class="react-btn" type="button" onclick="showReactPicker('{mid}')" title="React">+</button>"#
+        ));
+    }
+    chips.push_str("</span>");
+    chips
+}
+
+/// Extract a reaction from an incoming live TAGMSG line.
+/// Returns `(target_msgid, emoji)` on success.
+fn parse_tagmsg_reaction(line: &str) -> Option<(String, String)> {
+    let (tags, after) = parse_irc_tags(line);
+    let emoji = tags.get("+react")?;
+    let msgid = tags.get("+reply")?;
+    // Confirm it's a TAGMSG for a channel (we only support channel reactions).
+    if !after
+        .split_whitespace()
+        .nth(1)?
+        .eq_ignore_ascii_case("TAGMSG")
+    {
+        return None;
+    }
+    Some((msgid.clone(), emoji.clone()))
+}
 /// Render an IRC line as an HTML row with timestamp + nick color.
+/// Handles IRCv3 message tags, msgid, and embedded reaction metadata.
 fn render_irc_line(line: &str) -> String {
     let line = line.trim_end_matches(['\r', '\n']);
     let ts = Utc::now().format("%H:%M:%S").to_string();
     let ts_html = format!(r#"<span class="ts">{ts}</span>"#);
 
-    if let Some(rest) = line.strip_prefix(':') {
+    let (tags, rest) = parse_irc_tags(line);
+
+    if let Some(rest) = rest.strip_prefix(':') {
         if let Some(sp) = rest.find(' ') {
             let prefix = &rest[..sp];
             let cmd_and_args = &rest[sp + 1..];
@@ -1373,8 +1622,18 @@ fn render_irc_line(line: &str) -> String {
                 let cls = if cmd == "NOTICE" { "notice" } else { "msg" };
                 let color = nick_color_class(nick);
                 let safe_text = linkify_urls(&html_escape(text));
+                let msgid = tags.get("msgid").cloned();
+                let msgid_attr = msgid
+                    .as_deref()
+                    .map(|m| format!(r#" data-msgid="{m}""#))
+                    .unwrap_or_default();
+                let reactions = tags
+                    .get("+freeq.at/reactions")
+                    .map(|v| parse_reactions_tag(v))
+                    .unwrap_or_default();
+                let reaction_html = render_reaction_chips(msgid.as_deref(), &reactions);
                 return format!(
-                    r#"<div class="{cls}">{ts_html}<span class="body"><span class="nick {color}">{nick}</span> {safe_text}</span></div>"#
+                    r#"<div class="{cls}"{msgid_attr}>{ts_html}<span class="body"><span class="nick {color}">{nick}</span> {safe_text}{reaction_html}</span></div>"#
                 );
             }
             if matches!(cmd, "JOIN" | "PART" | "QUIT") {
@@ -1706,8 +1965,15 @@ fn render_history_row(msg: &UpstreamHistoryMessage) -> String {
         .map(|dt| dt.format("%H:%M:%S").to_string())
         .unwrap_or_else(|| "--:--:--".to_string());
     let safe_text = html_escape(&msg.text);
+    let msgid_attr = msg
+        .msgid
+        .as_deref()
+        .map(|m| format!(r#" data-msgid="{m}""#))
+        .unwrap_or_default();
+    let reactions = msg.reactions();
+    let reaction_html = render_reaction_chips(msg.msgid.as_deref(), &reactions);
     format!(
-        r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick {color}">{nick}</span> {safe_text}</span></div>"#
+        r#"<div class="msg"{msgid_attr}><span class="ts">{ts}</span><span class="body"><span class="nick {color}">{nick}</span> {safe_text}{reaction_html}</span></div>"#
     )
 }
 fn nick_color_class(nick: &str) -> &'static str {

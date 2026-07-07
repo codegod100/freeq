@@ -13,19 +13,42 @@ html,body{height:100dvh;overflow:hidden}
 *{scrollbar-width:thin;scrollbar-color:#333 #1a1a2e}
 #status .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--bulma-grey);margin-right:4px}
 #status.connected .dot{background:var(--self);box-shadow:0 0 5px var(--self)}
+.mobile-btn{display:none;align-items:center;justify-content:center;width:2.5rem;height:2.5rem;background:transparent;border:0;color:var(--bulma-link-text);font-size:1.25rem;cursor:pointer}
+.mobile-btn:hover{background:rgba(255,255,255,.08)}
+#mobile-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:30;display:none}
+#mobile-backdrop.open{display:block}
+@media(max-width:768px){
+ .navbar{flex-wrap:wrap}
+ .navbar-brand{width:100%;justify-content:space-between}
+ .navbar-brand>.navbar-item:first-child{flex-shrink:0}
+ .navbar-end{justify-content:space-between;width:100%;padding:0 .5rem}
+ .navbar-end .navbar-item{padding:.25rem .3rem}
+ .navbar-end .field.has-addons{width:100%}
+ .navbar-end .field.has-addons .control.is-expanded{display:flex}
+ .navbar-end .field.has-addons .input{width:100%}
+ .mobile-btn{display:flex}
+ .columns{position:relative}
+ #sidebar{position:fixed;top:0;bottom:0;left:0;width:260px;max-width:80vw;background:var(--bulma-body-background-color);z-index:40;border-right:1px solid var(--bulma-border);transition:transform .2s ease;transform:translateX(-110%);display:flex;flex-direction:column;padding:0}
+ #sidebar.open{transform:translateX(0)}
+ .section>.columns>.column{position:static}
+ #sidebar .menu-list a,#sidebar .menu-label{padding:.5rem .75rem;font-size:.9rem}
+ .column.is-narrow{display:none}
+ .column.is-narrow#sidebar{display:flex}
+}
 </style>
 </head>
 <body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},connected:false}'>
 <section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
   <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
     <div class="navbar-brand" style="min-height:2.5rem">
+      <button class="mobile-btn" type="button" onclick="toggleSidebar()" aria-label="Channels">&#x2630;</button>
       <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
       <span class="navbar-item has-text-grey-light py-1">channels</span>
     </div>
     <div class="navbar-end">
       <div class="navbar-item py-1">
         <form data-signals="{channel:''}" data-on:submit="@post('/chat/_new/join')" data-signals-merge class="field has-addons">
-          <div class="control"><input class="input is-small" type="text" name="channel" placeholder="join #…" autocomplete="off" data-bind:channel style="width:80px"></div>
+          <div class="control is-expanded"><input class="input is-small" type="text" name="channel" placeholder="join #…" autocomplete="off" data-bind:channel style="width:80px"></div>
           <div class="control"><button class="button is-small is-link" type="submit">+</button></div>
         </form>
       </div>
@@ -35,7 +58,7 @@ html,body{height:100dvh;overflow:hidden}
     </div>
   </nav>
   <div class="columns is-gapless is-mobile" style="flex:1;min-height:0;margin-top:0">
-    <div class="column is-narrow" style="width:220px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
+    <div class="column is-narrow" id="sidebar" style="width:220px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
       <div class="menu">
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0" style="font-size:.65rem;letter-spacing:.05em">JOINED</p>
         <ul class="menu-list">
@@ -50,10 +73,32 @@ html,body{height:100dvh;overflow:hidden}
       </div>
     </div>
     <div class="column" style="display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:0">
-      <p class="has-text-grey-light is-size-5 has-text-centered">Select a channel from the sidebar<br>or join a new one above.</p>
+      <p class="has-text-grey-light is-size-5 has-text-centered">Select a channel<br>or join a new one above.</p>
     </div>
   </div>
+<div id="mobile-backdrop" onclick="closeSidebar()"></div>
 </section>
+<script>
+function toggleSidebar(){
+  var s=document.getElementById('sidebar');
+  var b=document.getElementById('mobile-backdrop');
+  if(!s)return;
+  var open=!s.classList.contains('open');
+  s.classList.toggle('open',open);
+  if(b)b.classList.toggle('open',open);
+}
+function closeSidebar(){
+  var s=document.getElementById('sidebar');
+  var b=document.getElementById('mobile-backdrop');
+  if(s)s.classList.remove('open');
+  if(b)b.classList.remove('open');
+}
+(function(){
+  var sb=document.getElementById('sidebar');
+  if(sb)sb.addEventListener('click',function(e){if(e.target.tagName==='A'||e.target.closest('a'))closeSidebar();});
+  window.addEventListener('resize',function(){if(window.matchMedia('(min-width:769px)').matches)closeSidebar();});
+})();
+</script>
 <script src="/datastar.js"></script>
 </body>
 </html>

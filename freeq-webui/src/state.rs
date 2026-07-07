@@ -204,25 +204,17 @@ impl AppState {
             .transpose()
             .context("initializing session store")?;
 
-        let mut tera = tera::Tera::default();
-        let mut files: Vec<(String, Option<String>)> = Vec::new();
-        for entry in std::fs::read_dir("templates").context("reading templates/")? {
-            let entry = entry?;
-            let p = entry.path();
-            if p.extension().and_then(|s| s.to_str()) == Some("tera") {
-                let name = p
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .ok_or_else(|| anyhow::anyhow!("bad template filename: {p:?}"))?
-                    .to_string();
-                files.push((p.to_string_lossy().to_string(), Some(name)));
-            }
-        }
-        if files.is_empty() {
-            anyhow::bail!("no .tera templates in templates/");
-        }
-        tera.add_template_files(files)
-            .context("loading Tera templates")?;
+        let mut tera = tera::Tera::new();
+        let template_dir = if std::path::Path::new("templates").is_dir() {
+            std::path::PathBuf::from("templates")
+        } else if std::path::Path::new("freeq-webui/templates").is_dir() {
+            std::path::PathBuf::from("freeq-webui/templates")
+        } else {
+            anyhow::bail!("no templates directory found (looked for templates/ and freeq-webui/templates/)");
+        };
+        let glob = format!("{}/**/*", template_dir.display());
+        tera.load_from_glob(&glob)
+            .context("loading tera templates from glob")?;
         Ok(Self {
             upstream,
             sessions: Arc::new(Mutex::new(HashMap::new())),

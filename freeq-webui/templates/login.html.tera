@@ -8,7 +8,7 @@
 <style>
 :root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--self:#5cdb95;--c1:#7ab7ff}
 *{box-sizing:border-box} html,body{height:100%;margin:0}
-body{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}
+body{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center;padding:1rem}
 #box{width:100%;max-width:340px;padding:1.5rem;border:1px solid var(--border);border-radius:8px;background:#11151b}
 h1{font-size:1rem;margin:0 0 1.2rem;color:var(--c1)}
 p{margin:0 0 0.8rem;color:var(--muted);font-size:12px;line-height:1.5}
@@ -20,6 +20,11 @@ button:hover{filter:brightness(1.15)}
 .guest{display:block;text-align:center;margin-top:0.9rem;color:var(--muted);font-size:12px;text-decoration:none}
 .guest:hover{color:var(--fg)}
 .error{color:#ef476f;font-size:12px;margin-bottom:0.8rem}
+@media(max-width:480px){
+ #box{padding:1.25rem}
+ input,button{padding:0.7rem;font-size:14px}
+ h1{font-size:1.1rem}
+}
 </style>
 </head>
 <body>
