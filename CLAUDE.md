@@ -2,6 +2,11 @@
 
 **All Cargo, Rust, and Node development operations in this repo MUST be run inside `devenv shell`.** The devenv provides the pinned Rust toolchain, Node 24, Bun, and required system dependencies. Running raw `cargo ...` or `npm ...` outside the shell may use the wrong toolchain or fail to find dependencies.
 
+## jj (Jujutsu) conventions
+
+**Always invoke `jj` with `--no-pager`** (e.g. `jj st --no-pager`, `jj log --no-pager -r @ --limit 5`). The pager hangs in non-TTY tool contexts; `--no-pager` keeps output inline.
+
+
 Enter the shell with:
 
 ```bash
