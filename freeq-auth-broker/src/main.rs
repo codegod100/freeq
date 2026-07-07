@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use freeq_auth_broker::{
-    BrokerConfig, BrokerState, RemoteWriter, SqliteStore, derive_encryption_key, router,
+    BrokerConfig, BrokerState, RemoteWriter, SqliteStore, derive_encryption_key, init_db, router,
 };
 use tokio::sync::Mutex;
 
@@ -61,6 +61,11 @@ async fn main() {
             Err(e) => panic!("Failed to open broker db after 60s of retries: {e}"),
         }
     };
+    // Create the schema if this is a fresh DB. `from_connection` (unlike
+    // `SqliteStore::new`) doesn't do this, so without it a brand-new broker DB
+    // has no `sessions` table and the first login fails with
+    // "no such table: sessions". Idempotent (CREATE TABLE IF NOT EXISTS).
+    init_db(&db).expect("failed to initialize broker db schema");
     let store = Arc::new(SqliteStore::from_connection(db, encryption_key));
 
     let writer = Arc::new(RemoteWriter {
