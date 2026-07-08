@@ -16,7 +16,9 @@ import ScreenCaptureKit
 /// connected camera (sticky UID via `MediaDeviceSelection`), and recovers
 /// when the active camera is unplugged by falling back to the default.
 final class CallCameraCapture: NSObject {
-    /// Fires on the capture queue with a tightly-packed BGRA frame. Keep fast.
+    /// Fires with a tightly-packed BGRA frame on a background queue (the
+    /// capture queue with no effect, the effects queue when an effect is
+    /// active) — never the main thread. Keep fast; don't retain the pointer.
     /// (pointer, byteLength, width, height, timestampUs)
     var onFrame: ((UnsafePointer<UInt8>, Int, Int, Int, UInt64) -> Void)?
     /// Camera permission was denied — surface UI guidance.
@@ -32,6 +34,14 @@ final class CallCameraCapture: NSObject {
 
     private let output = AVCaptureVideoDataOutput()
     private let queue = DispatchQueue(label: "at.freeq.macos.camera")
+    /// Background-effect segmentation + composite runs here, OFF the capture
+    /// queue, so the expensive Vision pass never stalls the capture pipeline
+    /// (which drives the low-latency hardware self-preview) and can't let
+    /// latency accumulate. `effectSlot` is a drop-if-busy gate: if a frame is
+    /// still being processed, newer frames are skipped rather than queued —
+    /// the self-view stays current instead of falling progressively behind.
+    private let effectsQueue = DispatchQueue(label: "at.freeq.macos.camera.effects")
+    private let effectSlot = DispatchSemaphore(value: 1)
     private var configured = false
     private var preferredUniqueID: String?
     private var currentInput: AVCaptureDeviceInput?
@@ -448,14 +458,44 @@ extension CallCameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
         from connection: AVCaptureConnection
     ) {
         guard let onFrame, let rawPb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let tsUs = UInt64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
 
-        // Background effects: composite person-over-styled-background; fall
-        // back to the raw frame when off or when segmentation yields nothing.
-        let pb = effects.process(rawPb) ?? rawPb
-        if pb !== rawPb {
-            Self.enqueue(pixelBuffer: pb, on: processedPreviewLayer)
+        guard effects.effect.isActive else {
+            // Fast path — no effect. The hardware `previewLayer` renders the
+            // raw feed at zero latency; we only need to pack + send. Stays on
+            // the capture queue, unchanged.
+            packAndSend(rawPb, tsUs: tsUs, onFrame: onFrame)
+            return
         }
 
+        // Effect path — hand the frame to the effects queue and return
+        // immediately so the capture pipeline never blocks on segmentation.
+        // Drop-if-busy: if the previous frame is still processing, skip this
+        // one (bounded latency, current self-view) instead of queueing behind
+        // it. Capturing `sampleBuffer` retains the pixel buffer across the hop.
+        guard effectSlot.wait(timeout: .now()) == .success else { return }
+        effectsQueue.async { [weak self] in
+            defer { self?.effectSlot.signal() }
+            guard let self,
+                  let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            // Composite person-over-styled-background; fall back to the raw
+            // frame if segmentation yields nothing.
+            let processed = self.effects.process(pb) ?? pb
+            if processed !== pb {
+                Self.enqueue(pixelBuffer: processed, on: self.processedPreviewLayer)
+            }
+            self.packAndSend(processed, tsUs: tsUs, onFrame: onFrame)
+        }
+    }
+
+    /// Tightly pack a BGRA buffer (the SDK expects no row padding) and hand it
+    /// to `onFrame`. Runs on the capture queue (no-effect path) or the effects
+    /// queue (effect path) — never the main thread.
+    private func packAndSend(
+        _ pb: CVPixelBuffer,
+        tsUs: UInt64,
+        onFrame: (UnsafePointer<UInt8>, Int, Int, Int, UInt64) -> Void
+    ) {
         CVPixelBufferLockBaseAddress(pb, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
 
@@ -465,9 +505,6 @@ extension CallCameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
 
         let expectedRow = width * 4
-        let tsUs = UInt64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
-
-        // Tightly pack into width*height*4 (the SDK expects no row padding).
         var packed = [UInt8](repeating: 0, count: width * height * 4)
         packed.withUnsafeMutableBytes { dst in
             let dstBase = dst.baseAddress!
