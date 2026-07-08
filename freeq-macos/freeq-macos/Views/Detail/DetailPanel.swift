@@ -30,7 +30,7 @@ struct MemberListView: View {
     private var regular: [MemberInfo] { filtered.filter { !$0.isOp && !$0.isVoiced }.sorted { $0.nick < $1.nick } }
 
     private var filtered: [MemberInfo] {
-        let base = channel.uniqueMembers
+        let base = channel.uniqueMembers(resolveDid: { ProfileCache.shared.did(for: $0) })
         if searchText.isEmpty { return base }
         let q = searchText.lowercased()
         return base.filter { $0.nick.lowercased().contains(q) }
@@ -57,7 +57,7 @@ struct MemberListView: View {
             Divider().overlay(Theme.borderSoft)
 
             HStack {
-                Text("\(channel.uniqueMemberCount) members")
+                Text("\(channel.uniqueMemberCount(resolveDid: { ProfileCache.shared.did(for: $0) })) members")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
                 Spacer()

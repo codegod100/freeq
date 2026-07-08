@@ -94,8 +94,19 @@ extension AppState {
     func startFreshAvSession(channel: String) {
         let instance = Self.generateAvInstanceId()
         currentAvInstance = instance
-        pendingAvStart.insert(channel.lowercased())
+        let key = channel.lowercased()
+        pendingAvStart.insert(key)
         sendRaw("@+freeq.at/av-start;+freeq.at/av-instance=\(instance) TAGMSG \(channel)")
+        // Concurrent-start safety net: if our av-start lost the race (server
+        // rejected it and the winner's `started` already passed before we were
+        // pending), no `started` will arrive to converge us. After a short
+        // wait, if we're still pending + not in a call, re-discover and join
+        // whatever session actually exists.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.pendingAvStart.contains(key), !self.isInCall else { return }
+            self.pendingAvStart.remove(key)
+            Task { await self.discoverAndJoinOrStart(channel: channel) }
+        }
     }
 
     /// Construct the MoQ session, start mic capture, and announce the join.
@@ -385,20 +396,31 @@ extension AppState {
         switch avState {
         case "started":
             activeAvSessions[chanKey] = sessionId
-            if pendingAvStart.contains(chanKey) && actor.lowercased() == nick.lowercased() {
+            let wasPending = pendingAvStart.contains(chanKey)
+            switch resolveAvStarted(
+                pendingStart: wasPending,
+                actorIsSelf: actor.lowercased() == nick.lowercased(),
+                sessionId: sessionId
+            ) {
+            case .joinSession(let sid):
+                // We were trying to start — converge on the winning session,
+                // whether we created it or lost a concurrent-start race.
                 pendingAvStart.remove(chanKey)
-                startCall(channel: channel, sessionId: sessionId)
-            } else if actor.lowercased() != nick.lowercased()
-                && notifyLevel(channel) != .muted {
-                // Someone else started a call in a channel we're in — a
-                // time-sensitive "join?" nudge. Clicking focuses the channel.
-                NotificationManager.shared.notifyEvent(
-                    title: "Voice session in \(channel)",
-                    body: "\(actor) started a call",
-                    target: channel,
-                    threadId: "freeq.call.\(chanKey)"
-                )
-                NotificationManager.shared.requestAttentionIfBackground()
+                if !isInCall { startCall(channel: channel, sessionId: sid) }
+            case .ignore:
+                break
+            case .notifyPeerStarted:
+                if notifyLevel(channel) != .muted {
+                    // Someone else started a call in a channel we're in — a
+                    // time-sensitive "join?" nudge. Clicking focuses the channel.
+                    NotificationManager.shared.notifyEvent(
+                        title: "Voice session in \(channel)",
+                        body: "\(actor) started a call",
+                        target: channel,
+                        threadId: "freeq.call.\(chanKey)"
+                    )
+                    NotificationManager.shared.requestAttentionIfBackground()
+                }
             }
         case "ended":
             activeAvSessions.removeValue(forKey: chanKey)
@@ -469,15 +491,15 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
                 // Pixel work happens on the render queue, not the main thread.
                 VideoSampleBuffer.renderAsync(bgra: bgra, width: Int(width), height: Int(height), on: layer)
             }
-            _ = state.participantsWithVideo.insert(nick)
+            _ = state.participantsWithVideo.insert(nick.lowercased())
         case .screenTrackStarted(let nick):
-            _ = state.participantsWithScreen.insert(nick)
+            _ = state.participantsWithScreen.insert(nick.lowercased())
         case .screenTrackStopped(let nick):
             state.participantsWithScreen = state.participantsWithScreen.filter {
                 $0.lowercased() != nick.lowercased()
             }
         case .screenFrame(let nick, let bgra, let width, let height):
-            _ = state.participantsWithScreen.insert(nick)
+            _ = state.participantsWithScreen.insert(nick.lowercased())
             if let layer = state.screenLayer(for: nick) {
                 VideoSampleBuffer.renderAsync(bgra: bgra, width: Int(width), height: Int(height), on: layer)
             }

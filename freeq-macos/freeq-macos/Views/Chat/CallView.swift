@@ -80,7 +80,7 @@ struct CallView: View {
     private func tile(nick: String, label: String, isLocal: Bool) -> some View {
         let hasVideo = isLocal
             ? ((appState.isCameraOn && appState.localPreviewCapture != nil) || appState.isScreenSharing)
-            : appState.participantsWithVideo.contains(nick)
+            : appState.participantsWithVideo.contains(nick.lowercased())
         VStack(spacing: 4) {
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
@@ -164,7 +164,7 @@ struct CallView: View {
     private func expandedTile(nick: String, isLocal: Bool) -> some View {
         let hasVideo = isLocal
             ? ((appState.isCameraOn && appState.localPreviewCapture != nil) || appState.isScreenSharing)
-            : appState.participantsWithVideo.contains(nick)
+            : appState.participantsWithVideo.contains(nick.lowercased())
         ZStack {
             RoundedRectangle(cornerRadius: 14)
                 .fill(Color(nsColor: .controlBackgroundColor))

@@ -24,11 +24,15 @@ class ChannelState: Identifiable {
     /// reconnected N times) count once. DID resolves from the roster or the
     /// profile cache; guests (no resolvable DID) are kept. Prefers the fuller
     /// (dotted) handle for display. Single source for member lists + counts.
-    var uniqueMembers: [MemberInfo] {
+    /// `resolveDid` supplies a DID for members whose `MemberInfo.did` is nil
+    /// (on macOS the roster leaves it nil and the DID lives in ProfileCache).
+    /// Kept as an injected closure so this model stays free of the app-only
+    /// ProfileCache and remains unit-testable in FreeqMacosCore.
+    func uniqueMembers(resolveDid: (String) -> String? = { _ in nil }) -> [MemberInfo] {
         var indexByDid: [String: Int] = [:]
         var out: [MemberInfo] = []
         for m in members {
-            guard let did = m.did ?? ProfileCache.shared.did(for: m.nick) else {
+            guard let did = m.did ?? resolveDid(m.nick) else {
                 out.append(m); continue
             }
             if let idx = indexByDid[did] {
@@ -41,7 +45,9 @@ class ChannelState: Identifiable {
         return out
     }
 
-    var uniqueMemberCount: Int { uniqueMembers.count }
+    func uniqueMemberCount(resolveDid: (String) -> String? = { _ in nil }) -> Int {
+        uniqueMembers(resolveDid: resolveDid).count
+    }
     var hasVisibleMessages: Bool { messages.contains { !$0.isDeleted } }
 
     var activeTypers: [String] {

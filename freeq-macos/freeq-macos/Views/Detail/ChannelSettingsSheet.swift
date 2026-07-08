@@ -65,7 +65,7 @@ struct ChannelSettingsSheet: View {
                     }
 
                     // Members
-                    GroupBox("Members (\(channel.uniqueMemberCount))") {
+                    GroupBox("Members (\(channel.uniqueMemberCount(resolveDid: { ProfileCache.shared.did(for: $0) })))") {
                         VStack(alignment: .leading, spacing: 4) {
                             let ops = channel.members.filter(\.isOp)
                             let voiced = channel.members.filter { $0.isVoiced && !$0.isOp }

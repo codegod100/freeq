@@ -56,6 +56,7 @@
 		82F06962C82E36993AC3F92C /* AppKitMessageList.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2FF7FE3348FFE303622668A /* AppKitMessageList.swift */; };
 		87278B03BA72D53ADC27DB97 /* MainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61EB9E0F12CF280B8BADFA41 /* MainView.swift */; };
 		87EDC9A9B0E1957D0BFEE7AD /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E7280ECF55468ACAA820E4 /* ShareViewController.swift */; };
+		8AA52D2329AF515F98602EDF /* AvStartRace.swift in Sources */ = {isa = PBXBuildFile; fileRef = 50E8C4C51998A707446B885B /* AvStartRace.swift */; };
 		8F89EA8FF036A4BEA4FAF771 /* Safety.swift in Sources */ = {isa = PBXBuildFile; fileRef = 568A6384EFD5C7CA0D2820AF /* Safety.swift */; };
 		8F91067FD889CE783A775F1A /* AudioSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F168787C6DC3D5A739D406A /* AudioSettings.swift */; };
 		95713207153A9DD7BAB5955A /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA3E838FFB8176761B9DAA50 /* ChatMessage.swift */; };
@@ -153,6 +154,7 @@
 		49DCC7DD970BA3640B37934D /* BookmarksPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BookmarksPanel.swift; sourceTree = "<group>"; };
 		4BCCB41ADB5F3934945B6E85 /* FreeqSDK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = FreeqSDK.xcframework; sourceTree = "<group>"; };
 		4F8EFFA45A91FBAF437F7ADF /* UploadResponse.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UploadResponse.swift; sourceTree = "<group>"; };
+		50E8C4C51998A707446B885B /* AvStartRace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvStartRace.swift; sourceTree = "<group>"; };
 		53A3EEB6BC19DB7746A55502 /* ThreadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadView.swift; sourceTree = "<group>"; };
 		53BCB3D151F95995B9DD7E8C /* CameraEffectsProcessor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraEffectsProcessor.swift; sourceTree = "<group>"; };
 		568A6384EFD5C7CA0D2820AF /* Safety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Safety.swift; sourceTree = "<group>"; };
@@ -367,6 +369,7 @@
 				0F52BF9F99E9D9772373AA39 /* AudioLevelMeter.swift */,
 				D17E048D6D4D5A5BBEA1FABA /* AudioOutputDevices.swift */,
 				5B44CE675043F28160CDE06F /* AvatarCache.swift */,
+				50E8C4C51998A707446B885B /* AvStartRace.swift */,
 				AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */,
 				DB0BA22F0AF547102314C733 /* CallAudioDevices.swift */,
 				272F2E7627007A625AE37DA8 /* CallCameraCapture.swift */,
@@ -561,6 +564,7 @@
 				0BDB4364770D6AEE882147B6 /* AudioOutputDevices.swift in Sources */,
 				8F91067FD889CE783A775F1A /* AudioSettings.swift in Sources */,
 				AF76EC565DC3FE7EB618879F /* AutocompletePopup.swift in Sources */,
+				8AA52D2329AF515F98602EDF /* AvStartRace.swift in Sources */,
 				B278B82F0D0C1A1DD292BD90 /* AvatarCache.swift in Sources */,
 				3146DC065B84E88A34D2BD2C /* BookmarksPanel.swift in Sources */,
 				F221FBCD2F33FDE638027BB4 /* BrokerAuth.swift in Sources */,
