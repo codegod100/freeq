@@ -289,6 +289,9 @@ struct MessageListView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
+        // Intercept in-app freeq:// links from message text (nick → profile,
+        // #channel → switch/join); real URLs fall through to the browser.
+        .environment(\.openURL, OpenURLAction(handler: handleMessageURL))
         .sheet(item: $threadMessage) { msg in
             ThreadView(rootMessage: msg, channelName: channel.name)
                 .presentationDetents([.large])
@@ -835,6 +838,8 @@ struct MessageListView: View {
     private static let mdStrike = try! NSRegularExpression(pattern: #"~~(.+?)~~"#)
     private static let mdInlineCode = try! NSRegularExpression(pattern: #"(?<!`)`(?!`)([^`\n]+)(?<!`)`(?!`)"#)
     private static let mdURL = try! NSRegularExpression(pattern: #"https?://[^\s<>\]\)]+"#)
+    private static let mdMention = try! NSRegularExpression(pattern: #"@([A-Za-z0-9][A-Za-z0-9._-]*)"#)
+    private static let mdChannel = try! NSRegularExpression(pattern: #"(?<![\w/#])#[A-Za-z0-9][A-Za-z0-9._-]*"#)
 
     @ViewBuilder
     private func messageBody(_ msg: ChatMessage) -> some View {
@@ -1106,7 +1111,60 @@ struct MessageListView: View {
             }
         }
 
+        // Tappable @mentions → freeq://mention/<token> (opens the profile).
+        let ns = text as NSString
+        for match in Self.mdMention.matches(in: text, range: nsRange) {
+            // Skip emails: require a boundary before '@'.
+            let at = match.range.location
+            if at > 0, let s = UnicodeScalar(UInt32(ns.character(at: at - 1))),
+               CharacterSet.alphanumerics.contains(s) { continue }
+            guard let attrRange = Range(match.range, in: result),
+                  result[attrRange].link == nil else { continue }
+            let token = ns.substring(with: match.range(at: 1))
+            let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? token
+            if let url = URL(string: "freeq://mention/\(encoded)") {
+                result[attrRange].link = url
+                result[attrRange].foregroundColor = Theme.accent
+                result[attrRange].font = .system(.body, weight: .semibold)
+            }
+        }
+
+        // Tappable #channels → freeq://channel/<name> (switch/join).
+        for match in Self.mdChannel.matches(in: text, range: nsRange) {
+            guard let attrRange = Range(match.range, in: result),
+                  result[attrRange].link == nil else { continue }
+            let name = ns.substring(with: match.range) // "#channel"
+            let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+            if let url = URL(string: "freeq://channel/\(encoded)") {
+                result[attrRange].link = url
+                result[attrRange].foregroundColor = Theme.accent
+                result[attrRange].font = .system(.body, weight: .semibold)
+            }
+        }
+
         return result
+    }
+
+    /// Intercept in-app links from message text. `freeq://mention/<token>`
+    /// opens the profile; `freeq://channel/<name>` switches to (or joins) the
+    /// channel; everything else opens in the browser.
+    private func handleMessageURL(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "freeq" else { return .systemAction }
+        switch url.host {
+        case "mention":
+            let token = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+            profileTarget = ProfileNickTarget(nick: token, origin: nil)
+            return .handled
+        case "channel":
+            let name = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+            if !appState.channels.contains(where: { $0.name.lowercased() == name.lowercased() }) {
+                appState.joinChannel(name)
+            }
+            appState.navigate(toBuffer: name)
+            return .handled
+        default:
+            return .systemAction
+        }
     }
 
     // MARK: - Formatting

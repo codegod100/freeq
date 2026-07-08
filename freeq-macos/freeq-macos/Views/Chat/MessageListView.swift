@@ -815,10 +815,23 @@ struct MessageRow: View {
     /// Intercept `freeq://mention/<token>` links (open the profile); let every
     /// other URL fall through to the system handler.
     private func handleMessageURL(_ url: URL) -> OpenURLAction.Result {
-        guard url.scheme == "freeq", url.host == "mention" else { return .systemAction }
-        let token = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
-        mentionTarget = MentionTarget(nick: resolveMentionNick(token))
-        return .handled
+        guard url.scheme == "freeq" else { return .systemAction }
+        switch url.host {
+        case "mention":
+            let token = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+            mentionTarget = MentionTarget(nick: resolveMentionNick(token))
+            return .handled
+        case "channel":
+            let name = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+            if appState.channels.contains(where: { $0.name.lowercased() == name.lowercased() }) {
+                appState.activeChannel = name
+            } else {
+                appState.joinChannel(name)
+            }
+            return .handled
+        default:
+            return .systemAction
+        }
     }
 
     /// Resolve a mention token to a real nick: a channel member matching the
@@ -990,12 +1003,35 @@ struct MessageRow: View {
             }
         }
 
+        // Linkify #channels → freeq://channel/<name>, tapped to switch/join.
+        // Same skip-if-already-linked discipline as mentions.
+        if let regex = Self.channelRegex {
+            let ns = plain as NSString
+            for m in regex.matches(in: plain, range: NSRange(location: 0, length: ns.length)) {
+                guard let r = Range(m.range, in: plain),
+                      let attrRange = Range(r, in: result),
+                      result[attrRange].link == nil else { continue }
+                let name = ns.substring(with: m.range) // "#channel"
+                let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+                if let url = URL(string: "freeq://channel/\(encoded)") {
+                    result[attrRange].link = url
+                }
+                result[attrRange].foregroundColor = .accentColor
+                result[attrRange].font = .body.weight(.semibold)
+            }
+        }
+
         return result
     }
 
     /// `@nick` / `@handle.tld` — a leading letter/digit then nick/handle chars.
     static let mentionRegex = try? NSRegularExpression(
         pattern: "@([A-Za-z0-9][A-Za-z0-9._-]*)")
+
+    /// `#channel` — not preceded by a word char, slash, or another `#` (so URL
+    /// fragments and `##` don't match).
+    static let channelRegex = try? NSRegularExpression(
+        pattern: "(?<![\\w/#])#[A-Za-z0-9][A-Za-z0-9._-]*")
 }
 
 // MARK: - Hover Action Bar (Slack/Discord style)

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState, useMemo, memo } from 'react';
 import { useStore, type Message, type PinnedMessage } from '../store';
-import { getNick, requestHistory, sendReaction, sendUnreact } from '../irc/client';
+import { getNick, requestHistory, sendReaction, sendUnreact, joinChannel } from '../irc/client';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
 import { EmojiPicker } from './EmojiPicker';
 import { UserPopover } from './UserPopover';
@@ -90,9 +90,11 @@ function textWithoutImages(text: string, imageUrls: string[]): string {
 
 /** Parse text into typed segments for safe React rendering (no dangerouslySetInnerHTML). */
 interface TextSegment {
-  type: 'text' | 'link' | 'code' | 'codeblock' | 'bold' | 'italic' | 'strike';
+  type: 'text' | 'link' | 'code' | 'codeblock' | 'bold' | 'italic' | 'strike' | 'mention' | 'channel';
   content: string;
   href?: string;
+  /** For mention/channel: the actionable value (nick without @, or #channel). */
+  value?: string;
 }
 
 function parseTextSegments(text: string): TextSegment[] {
@@ -106,6 +108,8 @@ function parseTextSegments(text: string): TextSegment[] {
     { re: /\*\*(.+?)\*\*/g, type: 'bold', group: 1 },
     { re: /(?<!\*)\*([^*]+)\*(?!\*)/g, type: 'italic', group: 1 },
     { re: /~~(.+?)~~/g, type: 'strike', group: 1 },
+    { re: /(?<![A-Za-z0-9])@([A-Za-z0-9][A-Za-z0-9._-]*)/g, type: 'mention', group: 1 },
+    { re: /(?<![\w/#])#([A-Za-z0-9][A-Za-z0-9._-]*)/g, type: 'channel', group: 1 },
   ];
 
   // Build a combined list of all matches with positions
@@ -143,6 +147,12 @@ function parseTextSegments(text: string): TextSegment[] {
     }
     if (m.type === 'link') {
       segments.push({ type: 'link', content: m.content, href: m.content });
+    } else if (m.type === 'mention') {
+      // display the full "@nick", act on the bare nick
+      segments.push({ type: 'mention', content: m.full, value: m.content });
+    } else if (m.type === 'channel') {
+      // display + act on the full "#channel"
+      segments.push({ type: 'channel', content: m.full, value: m.full });
     } else {
       segments.push({ type: m.type, content: m.content });
     }
@@ -182,8 +192,14 @@ function renderWithBreaks(text: string): React.ReactNode {
   ));
 }
 
+/** Context for making @nick / #channel spans interactive. */
+interface RenderCtx {
+  channel?: string;
+  onNickClick?: (nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => void;
+}
+
 /** Render text segments as React elements (XSS-safe — no innerHTML). */
-function renderTextSafe(text: string): React.ReactElement {
+function renderTextSafe(text: string, ctx?: RenderCtx): React.ReactElement {
   const segments = parseTextSegmentsCached(text);
   return (
     <>
@@ -192,6 +208,32 @@ function renderTextSafe(text: string): React.ReactElement {
         switch (seg.type) {
           case 'link':
             return <a key={i} href={seg.href} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline break-all">{content}</a>;
+          case 'mention':
+            return (
+              <button
+                key={i}
+                type="button"
+                className="text-accent hover:underline font-medium"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const nick = seg.value ?? content.replace(/^@/, '');
+                  // Resolve DID from the channel roster (impersonation-safe).
+                  const did = ctx?.channel
+                    ? useStore.getState().channels.get(ctx.channel.toLowerCase())?.members.get(nick.toLowerCase())?.did
+                    : undefined;
+                  ctx?.onNickClick?.(nick, did, undefined, e);
+                }}
+              >{content}</button>
+            );
+          case 'channel':
+            return (
+              <button
+                key={i}
+                type="button"
+                className="text-accent hover:underline font-medium"
+                onClick={(e) => { e.stopPropagation(); joinChannel(seg.value ?? content); }}
+              >{content}</button>
+            );
           case 'codeblock':
             return <pre key={i} className="bg-surface rounded px-2 py-1.5 my-1 text-[13px] font-mono overflow-x-auto whitespace-pre-wrap">{content.replace(/^\n|\n$/g, '')}</pre>;
           case 'code':
@@ -365,8 +407,13 @@ function InlineVideoPlayer({ url }: { url: string }) {
   );
 }
 
-function MessageContentImpl({ msg }: { msg: Message }) {
+function MessageContentImpl({ msg, channel, onNickClick }: {
+  msg: Message;
+  channel?: string;
+  onNickClick?: (nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => void;
+}) {
   const setLightbox = useStore((s) => s.setLightboxUrl);
+  const linkCtx: RenderCtx = { channel, onNickClick };
 
   if (msg.isAction) {
     const color = msg.isSelf ? '#b18cff' : nickColor(msg.from);
@@ -457,7 +504,7 @@ function MessageContentImpl({ msg }: { msg: Message }) {
 
       {cleanText && (
         <div className="text-[15px] leading-relaxed [&_pre]:my-1 [&_a]:break-all">
-          {renderTextSafe(cleanText)}
+          {renderTextSafe(cleanText, linkCtx)}
         </div>
       )}
 
@@ -678,7 +725,7 @@ function FullMessageImpl({ msg, channel, onNickClick }: MessageProps) {
           {msg.editOf && !msg.isStreaming && <span className="text-xs text-fg-dim">(edited)</span>}
           {msg.encrypted && <EncryptedBadge />}
         </div>
-        <MessageContent msg={msg} />
+        <MessageContent msg={msg} channel={channel} onNickClick={onNickClick} />
         <Reactions msg={msg} channel={channel} />
       </div>
 
@@ -726,7 +773,7 @@ function FullMessageImpl({ msg, channel, onNickClick }: MessageProps) {
   );
 }
 
-function GroupedMessageImpl({ msg, channel }: MessageProps) {
+function GroupedMessageImpl({ msg, channel, onNickClick }: MessageProps) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | undefined>();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -751,7 +798,7 @@ function GroupedMessageImpl({ msg, channel }: MessageProps) {
         {formatTime(msg.timestamp)}
       </span>
       <div className="min-w-0 flex-1">
-        <MessageContent msg={msg} />
+        <MessageContent msg={msg} channel={channel} onNickClick={onNickClick} />
         <Reactions msg={msg} channel={channel} />
       </div>
 
