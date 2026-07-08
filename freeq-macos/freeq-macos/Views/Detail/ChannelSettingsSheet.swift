@@ -65,7 +65,7 @@ struct ChannelSettingsSheet: View {
                     }
 
                     // Members
-                    GroupBox("Members (\(channel.members.count))") {
+                    GroupBox("Members (\(channel.uniqueMemberCount))") {
                         VStack(alignment: .leading, spacing: 4) {
                             let ops = channel.members.filter(\.isOp)
                             let voiced = channel.members.filter { $0.isVoiced && !$0.isOp }

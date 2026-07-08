@@ -4,26 +4,7 @@ struct MemberListView: View {
     @ObservedObject var channel: ChannelState
     @State private var profileNick: String? = nil
 
-    /// One row per account: collapse the same DID (multi-device, or a
-    /// nick-collision twin like chadfowler.com / chadfowlercom) into a single
-    /// member. Guests (no resolvable DID) are kept. Prefers the fuller (dotted)
-    /// handle for display.
-    private var dedupedMembers: [MemberInfo] {
-        var indexByDid: [String: Int] = [:]
-        var out: [MemberInfo] = []
-        for m in channel.members {
-            guard let did = m.did ?? AvatarCache.shared.did(for: m.nick) else {
-                out.append(m); continue
-            }
-            if let idx = indexByDid[did] {
-                if m.nick.contains("."), !out[idx].nick.contains(".") { out[idx] = m }
-            } else {
-                indexByDid[did] = out.count
-                out.append(m)
-            }
-        }
-        return out
-    }
+    private var dedupedMembers: [MemberInfo] { channel.uniqueMembers }
 
     private var ops: [MemberInfo] {
         dedupedMembers.filter { $0.isOp }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }

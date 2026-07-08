@@ -35,6 +35,23 @@ export interface Member {
   actorClass?: 'human' | 'agent' | 'external_agent';
 }
 
+/** Count members collapsed to one per account (same DID) — multi-session or
+ *  nick-collision twins (e.g. chadfowler.com / chadfowlercom, or a bot that
+ *  reconnected N times) count once; guests (no DID) count individually.
+ *  Matches the deduped roster so header/badge counts agree with the list. */
+export function uniqueMemberCount(members: Map<string, Member>): number {
+  const dids = new Set<string>();
+  let count = 0;
+  for (const m of members.values()) {
+    if (m.did) {
+      if (dids.has(m.did)) continue;
+      dids.add(m.did);
+    }
+    count++;
+  }
+  return count;
+}
+
 export interface PinnedMessage {
   msgid: string;
   pinned_by: string;

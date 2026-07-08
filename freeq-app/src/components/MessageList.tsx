@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback, useState, useMemo, memo } from 'react';
-import { useStore, type Message, type PinnedMessage } from '../store';
+import { useStore, uniqueMemberCount, type Message, type PinnedMessage } from '../store';
 import { getNick, requestHistory, sendReaction, sendUnreact, joinChannel } from '../irc/client';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
 import { EmojiPicker } from './EmojiPicker';
@@ -1084,7 +1084,7 @@ function TypingIndicatorBar({ channel }: { channel: string }) {
 function ChannelEmptyState({ channel }: { channel: string }) {
   const ch = useStore((s) => s.channels.get(channel.toLowerCase()));
   const topic = ch?.topic;
-  const memberCount = ch?.members.size ?? 0;
+  const memberCount = ch ? uniqueMemberCount(ch.members) : 0;
   const isEncrypted = ch?.isEncrypted;
 
   return (

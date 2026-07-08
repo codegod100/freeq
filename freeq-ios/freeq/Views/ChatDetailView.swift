@@ -133,7 +133,7 @@ struct ChatDetailView: View {
                                 .foregroundColor(Theme.textMuted)
                                 .lineLimit(1)
                         } else if isChannel {
-                            Text("\(channel.members.count) members")
+                            Text("\(channel.uniqueMemberCount) members")
                                 .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
                         }

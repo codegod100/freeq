@@ -372,8 +372,8 @@ struct ChatRow: View {
                     }
 
                     // Member count for channels
-                    if isChannel && conversation.members.count > 0 {
-                        Text("\(conversation.members.count)")
+                    if isChannel && conversation.uniqueMemberCount > 0 {
+                        Text("\(conversation.uniqueMemberCount)")
                             .font(.fqCaption2)
                             .foregroundColor(Theme.textMuted)
                     }

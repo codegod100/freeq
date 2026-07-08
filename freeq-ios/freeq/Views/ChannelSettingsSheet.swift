@@ -36,7 +36,7 @@ struct ChannelSettingsSheet: View {
                                     .font(.fqBody.weight(.bold))
                                     .foregroundColor(Theme.textPrimary)
 
-                                Text("\(channel.members.count) members")
+                                Text("\(channel.uniqueMemberCount) members")
                                     .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                             }
@@ -140,7 +140,7 @@ struct ChannelSettingsSheet: View {
                             .listRowBackground(Theme.bgSecondary)
                         }
                     } header: {
-                        Text("Members (\(channel.members.count))")
+                        Text("Members (\(channel.uniqueMemberCount))")
                             .foregroundColor(Theme.textMuted)
                     }
 

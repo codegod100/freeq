@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import type { AvParticipant } from '../store';
-import { useStore } from '../store';
+import { useStore, uniqueMemberCount } from '../store';
 import { setTopic as sendTopic, startAvSession } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
@@ -22,7 +22,7 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
   const ch = channels.get(activeChannel.toLowerCase());
   const whoisCache = useStore((s) => s.whoisCache);
   const topic = ch?.topic || '';
-  const memberCount = ch?.members.size || 0;
+  const memberCount = ch ? uniqueMemberCount(ch.members) : 0;
   const isChannel = activeChannel !== 'server' && activeChannel.startsWith('#');
   const isDM = activeChannel !== 'server' && !activeChannel.startsWith('#');
   const setChannelSettings = useStore((s) => s.setChannelSettingsOpen);

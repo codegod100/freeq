@@ -18,6 +18,30 @@ class ChannelState: Identifiable {
     var id: String { name }
     var isChannel: Bool { name.hasPrefix("#") }
     var isDM: Bool { !name.hasPrefix("#") }
+
+    /// Members collapsed to one row per account (same DID). Multi-session or
+    /// nick-collision twins (e.g. chadfowler.com / chadfowlercom, or a bot that
+    /// reconnected N times) count once. DID resolves from the roster or the
+    /// profile cache; guests (no resolvable DID) are kept. Prefers the fuller
+    /// (dotted) handle for display. Single source for member lists + counts.
+    var uniqueMembers: [MemberInfo] {
+        var indexByDid: [String: Int] = [:]
+        var out: [MemberInfo] = []
+        for m in members {
+            guard let did = m.did ?? ProfileCache.shared.did(for: m.nick) else {
+                out.append(m); continue
+            }
+            if let idx = indexByDid[did] {
+                if m.nick.contains("."), !out[idx].nick.contains(".") { out[idx] = m }
+            } else {
+                indexByDid[did] = out.count
+                out.append(m)
+            }
+        }
+        return out
+    }
+
+    var uniqueMemberCount: Int { uniqueMembers.count }
     var hasVisibleMessages: Bool { messages.contains { !$0.isDeleted } }
 
     var activeTypers: [String] {

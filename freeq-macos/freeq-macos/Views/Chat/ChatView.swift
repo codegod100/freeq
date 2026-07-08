@@ -235,7 +235,7 @@ struct ChannelWelcomeView: View {
 
             HStack(spacing: 10) {
                 if isChannel {
-                    contextPill(icon: "person.2.fill", text: "\(channel?.members.count ?? 0) members")
+                    contextPill(icon: "person.2.fill", text: "\(channel?.uniqueMemberCount ?? 0) members")
                     if let topic = channel?.topic, !topic.isEmpty {
                         contextPill(icon: "quote.bubble.fill", text: topic)
                     }
@@ -295,7 +295,7 @@ struct TopBarView: View {
                     Text(channel?.name.replacingOccurrences(of: "#", with: "") ?? "")
                         .font(.headline.weight(.semibold))
                         .foregroundStyle(Theme.textPrimary)
-                    Text("\(channel?.members.count ?? 0) members")
+                    Text("\(channel?.uniqueMemberCount ?? 0) members")
                         .font(.caption2)
                         .foregroundStyle(Theme.textTertiary)
                 }
@@ -386,7 +386,7 @@ struct TopBarView: View {
                 Button {
                     showSettings = true
                 } label: {
-                    Label("\(channel?.members.count ?? 0)", systemImage: "person.2")
+                    Label("\(channel?.uniqueMemberCount ?? 0)", systemImage: "person.2")
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
                 }

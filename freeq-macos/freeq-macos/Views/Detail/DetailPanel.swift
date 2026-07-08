@@ -30,31 +30,10 @@ struct MemberListView: View {
     private var regular: [MemberInfo] { filtered.filter { !$0.isOp && !$0.isVoiced }.sorted { $0.nick < $1.nick } }
 
     private var filtered: [MemberInfo] {
-        let base = Self.dedupedByDid(channel.members)
+        let base = channel.uniqueMembers
         if searchText.isEmpty { return base }
         let q = searchText.lowercased()
         return base.filter { $0.nick.lowercased().contains(q) }
-    }
-
-    /// Collapse multiple connections of the same account (same DID) into one
-    /// row — the same person on two devices, or a nick-collision twin like
-    /// chadfowler.com / chadfowlercom, is one member. Guests (no resolvable
-    /// DID) are kept as-is. Prefers the fuller (dotted) handle for display.
-    static func dedupedByDid(_ members: [MemberInfo]) -> [MemberInfo] {
-        var indexByDid: [String: Int] = [:]
-        var out: [MemberInfo] = []
-        for m in members {
-            guard let did = m.did ?? ProfileCache.shared.did(for: m.nick) else {
-                out.append(m); continue
-            }
-            if let idx = indexByDid[did] {
-                if m.nick.contains("."), !out[idx].nick.contains(".") { out[idx] = m }
-            } else {
-                indexByDid[did] = out.count
-                out.append(m)
-            }
-        }
-        return out
     }
 
     var body: some View {
@@ -78,7 +57,7 @@ struct MemberListView: View {
             Divider().overlay(Theme.borderSoft)
 
             HStack {
-                Text("\(Self.dedupedByDid(channel.members).count) members")
+                Text("\(channel.uniqueMemberCount) members")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(Theme.textSecondary)
                 Spacer()

@@ -176,7 +176,7 @@ struct SidebarView: View {
                         .background(Theme.accent)
                         .cornerRadius(10)
                 } else if !channel.members.isEmpty {
-                    Text("\(channel.members.count)")
+                    Text("\(channel.uniqueMemberCount)")
                         .font(.fqCaption2)
                         .foregroundColor(Theme.textMuted)
                         .padding(.horizontal, 6)
