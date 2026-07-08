@@ -734,6 +734,87 @@ describe('CallPanel — camera', () => {
 });
 
 // ═══════════════════════════════════════════════════════════════
+// Mid-call nick change → re-announce the publisher
+// ═══════════════════════════════════════════════════════════════
+
+describe('CallPanel — nick change mid-call', () => {
+  it('rebuilds the publisher under the NEW nick (same instance) when the server force-renames', async () => {
+    // The server dot-strips a custom-domain nick on reconnect
+    // (`chadfowler.com` → `chadfowlercom`). The publisher captured the old
+    // nick at call start; it must re-announce under the new nick so peers —
+    // who key media association on the broadcast path — can re-associate.
+    // The instance suffix stays constant across the rename.
+    useStore.setState({ nick: 'chadfowler.com' });
+    setupClient('chadfowler.com');
+    setupSession();
+    mockSessionsApi([]);
+    const myInstance = (await import('../irc/client')).getAvInstanceId()!;
+
+    const { container } = render(<CallPanel />);
+    await flush();
+
+    let pub = container.querySelector('moq-publish') as HTMLElement;
+    expect(pub.getAttribute('name')).toBe(`sess-1/chadfowler.com~${myInstance}`);
+    const stalePub = pub;
+
+    // Server force-rename → SDK emits nickChanged → store.setNick.
+    await act(async () => { useStore.getState().setNick('chadfowlercom'); });
+    await flush();
+
+    pub = container.querySelector('moq-publish') as HTMLElement;
+    // Same instance, new nick — the publish path now reflects the rename.
+    expect(pub.getAttribute('name')).toBe(`sess-1/chadfowlercom~${myInstance}`);
+    // Exactly one live publisher — the stale one was torn down.
+    expect(container.querySelectorAll('moq-publish')).toHaveLength(1);
+    // The old element's url was cleared (broadcast released), not left live.
+    expect(stalePub.getAttribute('url')).toBe('');
+  });
+
+  it('does not rebuild the publisher when the nick is unchanged', async () => {
+    setupSession();
+    mockSessionsApi([]);
+
+    const { container } = render(<CallPanel />);
+    await flush();
+
+    const pub = container.querySelector('moq-publish') as HTMLElement;
+    const nameBefore = pub.getAttribute('name');
+
+    // A no-op setNick to the same value must not tear down / rebuild.
+    await act(async () => { useStore.getState().setNick('me'); });
+    await flush();
+
+    const pubAfter = container.querySelector('moq-publish') as HTMLElement;
+    // Same live element, same path, url intact (never cleared by a rebuild).
+    expect(pubAfter).toBe(pub);
+    expect(pubAfter.getAttribute('name')).toBe(nameBefore);
+    expect(pubAfter.getAttribute('url')).not.toBe('');
+  });
+
+  it('preserves camera-on state across a mid-call rename rebuild', async () => {
+    // The rebuild must re-announce with video iff the camera was on, or the
+    // rename silently drops the user's video track from the catalog.
+    setupSession();
+    useStore.setState({ avCameraOn: true });
+    mockSessionsApi([]);
+
+    const { container } = render(<CallPanel />);
+    await flush();
+
+    expect((container.querySelector('moq-publish') as HTMLElement).hasAttribute('invisible')).toBe(false);
+
+    await act(async () => { useStore.getState().setNick('menew'); });
+    await flush();
+
+    const pub = container.querySelector('moq-publish') as HTMLElement;
+    expect(pub.getAttribute('name')).toContain('sess-1/menew~');
+    // Rebuilt WITH video (no `invisible`) because the camera was on.
+    expect(pub.hasAttribute('invisible')).toBe(false);
+    expect(pub.getAttribute('source')).toBe('camera');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
 // Leave / unmount / session-end cleanup
 // ═══════════════════════════════════════════════════════════════
 

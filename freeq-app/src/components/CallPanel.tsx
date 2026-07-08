@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '../store';
-import { getAvInstanceId, getClient, getNick, leaveAvSession } from '../irc/client';
+import { getAvInstanceId, getClient, leaveAvSession } from '../irc/client';
 import { loadMoqComponents } from '../lib/moq-loader';
 import { broadcastName, computeParticipantSlots } from '../lib/av-mesh';
 import { getCachedProfile } from '../lib/profiles';
@@ -130,7 +130,11 @@ export function CallPanel() {
   const [selectedCamera, setSelectedCamera] = useState('');
   const [showSettings, setShowSettings] = useState(false);
 
-  const myNick = getNick();
+  // Reactive nick — the store is the source of truth (set on `registered`
+  // and updated on every `nickChanged`). Reading it via the store (rather
+  // than a one-shot getNick()) is what lets the publisher re-announce when
+  // the server force-renames us mid-call (see the republish effect below).
+  const myNick = useStore((s) => s.nick);
   // Use the nginx-proxied :443 WebSocket endpoint. The direct-to-
   // :8080 WebTransport path (commented original below) currently
   // half-connects: moq-watch logs "connected via WebTransport" but
@@ -331,6 +335,29 @@ export function CallPanel() {
     buildPublishEl(useStore.getState().avCameraOn);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [moqUrl, pubEl]);
+
+  // ── Re-announce the publisher when the local nick changes ───
+  // The server can force-rename us mid-call: a custom-domain nick like
+  // `chadfowler.com` is dot-stripped to `chadfowlercom` on (re)connect. The
+  // broadcast path embeds the nick (`{session}/{nick}~{instance}`), and the
+  // publisher captured the OLD nick at call start — so without this it keeps
+  // publishing under the stale path. Peers key their media
+  // association/teardown on that path, so they can't correctly tear down the
+  // old broadcast or attach to the new one → one-directional audio/video and
+  // ghost tiles. The instance suffix is stable across a rename, so rebuilding
+  // under `{session}/{newNick}~{instance}` (same instance) is exactly what
+  // lets instance-keyed peers re-associate. Same recreate pattern as the
+  // token redial above (a bare `name` attribute rewrite doesn't re-announce
+  // the catalog reliably across moq-publish versions).
+  useEffect(() => {
+    const pub = pubEl;
+    if (!pub || !sessionId || !myNick) return;
+    const expected = broadcastName(sessionId, myNick, getAvInstanceId());
+    if (pub.getAttribute('name') === expected) return;
+    stopPublishEl();
+    buildPublishEl(useStore.getState().avCameraOn);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myNick, pubEl, sessionId]);
 
   // ── Sync mute state ─────────────────────────────────────────
   useEffect(() => {

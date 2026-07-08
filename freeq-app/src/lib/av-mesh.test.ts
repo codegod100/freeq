@@ -189,3 +189,56 @@ describe('no split when two different people share a nick', () => {
     expect(findSplits('S', members)).toEqual([]);
   });
 });
+
+// ── Mid-call rename: the path tracks the nick, keyed on the stable instance ─
+describe('rename mid-call is instance-robust', () => {
+  const sid = 'SESS';
+
+  it('a peer that renamed (same instance, new nick) yields a slot on its NEW path', () => {
+    // The server force-renames a custom-domain nick: `chadfowler.com` →
+    // `chadfowlercom`. The instance is unchanged. The subscribe path must
+    // follow the new nick so we watch what the peer now publishes, and the
+    // slot key must change so the old tile is replaced (not ghosted).
+    const before: RosterParticipant[] = [
+      { did: 'did:c', nick: 'chadfowler.com', instance_id: 'devA' },
+    ];
+    const after: RosterParticipant[] = [
+      { did: 'did:c', nick: 'chadfowlercom', instance_id: 'devA' },
+    ];
+    const me: SelfIdentity = { nick: 'alice', instance: 'a1', did: 'did:a' };
+
+    const s1 = computeParticipantSlots(before, me, sid);
+    expect(s1[0].broadcastName).toBe('SESS/chadfowler.com~devA');
+    expect(s1[0].broadcastKey).toBe('chadfowler.com~devA');
+
+    const s2 = computeParticipantSlots(after, me, sid);
+    expect(s2[0].broadcastName).toBe('SESS/chadfowlercom~devA');
+    // Key changed with the nick → the tile keyed on it is torn down + rebuilt,
+    // so a renamed peer is never double-counted or ghosted.
+    expect(s2[0].broadcastKey).toBe('chadfowlercom~devA');
+    expect(s2[0].broadcastKey).not.toBe(s1[0].broadcastKey);
+  });
+
+  it('after OUR OWN force-rename we still recognise ourselves by instance (no self-subscribe)', () => {
+    // Identity is decided by instance, not nick, so a self-rename must not
+    // make us subscribe to our own (renamed) broadcast — that would be a
+    // feedback loop / wasted decode.
+    const roster: RosterParticipant[] = [
+      { did: 'did:a', nick: 'chadfowlercom', instance_id: 'a1' }, // us, post-rename
+      { did: 'did:b', nick: 'bob', instance_id: 'b1' },
+    ];
+    // Our SelfIdentity carries the SAME instance but the NEW nick.
+    const me: SelfIdentity = { nick: 'chadfowlercom', instance: 'a1', did: 'did:a' };
+    const slots = computeParticipantSlots(roster, me, sid);
+    expect(slots.map((s) => s.broadcastName)).toEqual(['SESS/bob~b1']);
+  });
+
+  it('a full call stays split-free through a mid-call rename', () => {
+    const members: Member[] = [
+      { did: 'did:c', nick: 'chadfowlercom', instance: 'devA' }, // just renamed
+      { did: 'did:b', nick: 'bob', instance: 'b1' },
+      { did: 'did:e', nick: 'eliza', instance: 'e1' },
+    ];
+    expect(findSplits('S', members)).toEqual([]);
+  });
+});
