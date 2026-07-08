@@ -3183,26 +3183,37 @@ where
             .map(|set| set.into_iter().collect())
             .unwrap_or_default();
 
-        let left_sessions = {
+        // Each entry carries the per-device instance so the `left` presence
+        // signal names the exact device that dropped — clients key teardown
+        // on the instance (it matches the media broadcast path), not the nick.
+        let left_sessions: Vec<(String, Option<String>, String, bool, Option<String>)> = {
             let mut mgr = state.av_sessions.lock();
             if instances.is_empty() {
                 // Legacy path — no per-instance bookkeeping for this connection,
                 // so we don't know which slots are ours. Mark all DID slots left.
                 mgr.leave_all_for_did(&did_for_av)
+                    .into_iter()
+                    .map(|(sid, ch, nick, end)| (sid, ch, nick, end, None))
+                    .collect()
             } else {
                 let mut out = Vec::new();
                 for inst in &instances {
-                    out.extend(mgr.leave_for_did_instance(&did_for_av, Some(inst)));
+                    for (sid, ch, nick, end) in mgr.leave_for_did_instance(&did_for_av, Some(inst)) {
+                        out.push((sid, ch, nick, end, Some(inst.clone())));
+                    }
                 }
                 out
             }
         };
 
-        for (av_sid, channel, av_nick, should_end) in &left_sessions {
+        for (av_sid, channel, av_nick, should_end, instance) in &left_sessions {
+            let inst_str = instance.as_deref().unwrap_or("");
             if let Some(ch) = channel {
                 let participant_count = state.av_sessions.lock().active_participant_count(av_sid);
                 if *should_end {
-                    messaging::broadcast_av_state_pub(&state, ch, av_sid, "ended", av_nick, 0, "");
+                    messaging::broadcast_av_state_pub(
+                        &state, ch, av_sid, "ended", av_nick, "", 0, "",
+                    );
                     // Clean up bridge and Room when session ends on disconnect
                     #[cfg(feature = "av-native")]
                     {
@@ -3224,6 +3235,7 @@ where
                         av_sid,
                         "left",
                         av_nick,
+                        inst_str,
                         participant_count,
                         "",
                     );

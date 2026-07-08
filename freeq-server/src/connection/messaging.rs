@@ -2609,6 +2609,7 @@ fn handle_av_tagmsg(
                         &session_id,
                         "started",
                         &nick,
+                        instance_id.unwrap_or(""),
                         participant_count,
                         title_display,
                     );
@@ -2865,6 +2866,7 @@ fn handle_av_tagmsg(
                         &session_id,
                         "joined",
                         &nick,
+                        instance_id.unwrap_or(""),
                         participant_count,
                         "",
                     );
@@ -2927,7 +2929,7 @@ fn handle_av_tagmsg(
                     drop(mgr);
 
                     if should_end {
-                        broadcast_av_state(state, target, &session_id, "ended", &nick, 0, "");
+                        broadcast_av_state(state, target, &session_id, "ended", &nick, "", 0, "");
                         broadcast_av_s2s(
                             state,
                             "ended",
@@ -2961,6 +2963,7 @@ fn handle_av_tagmsg(
                             &session_id,
                             "left",
                             &nick,
+                            instance_id.unwrap_or(""),
                             participant_count,
                             "",
                         );
@@ -3025,7 +3028,7 @@ fn handle_av_tagmsg(
                     state.with_db(|db| db.save_av_session(&session));
                     drop(mgr);
 
-                    broadcast_av_state(state, target, &session_id, "ended", &nick, 0, "");
+                    broadcast_av_state(state, target, &session_id, "ended", &nick, "", 0, "");
                     broadcast_av_s2s(
                         state,
                         "ended",
@@ -3097,12 +3100,14 @@ pub fn broadcast_av_notice(state: &Arc<SharedState>, channel: &str, text: &str) 
 }
 
 /// Broadcast AV session state to all channel members via TAGMSG (public for disconnect cleanup).
+#[allow(clippy::too_many_arguments)]
 pub fn broadcast_av_state_pub(
     state: &Arc<SharedState>,
     target: &str,
     session_id: &str,
     action: &str,
     actor_nick: &str,
+    actor_instance: &str,
     participant_count: usize,
     title: &str,
 ) {
@@ -3112,6 +3117,7 @@ pub fn broadcast_av_state_pub(
         session_id,
         action,
         actor_nick,
+        actor_instance,
         participant_count,
         title,
     );
@@ -3143,16 +3149,22 @@ fn send_av_token(state: &Arc<SharedState>, conn_id: &str, nick: &str, session_id
 #[cfg(not(feature = "av-native"))]
 fn send_av_token(_state: &Arc<SharedState>, _conn_id: &str, _nick: &str, _session_id: &str) {}
 
-/// Broadcast AV session state to all channel members via TAGMSG.
-fn broadcast_av_state(
-    state: &Arc<SharedState>,
-    target: &str,
-    session_id: &str,
+/// Build the message tags for an AV state TAGMSG (everything but the
+/// nondeterministic `time` tag). Pure + unit-testable.
+///
+/// `actor_instance` is the actor's per-device instance. It's the stable
+/// identity clients key presence on: `av-actor` (nick) can differ between the
+/// media path and this signal for multi-nick accounts, but the instance
+/// matches the media broadcast path `{session}/{nick}~{instance}`, so a `left`
+/// here reliably clears the right tile. Empty for legacy clients (tag omitted).
+fn av_state_tag_map(
     action: &str,
+    session_id: &str,
     actor_nick: &str,
+    actor_instance: &str,
     participant_count: usize,
     title: &str,
-) {
+) -> std::collections::HashMap<String, String> {
     let mut tags = std::collections::HashMap::new();
     tags.insert("+freeq.at/av-state".to_string(), action.to_string());
     tags.insert("+freeq.at/av-id".to_string(), session_id.to_string());
@@ -3161,9 +3173,38 @@ fn broadcast_av_state(
         participant_count.to_string(),
     );
     tags.insert("+freeq.at/av-actor".to_string(), actor_nick.to_string());
+    if !actor_instance.is_empty() {
+        tags.insert(
+            "+freeq.at/av-instance".to_string(),
+            actor_instance.to_string(),
+        );
+    }
     if !title.is_empty() {
         tags.insert("+freeq.at/av-title".to_string(), title.to_string());
     }
+    tags
+}
+
+/// Broadcast AV session state to all channel members via TAGMSG.
+#[allow(clippy::too_many_arguments)]
+fn broadcast_av_state(
+    state: &Arc<SharedState>,
+    target: &str,
+    session_id: &str,
+    action: &str,
+    actor_nick: &str,
+    actor_instance: &str,
+    participant_count: usize,
+    title: &str,
+) {
+    let mut tags = av_state_tag_map(
+        action,
+        session_id,
+        actor_nick,
+        actor_instance,
+        participant_count,
+        title,
+    );
     let time_tag = chrono::Utc::now()
         .format("%Y-%m-%dT%H:%M:%S.000Z")
         .to_string();
@@ -3366,5 +3407,60 @@ mod av_dispatch_tests {
         both.insert("+freeq.at/av-leave".into(), String::new());
         both.insert("+freeq.at/av-end".into(), String::new());
         assert_eq!(dispatch(&both), Some(&"+freeq.at/av-leave"));
+    }
+}
+
+#[cfg(test)]
+mod av_state_tag_tests {
+    //! Presence signals must carry the actor's per-device `instance` so
+    //! clients key teardown on the stable id (matches the media path
+    //! `{session}/{nick}~{instance}`), not the nick — which can differ
+    //! between the media path and this signal for multi-nick accounts and
+    //! leave a ghost tile on disconnect.
+    use super::av_state_tag_map;
+
+    #[test]
+    fn left_signal_carries_actor_instance() {
+        let tags = av_state_tag_map("left", "sess-1", "chadfowler.com", "devABCD", 1, "");
+        assert_eq!(
+            tags.get("+freeq.at/av-instance").map(String::as_str),
+            Some("devABCD"),
+            "a `left` must name the exact device that dropped"
+        );
+        assert_eq!(
+            tags.get("+freeq.at/av-actor").map(String::as_str),
+            Some("chadfowler.com")
+        );
+        assert_eq!(tags.get("+freeq.at/av-state").map(String::as_str), Some("left"));
+    }
+
+    #[test]
+    fn joined_and_started_carry_instance() {
+        for action in ["joined", "started"] {
+            let tags = av_state_tag_map(action, "s", "nick", "inst9", 2, "");
+            assert_eq!(
+                tags.get("+freeq.at/av-instance").map(String::as_str),
+                Some("inst9"),
+                "{action} must carry the instance"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_empty_instance_omits_the_tag() {
+        // Older clients don't send an instance; the tag must be absent (not
+        // an empty string) so receivers cleanly fall back to nick matching.
+        let tags = av_state_tag_map("left", "s", "nick", "", 0, "");
+        assert!(
+            !tags.contains_key("+freeq.at/av-instance"),
+            "empty instance must omit the tag entirely"
+        );
+    }
+
+    #[test]
+    fn instance_does_not_leak_into_unrelated_tags() {
+        let tags = av_state_tag_map("started", "s", "nick", "inst9", 1, "standup");
+        assert_eq!(tags.get("+freeq.at/av-title").map(String::as_str), Some("standup"));
+        assert_eq!(tags.get("+freeq.at/av-participants").map(String::as_str), Some("1"));
     }
 }

@@ -2211,6 +2211,7 @@ impl Server {
                                         id,
                                         "ended",
                                         "server",
+                                        "",
                                         0,
                                         "",
                                     );
