@@ -1364,6 +1364,11 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
             is FreeqEvent.WhoisReply -> {
                 // No-op for now
             }
+
+            is FreeqEvent.ReadMarker -> {
+                // draft/read-marker (cross-device read state). No UI effect yet
+                // — mirrors iOS/macOS, which just store the latest marker.
+            }
         }
     }
 }
