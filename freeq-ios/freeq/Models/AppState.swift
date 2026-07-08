@@ -358,6 +358,19 @@ class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(Array(favorites), forKey: "freeq.favorites") }
     }
 
+    /// Favorite buffer names in user-visible order (newest-favorited last).
+    /// Drives the Favorites section order and ⌃⌘1–9 "go to favorite N". Kept in
+    /// sync with `favorites` by `toggleFavorite`.
+    @Published var favoritesOrder: [String] = [] {
+        didSet { UserDefaults.standard.set(favoritesOrder, forKey: "freeq.favoritesOrder") }
+    }
+
+    // Command-driven sheet triggers (hardware-keyboard shortcuts on iPad).
+    @Published var showQuickSwitcher = false
+    @Published var showJoinSheet = false
+    @Published var showSearchSheet = false
+    @Published var showShortcutsHelp = false
+
     /// DM peers the user has explicitly closed. Stored lowercased so we
     /// can compare against any case-shape the server hands back. Closed
     /// DMs are:
@@ -1094,6 +1107,12 @@ class AppState: ObservableObject {
         if let savedFavorites = UserDefaults.standard.stringArray(forKey: "freeq.favorites") {
             favorites = Set(savedFavorites)
         }
+        // Ordered favorites (for the Favorites section order + ⌃⌘1–9). Migrate
+        // from the unordered set on first run, and reconcile any drift.
+        var order = UserDefaults.standard.stringArray(forKey: "freeq.favoritesOrder") ?? []
+        order = order.filter { favorites.contains($0) }
+        for name in favorites where !order.contains(name) { order.append(name) }
+        favoritesOrder = order
         if let savedClosed = UserDefaults.standard.stringArray(forKey: "freeq.closedDMs") {
             closedDMs = Set(savedClosed)
         }
@@ -1837,8 +1856,10 @@ class AppState: ObservableObject {
     func toggleFavorite(_ channel: String) {
         if favorites.contains(channel) {
             favorites.remove(channel)
+            favoritesOrder.removeAll { $0 == channel }
         } else {
             favorites.insert(channel)
+            if !favoritesOrder.contains(channel) { favoritesOrder.append(channel) }
         }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }

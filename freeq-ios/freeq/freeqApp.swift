@@ -135,6 +135,7 @@ struct FreeqApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             appState.handleScenePhase(newPhase)
         }
+        .commands { FreeqCommands(appState: appState) }
     }
 
 }

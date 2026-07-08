@@ -28,6 +28,7 @@ let package = Package(
                 "MessageActions.swift",
                 "ServerConfig.swift",
                 "FreeqDirectory.swift",
+                "BufferNavigation.swift",
             ]
         ),
         .testTarget(

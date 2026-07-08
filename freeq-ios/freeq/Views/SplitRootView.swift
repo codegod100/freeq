@@ -63,7 +63,12 @@ private struct SidebarListView: View {
     }
 
     private func isChannel(_ name: String) -> Bool { name.hasPrefix("#") || name.hasPrefix("&") }
-    private var favorites: [ChannelState] { filtered.filter { appState.isFavorite($0.name) } }
+    private var favorites: [ChannelState] {
+        filtered.filter { appState.isFavorite($0.name) }.sorted { a, b in
+            (appState.favoritesOrder.firstIndex(of: a.name) ?? .max)
+                < (appState.favoritesOrder.firstIndex(of: b.name) ?? .max)
+        }
+    }
     private var channels: [ChannelState] {
         filtered.filter { !appState.isFavorite($0.name) && isChannel($0.name) }
     }

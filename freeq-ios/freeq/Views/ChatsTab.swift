@@ -126,7 +126,10 @@ struct ChatsTab: View {
     /// Favorited conversations, pinned to a top section (any name; works for
     /// channels and DMs). Order follows the base sort (alpha / recency).
     private var favoriteConversations: [ChannelState] {
-        filteredConversations.filter { appState.isFavorite($0.name) }
+        filteredConversations.filter { appState.isFavorite($0.name) }.sorted { a, b in
+            (appState.favoritesOrder.firstIndex(of: a.name) ?? .max)
+                < (appState.favoritesOrder.firstIndex(of: b.name) ?? .max)
+        }
     }
 
     private var otherConversations: [ChannelState] {

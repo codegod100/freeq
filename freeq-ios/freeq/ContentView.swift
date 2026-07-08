@@ -49,6 +49,11 @@ struct ContentView: View {
         }
         .animation(.easeInOut(duration: 0.35), value: appState.hasSavedSession)
         .preferredColorScheme(appState.isDarkTheme ? .dark : .light)
+        // Command-driven sheets (keyboard shortcuts on iPad).
+        .sheet(isPresented: $appState.showQuickSwitcher) { QuickSwitcherSheet() }
+        .sheet(isPresented: $appState.showJoinSheet) { JoinChannelSheet() }
+        .sheet(isPresented: $appState.showSearchSheet) { SearchSheet() }
+        .sheet(isPresented: $appState.showShortcutsHelp) { ShortcutsHelpSheet() }
     }
 }
 
