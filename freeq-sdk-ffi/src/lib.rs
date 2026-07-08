@@ -1043,9 +1043,14 @@ pub enum AvEvent {
     },
     ParticipantJoined {
         nick: String,
+        /// Stable per-device id from the media path `{session}/{nick}~{instance}`.
+        /// Clients key presence on this, not `nick` (which can differ from the
+        /// server's `left` signal for multi-nick accounts). "" for legacy peers.
+        instance: String,
     },
     ParticipantLeft {
         nick: String,
+        instance: String,
     },
     AudioTrackStarted {
         nick: String,
@@ -1578,10 +1583,13 @@ mod av_impl {
                             }
                             // Paths: `{session}/{nick}[~{instance}]` for the
                             // main broadcast, `/screen` suffix for a share.
-                            let (nick, is_screen) = parse_broadcast_path(&path_str);
-                            tracing::info!(nick = %nick, screen = is_screen, path = %path_str, "AV: participant broadcast");
+                            let (nick, instance, is_screen) = parse_broadcast_path(&path_str);
+                            tracing::info!(nick = %nick, instance = %instance, screen = is_screen, path = %path_str, "AV: participant broadcast");
                             if !is_screen {
-                                handler.on_av_event(AvEvent::ParticipantJoined { nick: nick.clone() });
+                                handler.on_av_event(AvEvent::ParticipantJoined {
+                                    nick: nick.clone(),
+                                    instance: instance.clone(),
+                                });
                             }
                             let ab = audio_for_playback.clone();
                             let h = handler.clone();
@@ -1598,11 +1606,11 @@ mod av_impl {
                             if !belongs_to_session(&path_str, session_scope) {
                                 continue;
                             }
-                            let (nick, is_screen) = parse_broadcast_path(&path_str);
+                            let (nick, instance, is_screen) = parse_broadcast_path(&path_str);
                             if is_screen {
                                 handler.on_av_event(AvEvent::ScreenTrackStopped { nick });
                             } else {
-                                handler.on_av_event(AvEvent::ParticipantLeft { nick });
+                                handler.on_av_event(AvEvent::ParticipantLeft { nick, instance });
                             }
                         }
                         // Announcement stream ended = transport gone.
@@ -1616,7 +1624,11 @@ mod av_impl {
     }
 
     /// `{session}/{nick}[~{instance}][/screen]` → (display nick, is_screen).
-    pub(super) fn parse_broadcast_path(path_str: &str) -> (String, bool) {
+    /// `{session}/{nick}[~{instance}][/screen]` → (display nick, instance, is_screen).
+    /// The instance is the stable per-device id; it's what clients key presence
+    /// teardown on, since the nick can differ between this media path and the
+    /// server's `left` signal for multi-nick accounts. "" when absent (legacy).
+    pub(super) fn parse_broadcast_path(path_str: &str) -> (String, String, bool) {
         let segments: Vec<&str> = path_str.split('/').collect();
         let is_screen = segments.last() == Some(&"screen") && segments.len() >= 2;
         let nick_segment = if is_screen {
@@ -1624,8 +1636,10 @@ mod av_impl {
         } else {
             segments.last().copied().unwrap_or("unknown")
         };
-        let nick = nick_segment.split('~').next().unwrap_or(nick_segment);
-        (nick.to_string(), is_screen)
+        let mut parts = nick_segment.splitn(2, '~');
+        let nick = parts.next().unwrap_or(nick_segment).to_string();
+        let instance = parts.next().unwrap_or("").to_string();
+        (nick, instance, is_screen)
     }
 
     async fn handle_remote_broadcast(
@@ -2183,11 +2197,11 @@ mod tests {
                 AvEvent::Disconnected { reason } => {
                     println!("[test] AV disconnected: {reason}");
                 }
-                AvEvent::ParticipantJoined { nick } => {
-                    println!("[test] Participant joined: {nick}");
+                AvEvent::ParticipantJoined { nick, instance } => {
+                    println!("[test] Participant joined: {nick} (instance {instance})");
                 }
-                AvEvent::ParticipantLeft { nick } => {
-                    println!("[test] Participant left: {nick}");
+                AvEvent::ParticipantLeft { nick, instance } => {
+                    println!("[test] Participant left: {nick} (instance {instance})");
                 }
                 AvEvent::Error { message } => {
                     println!("[test] AV error: {message}");
@@ -2206,9 +2220,11 @@ mod tests {
         };
         let _ = AvEvent::ParticipantJoined {
             nick: "alice".to_string(),
+            instance: "devA".to_string(),
         };
         let _ = AvEvent::ParticipantLeft {
             nick: "bob".to_string(),
+            instance: "devB".to_string(),
         };
         let _ = AvEvent::AudioTrackStarted {
             nick: "carol".to_string(),
@@ -2278,26 +2294,34 @@ mod tests {
     #[test]
     fn broadcast_path_parsing() {
         use super::av_impl::parse_broadcast_path;
+        // Instance is extracted (not stripped) so clients can key presence on it.
         assert_eq!(
             parse_broadcast_path("sess-1/alice~ff00aa11"),
-            ("alice".to_string(), false)
+            ("alice".to_string(), "ff00aa11".to_string(), false)
         );
         assert_eq!(
             parse_broadcast_path("sess-1/alice~ff00aa11/screen"),
-            ("alice".to_string(), true)
+            ("alice".to_string(), "ff00aa11".to_string(), true)
         );
+        // Legacy peer with no ~instance suffix → empty instance.
         assert_eq!(
             parse_broadcast_path("sess-1/bob"),
-            ("bob".to_string(), false)
+            ("bob".to_string(), String::new(), false)
         );
         assert_eq!(
             parse_broadcast_path("sess-1/bob/screen"),
-            ("bob".to_string(), true)
+            ("bob".to_string(), String::new(), true)
         );
         // A bare nick "screen" with no parent segment is not a screen share.
         assert_eq!(
             parse_broadcast_path("screen"),
-            ("screen".to_string(), false)
+            ("screen".to_string(), String::new(), false)
+        );
+        // A nick that itself contains a dotted domain keeps the dots; only the
+        // first ~ splits nick from instance.
+        assert_eq!(
+            parse_broadcast_path("sess-1/chadfowler.com~dev42"),
+            ("chadfowler.com".to_string(), "dev42".to_string(), false)
         );
     }
 

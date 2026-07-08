@@ -206,8 +206,8 @@ interface FreeqP2p {
 interface AvEvent {
     Connected();
     Disconnected(string reason);
-    ParticipantJoined(string nick);
-    ParticipantLeft(string nick);
+    ParticipantJoined(string nick, string instance);
+    ParticipantLeft(string nick, string instance);
     AudioTrackStarted(string nick);
     AudioTrackStopped(string nick);
     VideoTrackStarted(string nick);
