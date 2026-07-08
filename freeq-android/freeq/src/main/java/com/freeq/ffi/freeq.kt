@@ -861,6 +861,14 @@ internal open class UniffiVTableCallbackInterfaceP2pEventHandler(
 
 
 
+
+
+
+
+
+
+
+
 // For large crates we prevent `MethodTooLargeException` (see #2340)
 // N.B. the name of the extension is very misleading, since it is 
 // rather `InterfaceTooLargeException`, caused by too many methods 
@@ -880,13 +888,21 @@ internal interface IntegrityCheckingUniffiLib : Library {
 ): Short
 fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_leave(
 ): Short
+fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_list_output_devices(
+): Short
 fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_audio_frame(
+): Short
+fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_screen_frame(
 ): Short
 fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_video_frame(
 ): Short
 fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_camera_enabled(
 ): Short
 fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_muted(
+): Short
+fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_output_device(
+): Short
+fun uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_screen_enabled(
 ): Short
 fun uniffi_freeq_sdk_ffi_checksum_method_freeqclient_connect(
 ): Short
@@ -1022,13 +1038,21 @@ fun uniffi_freeq_sdk_ffi_fn_method_freeqav_is_connected(`ptr`: Pointer,uniffi_ou
 ): Byte
 fun uniffi_freeq_sdk_ffi_fn_method_freeqav_leave(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
+fun uniffi_freeq_sdk_ffi_fn_method_freeqav_list_output_devices(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
 fun uniffi_freeq_sdk_ffi_fn_method_freeqav_push_audio_frame(`ptr`: Pointer,`samples`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_freeq_sdk_ffi_fn_method_freeqav_push_screen_frame(`ptr`: Pointer,`bgra`: RustBuffer.ByValue,`width`: Int,`height`: Int,`timestampUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_freeq_sdk_ffi_fn_method_freeqav_push_video_frame(`ptr`: Pointer,`bgra`: RustBuffer.ByValue,`width`: Int,`height`: Int,`timestampUs`: Long,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_freeq_sdk_ffi_fn_method_freeqav_set_camera_enabled(`ptr`: Pointer,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_freeq_sdk_ffi_fn_method_freeqav_set_muted(`ptr`: Pointer,`muted`: Byte,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_freeq_sdk_ffi_fn_method_freeqav_set_output_device(`ptr`: Pointer,`deviceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): Unit
+fun uniffi_freeq_sdk_ffi_fn_method_freeqav_set_screen_enabled(`ptr`: Pointer,`enabled`: Byte,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
 fun uniffi_freeq_sdk_ffi_fn_clone_freeqclient(`ptr`: Pointer,uniffi_out_err: UniffiRustCallStatus, 
 ): Pointer
@@ -1244,7 +1268,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_leave() != 39649.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_list_output_devices() != 57362.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_audio_frame() != 55965.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_screen_frame() != 34940.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_push_video_frame() != 30541.toShort()) {
@@ -1254,6 +1284,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_muted() != 7170.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_output_device() != 62033.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqav_set_screen_enabled() != 14174.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_freeq_sdk_ffi_checksum_method_freeqclient_connect() != 3331.toShort()) {
@@ -1838,13 +1874,21 @@ public interface FreeqAvInterface {
     
     fun `leave`()
     
+    fun `listOutputDevices`(): List<AvAudioDevice>
+    
     fun `pushAudioFrame`(`samples`: List<kotlin.Float>)
+    
+    fun `pushScreenFrame`(`bgra`: List<kotlin.UByte>, `width`: kotlin.UInt, `height`: kotlin.UInt, `timestampUs`: kotlin.ULong)
     
     fun `pushVideoFrame`(`bgra`: List<kotlin.UByte>, `width`: kotlin.UInt, `height`: kotlin.UInt, `timestampUs`: kotlin.ULong)
     
     fun `setCameraEnabled`(`enabled`: kotlin.Boolean)
     
     fun `setMuted`(`muted`: kotlin.Boolean)
+    
+    fun `setOutputDevice`(`deviceId`: kotlin.String?)
+    
+    fun `setScreenEnabled`(`enabled`: kotlin.Boolean)
     
     companion object
 }
@@ -1961,12 +2005,35 @@ open class FreeqAv: Disposable, AutoCloseable, FreeqAvInterface
     
     
 
+    override fun `listOutputDevices`(): List<AvAudioDevice> {
+            return FfiConverterSequenceTypeAvAudioDevice.lift(
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_freeq_sdk_ffi_fn_method_freeqav_list_output_devices(
+        it, _status)
+}
+    }
+    )
+    }
+    
+
     override fun `pushAudioFrame`(`samples`: List<kotlin.Float>)
         = 
     callWithPointer {
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_freeq_sdk_ffi_fn_method_freeqav_push_audio_frame(
         it, FfiConverterSequenceFloat.lower(`samples`),_status)
+}
+    }
+    
+    
+
+    override fun `pushScreenFrame`(`bgra`: List<kotlin.UByte>, `width`: kotlin.UInt, `height`: kotlin.UInt, `timestampUs`: kotlin.ULong)
+        = 
+    callWithPointer {
+    uniffiRustCall() { _status ->
+    UniffiLib.INSTANCE.uniffi_freeq_sdk_ffi_fn_method_freeqav_push_screen_frame(
+        it, FfiConverterSequenceUByte.lower(`bgra`),FfiConverterUInt.lower(`width`),FfiConverterUInt.lower(`height`),FfiConverterULong.lower(`timestampUs`),_status)
 }
     }
     
@@ -2001,6 +2068,30 @@ open class FreeqAv: Disposable, AutoCloseable, FreeqAvInterface
     uniffiRustCall() { _status ->
     UniffiLib.INSTANCE.uniffi_freeq_sdk_ffi_fn_method_freeqav_set_muted(
         it, FfiConverterBoolean.lower(`muted`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(FreeqException::class)override fun `setOutputDevice`(`deviceId`: kotlin.String?)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(FreeqException) { _status ->
+    UniffiLib.INSTANCE.uniffi_freeq_sdk_ffi_fn_method_freeqav_set_output_device(
+        it, FfiConverterOptionalString.lower(`deviceId`),_status)
+}
+    }
+    
+    
+
+    
+    @Throws(FreeqException::class)override fun `setScreenEnabled`(`enabled`: kotlin.Boolean)
+        = 
+    callWithPointer {
+    uniffiRustCallWithError(FreeqException) { _status ->
+    UniffiLib.INSTANCE.uniffi_freeq_sdk_ffi_fn_method_freeqav_set_screen_enabled(
+        it, FfiConverterBoolean.lower(`enabled`),_status)
 }
     }
     
@@ -3143,6 +3234,42 @@ public object FfiConverterTypeFreeqP2p: FfiConverter<FreeqP2p, Pointer> {
 
 
 
+data class AvAudioDevice (
+    var `id`: kotlin.String, 
+    var `name`: kotlin.String, 
+    var `isDefault`: kotlin.Boolean
+) {
+    
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeAvAudioDevice: FfiConverterRustBuffer<AvAudioDevice> {
+    override fun read(buf: ByteBuffer): AvAudioDevice {
+        return AvAudioDevice(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: AvAudioDevice) = (
+            FfiConverterString.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`isDefault`)
+    )
+
+    override fun write(value: AvAudioDevice, buf: ByteBuffer) {
+            FfiConverterString.write(value.`id`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`isDefault`, buf)
+    }
+}
+
+
+
 data class ChannelTopic (
     var `text`: kotlin.String, 
     var `setBy`: kotlin.String?
@@ -3523,6 +3650,38 @@ sealed class AvEvent {
         companion object
     }
     
+    data class ScreenTrackStarted(
+        val `nick`: kotlin.String) : AvEvent() {
+        companion object
+    }
+    
+    data class ScreenTrackStopped(
+        val `nick`: kotlin.String) : AvEvent() {
+        companion object
+    }
+    
+    data class ScreenFrame(
+        val `nick`: kotlin.String, 
+        val `bgra`: List<kotlin.UByte>, 
+        val `width`: kotlin.UInt, 
+        val `height`: kotlin.UInt) : AvEvent() {
+        companion object
+    }
+    
+    data class AudioLevel(
+        val `nick`: kotlin.String, 
+        val `level`: kotlin.Float) : AvEvent() {
+        companion object
+    }
+    
+    data class Reconnecting(
+        val `attempt`: kotlin.UInt) : AvEvent() {
+        companion object
+    }
+    
+    object Reconnected : AvEvent()
+    
+    
     data class Error(
         val `message`: kotlin.String) : AvEvent() {
         companion object
@@ -3567,7 +3726,27 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
                 FfiConverterUInt.read(buf),
                 FfiConverterUInt.read(buf),
                 )
-            10 -> AvEvent.Error(
+            10 -> AvEvent.ScreenTrackStarted(
+                FfiConverterString.read(buf),
+                )
+            11 -> AvEvent.ScreenTrackStopped(
+                FfiConverterString.read(buf),
+                )
+            12 -> AvEvent.ScreenFrame(
+                FfiConverterString.read(buf),
+                FfiConverterSequenceUByte.read(buf),
+                FfiConverterUInt.read(buf),
+                FfiConverterUInt.read(buf),
+                )
+            13 -> AvEvent.AudioLevel(
+                FfiConverterString.read(buf),
+                FfiConverterFloat.read(buf),
+                )
+            14 -> AvEvent.Reconnecting(
+                FfiConverterUInt.read(buf),
+                )
+            15 -> AvEvent.Reconnected
+            16 -> AvEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -3640,6 +3819,51 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
                 + FfiConverterUInt.allocationSize(value.`height`)
             )
         }
+        is AvEvent.ScreenTrackStarted -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`nick`)
+            )
+        }
+        is AvEvent.ScreenTrackStopped -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`nick`)
+            )
+        }
+        is AvEvent.ScreenFrame -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`nick`)
+                + FfiConverterSequenceUByte.allocationSize(value.`bgra`)
+                + FfiConverterUInt.allocationSize(value.`width`)
+                + FfiConverterUInt.allocationSize(value.`height`)
+            )
+        }
+        is AvEvent.AudioLevel -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`nick`)
+                + FfiConverterFloat.allocationSize(value.`level`)
+            )
+        }
+        is AvEvent.Reconnecting -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterUInt.allocationSize(value.`attempt`)
+            )
+        }
+        is AvEvent.Reconnected -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
         is AvEvent.Error -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -3698,8 +3922,41 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
                 FfiConverterUInt.write(value.`height`, buf)
                 Unit
             }
-            is AvEvent.Error -> {
+            is AvEvent.ScreenTrackStarted -> {
                 buf.putInt(10)
+                FfiConverterString.write(value.`nick`, buf)
+                Unit
+            }
+            is AvEvent.ScreenTrackStopped -> {
+                buf.putInt(11)
+                FfiConverterString.write(value.`nick`, buf)
+                Unit
+            }
+            is AvEvent.ScreenFrame -> {
+                buf.putInt(12)
+                FfiConverterString.write(value.`nick`, buf)
+                FfiConverterSequenceUByte.write(value.`bgra`, buf)
+                FfiConverterUInt.write(value.`width`, buf)
+                FfiConverterUInt.write(value.`height`, buf)
+                Unit
+            }
+            is AvEvent.AudioLevel -> {
+                buf.putInt(13)
+                FfiConverterString.write(value.`nick`, buf)
+                FfiConverterFloat.write(value.`level`, buf)
+                Unit
+            }
+            is AvEvent.Reconnecting -> {
+                buf.putInt(14)
+                FfiConverterUInt.write(value.`attempt`, buf)
+                Unit
+            }
+            is AvEvent.Reconnected -> {
+                buf.putInt(15)
+                Unit
+            }
+            is AvEvent.Error -> {
+                buf.putInt(16)
                 FfiConverterString.write(value.`message`, buf)
                 Unit
             }
@@ -3880,6 +4137,12 @@ sealed class FreeqEvent {
         companion object
     }
     
+    data class ReadMarker(
+        val `target`: kotlin.String, 
+        val `timestamp`: kotlin.String?) : FreeqEvent() {
+        companion object
+    }
+    
     data class WhoisReply(
         val `nick`: kotlin.String, 
         val `info`: kotlin.String) : FreeqEvent() {
@@ -3975,14 +4238,18 @@ public object FfiConverterTypeFreeqEvent : FfiConverterRustBuffer<FreeqEvent>{
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
-            19 -> FreeqEvent.WhoisReply(
+            19 -> FreeqEvent.ReadMarker(
+                FfiConverterString.read(buf),
+                FfiConverterOptionalString.read(buf),
+                )
+            20 -> FreeqEvent.WhoisReply(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 )
-            20 -> FreeqEvent.Notice(
+            21 -> FreeqEvent.Notice(
                 FfiConverterString.read(buf),
                 )
-            21 -> FreeqEvent.Disconnected(
+            22 -> FreeqEvent.Disconnected(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -4131,6 +4398,14 @@ public object FfiConverterTypeFreeqEvent : FfiConverterRustBuffer<FreeqEvent>{
                 + FfiConverterOptionalString.allocationSize(value.`timestamp`)
             )
         }
+        is FreeqEvent.ReadMarker -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`target`)
+                + FfiConverterOptionalString.allocationSize(value.`timestamp`)
+            )
+        }
         is FreeqEvent.WhoisReply -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
@@ -4262,19 +4537,25 @@ public object FfiConverterTypeFreeqEvent : FfiConverterRustBuffer<FreeqEvent>{
                 FfiConverterOptionalString.write(value.`timestamp`, buf)
                 Unit
             }
-            is FreeqEvent.WhoisReply -> {
+            is FreeqEvent.ReadMarker -> {
                 buf.putInt(19)
+                FfiConverterString.write(value.`target`, buf)
+                FfiConverterOptionalString.write(value.`timestamp`, buf)
+                Unit
+            }
+            is FreeqEvent.WhoisReply -> {
+                buf.putInt(20)
                 FfiConverterString.write(value.`nick`, buf)
                 FfiConverterString.write(value.`info`, buf)
                 Unit
             }
             is FreeqEvent.Notice -> {
-                buf.putInt(20)
+                buf.putInt(21)
                 FfiConverterString.write(value.`text`, buf)
                 Unit
             }
             is FreeqEvent.Disconnected -> {
-                buf.putInt(21)
+                buf.putInt(22)
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }
@@ -4689,6 +4970,34 @@ public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.Str
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeAvAudioDevice: FfiConverterRustBuffer<List<AvAudioDevice>> {
+    override fun read(buf: ByteBuffer): List<AvAudioDevice> {
+        val len = buf.getInt()
+        return List<AvAudioDevice>(len) {
+            FfiConverterTypeAvAudioDevice.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<AvAudioDevice>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeAvAudioDevice.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<AvAudioDevice>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeAvAudioDevice.write(it, buf)
         }
     }
 }
