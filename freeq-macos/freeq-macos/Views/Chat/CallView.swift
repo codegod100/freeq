@@ -660,6 +660,21 @@ struct RemoteVideoTile: NSViewRepresentable {
             wantsLayer = true
             displayLayer.videoGravity = .resizeAspectFill
             layer?.addSublayer(displayLayer)
+            // Give the layer a host-clock control timebase so it PACES frames
+            // to the display instead of rendering each the instant it arrives.
+            // Without this (and with the old DisplayImmediately flag) network/
+            // decode jitter showed as jumpy/stuttery video. Each frame's PTS is
+            // host-clock time, so the layer schedules against the same timeline.
+            var tb: CMTimebase?
+            CMTimebaseCreateWithSourceClock(
+                allocator: kCFAllocatorDefault,
+                sourceClock: CMClockGetHostTimeClock(),
+                timebaseOut: &tb)
+            if let tb {
+                CMTimebaseSetTime(tb, time: CMClockGetTime(CMClockGetHostTimeClock()))
+                CMTimebaseSetRate(tb, rate: 1.0)
+                displayLayer.controlTimebase = tb
+            }
         }
         required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
         override func layout() {
@@ -782,12 +797,10 @@ enum VideoSampleBuffer {
         )
         guard sbStatus == noErr, let sb = sampleBuffer else { return false }
 
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) as? [CFMutableDictionary],
-           let first = attachments.first {
-            let key = Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque()
-            let value = Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
-            CFDictionarySetValue(first, key, value)
-        }
+        // NB: intentionally NOT setting kCMSampleAttachmentKey_DisplayImmediately.
+        // The layer's control timebase (set on the view) paces frames against
+        // the host clock via each frame's PTS, which smooths jitter. Displaying
+        // immediately would bypass that pacing and reintroduce the stutter.
 
         layer.enqueue(sb)
         return true
