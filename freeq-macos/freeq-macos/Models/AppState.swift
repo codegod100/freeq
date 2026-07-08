@@ -1191,6 +1191,18 @@ class AppEventHandler: EventHandler {
 }
 
 extension AppState {
+    /// Whether a message/tag originated from us. Prefers the account DID — it's
+    /// immune to nick case and to force-renames across our own sessions, which
+    /// a raw nick compare is not (a stale `nick` made our own DM echoes look
+    /// like incoming DMs → a phantom self-DM buffer + notification). Falls back
+    /// to a nick match only when there's no DID (guests).
+    func isSelfSender(nick sender: String, account: String?) -> Bool {
+        if let account, !account.isEmpty, let mine = authenticatedDID, account == mine {
+            return true
+        }
+        return sender.lowercased() == self.nick.lowercased()
+    }
+
     func handleEvent(_ event: FreeqEvent) {
         switch event {
         case .readMarker(let target, let timestamp):
@@ -1300,7 +1312,7 @@ extension AppState {
             }
 
         case .message(let msg):
-            let isSelf = msg.fromNick.lowercased() == nick.lowercased()
+            let isSelf = isSelfSender(nick: msg.fromNick, account: msg.account)
 
             // Pipe the server's account-tag DID into the profile cache.
             // Every PRIVMSG from an authenticated user carries a
@@ -1385,7 +1397,7 @@ extension AppState {
                 let ch = getOrCreateChannel(target)
                 ch.appendIfNew(message)
                 ch.typingUsers.removeValue(forKey: msg.fromNick)
-                if !senderBlocked { incrementUnread(target) }
+                if !isSelf && !senderBlocked { incrementUnread(target) }
 
                 let level = notifyLevel(target)
                 let mentioned = msg.text.localizedCaseInsensitiveContains(nick)
@@ -1421,7 +1433,7 @@ extension AppState {
                 closedDMs.remove(bufName.lowercased())
                 let dm = getOrCreateDM(bufName)
                 dm.appendIfNew(message)
-                if !senderBlocked { incrementUnread(bufName) }
+                if !isSelf && !senderBlocked { incrementUnread(bufName) }
 
                 // DM notification (time-sensitive: a DM is a direct ping).
                 if !isSelf && !senderBlocked {
@@ -1440,7 +1452,8 @@ extension AppState {
             let tags = Dictionary(uniqueKeysWithValues: tagMsg.tags.map { ($0.key, $0.value) })
             let target = tagMsg.target
             let from = tagMsg.from
-            let isSelf = from.lowercased() == nick.lowercased()
+            let tagAccount = tags["account"] ?? tags["+freeq.at/account"]
+            let isSelf = isSelfSender(nick: from, account: tagAccount)
             let dmBuffer = isSelf ? target : from
             let bufferName = target.hasPrefix("#") ? target : dmBuffer
 

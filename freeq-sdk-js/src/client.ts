@@ -887,6 +887,16 @@ export class FreeqClient extends EventEmitter {
     }
   }
 
+  /** Whether a message/tag came from us. Prefers the account DID — robust to
+   *  nick case and to force-renames across our own sessions, unlike a raw nick
+   *  compare (a stale `_nick` made our own DM echoes look like incoming DMs,
+   *  spawning a phantom self-DM buffer + notification). Falls back to nick. */
+  private isSelfSender(from: string, tags?: Record<string, string>): boolean {
+    const acct = tags?.['+freeq.at/account'] ?? tags?.['account'];
+    if (acct && this._authDid && acct === this._authDid) return true;
+    return from.toLowerCase() === this._nick.toLowerCase();
+  }
+
   private didForNick(targetNick: string): string | undefined {
     // Internal cache first (populated from WHOIS 330 + JOIN account tags).
     // Falls back to the legacy external `nickToDid` resolver an app layer
@@ -1043,7 +1053,7 @@ export class FreeqClient extends EventEmitter {
     const from = batch.openerFrom ?? '';
     const target = batch.target;
     const isChannel = target.startsWith('#') || target.startsWith('&');
-    const isSelf = from.toLowerCase() === this._nick.toLowerCase();
+    const isSelf = this.isSelfSender(from, openerTags);
     const bufName = isChannel ? target : (isSelf ? target : from);
 
     const wireText = this.assembleMultiline(lines);
@@ -1497,7 +1507,7 @@ export class FreeqClient extends EventEmitter {
         const text = msg.params[1] || '';
         const isAction = text.startsWith('\x01ACTION ') && text.endsWith('\x01');
         const isChannel = target.startsWith('#') || target.startsWith('&');
-        const isSelf = from.toLowerCase() === this._nick.toLowerCase();
+        const isSelf = this.isSelfSender(from, msg.tags);
         const bufName = isChannel ? target : (isSelf ? target : from);
 
         // If this PRIVMSG is a chunk of an open `draft/multiline` batch,
@@ -1683,7 +1693,7 @@ export class FreeqClient extends EventEmitter {
       case 'TAGMSG': {
         const target = msg.params[0];
         const isChannel = target.startsWith('#') || target.startsWith('&');
-        const isSelf = from.toLowerCase() === this._nick.toLowerCase();
+        const isSelf = this.isSelfSender(from, msg.tags);
         const bufName = isChannel ? target : (isSelf ? target : from);
 
         const deleteOf = msg.tags['+draft/delete'];

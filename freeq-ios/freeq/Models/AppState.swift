@@ -417,6 +417,15 @@ class AppState: ObservableObject {
         return blockedNicks.contains(nick.lowercased())
     }
 
+    /// Whether a message/tag came from us. Prefers the account DID — robust to
+    /// nick case and to force-renames across our own sessions, unlike a raw nick
+    /// compare (a stale `nick` made our own DM echoes look like incoming DMs,
+    /// spawning a phantom self-DM buffer + notification). Falls back to nick.
+    func isSelfSender(nick sender: String, account: String?) -> Bool {
+        if let account, !account.isEmpty, let mine = authenticatedDID, account == mine { return true }
+        return sender.lowercased() == nick.lowercased()
+    }
+
     func blockUser(nick: String, did: String?) {
         if let did, !did.isEmpty { blockedDIDs.insert(did) }
         blockedNicks.insert(nick.lowercased())
@@ -2255,7 +2264,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
         case .message(let ircMsg):
             let target = ircMsg.target
             let from = ircMsg.fromNick
-            let isSelf = from.lowercased() == state.nick.lowercased()
+            let isSelf = state.isSelfSender(nick: from, account: ircMsg.account)
             // A blocked sender's message still lands in the buffer (filtered at
             // render, so unblocking restores it) but must not ring, badge, or
             // haptic — block is the advertised safety remedy, so it has to
@@ -2467,7 +2476,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             let tags = Dictionary(uniqueKeysWithValues: tagMsg.tags.map { ($0.key, $0.value) })
             let target = tagMsg.target
             let from = tagMsg.from
-            let isSelf = from.lowercased() == state.nick.lowercased()
+            let isSelf = state.isSelfSender(nick: from, account: tags["account"] ?? tags["+freeq.at/account"])
             // For DMs, an echoed TAGMSG from ourselves carries target=peer, from=self —
             // route to the peer's DM buffer, not a DM keyed by our own nick.
             let dmBuffer = isSelf ? target : from
