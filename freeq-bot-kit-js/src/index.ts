@@ -52,6 +52,19 @@ export type {
   BuildDelegationOptions,
 } from "./delegation.js";
 
+// freeq.at/act signing — the act RFC's canonical (sign-what's-present over
+// act-* tags), kid derivation, and sign/verify. Byte-compatible with
+// freeq_sdk::act; contract fixtures in spec/act-signing-vectors.json.
+export {
+  actCanonical,
+  deriveKid,
+  signActTags,
+  verifyActTags,
+  publicKeyFromMultibase,
+  ACT_SIG_TAG,
+} from "./act.js";
+export type { ActVerifyResult } from "./act.js";
+
 // Daemon CLI scaffold — Commander-based launch/stop/status/doctor/tail
 // for long-running freeq bot daemons. Caller provides runDaemon + paths;
 // bot-kit handles pid files, --detach forking, signal wiring, and the
