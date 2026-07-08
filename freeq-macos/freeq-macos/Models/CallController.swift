@@ -390,7 +390,7 @@ extension AppState {
     }
 
     /// Handle an inbound `+freeq.at/av-state` TAGMSG.
-    func handleAvState(_ avState: String, sessionId: String, actor: String, channel: String) {
+    func handleAvState(_ avState: String, sessionId: String, actor: String, actorInstance: String? = nil, channel: String) {
         let chanKey = channel.lowercased()
         let inThisCall = isInCall && currentCallChannel?.lowercased() == chanKey
         switch avState {
@@ -434,9 +434,19 @@ extension AppState {
             }
         case "left":
             if inThisCall {
-                callParticipants.removeAll { $0.lowercased() == actor.lowercased() }
-                participantsWithVideo = participantsWithVideo.filter { $0.lowercased() != actor.lowercased() }
-                participantsWithScreen = participantsWithScreen.filter { $0.lowercased() != actor.lowercased() }
+                // Prefer the stable per-device instance — the media-path nick a
+                // multi-nick account was added under can differ from the actor
+                // nick, so a nick-keyed removal would miss and leave a ghost tile.
+                // Falls back to the actor nick for legacy clients (no instance).
+                let dropNick = resolveAvLeftNick(
+                    instanceToNick: instanceToNick,
+                    actorNick: actor,
+                    actorInstance: actorInstance
+                ) ?? actor
+                let dropKey = dropNick.lowercased()
+                callParticipants.removeAll { $0.lowercased() == dropKey }
+                participantsWithVideo = participantsWithVideo.filter { $0.lowercased() != dropKey }
+                participantsWithScreen = participantsWithScreen.filter { $0.lowercased() != dropKey }
             }
         default:
             break
@@ -468,14 +478,23 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             state.isInCall = true
         case .disconnected:
             state.tearDownCallLocallyOnDisconnect()
-        case .participantJoined(let nick):
+        case .participantJoined(let nick, let instance):
             if !state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) {
                 state.callParticipants.append(nick)
             }
-        case .participantLeft(let nick):
+            // Remember the media-path nick this device joined under, keyed by
+            // its stable instance, so the fast `av-state=left` teardown can
+            // resolve the right nick for multi-nick accounts (ghost-tile fix).
+            if !instance.isEmpty {
+                state.instanceToNick[instance] = nick
+            }
+        case .participantLeft(let nick, let instance):
             state.callParticipants.removeAll { $0.lowercased() == nick.lowercased() }
             state.participantsWithVideo = state.participantsWithVideo.filter { $0.lowercased() != nick.lowercased() }
             state.participantsWithScreen = state.participantsWithScreen.filter { $0.lowercased() != nick.lowercased() }
+            if !instance.isEmpty {
+                state.instanceToNick.removeValue(forKey: instance)
+            }
         case .audioTrackStarted, .audioTrackStopped, .videoTrackStarted:
             break
         case .videoTrackStopped(let nick):

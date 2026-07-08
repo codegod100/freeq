@@ -135,6 +135,11 @@ class AppState {
     var participantsWithVideo: Set<String> = []
     /// Nicks with a live screen-share broadcast ({peer}/screen path).
     var participantsWithScreen: Set<String> = []
+    /// Per-device instance → the media-path nick the participant was added
+    /// under. Populated on `AvEvent.participantJoined` and used to key the
+    /// fast `av-state=left` teardown on the stable instance instead of the
+    /// actor nick (which can differ for multi-nick accounts → ghost tiles).
+    @ObservationIgnored var instanceToNick: [String: String] = [:]
     /// Remote playout levels (lowercased nick → 0…1) from AvEvent.audioLevel;
     /// drives remote active-speaker rings once the SDK emits them (R1).
     var remoteAudioLevels: [String: Float] = [:]
@@ -1512,6 +1517,7 @@ extension AppState {
                target.hasPrefix("#") {
                 handleAvState(avState, sessionId: avId,
                               actor: tags["+freeq.at/av-actor"] ?? from,
+                              actorInstance: tags["+freeq.at/av-instance"],
                               channel: target)
             }
 
