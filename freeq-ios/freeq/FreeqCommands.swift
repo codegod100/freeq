@@ -14,6 +14,10 @@ struct FreeqCommands: Commands {
                 .keyboardShortcut("f", modifiers: .command)
             Button("Join Channel…") { appState.showJoinSheet = true }
                 .keyboardShortcut("j", modifiers: .command)
+            Button("New Direct Message…") { appState.showNewDMSheet = true }
+                .keyboardShortcut("n", modifiers: .command)
+            Button("Toggle Member List") { appState.showMemberList.toggle() }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
 
             Divider()
 
@@ -41,6 +45,17 @@ struct FreeqCommands: Commands {
                 Button("Go to Favorite \(n)") { appState.switchToFavorite(n - 1) }
                     .keyboardShortcut(KeyEquivalent(Character("\(n)")), modifiers: [.control, .command])
             }
+        }
+
+        CommandMenu("Call") {
+            Button("Toggle Mute") { if appState.isInCall { appState.toggleMute() } }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+            Button("Toggle Camera") { if appState.isInCall { appState.toggleCamera() } }
+                .keyboardShortcut("v", modifiers: [.command, .shift])
+            Button("Expand / Collapse Call") { if appState.isInCall { appState.isCallExpanded.toggle() } }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+            Button("Leave Call") { if appState.isInCall { appState.leaveCall() } }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
         }
 
         CommandGroup(replacing: .help) {

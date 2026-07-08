@@ -52,6 +52,7 @@ struct ContentView: View {
         // Command-driven sheets (keyboard shortcuts on iPad).
         .sheet(isPresented: $appState.showQuickSwitcher) { QuickSwitcherSheet() }
         .sheet(isPresented: $appState.showJoinSheet) { JoinChannelSheet() }
+        .sheet(isPresented: $appState.showNewDMSheet) { NewDMSheet() }
         .sheet(isPresented: $appState.showSearchSheet) { SearchSheet() }
         .sheet(isPresented: $appState.showShortcutsHelp) { ShortcutsHelpSheet() }
     }

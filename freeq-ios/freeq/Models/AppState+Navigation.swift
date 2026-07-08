@@ -9,13 +9,20 @@ extension AppState {
         return favoritesOrder.compactMap { name in all.first { $0.name == name } }
     }
 
-    /// Full sidebar-ordered buffer names: favorites, then channels, then DMs.
+    /// Full sidebar-ordered buffer names, matching what's rendered on screen:
+    /// favorites first (favorite order), then channels **alphabetically**, then
+    /// DMs by recency. ⌘1–9 and ⌥↑/↓ step through this exact order, so the
+    /// numbers line up with the visible list.
     private var sidebarBufferOrder: [String] {
-        BufferNavigation.sidebarOrder(
-            channels: channels.map(\.name),
-            favoriteOrder: favoritesOrder,
-            dms: dmBuffers.map(\.name)
-        )
+        let sortedChannels = channels
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            .map(\.name)
+        let sortedDms = dmBuffers
+            .filter { !isBlocked(nick: $0.name) }
+            .sorted { $0.lastActivity > $1.lastActivity }
+            .map(\.name)
+        return BufferNavigation.sidebarOrder(
+            channels: sortedChannels, favoriteOrder: favoritesOrder, dms: sortedDms)
     }
 
     /// Buffers with unread messages.

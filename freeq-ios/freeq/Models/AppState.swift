@@ -370,6 +370,10 @@ class AppState: ObservableObject {
     @Published var showJoinSheet = false
     @Published var showSearchSheet = false
     @Published var showShortcutsHelp = false
+    @Published var showNewDMSheet = false
+    /// Member-list panel visibility for the active channel (⇧⌘D). Lifted from
+    /// ChatDetailView so a keyboard shortcut can toggle it.
+    @Published var showMemberList = false
 
     /// DM peers the user has explicitly closed. Stored lowercased so we
     /// can compare against any case-shape the server hands back. Closed

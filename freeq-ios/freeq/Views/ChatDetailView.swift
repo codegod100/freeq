@@ -4,7 +4,6 @@ import SwiftUI
 struct ChatDetailView: View {
     @EnvironmentObject var appState: AppState
     let channelName: String
-    @State private var showingMembers = false
     @State private var showingSearch = false
     // On-device "catch me up" summary.
     @State private var showingSummary = false
@@ -81,17 +80,17 @@ struct ChatDetailView: View {
                                 }
 
                             // Member list slide-in
-                            if showingMembers {
+                            if appState.showMemberList {
                                 HStack(spacing: 0) {
                                     Spacer()
                                     Color.black.opacity(0.3)
                                         .ignoresSafeArea()
-                                        .onTapGesture { showingMembers = false }
+                                        .onTapGesture { appState.showMemberList = false }
                                     MemberListView(channel: channel)
                                         .frame(width: 260)
                                         .transition(.move(edge: .trailing))
                                 }
-                                .animation(.easeInOut(duration: 0.2), value: showingMembers)
+                                .animation(.easeInOut(duration: 0.2), value: appState.showMemberList)
                             }
                         }
 
@@ -173,7 +172,7 @@ struct ChatDetailView: View {
                             .foregroundColor(Theme.textSecondary)
                     }
 
-                    Button(action: { showingMembers.toggle() }) {
+                    Button(action: { appState.showMemberList.toggle() }) {
                         Image(systemName: "person.2")
                             .font(.system(size: 14))
                             .foregroundColor(Theme.textSecondary)

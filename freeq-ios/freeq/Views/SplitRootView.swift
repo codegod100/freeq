@@ -110,6 +110,15 @@ private struct SidebarListView: View {
     private func row(_ conv: ChannelState) -> some View {
         ChatRow(conversation: conv, unreadCount: appState.unreadCounts[conv.name] ?? 0)
             .tag(conv.name)
+            .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button {
+                    appState.toggleFavorite(conv.name)
+                } label: {
+                    Label(appState.isFavorite(conv.name) ? "Unfavorite" : "Favorite",
+                          systemImage: appState.isFavorite(conv.name) ? "star.slash" : "star")
+                }
+                .tint(.yellow)
+            }
             .contextMenu {
                 Button {
                     appState.toggleFavorite(conv.name)
