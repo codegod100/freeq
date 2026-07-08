@@ -96,9 +96,46 @@ struct GeneralSettings: View {
 
 struct ConnectionSettings: View {
     @Environment(AppState.self) private var appState
+    @State private var newAutoJoin = ""
 
     var body: some View {
         Form {
+            Section {
+                if appState.autoJoinChannels.isEmpty {
+                    Text("No channels — you'll only join what you open.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(appState.autoJoinChannels, id: \.self) { ch in
+                        HStack {
+                            Text(ch).font(.body.monospaced())
+                            Spacer()
+                            Button {
+                                appState.removeAutoJoin(ch)
+                            } label: {
+                                Image(systemName: "minus.circle.fill")
+                                    .foregroundStyle(.red)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove from auto-join (won't rejoin on connect)")
+                        }
+                    }
+                }
+                HStack {
+                    TextField("#channel", text: $newAutoJoin)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit(addAutoJoin)
+                    Button("Add", action: addAutoJoin)
+                        .disabled(newAutoJoin.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            } header: {
+                Text("Auto-join channels")
+            } footer: {
+                Text("These are rejoined every time you connect. Channels are added here automatically when you join them — remove any you don't want to keep rejoining.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Server") {
                 LabeledContent("Address") {
                     Text(appState.serverAddress)
@@ -144,6 +181,13 @@ struct ConnectionSettings: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func addAutoJoin() {
+        let ch = newAutoJoin.trimmingCharacters(in: .whitespaces)
+        guard !ch.isEmpty else { return }
+        appState.addAutoJoin(ch)
+        newAutoJoin = ""
     }
 
     private var statusColor: Color {

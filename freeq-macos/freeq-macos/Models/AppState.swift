@@ -620,6 +620,24 @@ class AppState {
         }
     }
 
+    // MARK: - Auto-join list editing
+
+    /// Add a channel to the auto-join list (rejoined on connect). Deduped.
+    func addAutoJoin(_ channel: String) {
+        let name = channel.hasPrefix("#") ? channel : "#\(channel)"
+        guard name.count > 1,
+              !autoJoinChannels.contains(where: { $0.lowercased() == name.lowercased() }) else { return }
+        autoJoinChannels.append(name)
+        UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
+    }
+
+    /// Remove a channel from the auto-join list so it stops being rejoined on
+    /// every connect. Does not leave the channel now — use partChannel for that.
+    func removeAutoJoin(_ channel: String) {
+        autoJoinChannels.removeAll { $0.lowercased() == channel.lowercased() }
+        UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
+    }
+
     func partChannel(_ channel: String) {
         do {
             try client?.part(channel: channel)
