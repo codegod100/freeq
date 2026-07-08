@@ -75,6 +75,28 @@ pub fn participant_key(did: &str, instance_id: Option<&str>) -> String {
     }
 }
 
+/// Whether AV teardown on a connection drop should be deferred behind a grace
+/// window rather than run immediately. A DID user's *last* connection gets
+/// grace so a brief network blip + reconnect doesn't end their call; guests
+/// (no DID) and multi-device users (another live session remains) tear down
+/// immediately, matching the channel-membership grace policy.
+pub fn av_disconnect_deferred(is_did_user: bool, is_last_session: bool) -> bool {
+    is_did_user && is_last_session
+}
+
+/// Is `instance` currently claimed by any live IRC connection? `per_conn` maps
+/// a connection's session_id → the set of AV instances it has registered
+/// (`av_instances_per_conn`). Used at AV-grace expiry: if the instance
+/// reappeared on some connection, the user reconnected and rejoined the call,
+/// so we keep the slot instead of tearing it down. Per-device instance ids are
+/// globally unique, so membership in *any* connection's set is sufficient.
+pub fn instance_claimed_by_live_conn(
+    per_conn: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+    instance: &str,
+) -> bool {
+    per_conn.values().any(|set| set.contains(instance))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ParticipantRole {
@@ -688,6 +710,39 @@ impl AvSessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn av_disconnect_deferred_only_for_did_last_session() {
+        // DID user's last connection → grace (survive a blip).
+        assert!(av_disconnect_deferred(true, true));
+        // DID user with another live device → immediate (that device holds it).
+        assert!(!av_disconnect_deferred(true, false));
+        // Guest → immediate (no grace, matches channel policy).
+        assert!(!av_disconnect_deferred(false, true));
+        assert!(!av_disconnect_deferred(false, false));
+    }
+
+    #[test]
+    fn instance_claimed_detects_rejoin() {
+        let mut per_conn: HashMap<String, HashSet<String>> = HashMap::new();
+        per_conn.insert("stream-1".into(), HashSet::from(["devA".to_string()]));
+        per_conn.insert("stream-2".into(), HashSet::from(["devB".to_string(), "devC".to_string()]));
+
+        // Instance present on some live connection → rejoined, keep the slot.
+        assert!(instance_claimed_by_live_conn(&per_conn, "devA"));
+        assert!(instance_claimed_by_live_conn(&per_conn, "devC"));
+        // Instance gone from every connection → nobody rejoined, tear it down.
+        assert!(!instance_claimed_by_live_conn(&per_conn, "devGone"));
+    }
+
+    #[test]
+    fn instance_claimed_empty_map_is_false() {
+        // No live connections at all → nothing is claimed (grace expiry must
+        // tear down, not silently keep orphaned slots).
+        let per_conn: HashMap<String, HashSet<String>> = HashMap::new();
+        assert!(!instance_claimed_by_live_conn(&per_conn, "devA"));
+    }
 
     #[test]
     fn create_and_join_session() {

@@ -412,6 +412,53 @@ where
     handle_io_with_meta(reader, writer, session_id, state, None).await
 }
 
+/// Broadcast the presence change for one left/ended AV slot, close the media
+/// room + bridge when the session ended, and persist. Shared by immediate
+/// disconnect teardown and the deferred (grace) teardown so both do exactly
+/// the same thing. `instance` is the actor's per-device id (empty for legacy).
+fn finish_av_slot_teardown(
+    state: &Arc<SharedState>,
+    av_sid: &str,
+    channel: &Option<String>,
+    av_nick: &str,
+    should_end: bool,
+    instance: &str,
+) {
+    if let Some(ch) = channel {
+        let participant_count = state.av_sessions.lock().active_participant_count(av_sid);
+        if should_end {
+            messaging::broadcast_av_state_pub(state, ch, av_sid, "ended", av_nick, "", 0, "");
+            // Clean up bridge and Room when the session ends.
+            #[cfg(feature = "av-native")]
+            {
+                state.av_bridges.lock().remove(av_sid);
+            }
+            let backend = state.av_media.lock().clone();
+            let sid = av_sid.to_string();
+            if let Some(backend) = backend {
+                tokio::spawn(async move {
+                    let _ = crate::av_media::MediaBackend::close_room(backend.as_ref(), &sid).await;
+                });
+            }
+        } else {
+            messaging::broadcast_av_state_pub(
+                state,
+                ch,
+                av_sid,
+                "left",
+                av_nick,
+                instance,
+                participant_count,
+                "",
+            );
+        }
+    }
+    if let Some(s) = state.av_sessions.lock().get(av_sid) {
+        let s = s.clone();
+        state.with_db(|db| db.save_av_session(&s));
+    }
+}
+
 async fn handle_io_with_meta<R, W>(
     mut reader: BufReader<R>,
     writer: W,
@@ -3183,70 +3230,86 @@ where
             .map(|set| set.into_iter().collect())
             .unwrap_or_default();
 
-        // Each entry carries the per-device instance so the `left` presence
-        // signal names the exact device that dropped — clients key teardown
-        // on the instance (it matches the media broadcast path), not the nick.
-        let left_sessions: Vec<(String, Option<String>, String, bool, Option<String>)> = {
-            let mut mgr = state.av_sessions.lock();
-            if instances.is_empty() {
-                // Legacy path — no per-instance bookkeeping for this connection,
-                // so we don't know which slots are ours. Mark all DID slots left.
-                mgr.leave_all_for_did(&did_for_av)
-                    .into_iter()
-                    .map(|(sid, ch, nick, end)| (sid, ch, nick, end, None))
-                    .collect()
-            } else {
-                let mut out = Vec::new();
-                for inst in &instances {
-                    for (sid, ch, nick, end) in mgr.leave_for_did_instance(&did_for_av, Some(inst)) {
-                        out.push((sid, ch, nick, end, Some(inst.clone())));
-                    }
-                }
-                out
-            }
-        };
+        // A DID user's *last* connection gets an AV grace window so a brief
+        // network blip + reconnect doesn't end their call. Guests, multi-device
+        // users (another live session remains), and legacy clients with no
+        // per-instance bookkeeping tear down immediately.
+        let defer = crate::av::av_disconnect_deferred(
+            conn.authenticated_did.is_some(),
+            is_last_session_for_did,
+        ) && !instances.is_empty();
 
-        for (av_sid, channel, av_nick, should_end, instance) in &left_sessions {
-            let inst_str = instance.as_deref().unwrap_or("");
-            if let Some(ch) = channel {
-                let participant_count = state.av_sessions.lock().active_participant_count(av_sid);
-                if *should_end {
-                    messaging::broadcast_av_state_pub(
-                        &state, ch, av_sid, "ended", av_nick, "", 0, "",
-                    );
-                    // Clean up bridge and Room when session ends on disconnect
-                    #[cfg(feature = "av-native")]
-                    {
-                        state.av_bridges.lock().remove(av_sid);
+        if defer {
+            // Grace period for AV, aligned with the channel-membership grace.
+            const AV_GRACE_SECS: u64 = QUIT_GRACE_SECS;
+            tracing::info!(
+                did = %did_for_av, instances = instances.len(),
+                "AV: deferring teardown ({}s grace for blip/reconnect)", AV_GRACE_SECS
+            );
+            let state2 = state.clone();
+            let did2 = did_for_av.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(AV_GRACE_SECS)).await;
+                for inst in &instances {
+                    // If the instance reappeared on any live connection, the
+                    // user reconnected and rejoined — keep the slot untouched.
+                    // Otherwise tear it down exactly like the immediate path.
+                    // This self-heals: a reconnect that does NOT rejoin the
+                    // call still gets its stale slot cleaned up here.
+                    if crate::av::instance_claimed_by_live_conn(
+                        &state2.av_instances_per_conn.lock(),
+                        inst,
+                    ) {
+                        tracing::info!(instance = %inst, did = %did2, "AV: grace — rejoined, call kept");
+                        continue;
                     }
-                    let backend = state.av_media.lock().clone();
-                    let sid = av_sid.clone();
-                    if let Some(backend) = backend {
-                        tokio::spawn(async move {
-                            let _ =
-                                crate::av_media::MediaBackend::close_room(backend.as_ref(), &sid)
-                                    .await;
-                        });
+                    let left: Vec<(String, Option<String>, String, bool)> = {
+                        let mut mgr = state2.av_sessions.lock();
+                        mgr.leave_for_did_instance(&did2, Some(inst))
+                    };
+                    for (av_sid, channel, av_nick, should_end) in &left {
+                        finish_av_slot_teardown(&state2, av_sid, channel, av_nick, *should_end, inst);
                     }
-                } else {
-                    messaging::broadcast_av_state_pub(
-                        &state,
-                        ch,
-                        av_sid,
-                        "left",
-                        av_nick,
-                        inst_str,
-                        participant_count,
-                        "",
-                    );
+                    if !left.is_empty() {
+                        tracing::info!(instance = %inst, did = %did2, "AV: grace expired — not rejoined, torn down");
+                    }
                 }
+            });
+        } else {
+            // Immediate teardown. Each entry carries the per-device instance so
+            // the `left` signal names the exact device that dropped — clients
+            // key teardown on the instance (matches the media path), not nick.
+            let left_sessions: Vec<(String, Option<String>, String, bool, Option<String>)> = {
+                let mut mgr = state.av_sessions.lock();
+                if instances.is_empty() {
+                    // Legacy path — no per-instance bookkeeping for this
+                    // connection, so mark all DID slots left.
+                    mgr.leave_all_for_did(&did_for_av)
+                        .into_iter()
+                        .map(|(sid, ch, nick, end)| (sid, ch, nick, end, None))
+                        .collect()
+                } else {
+                    let mut out = Vec::new();
+                    for inst in &instances {
+                        for (sid, ch, nick, end) in mgr.leave_for_did_instance(&did_for_av, Some(inst))
+                        {
+                            out.push((sid, ch, nick, end, Some(inst.clone())));
+                        }
+                    }
+                    out
+                }
+            };
+
+            for (av_sid, channel, av_nick, should_end, instance) in &left_sessions {
+                finish_av_slot_teardown(
+                    &state,
+                    av_sid,
+                    channel,
+                    av_nick,
+                    *should_end,
+                    instance.as_deref().unwrap_or(""),
+                );
             }
-            // Persist to DB
-            if let Some(s) = state.av_sessions.lock().get(av_sid) {
-                let s = s.clone();
-                state.with_db(|db| db.save_av_session(&s));
-            }
-            tracing::info!(av_session = %av_sid, did = %did_for_av, ended = should_end, "AV session cleanup on disconnect");
         }
     }
 
