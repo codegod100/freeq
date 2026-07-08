@@ -179,6 +179,10 @@ class AppState {
     @ObservationIgnored var pendingAvStart: Set<String> = []
     /// Per-call instance id sent on av-join/av-leave (`+freeq.at/av-instance`).
     @ObservationIgnored var currentAvInstance: String? = nil
+    /// A call dropped by a connection blip, kept so a reconnect can rejoin the
+    /// same session+instance within the server's AV grace window. Set only on
+    /// disconnect-driven teardown; cleared on explicit leave or after rejoin.
+    @ObservationIgnored var pendingCallRejoin: PendingCallRejoin? = nil
     @ObservationIgnored var cameraCapture: CallCameraCapture? = nil
     @ObservationIgnored var screenCapture: CallScreenCapture? = nil
     @ObservationIgnored var micCapture: CallMicCapture? = nil
@@ -1300,6 +1304,23 @@ extension AppState {
                 fetchPins(channel: channel)
                 if let historyCommand = ChannelHydration.historyCommand(for: channel) {
                     sendRaw(historyCommand)
+                }
+                // If a blip dropped us mid-call in this channel, rejoin the
+                // same AV session with the same instance — the server held the
+                // slot in its grace window, so this re-enters in place.
+                if shouldRejoinCall(pending: pendingCallRejoin, joinedChannel: channel, now: Date()),
+                   let rejoin = pendingCallRejoin {
+                    pendingCallRejoin = nil
+                    currentAvInstance = rejoin.instance
+                    Log.irc.info("AV: rejoining call after reconnect (session \(rejoin.sessionId, privacy: .public))")
+                    startCall(channel: rejoin.channel, sessionId: rejoin.sessionId)
+                } else {
+                    // Any other join clears a stale pending (wrong channel or
+                    // past the window) so it can't fire later.
+                    if let p = pendingCallRejoin,
+                       Date().timeIntervalSince(p.disconnectedAt) >= 30 {
+                        pendingCallRejoin = nil
+                    }
                 }
             } else {
                 if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {

@@ -27,6 +27,7 @@
 		3BA358A98EDB3F19D087205E /* VerifiedProofSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = BFF32EBD38B463CD192010E5 /* VerifiedProofSheet.swift */; };
 		3C18EEA13CDA87B9091E35DF /* SafetySettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D0975BD51F0EA2352BDBC0F /* SafetySettings.swift */; };
 		3CBF7B5A0C44366BC7D7399D /* HelpView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBCA3FB47D495913D7C6FD49 /* HelpView.swift */; };
+		3CFC235C8095EB91F7E6DAD5 /* AvRejoin.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E08DDA806587AE220D2448 /* AvRejoin.swift */; };
 		3ECAA9DD14311CA0514B5E45 /* BufferNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */; };
 		4053A7A7289612A63F58C313 /* Logger.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB1B29BA8601FC220D46B705 /* Logger.swift */; };
 		40B19B4620E1FFA3196FBFAD /* DetailPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68D19F735EC72757A61B1D6C /* DetailPanel.swift */; };
@@ -190,6 +191,7 @@
 		9FEA777B589463007FF478DC /* MessageListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageListView.swift; sourceTree = "<group>"; };
 		A09A2F1C5515211E8D3BE359 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
 		A7D12A148B4822BCB055DECD /* MetricKitReporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetricKitReporter.swift; sourceTree = "<group>"; };
+		A7E08DDA806587AE220D2448 /* AvRejoin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvRejoin.swift; sourceTree = "<group>"; };
 		AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferNavigation.swift; sourceTree = "<group>"; };
 		AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeTextExtraction.swift; sourceTree = "<group>"; };
 		AFDA007C5D2E0294D534B5A4 /* ComposeFormatting.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposeFormatting.swift; sourceTree = "<group>"; };
@@ -372,6 +374,7 @@
 				D17E048D6D4D5A5BBEA1FABA /* AudioOutputDevices.swift */,
 				5B44CE675043F28160CDE06F /* AvatarCache.swift */,
 				2224B75B437C13782207DDF3 /* AvLeftResolve.swift */,
+				A7E08DDA806587AE220D2448 /* AvRejoin.swift */,
 				50E8C4C51998A707446B885B /* AvStartRace.swift */,
 				AC09D7B2D70E4DA2F7EDC957 /* BufferNavigation.swift */,
 				DB0BA22F0AF547102314C733 /* CallAudioDevices.swift */,
@@ -568,6 +571,7 @@
 				8F91067FD889CE783A775F1A /* AudioSettings.swift in Sources */,
 				AF76EC565DC3FE7EB618879F /* AutocompletePopup.swift in Sources */,
 				6C65F055C8CF7B1ADC46F72B /* AvLeftResolve.swift in Sources */,
+				3CFC235C8095EB91F7E6DAD5 /* AvRejoin.swift in Sources */,
 				8AA52D2329AF515F98602EDF /* AvStartRace.swift in Sources */,
 				B278B82F0D0C1A1DD292BD90 /* AvatarCache.swift in Sources */,
 				3146DC065B84E88A34D2BD2C /* BookmarksPanel.swift in Sources */,

@@ -148,11 +148,26 @@ extension AppState {
             let instanceTag = currentAvInstance.map { ";+freeq.at/av-instance=\($0)" } ?? ""
             sendRaw("@+freeq.at/av-leave;+freeq.at/av-id=\(sessionId)\(instanceTag) TAGMSG \(channel)")
         }
+        // Explicit leave — a reconnect must NOT drag us back into the call.
+        pendingCallRejoin = nil
         teardownLocal()
     }
 
     /// Tear down the call without sending `av-leave` (the wire is gone).
+    /// Capture the call identity first so a reconnect can rejoin the same
+    /// session+instance within the server's AV grace window.
     func tearDownCallLocallyOnDisconnect() {
+        if isInCall,
+           let channel = currentCallChannel,
+           let sessionId = currentCallSessionId,
+           let instance = currentAvInstance {
+            pendingCallRejoin = PendingCallRejoin(
+                channel: channel,
+                sessionId: sessionId,
+                instance: instance,
+                disconnectedAt: Date()
+            )
+        }
         teardownLocal()
     }
 
