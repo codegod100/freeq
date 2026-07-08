@@ -36,32 +36,37 @@ struct ChatView: View {
             }
 
             if appState.isInCall, let callChannel = appState.currentCallChannel {
-                // Cap the call panel so the video scales down to fit rather than
-                // pushing its own controls (and the message list) off-screen on
-                // shorter displays. The grid uses aspect-fit, so it shrinks
-                // gracefully; controls stay pinned and visible.
+                // Collapsed: cap the call so the message list stays visible and
+                // the video scales to fit. Expanded: the call takes the WHOLE
+                // area — the message list + composer hide below it, so "expand"
+                // actually fills instead of being squeezed into 60% (which cut
+                // off the video / hid participants below the fold).
                 CallView(channel: callChannel)
-                    .frame(maxHeight: max(220, geo.size.height * 0.6))
-                Divider().overlay(Theme.borderSoft)
-            }
-
-            MessageListView(channel: appState.activeChannelState)
-            Divider().overlay(Theme.borderSoft)
-
-            // Typing indicator bar
-            if let typers = appState.activeChannelState?.activeTypers, !typers.isEmpty {
-                HStack(spacing: 4) {
-                    TypingDotsView()
-                    Text(typingText(typers))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
+                    .frame(maxHeight: appState.isCallExpanded ? .infinity : max(220, geo.size.height * 0.6))
+                if !appState.isCallExpanded {
+                    Divider().overlay(Theme.borderSoft)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 4)
-                .background(Theme.surfaceSoft)
             }
-            ComposeBar()
+
+            if !(appState.isInCall && appState.isCallExpanded) {
+                MessageListView(channel: appState.activeChannelState)
+                Divider().overlay(Theme.borderSoft)
+
+                // Typing indicator bar
+                if let typers = appState.activeChannelState?.activeTypers, !typers.isEmpty {
+                    HStack(spacing: 4) {
+                        TypingDotsView()
+                        Text(typingText(typers))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 4)
+                    .background(Theme.surfaceSoft)
+                }
+                ComposeBar()
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Theme.chatBackground)
