@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		014D479059F416C096AC45EF /* PinnedMessagesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DF1180A85E6505A55D9F225 /* PinnedMessagesView.swift */; };
 		022C97385E4C6E436BF8FA82 /* JoinChannelSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F2B162069D9FEB43A008621 /* JoinChannelSheet.swift */; };
+		02AB33740D36A2AA483B8980 /* NewDMSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B90ADE5391CABDCBEF6FF3 /* NewDMSheet.swift */; };
 		0707953E63730121B32C90F1 /* freeqApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10926193239F585762C38F1 /* freeqApp.swift */; };
 		0D90DB6A860ED297CC10A2CF /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1613B43E3F87D0A8567A57BB /* CallView.swift */; };
 		1223DEEA3B6C431275E0AC0C /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D567BC948344D3BCA2F31223 /* SwiftUI.framework */; };
@@ -156,6 +157,7 @@
 		17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallMicCapture.swift; sourceTree = "<group>"; };
 		1D97CC3F5A8E1F52F2C940FF /* BufferListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferListView.swift; sourceTree = "<group>"; };
 		1DE07EAC6B16A20177585C57 /* ImageLightbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageLightbox.swift; sourceTree = "<group>"; };
+		22B90ADE5391CABDCBEF6FF3 /* NewDMSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewDMSheet.swift; sourceTree = "<group>"; };
 		25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntelligenceService.swift; sourceTree = "<group>"; };
 		26DE5AC40702B5E286A3DED3 /* Safety.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Safety.swift; sourceTree = "<group>"; };
 		27BC2996888A988136F5405B /* freeqTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = freeqTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -365,6 +367,7 @@
 				39851CF7C369A289DB8E3E93 /* MemberListView.swift */,
 				CA5BB884CBB62EBEF230A05D /* MessageListView.swift */,
 				A5770C0CB2F73315874C61C7 /* MotdSheet.swift */,
+				22B90ADE5391CABDCBEF6FF3 /* NewDMSheet.swift */,
 				88F30B75033F6333978D7F0E /* PeopleView.swift */,
 				81C517F4469AC28926160BA7 /* PhotoPicker.swift */,
 				9DF1180A85E6505A55D9F225 /* PinnedMessagesView.swift */,
@@ -715,6 +718,7 @@
 				F426EA83410FB9AF6A40F5A5 /* MessageListView.swift in Sources */,
 				60A3F828F885713C7D9FA3FB /* MotdSheet.swift in Sources */,
 				6B98C423EE9A7D82D1973063 /* NetworkMonitor.swift in Sources */,
+				02AB33740D36A2AA483B8980 /* NewDMSheet.swift in Sources */,
 				80DC207188B4EA44C3787CA2 /* Notifications.swift in Sources */,
 				CE133BCB1C065B2B2EEEB0B2 /* PeopleView.swift in Sources */,
 				5B1B81D53A3DE4767C2A498B /* PhoneWatchBridge.swift in Sources */,

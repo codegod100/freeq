@@ -307,7 +307,7 @@ final class AvMediaFlowTests: XCTestCase {
     func testVideoFrameEventMarksParticipantAndRenders() {
         let (state, _) = makeState(myNick: "alice")
         state.startCall(channel: "#freeq", sessionId: "s1")
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
         let layer = AVSampleBufferDisplayLayer()
         state.bindVideoSink(nick: "bob", to: layer)
 

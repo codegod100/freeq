@@ -360,7 +360,7 @@ final class AvSessionTests: XCTestCase {
         // FreeqAv path: same-DID second device. The SDK gave us this
         // event after stripping `~instance`, so the bare nick happens
         // to match — but it's still a different device, so we keep it.
-        state.deliverAvEventForTest(.participantJoined(nick: "alice"))
+        state.deliverAvEventForTest(.participantJoined(nick: "alice", instance: ""))
         XCTAssertTrue(state.callParticipants.contains(where: { $0.lowercased() == "alice" }),
                       "FreeqAv participantJoined must surface as a remote tile even if nick matches us — same-DID multi-device")
 
@@ -389,8 +389,8 @@ final class AvSessionTests: XCTestCase {
         let (state, _, _) = makeHarness()
         state.startCall(channel: "#freeq", sessionId: "sess-1")
 
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
 
         XCTAssertEqual(state.callParticipants, ["bob"],
                        "current implementation collapses same-DID-different-instance to one tile; if this changes, plumb instance id through and update CallView accordingly")
@@ -402,13 +402,13 @@ final class AvSessionTests: XCTestCase {
         let (state, _, _) = makeHarness()
         state.startCall(channel: "#freeq", sessionId: "sess-1")
 
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
         state.deliverAvEventForTest(.videoFrame(nick: "bob",
             bgra: [UInt8](repeating: 0, count: 4), width: 1, height: 1))
         XCTAssertTrue(state.callParticipants.contains("bob"))
         XCTAssertTrue(state.participantsWithVideo.contains("bob"))
 
-        state.deliverAvEventForTest(.participantLeft(nick: "bob"))
+        state.deliverAvEventForTest(.participantLeft(nick: "bob", instance: ""))
 
         XCTAssertFalse(state.callParticipants.contains("bob"))
         XCTAssertFalse(state.participantsWithVideo.contains("bob"),
@@ -520,7 +520,7 @@ final class AvSessionTests: XCTestCase {
     func testFreeqAvDisconnectedClearsCallState() {
         let (state, _, _) = makeHarness()
         state.startCall(channel: "#freeq", sessionId: "sess-1")
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
         XCTAssertTrue(state.isInCall)
         XCTAssertEqual(state.callParticipants, ["bob"])
 
@@ -539,7 +539,7 @@ final class AvSessionTests: XCTestCase {
         let (state, _, driverRef) = makeHarness()
         state.startCall(channel: "#freeq", sessionId: "sess-1")
         let driver = driverRef()!
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
         XCTAssertTrue(state.isInCall)
 
         // Simulate the IRC connection dying entirely.
@@ -579,7 +579,7 @@ final class AvSessionTests: XCTestCase {
         // The SDK's `path == our_name` check filtered the iOS broadcast,
         // so the participantJoined we get is web alice's. Nick happens
         // to be the same because it's the same DID/handle.
-        state.deliverAvEventForTest(.participantJoined(nick: "alice"))
+        state.deliverAvEventForTest(.participantJoined(nick: "alice", instance: ""))
         XCTAssertTrue(state.callParticipants.contains(where: { $0.lowercased() == "alice" }),
                       "same-nick remote (web alice) must be tracked as a remote participant on iOS")
 
@@ -615,7 +615,7 @@ final class AvSessionTests: XCTestCase {
                        "must not flip the video flag for an absent nick")
 
         // Now the join arrives, then a second frame. Tile should fill.
-        state.deliverAvEventForTest(.participantJoined(nick: "racey"))
+        state.deliverAvEventForTest(.participantJoined(nick: "racey", instance: ""))
         state.deliverAvEventForTest(.videoFrame(nick: "racey",
             bgra: [UInt8](repeating: 0, count: 4), width: 1, height: 1))
         XCTAssertTrue(state.participantsWithVideo.contains("racey"))
@@ -631,7 +631,7 @@ final class AvSessionTests: XCTestCase {
         let (state, _, _) = makeHarness()
         state.startCall(channel: "#freeq", sessionId: "sess-1")
 
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
         state.deliverAvEventForTest(.videoFrame(nick: "bob",
             bgra: [UInt8](repeating: 0, count: 4), width: 1, height: 1))
         XCTAssertTrue(state.callParticipants.contains("bob"))
@@ -654,7 +654,7 @@ final class AvSessionTests: XCTestCase {
         let (state, _, _) = makeHarness()
         state.startCall(channel: "#freeq", sessionId: "sess-1")
 
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
         state.deliverAvEventForTest(.videoFrame(nick: "bob",
             bgra: [UInt8](repeating: 0, count: 4), width: 1, height: 1))
         state.deliverAvEventForTest(.videoTrackStopped(nick: "bob"))
@@ -674,8 +674,8 @@ final class AvSessionTests: XCTestCase {
         let (state, _, _) = makeHarness(myNick: "alice")
         state.startCall(channel: "#freeq", sessionId: "sess-1")
 
-        state.deliverAvEventForTest(.participantJoined(nick: "bob"))
-        state.deliverAvEventForTest(.participantJoined(nick: "carol"))
+        state.deliverAvEventForTest(.participantJoined(nick: "bob", instance: ""))
+        state.deliverAvEventForTest(.participantJoined(nick: "carol", instance: ""))
         // Alice's own broadcast is filtered at the SDK layer; we don't
         // expect ourselves to appear via FreeqAv. But if another device
         // on the same DID also joins (4th case), it surfaces as alice.

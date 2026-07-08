@@ -2204,9 +2204,9 @@ public enum AvEvent {
     case connected
     case disconnected(reason: String
     )
-    case participantJoined(nick: String
+    case participantJoined(nick: String, instance: String
     )
-    case participantLeft(nick: String
+    case participantLeft(nick: String, instance: String
     )
     case audioTrackStarted(nick: String
     )
@@ -2253,10 +2253,10 @@ public struct FfiConverterTypeAvEvent: FfiConverterRustBuffer {
         case 2: return .disconnected(reason: try FfiConverterString.read(from: &buf)
         )
         
-        case 3: return .participantJoined(nick: try FfiConverterString.read(from: &buf)
+        case 3: return .participantJoined(nick: try FfiConverterString.read(from: &buf), instance: try FfiConverterString.read(from: &buf)
         )
         
-        case 4: return .participantLeft(nick: try FfiConverterString.read(from: &buf)
+        case 4: return .participantLeft(nick: try FfiConverterString.read(from: &buf), instance: try FfiConverterString.read(from: &buf)
         )
         
         case 5: return .audioTrackStarted(nick: try FfiConverterString.read(from: &buf)
@@ -2311,14 +2311,16 @@ public struct FfiConverterTypeAvEvent: FfiConverterRustBuffer {
             FfiConverterString.write(reason, into: &buf)
             
         
-        case let .participantJoined(nick):
+        case let .participantJoined(nick,instance):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(nick, into: &buf)
+            FfiConverterString.write(instance, into: &buf)
             
         
-        case let .participantLeft(nick):
+        case let .participantLeft(nick,instance):
             writeInt(&buf, Int32(4))
             FfiConverterString.write(nick, into: &buf)
+            FfiConverterString.write(instance, into: &buf)
             
         
         case let .audioTrackStarted(nick):

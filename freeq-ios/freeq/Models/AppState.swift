@@ -568,6 +568,13 @@ class AppState: ObservableObject {
     /// MoQ broadcast path so two devices on the same DID don't collide.
     internal var currentAvInstance: String? = nil
 
+    /// Maps a remote device's stable AV instance id → the nick it joined
+    /// under. Populated from `AvEvent.participantJoined` (and the `joined`
+    /// `av-state` TAGMSG). Used to key presence teardown on the instance
+    /// rather than the nick, since a multi-nick account can present a
+    /// different nick on the `left` signal than the one it joined with.
+    internal var avInstanceToNick: [String: String] = [:]
+
     func startCall(channel: String, sessionId: String) {
         guard client != nil || rawSenderForTest != nil else { return }
         // Native clients take the SFU's QUIC listener on :8080 — the
@@ -2571,6 +2578,11 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     // call AND the joiner is someone else. (Self-joined is a
                     // self-echo of our own av-join; FreeqAv ParticipantJoined
                     // will also fire for everyone else's video tracks.)
+                    // Record the actor's instance→nick so a later `left` for
+                    // a multi-nick account still resolves to the right tile.
+                    if let avInstance = tags["+freeq.at/av-instance"], !avInstance.isEmpty {
+                        state.avInstanceToNick[avInstance] = avActor
+                    }
                     if inThisCall
                        && avActor.lowercased() != state.nick.lowercased()
                        && !state.callParticipants.contains(where: { $0.lowercased() == avActor.lowercased() }) {
@@ -2579,15 +2591,25 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 case "left":
                     // Same gating: only update if it's a different participant
                     // and we're in this call. Symmetric with `joined`.
+                    // Prefer the av-instance tag to resolve who left: the
+                    // actor nick can differ from the joined nick for a
+                    // multi-nick account. Fall back to the actor when the
+                    // instance is absent or unmapped.
+                    let avInstance = tags["+freeq.at/av-instance"]
+                    let leaver = (avInstance.flatMap { $0.isEmpty ? nil : state.avInstanceToNick[$0] }) ?? avActor
+                    let leaverKey = leaver.lowercased()
                     if inThisCall {
-                        state.callParticipants.removeAll { $0.lowercased() == avActor.lowercased() }
+                        state.callParticipants.removeAll { $0.lowercased() == leaverKey }
                         state.participantsWithVideo = state.participantsWithVideo.filter {
-                            $0.lowercased() != avActor.lowercased()
+                            $0.lowercased() != leaverKey
                         }
                         state.participantsWithScreen = state.participantsWithScreen.filter {
-                            $0.lowercased() != avActor.lowercased()
+                            $0.lowercased() != leaverKey
                         }
-                        state.remoteAudioLevels.removeValue(forKey: avActor.lowercased())
+                        state.remoteAudioLevels.removeValue(forKey: leaverKey)
+                    }
+                    if let avInstance, !avInstance.isEmpty {
+                        state.avInstanceToNick.removeValue(forKey: avInstance)
                     }
                 default:
                     break
@@ -2725,7 +2747,7 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             state.endCallActivity()
             print("[av] Disconnected: \(reason)")
 
-        case .participantJoined(let nick):
+        case .participantJoined(let nick, let instance):
             // Don't filter on nick alone here — the SDK already drops our
             // own broadcast at the path level (`path == our_name`), so
             // anything that reaches us is a *different device's* broadcast,
@@ -2733,26 +2755,42 @@ final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
             // on web). The bare-nick "self-echo" filter we used to have
             // here was the cause of "iOS doesn't show my web client" — it
             // collapsed the multi-device case into a no-op.
+            // Remember which nick this device joined under so a later `left`
+            // signal (which can carry a different nick for a multi-nick
+            // account) still resolves to the right tile via its instance.
+            if !instance.isEmpty {
+                state.avInstanceToNick[instance] = nick
+            }
             if !state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) {
                 state.callParticipants.append(nick)
             }
             state.updateCallActivity()
-            print("[av] Participant joined: \(nick)")
+            print("[av] Participant joined: \(nick) [instance=\(instance)]")
 
-        case .participantLeft(let nick):
+        case .participantLeft(let nick, let instance):
+            // Prefer the instance→nick mapping recorded at join time: the
+            // `left` signal's nick can differ from the joined nick for a
+            // multi-nick account, so keying teardown on the instance removes
+            // the correct tile. Fall back to the signalled nick when the
+            // instance is absent (legacy peer) or unmapped.
+            let target = (!instance.isEmpty ? state.avInstanceToNick[instance] : nil) ?? nick
+            let key = target.lowercased()
             // Symmetric removal: drop the tile AND the video-active marker.
             // Leaving the latter behind made the next call show a frozen-frame
             // tile for the departed nick the moment a same-named user joined.
-            state.callParticipants.removeAll { $0.lowercased() == nick.lowercased() }
+            state.callParticipants.removeAll { $0.lowercased() == key }
             state.participantsWithVideo = state.participantsWithVideo.filter {
-                $0.lowercased() != nick.lowercased()
+                $0.lowercased() != key
             }
             state.participantsWithScreen = state.participantsWithScreen.filter {
-                $0.lowercased() != nick.lowercased()
+                $0.lowercased() != key
             }
-            state.remoteAudioLevels.removeValue(forKey: nick.lowercased())
+            state.remoteAudioLevels.removeValue(forKey: key)
+            if !instance.isEmpty {
+                state.avInstanceToNick.removeValue(forKey: instance)
+            }
             state.updateCallActivity()
-            print("[av] Participant left: \(nick)")
+            print("[av] Participant left: \(target) [instance=\(instance)]")
 
         case .audioTrackStarted(let nick):
             print("[av] Audio started: \(nick)")
