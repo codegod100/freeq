@@ -39,11 +39,29 @@ export function MemberList() {
     return <DMProfilePanel key={activeChannel} nick={activeChannel} channel={ch} />;
   }
 
-  const members = [...ch.members.values()].sort((a, b) => {
+  const sortedMembers = [...ch.members.values()].sort((a, b) => {
     const wa = a.isOp ? 0 : a.isHalfop ? 1 : a.isVoiced ? 2 : 3;
     const wb = b.isOp ? 0 : b.isHalfop ? 1 : b.isVoiced ? 2 : 3;
     return wa - wb || a.nick.localeCompare(b.nick);
   });
+  // Collapse multiple connections of the same account (same DID) into one row.
+  // The same person on two devices — or a nick-collision twin like
+  // chadfowler.com / chadfowlercom — is one member, not two. Guests (no DID)
+  // are always kept, keyed by nick. Prefer the connection whose nick is the
+  // fuller handle (has a dot) as the canonical display.
+  const bestByDid = new Map<string, Member>();
+  const members: Member[] = [];
+  for (const m of sortedMembers) {
+    if (!m.did) { members.push(m); continue; }
+    const existing = bestByDid.get(m.did);
+    if (!existing) { bestByDid.set(m.did, m); members.push(m); continue; }
+    // Keep the more canonical nick (dotted handle) if this one is better.
+    if (m.nick.includes('.') && !existing.nick.includes('.')) {
+      const idx = members.indexOf(existing);
+      if (idx >= 0) members[idx] = m;
+      bestByDid.set(m.did, m);
+    }
+  }
 
   const isAgent = (m: Member) => m.actorClass === 'agent' || m.actorClass === 'external_agent';
   const ops = members.filter((m) => m.isOp && !isAgent(m));

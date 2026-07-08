@@ -4,20 +4,41 @@ struct MemberListView: View {
     @ObservedObject var channel: ChannelState
     @State private var profileNick: String? = nil
 
+    /// One row per account: collapse the same DID (multi-device, or a
+    /// nick-collision twin like chadfowler.com / chadfowlercom) into a single
+    /// member. Guests (no resolvable DID) are kept. Prefers the fuller (dotted)
+    /// handle for display.
+    private var dedupedMembers: [MemberInfo] {
+        var indexByDid: [String: Int] = [:]
+        var out: [MemberInfo] = []
+        for m in channel.members {
+            guard let did = m.did ?? AvatarCache.shared.did(for: m.nick) else {
+                out.append(m); continue
+            }
+            if let idx = indexByDid[did] {
+                if m.nick.contains("."), !out[idx].nick.contains(".") { out[idx] = m }
+            } else {
+                indexByDid[did] = out.count
+                out.append(m)
+            }
+        }
+        return out
+    }
+
     private var ops: [MemberInfo] {
-        channel.members.filter { $0.isOp }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
+        dedupedMembers.filter { $0.isOp }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
     }
 
     private var halfops: [MemberInfo] {
-        channel.members.filter { $0.isHalfop && !$0.isOp }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
+        dedupedMembers.filter { $0.isHalfop && !$0.isOp }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
     }
 
     private var voiced: [MemberInfo] {
-        channel.members.filter { $0.isVoiced && !$0.isOp && !$0.isHalfop }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
+        dedupedMembers.filter { $0.isVoiced && !$0.isOp && !$0.isHalfop }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
     }
 
     private var regular: [MemberInfo] {
-        channel.members.filter { !$0.isOp && !$0.isHalfop && !$0.isVoiced }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
+        dedupedMembers.filter { !$0.isOp && !$0.isHalfop && !$0.isVoiced }.sorted { $0.nick.lowercased() < $1.nick.lowercased() }
     }
 
     var body: some View {
@@ -28,7 +49,7 @@ struct MemberListView: View {
                     .font(.fqFootnote.weight(.bold))
                     .foregroundColor(Theme.textSecondary)
                 Spacer()
-                Text("\(channel.members.count)")
+                Text("\(dedupedMembers.count)")
                     .font(.fqFootnote.weight(.medium))
                     .foregroundColor(Theme.textMuted)
             }
