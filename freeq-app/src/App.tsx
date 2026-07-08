@@ -250,8 +250,8 @@ export default function App() {
           }`}
           onClick={() => setSidebarOpen(false)}
         />
-        <div className={`app-sidebar-shell fixed inset-y-0 left-0 z-30 w-64 md:relative md:inset-auto md:h-full ${
-          sidebarOpen ? 'translate-x-0 md:w-64' : '-translate-x-full md:w-0 md:translate-x-0 pointer-events-none'
+        <div className={`app-sidebar-shell fixed inset-y-0 left-0 z-30 w-52 md:w-56 md:relative md:inset-auto md:h-full ${
+          sidebarOpen ? 'translate-x-0 md:w-56' : '-translate-x-full md:w-0 md:translate-x-0 pointer-events-none'
         }`}>
           <Sidebar onOpenSettings={() => setSettings(true)} />
         </div>

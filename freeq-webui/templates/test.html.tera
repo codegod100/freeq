@@ -1,0 +1,2 @@
+{% for ch in channels %}{{ ch.name }}|{{ ch.members }}|{{ ch.topic }}
+{% endfor %}

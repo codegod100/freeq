@@ -132,7 +132,12 @@ async fn run_monitor(
         let new_lines: Vec<&String> = snapshot.transcript[consumed_lines..]
             .iter()
             .filter(|l| {
-                let speaker = l.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+                let speaker = l
+                    .split(':')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
                 !speaker.starts_with(&self_base)
             })
             .collect();
@@ -150,8 +155,14 @@ async fn run_monitor(
         let Some(key) = cfg.groq_api_key.as_deref() else {
             continue;
         };
-        let rec = match recognize(&cfg.http, key, &cfg.groq_chat_model, &context, &recent_topics)
-            .await
+        let rec = match recognize(
+            &cfg.http,
+            key,
+            &cfg.groq_chat_model,
+            &context,
+            &recent_topics,
+        )
+        .await
         {
             Some(r) => r,
             None => continue,
@@ -319,7 +330,11 @@ fn append_note(path: &Option<std::path::PathBuf>, channel: &str, topics: &[Strin
         .unwrap_or(0);
     let line = serde_json::json!({ "ts": ts, "channel": channel, "topics": topics });
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }

@@ -1410,6 +1410,23 @@ export class FreeqClient extends EventEmitter {
         break;
       }
 
+      case 'ACCOUNT': {
+        const did = msg.params[0] || '';
+        const lc = from.toLowerCase();
+        if (did && did !== '*') {
+          this._nickToDid.set(lc, did);
+          this._didToNick.set(did, lc);
+        } else {
+          this._nickToDid.delete(lc);
+          // Clear reverse mapping if this nick was in the DID→nick map.
+          for (const [d, n] of this._didToNick) {
+            if (n === lc) { this._didToNick.delete(d); break; }
+          }
+        }
+        this.emit('memberDid', from, did);
+        break;
+      }
+
       case 'JOIN': {
         const channel = msg.params[0];
         const account = msg.params[1];

@@ -1,0 +1,499 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>freeq - #{{channel}}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
+<meta name="theme-color" content="#1a1a2e">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
+<script src="/datastar.js"></script>
+<style>
+:root{--nick-1:#7ab7ff;--nick-2:#f78b6c;--nick-3:#c792ea;--nick-4:#ffd166;--nick-5:#06d6a0;--nick-6:#ef476f;--nick-7:#f4a261;--nick-8:#90e0ef;--self:#5cdb95}
+html,body{height:100dvh;overflow:hidden}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#1a1a2e}::-webkit-scrollbar-thumb{background:#333;border-radius:3px}::-webkit-scrollbar-thumb:hover{background:#888}
+*{scrollbar-width:thin;scrollbar-color:#333 #1a1a2e}
+#messages{overflow-y:auto;flex:1}
+#messages .msg{display:grid;grid-template-columns:48px 1fr;gap:.3rem;padding:1px 0;font-size:.8rem}
+#messages .ts{color:var(--bulma-grey);font-size:.65rem;text-align:right;user-select:none}
+#messages .body{white-space:pre-wrap;overflow-wrap:anywhere}
+#messages .nick{font-weight:600}
+.nick.n1{color:var(--nick-1)}.nick.n2{color:var(--nick-2)}.nick.n3{color:var(--nick-3)}.nick.n4{color:var(--nick-4)}
+.nick.n5{color:var(--nick-5)}.nick.n6{color:var(--nick-6)}.nick.n7{color:var(--nick-7)}.nick.n8{color:var(--nick-8)}
+#messages .notice{color:var(--bulma-grey);font-style:italic;padding:2px 0}
+#messages .join .body{color:var(--nick-5)}#messages .part .body{color:var(--nick-6)}
+#member-panel .pfx.op{color:var(--self)}
+#status .dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--bulma-grey);margin-right:4px}
+#status.connected .dot{background:var(--self);box-shadow:0 0 5px var(--self)}
+#messages a{color:var(--bulma-link-text)}
+.policy-tag{cursor:pointer}
+.policy-tag:hover{background:var(--bulma-link-text)!important;color:#fff!important}
+.sidebar-toggle{display:flex;align-items:center;gap:.35rem;cursor:pointer;user-select:none}
+.sidebar-toggle::before{content:'';display:inline-block;width:0;height:0;border-left:.35rem solid transparent;border-right:.35rem solid transparent;border-top:.45rem solid currentColor;transition:transform .15s ease}
+.sidebar-toggle.collapsed::before{transform:rotate(-90deg)}
+.reactions{display:inline-flex;flex-wrap:wrap;gap:3px;margin-left:6px;vertical-align:middle}
+.reaction-chip{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;background:rgba(255,255,255,.07);border:1px solid var(--bulma-border);border-radius:999px;font-size:.75rem;line-height:1.2;cursor:default;user-select:none}
+.reaction-chip:hover{background:rgba(255,255,255,.12)}
+.reaction-chip.mine{background:rgba(92,219,149,.25);border-color:rgba(92,219,149,.5)}
+.react-btn{display:inline-flex;align-items:center;justify-content:center;width:1.2rem;height:1.2rem;padding:0;background:transparent;border:1px dashed var(--bulma-border);border-radius:999px;color:var(--bulma-grey);font-size:.7rem;cursor:pointer;opacity:.5;transition:opacity .15s}
+#messages .msg:hover .react-btn,#messages .msg:focus-within .react-btn{opacity:1}
+.menu,.menu-list,.menu-list li{width:100%}
+.channel-row{display:grid;grid-template-columns:1fr auto;align-items:center;gap:.25rem;padding:0 .25rem 0 0;width:100%}
+.channel-row .channel-link{display:block;min-width:0;padding:.25rem .5rem;border-radius:var(--bulma-radius-small);color:var(--bulma-text);text-decoration:none;overflow-wrap:anywhere}
+.channel-row .channel-link.is-active,.channel-row .channel-link:hover{background:var(--bulma-link);color:#fff}
+.channel-row .policy-tag{cursor:pointer;border:0}
+.mobile-btn{display:none;align-items:center;justify-content:center;width:2.5rem;height:2.5rem;background:transparent;border:0;color:var(--bulma-link-text);font-size:1.25rem;cursor:pointer}
+.mobile-btn:hover{background:rgba(255,255,255,.08)}
+#react-picker{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);display:none;z-index:100;background:var(--bulma-body-background-color);border:1px solid var(--bulma-border);border-radius:.5rem;padding:.4rem;box-shadow:0 4px 16px rgba(0,0,0,.4);gap:4px}
+#react-picker.open{display:flex}
+#react-picker button{background:transparent;border:0;padding:.25rem .4rem;font-size:1.25rem;border-radius:.3rem;cursor:pointer;line-height:1}
+#react-picker button:hover{background:rgba(255,255,255,.12)}
+@media(max-width:1024px){
+ .navbar{flex-wrap:wrap}
+ .navbar-brand{width:100%;justify-content:space-between;align-items:center}
+ .navbar-brand>.navbar-item:first-child{flex-shrink:0}
+ .navbar-brand #channel-topic{display:none}
+ .navbar-brand .topic-edit{display:none}
+ .navbar-end{justify-content:space-between;width:100%;padding:0 .5rem;display:flex}
+ .navbar-end .navbar-item{padding:.25rem .3rem}
+ .navbar-end .field.has-addons{width:100%}
+ .navbar-end .field.has-addons .control.is-expanded{display:flex}
+ .navbar-end .field.has-addons .input{width:100%}
+ .mobile-btn{display:flex!important}
+ body{overflow-x:hidden}
+ .columns{position:relative;overflow-x:hidden}
+ #sidebar,#member-panel{position:fixed;top:0;bottom:0;width:260px;max-width:80vw;background:var(--bulma-body-background-color);z-index:100;transition:transform .2s ease;transform:translateX(-110%);display:flex;flex-direction:column;padding:0;box-shadow:4px 0 16px rgba(0,0,0,.4)}
+ #sidebar{left:0;border-right:1px solid var(--bulma-border)}
+ #member-panel{right:0;border-left:1px solid var(--bulma-border);transform:translateX(110%);box-shadow:-4px 0 16px rgba(0,0,0,.4)}
+ #sidebar.open,#member-panel.open{transform:translateX(0)}
+ #messages .msg{font-size:.9rem;grid-template-columns:42px 1fr;padding:.15rem 0}
+ #messages .ts{font-size:.7rem}
+ #send-form .input,#send-form .button{height:2.4rem;font-size:1rem}
+ #send-form .input{padding:.5rem .75rem}
+ #sidebar .menu-list a,#sidebar .menu-label{padding:.5rem .75rem;font-size:.9rem}
+ .modal-content{margin:.75rem;max-width:calc(100vw - 1.5rem)!important}
+}
+@media(max-width:1024px) and (max-height:500px){
+ #send-form .input,#send-form .button{height:2rem;font-size:.9rem}
+}
+</style>
+</head>
+<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:"",my_reactions:{},picker_msgid:"",picker_open:false}' data-auth-handle="{{login_handle}}">
+<section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
+  <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
+    <div class="navbar-brand" style="min-height:2.5rem">
+      <button class="mobile-btn" type="button" onclick="toggleSidebar()" aria-label="Channels">&#x2630;</button>
+      <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
+      <span class="navbar-item has-text-link py-1">#{{channel}}</span>
+      <button class="mobile-btn" type="button" onclick="toggleMembers()" aria-label="Members">&#x1F465;</button>
+      <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic" data-attr:style="$editing_topic ? 'display:none' : ''">{{topic}}</span><form class="field has-addons mb-0" data-attr:style="$auth_handle == '' || !$editing_topic ? 'display:none' : ''" data-on:submit="@post('/chat/{{channel}}/topic')"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" data-bind:topic_draft style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form><button class="button is-small is-dark ml-2" type="button" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
+    </div>
+    <div class="navbar-end">
+      <div class="navbar-item py-1">
+        <form id="join-form" data-signals="{channel:''}" data-on:submit="@post('/chat/_new/join')" data-signals-merge class="field has-addons">
+          <div class="control"><input class="input is-small" type="text" name="channel" placeholder="join #…" autocomplete="off" data-bind:channel style="width:80px"></div>
+          <div class="control"><button class="button is-small is-link" type="submit">+</button></div>
+        </form>
+      </div>
+      <span class="navbar-item has-text-success is-size-7 py-1" data-attr:style="$auth_handle == '' ? 'display:none' : ''">&#x1f512; <span data-text="$auth_handle"></span></span>
+      <div class="navbar-item py-1" data-attr:style="$auth_handle == '' ? '' : 'display:none'"><a class="button is-small is-link is-outlined" href="/login">Sign in</a></div>
+      <div class="navbar-item py-1 is-size-7"><span id="status"><span class="dot"></span> <span>connecting…</span></span></div>
+    </div>
+  </nav>
+  <div class="columns is-gapless is-mobile" style="flex:1;min-height:0;margin-top:0">
+    <div class="column is-narrow" id="sidebar" style="width:165px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
+      <div class="menu">
+        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle" data-target="my-channels" style="font-size:.65rem;letter-spacing:.05em">MY CHANNELS</p>
+        <ul class="menu-list" id="my-channels">
+        {% for ch in channels -%}{% if ch.name in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
+        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
+        {% endif %}{%- endfor %}</ul>
+        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle collapsed" data-target="all-channels" style="font-size:.65rem;letter-spacing:.05em">ALL CHANNELS</p>
+        <ul class="menu-list" id="all-channels" style="display:none">
+        {% for ch in channels -%}{% if ch.name not in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
+        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
+        {% endif %}{%- endfor %}</ul>
+      </div>
+    </div>
+    <div class="column" style="display:flex;flex-direction:column;min-height:0">
+      <div id="messages" class="px-3 py-2">{{initial_messages_html|safe}}</div>
+      <form id="send-form" data-signals="{msg:'',uploading:false}" data-on:submit="@post('/chat/{{channel}}/send')" data-signals-merge class="field has-addons mb-0 px-2 py-2" style="border-top:1px solid var(--bulma-border);flex-shrink:0">
+        <div class="control is-expanded"><input class="input is-small" type="text" name="msg" placeholder="Send to #{{channel}}…" autocomplete="off" autofocus data-bind:msg data-attr:disabled="$uploading" data-attr:placeholder="$uploading ? 'Uploading image…' : 'Send to #{{channel}}…'"></div>
+        <div class="control"><button class="button is-small is-link" type="submit" data-attr:disabled="$uploading">Send</button></div>
+        <div class="control"><button class="button is-small is-dark" type="button" data-on:click="@post('/chat/{{channel}}/part')">x</button></div>
+      </form>
+    </div>
+    <div class="column is-narrow is-size-7" style="width:165px;overflow-y:auto;border-left:1px solid var(--bulma-border);padding:.3rem .4rem" id="member-panel"><div class="has-text-grey">-</div></div>
+  </div>
+</section>
+<div id="react-picker" role="menu" aria-label="React with emoji" data-class:open="$picker_open ? 'open' : ''"></div>
+<div id="mobile-backdrop" onclick="closeDrawers()"></div>
+<div class="modal" id="oauth-modal">
+  <div class="modal-background" style="background:rgba(0,0,0,.7)" onclick="document.getElementById('oauth-modal').classList.remove('is-active')"></div>
+  <div class="modal-content" style="max-width:420px">
+    <div class="box has-background-dark has-text-light">
+      <p class="has-text-weight-bold mb-2">Sign in with your AT Protocol identity</p>
+      <p class="is-size-7 has-text-grey mb-3">Click below to authorize with your PDS:</p>
+      <a id="oauth-link" class="button is-link is-fullwidth" href="#">Open authorization page</a>
+    </div>
+  </div>
+</div>
+<div class="modal" id="policy-modal">
+  <div class="modal-background" style="background:rgba(0,0,0,.7)" onclick="document.getElementById('policy-modal').classList.remove('is-active')"></div>
+  <div class="modal-content" style="max-width:600px"><div class="box">
+    <p class="has-text-weight-bold mb-2">Channel Policy: <span id="policy-channel-name"></span></p>
+    <div id="policy-body" class="is-size-7"><p class="has-text-grey">Loading…</p></div>
+  </div></div>
+</div>
+<script>
+function bindSidebarToggles(){
+  document.querySelectorAll('.sidebar-toggle').forEach(function(el){
+    el.addEventListener('click',function(){
+      var id=el.getAttribute('data-target');
+      var ul=id?document.getElementById(id):el.nextElementSibling;
+      if(!ul)return;
+      var collapsed=el.classList.toggle('collapsed');
+      ul.style.display=collapsed?'none':'';
+    });
+  });
+}
+bindSidebarToggles();
+
+// Mobile drawer helpers. On screens > 768px wide the sidebars render inline
+// (per the default flex layout); on mobile the CSS positions them off-screen
+// and toggles transform via the .open class. The backdrop dims the page.
+function isMobile(){return window.matchMedia('(max-width: 768px)').matches;}
+function toggleSidebar(){
+  var s=document.getElementById('sidebar');
+  var m=document.getElementById('member-panel');
+  var b=document.getElementById('mobile-backdrop');
+  if(!s)return;
+  var open=!s.classList.contains('open');
+  s.classList.toggle('open',open);
+  if(m)m.classList.remove('open');
+  if(b)b.classList.toggle('open',open);
+}
+function toggleMembers(){
+  var s=document.getElementById('sidebar');
+  var m=document.getElementById('member-panel');
+  var b=document.getElementById('mobile-backdrop');
+  if(!m)return;
+  var open=!m.classList.contains('open');
+  m.classList.toggle('open',open);
+  if(s)s.classList.remove('open');
+  if(b)b.classList.toggle('open',open);
+}
+function closeDrawers(){
+  var s=document.getElementById('sidebar');
+  var m=document.getElementById('member-panel');
+  var b=document.getElementById('mobile-backdrop');
+  if(s)s.classList.remove('open');
+  if(m)m.classList.remove('open');
+  if(b)b.classList.remove('open');
+}
+window.toggleSidebar=toggleSidebar;
+window.toggleMembers=toggleMembers;
+window.closeDrawers=closeDrawers;
+(function(){
+  var picker=document.getElementById('react-picker');
+  if(!picker)return;
+  var EMOJIS=['👍','❤️','😂','🔥','😮','👎','🎉','🤔'];
+  picker.innerHTML=EMOJIS.map(function(e){
+    return '<button type="button" data-emoji="'+e+'" data-on:click="$picker_open=false;window.reactFromPicker($picker_msgid,\''+e+'\')">'+e+'</button>';
+  }).join('');
+  // Close on outside click via a tiny dispatch on the hidden input.
+  document.addEventListener('click',function(ev){
+    if(picker.contains(ev.target))return;
+    if(ev.target.classList&&ev.target.classList.contains('react-btn'))return;
+    var el=document.querySelector('[data-bind\\:picker_open]');
+    if(!el)return;
+    el.value='false';
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+  });
+})();
+
+// Signal-mutating helpers. The `+` button calls openReactPicker(msgid) to
+// show the picker. Picker buttons call reactFromPicker(emoji) to toggle the
+// reaction and POST to the server. Both use the standard `data-bind` input +
+// `input` event pattern so DataStar picks up the change.
+function openReactPicker(msgid){
+  try{
+    msgid=String(msgid||'');
+    if(!msgid)return;
+    window.__pickerMsgid=msgid;
+  }catch(e){console.error('openReactPicker failed',e);}
+}
+function reactFromPicker(mid,emoji){
+  try{
+    mid=String(mid||'');emoji=String(emoji||'');
+    if(!mid||!emoji)return;
+    var body=document.body;
+    var sigs={};
+    try{sigs=JSON.parse(body.getAttribute('data-signals')||'{}');}catch(e){}
+    sigs.my_reactions=sigs.my_reactions||{};
+    var list=sigs.my_reactions[mid]||[];
+    var has=list.indexOf(emoji)>=0;
+    list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
+    sigs.my_reactions[mid]=list;
+    body.setAttribute('data-signals',JSON.stringify(sigs));
+
+    // Immediate UI update so the user sees feedback without waiting for refresh.
+    updateReactionChip(mid,emoji,!has);
+
+    var url='/chat/{{channel}}/'+(has?'unreact':'react');
+    fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:mid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
+      if(!r.ok){
+        // Roll back local state and UI on server rejection.
+        try{sigs=JSON.parse(body.getAttribute('data-signals')||'{}');}catch(e){}
+        sigs.my_reactions=sigs.my_reactions||{};
+        var l=sigs.my_reactions[mid]||[];
+        l=has?l.concat([emoji]):l.filter(function(e){return e!==emoji;});
+        sigs.my_reactions[mid]=l;
+        body.setAttribute('data-signals',JSON.stringify(sigs));
+        updateReactionChip(mid,emoji,has);
+        console.error((has?'unreact':'react')+' failed',r.status);
+      }
+    });
+  }catch(e){console.error('reactFromPicker failed',e);}
+}
+
+// Add/remove a chip and the .mine highlight for the current user.
+function updateReactionChip(mid,emoji,mine){
+  mid=String(mid||'');emoji=String(emoji||'');
+  if(!mid||!emoji)return;
+  var row=document.querySelector('.msg[data-msgid="'+mid.replace(/"/g,'\\"')+'"]');
+  if(!row)return;
+  var container=row.querySelector('.reactions');
+  if(!container)return;
+  var chip=container.querySelector('.reaction-chip[data-emoji="'+emoji.replace(/"/g,'\\"')+'"]');
+  var me=document.body.getAttribute('data-auth-handle')||'you';
+  if(chip){
+    var title=(chip.getAttribute('title')||'').split(', ').filter(function(n){return n&&n!==me;});
+    if(mine)title.push(me);
+    var newTitle=title.join(', ');
+    var count=title.length;
+    chip.setAttribute('title',newTitle);
+    chip.textContent=count<=1?emoji:(emoji+' '+count);
+    chip.classList.toggle('mine',mine);
+  }else if(mine){
+    var b=document.createElement('button');
+    b.type='button';
+    b.className='reaction-chip mine';
+    b.setAttribute('data-emoji',emoji);
+    b.setAttribute('data-msgid',mid);
+    b.setAttribute('title',me);
+    b.setAttribute('data-class:mine',"window.isReacted('"+mid.replace(/'/g,"\\'")+"','"+emoji.replace(/'/g,"\\'")+"')?'':''");
+    b.textContent=emoji;
+    b.onclick=function(){window.toggleReaction(mid,emoji);};
+    var plus=container.querySelector('.react-btn');
+    if(plus)container.insertBefore(b,plus);
+    else container.appendChild(b);
+  }
+}
+// Update a chip based on a live reaction from another user.
+function updateReactionChipFromServer(mid,emoji,nick,added){
+  mid=String(mid||'');emoji=String(emoji||'');nick=String(nick||'');
+  if(!mid||!emoji||!nick)return;
+  var row=document.querySelector('.msg[data-msgid="'+mid.replace(/"/g,'\\"')+'"]');
+  if(!row)return;
+  var container=row.querySelector('.reactions');
+  if(!container)return;
+  var chip=container.querySelector('.reaction-chip[data-emoji="'+emoji.replace(/"/g,'\\"')+'"]');
+  if(chip){
+    var title=(chip.getAttribute('title')||'').split(', ').filter(function(n){return n&&n!==nick;});
+    if(added)title.push(nick);
+    var newTitle=title.join(', ');
+    var count=title.length;
+    chip.setAttribute('title',newTitle);
+    chip.textContent=count<=1?emoji:(emoji+' '+count);
+  }else if(added){
+    var b=document.createElement('button');
+    b.type='button';
+    b.className='reaction-chip';
+    b.setAttribute('data-emoji',emoji);
+    b.setAttribute('data-msgid',mid);
+    b.setAttribute('title',nick);
+    b.setAttribute('data-class:mine',"window.isReacted('"+mid.replace(/'/g,"\\'")+"','"+emoji.replace(/'/g,"\\'")+"')?'':''");
+    b.textContent=emoji;
+    b.onclick=function(){window.toggleReaction(mid,emoji);};
+    var plus=container.querySelector('.react-btn');
+    if(plus)container.insertBefore(b,plus);
+    else container.appendChild(b);
+  }
+}
+window.updateReactionChipFromServer=updateReactionChipFromServer;
+// Check if a (msgid, emoji) is in the current user's reaction set.
+function isReacted(msgid,emoji){
+  msgid=String(msgid||'');emoji=String(emoji||'');
+  if(!msgid||!emoji)return false;
+  var sigs={};
+  try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+  var list=(sigs.my_reactions&&sigs.my_reactions[msgid])||[];
+  return list.indexOf(emoji)>=0;
+}
+
+// Toggle a chip's reaction. Reads $my_reactions[msgid] from the body signal,
+// flips the entry for the given emoji, writes the signal back, then POSTs.
+function toggleReaction(msgid,emoji){
+  msgid=String(msgid||'');emoji=String(emoji||'');
+  if(!msgid||!emoji)return;
+  var sigs={};
+  try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+  sigs.my_reactions=sigs.my_reactions||{};
+  var list=sigs.my_reactions[msgid]||[];
+  var has=list.indexOf(emoji)>=0;
+  list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
+  sigs.my_reactions[msgid]=list;
+  document.body.setAttribute('data-signals',JSON.stringify(sigs));
+  // Re-render this row's chip set with the new .mine state.
+  var row=document.querySelector('.msg[data-msgid="'+msgid.replace(/"/g,'\\"')+'"]');
+  if(row){
+    var chips=row.querySelectorAll('.reaction-chip');
+    for(var i=0;i<chips.length;i++){
+      var e=chips[i].getAttribute('data-emoji');
+      if(!e)continue;
+      if(e===emoji){
+        if(has)chips[i].classList.remove('mine');
+        else chips[i].classList.add('mine');
+      }
+    }
+  }
+  var url='/chat/{{channel}}/'+(has?'unreact':'react');
+  fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:msgid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
+    if(!r.ok){
+      // Roll back local state on server rejection.
+      try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+      sigs.my_reactions=sigs.my_reactions||{};
+      var l=sigs.my_reactions[msgid]||[];
+      l=has?l.concat([emoji]):l.filter(function(e){return e!==emoji;});
+      sigs.my_reactions[msgid]=l;
+      document.body.setAttribute('data-signals',JSON.stringify(sigs));
+      console.error((has?'unreact':'react')+' failed',r.status);
+    }
+  });
+}
+window.isReacted=isReacted;
+window.toggleReaction=toggleReaction;
+
+function showPolicy(channel){
+  var modal=document.getElementById('policy-modal');
+  var body=document.getElementById('policy-body');
+  var name=document.getElementById('policy-channel-name');
+  modal.classList.add('is-active');
+  name.textContent='#'+channel;
+  body.innerHTML='<p class="has-text-grey">Loading…</p>';
+  Promise.all([
+    fetch('/api/policy/'+encodeURIComponent(channel)).then(function(r){return r.text().then(function(t){return {ok:r.ok,status:r.status,text:t}})}),
+    fetch('/api/policy/'+encodeURIComponent(channel)+'/rules').then(function(r){return r.text().then(function(t){return {ok:r.ok,status:r.status,text:t}})})
+  ]).then(function(resps){
+    var policyResp=resps[0],rulesResp=resps[1];
+    if(!policyResp.ok && policyResp.status===404){body.innerHTML='<p class="has-text-grey">No policy is set for this channel.</p>';return;}
+    if(!policyResp.ok){body.innerHTML='<p class="has-text-danger">Failed to load policy: '+policyResp.status+'</p>';return;}
+    var rulesText=null;
+    if(rulesResp.ok){
+      try{var rulesDoc=JSON.parse(rulesResp.text);rulesText=rulesDoc.text||null;}catch(e){}
+    }
+    try{var doc=JSON.parse(policyResp.text);body.innerHTML=renderPolicy(doc,rulesText);}
+    catch(e){body.innerHTML='<p class="has-text-danger">Invalid response</p>';}
+  }).catch(function(e){body.innerHTML='<p class="has-text-danger">Error: '+e.message+'</p>';});
+}
+function renderPolicy(data,rulesText){
+  var p=data.policy||{};
+  var auth=data.authority_set;
+  var html='<div class="policy-visual">';
+  html+='<div class="level is-mobile mb-2" style="border-bottom:1px solid var(--bulma-border);padding-bottom:.5rem">';
+  html+='<div class="level-left"><div class="level-item"><span class="tag is-info is-light">Version '+(p.version||'?')+'</span></div></div>';
+  html+='<div class="level-right"><div class="level-item"><span class="has-text-grey">'+(p.effective_at?new Date(p.effective_at).toLocaleString():'')+'</span></div></div>';
+  html+='</div>';
+  if(rulesText){
+    html+='<h4 class="has-text-weight-semibold mb-1">Channel rules</h4>';
+    html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15);white-space:pre-wrap;overflow-wrap:anywhere">'+esc(rulesText)+'</div>';
+  }
+  html+='<h4 class="has-text-weight-semibold mb-1">To join this channel</h4>';
+  html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">'+renderRequirement(p.requirements)+'</div>';
+  if(auth&&auth.signers&&auth.signers.length){
+    html+='<h4 class="has-text-weight-semibold mb-1">Authorities <span class="tag is-small is-dark">threshold '+(auth.policy_threshold||1)+'</span></h4>';
+    html+='<ul class="mb-3">';
+    for(var i=0;i<auth.signers.length;i++){
+      var s=auth.signers[i];
+      html+='<li class="is-size-7 has-text-grey"><code style="background:transparent;padding:0">'+esc(s.did)+'</code>'+(s.label?' — '+esc(s.label):'')+'</li>';
+    }
+    html+='</ul>';
+  }
+  if(p.role_requirements&&Object.keys(p.role_requirements).length){
+    html+='<h4 class="has-text-weight-semibold mb-1">Role requirements</h4>';
+    html+='<div class="box py-2 px-3 mb-3" style="background:rgba(0,0,0,.15)">';
+    for(var role in p.role_requirements){
+      html+='<div class="mb-2"><span class="tag is-small is-link">'+esc(role)+'</span></div>';
+      html+=renderRequirement(p.role_requirements[role]);
+    }
+    html+='</div>';
+  }
+  html+='</div>';
+  html+='<details class="policy-raw"><summary class="has-text-grey" style="cursor:pointer;user-select:none">Raw JSON</summary>';
+  html+='<pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:40vh;overflow:auto;margin-top:.5rem">'+esc(JSON.stringify(data,null,2))+'</pre>';
+  html+='</details>';
+  return html;
+}
+function renderRequirement(req,depth){
+  if(!req)return '<p class="has-text-grey">No requirements</p>';
+  depth=depth||0;
+  var t=req.type;
+  if(t==='ACCEPT')return '<div class="mb-1"><span class="has-text-success">&#10003;</span> Accept the channel rules <code class="is-size-8">'+esc((req.hash||'').slice(0,12))+'</code></div>';
+  if(t==='PRESENT')return '<div class="mb-1"><span class="has-text-info">&#9679;</span> Present credential <span class="tag is-small is-light">'+esc(req.credential_type)+'</span>'+(req.issuer?' from <code>'+esc(req.issuer)+'</code>':'')+'</div>';
+  if(t==='PROVE')return '<div class="mb-1"><span class="has-text-warning">&#9679;</span> Prove capability <span class="tag is-small is-light">'+esc(req.proof_type)+'</span></div>';
+  if(t==='ALL'){var h='<div class="mb-1"><span class="tag is-small is-black">ALL of</span></div><ul class="ml-4" style="list-style:disc">';for(var i=0;i<req.requirements.length;i++)h+='<li>'+renderRequirement(req.requirements[i],depth+1)+'</li>';h+='</ul>';return h;}
+  if(t==='ANY'){var h='<div class="mb-1"><span class="tag is-small is-grey">ANY of</span></div><ul class="ml-4" style="list-style:disc">';for(var i=0;i<req.requirements.length;i++)h+='<li>'+renderRequirement(req.requirements[i],depth+1)+'</li>';h+='</ul>';return h;}
+  if(t==='NOT')return '<div class="mb-1"><span class="tag is-small is-danger">NOT</span> '+renderRequirement(req.requirement,depth+1)+'</div>';
+  return '<div class="mb-1"><code>'+esc(JSON.stringify(req))+'</code></div>';
+}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+(function(){var m=document.getElementById('messages');if(m){requestAnimationFrame(function(){requestAnimationFrame(function(){m.scrollTop=m.scrollHeight})});new MutationObserver(function(){m.scrollTop=m.scrollHeight}).observe(m,{childList:!0})}})();
+(function(){var inp=document.querySelector('#send-form input[name=msg]'),form=document.getElementById('send-form');if(!inp||!form)return;inp.addEventListener('paste',function(e){var items=e.clipboardData&&e.clipboardData.items;if(!items)return;for(var i=0;i<items.length;i++){if(items[i].type.indexOf('image/')!==0)continue;var file=items[i].getAsFile();if(!file)continue;e.preventDefault();form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:true}));var fd=new FormData;fd.append('file',file,'paste.'+(items[i].type.split('/')[1]||'png'));fd.append('channel','#{{channel}}');fetch('/upload',{method:'POST',body:fd}).then(function(r){var ct=r.headers.get('content-type')||'';var p=ct.includes('json')?r.json():r.text().then(function(t){throw new Error(t||'Upload failed')});return p.then(function(j){if(!r.ok)throw new Error(j.message||j.error||'Upload failed');return j.url})}).then(function(url){var start=inp.selectionStart||0,end=inp.selectionEnd||0,t=inp.value;inp.value=t.slice(0,start)+url+' '+t.slice(end);var pos=start+url.length+1;inp.setSelectionRange(pos,pos)}).catch(function(err){alert('Upload failed: '+err.message)}).finally(function(){form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:false}));inp.focus()});return}})})();
+(function(){
+  var s=localStorage.getItem('freeq_handle');
+  function connect(){
+    var src=new EventSource('/chat/{{channel}}/events');
+    src.addEventListener('datastar-patch-signals',function(e){
+      var l=e.data.split('\n');
+      for(var i=0;i<l.length;i++){if(l[i].startsWith('signals '))try{var s=JSON.parse(l[i].slice(8));if(s.msg!==undefined){var inp=document.querySelector('#send-form input[name=msg]');if(inp)inp.value=s.msg}}catch(e){}}
+    });
+    src.addEventListener('topicupdate',function(e){
+      var t=document.getElementById('channel-topic');
+      if(t){try{t.textContent=JSON.parse(e.data)}catch(x){t.textContent=e.data}}
+    });
+    src.addEventListener('datastar-patch-elements',function(e){
+      var l=e.data.split('\n'),sel=null,mode='outer',els=null;
+      for(var i=0;i<l.length;i++){
+        if(l[i].startsWith('selector '))sel=l[i].slice(9);
+        else if(l[i].startsWith('mode '))mode=l[i].slice(5);
+        else if(l[i].startsWith('elements '))els=l[i].slice(9);
+      }
+      if(!els)return;
+      if(sel==='body'||sel===' body'){var d=document.createElement('div');d.innerHTML=els;var ss=d.querySelectorAll('script[data-effect]');for(var i=0;i<ss.length;i++)try{(new Function(ss[i].textContent))()}catch(e){};return}
+      var t=sel?document.querySelector(sel):null;if(!t)return;
+      if(mode==='append')t.insertAdjacentHTML('beforeend',els);else t.innerHTML=els;
+    });
+    src.onopen=function(){var st=document.getElementById('status');if(st){st.classList.add('connected');st.lastChild.textContent='connected'}};
+  }
+  {% if show_login or show_oauth_prompt %}
+  if(s&&!sessionStorage.getItem('freeq_retry')){
+    sessionStorage.setItem('freeq_retry','1');
+    fetch('/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'identifier='+encodeURIComponent(s),redirect:'manual'}).then(connect);
+  }else{connect()}
+  {% else %}
+  connect();
+  {% endif %}
+})();
+</script>
+<script>
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(function(e){console.error('SW registration failed',e);});
+}
+</script>
+</body>
+</html>

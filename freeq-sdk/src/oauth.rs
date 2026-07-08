@@ -14,17 +14,11 @@ use std::collections::HashMap;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
 use anyhow::{Context, Result, bail};
-// base64 + Digest are only used by the test helpers now that DpopKey/PKCE
-// moved to freeq-oauth; Sha256 is still used at module level (HKDF).
-#[cfg(test)]
 use base64::Engine;
-#[cfg(test)]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hkdf::Hkdf;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use sha2::Digest;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -37,18 +31,25 @@ pub struct OAuthSession {
     pub did: String,
     pub handle: String,
     pub access_token: String,
+    /// Refresh token for renewing the access token when it expires.
+    pub refresh_token: Option<String>,
+    /// Token endpoint URL for refresh requests.
+    pub token_endpoint: String,
+    /// OAuth client_id used during authorization.
+    pub client_id: String,
     pub pds_url: String,
     pub dpop_key: DpopKey,
     /// DPoP nonce for the PDS (discovered during token exchange or pre-flight).
     pub dpop_nonce: Option<String>,
 }
-
-/// Serializable form of an OAuth session for disk caching.
 #[derive(Serialize, Deserialize)]
 struct CachedSession {
     did: String,
     handle: String,
     access_token: String,
+    refresh_token: Option<String>,
+    token_endpoint: String,
+    client_id: String,
     pds_url: String,
     dpop_key: String,
     dpop_nonce: Option<String>,
@@ -64,6 +65,9 @@ impl OAuthSession {
             did: self.did.clone(),
             handle: self.handle.clone(),
             access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            token_endpoint: self.token_endpoint.clone(),
+            client_id: self.client_id.clone(),
             pds_url: self.pds_url.clone(),
             dpop_key: self.dpop_key.to_base64url(),
             dpop_nonce: self.dpop_nonce.clone(),
@@ -97,6 +101,9 @@ impl OAuthSession {
             did: self.did.clone(),
             handle: self.handle.clone(),
             access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            token_endpoint: self.token_endpoint.clone(),
+            client_id: self.client_id.clone(),
             pds_url: self.pds_url.clone(),
             dpop_key: self.dpop_key.to_base64url(),
             dpop_nonce: self.dpop_nonce.clone(),
@@ -141,6 +148,9 @@ impl OAuthSession {
             did: cached.did,
             handle: cached.handle,
             access_token: cached.access_token,
+            refresh_token: cached.refresh_token,
+            token_endpoint: cached.token_endpoint,
+            client_id: cached.client_id,
             pds_url: cached.pds_url,
             dpop_key,
             dpop_nonce: cached.dpop_nonce,
@@ -169,6 +179,9 @@ impl OAuthSession {
             did: cached.did,
             handle: cached.handle,
             access_token: cached.access_token,
+            refresh_token: cached.refresh_token,
+            token_endpoint: cached.token_endpoint,
+            client_id: cached.client_id,
             pds_url: cached.pds_url,
             dpop_key,
             dpop_nonce: cached.dpop_nonce,
@@ -206,6 +219,109 @@ impl OAuthSession {
 
         Ok(self)
     }
+
+    /// Refresh the access token using the stored refresh token.
+    ///
+    /// Calls the token endpoint with `grant_type=refresh_token`. Updates
+    /// `access_token`, `refresh_token` (if the server issued a new one),
+    /// and `dpop_nonce` in place. Returns `Ok(())` on success.
+    ///
+    /// Fails if no refresh token is available or the token endpoint
+    /// rejects the request.
+    pub async fn refresh(&mut self) -> Result<()> {
+        let rt = self
+            .refresh_token
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No refresh token available"))?;
+
+        let client = reqwest::Client::new();
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", rt.as_str()),
+            ("client_id", self.client_id.as_str()),
+        ];
+
+        let dpop_proof = self.dpop_key.proof(
+            "POST",
+            &self.token_endpoint,
+            self.dpop_nonce.as_deref(),
+            None,
+        )?;
+        let resp = client
+            .post(&self.token_endpoint)
+            .header("DPoP", &dpop_proof)
+            .form(&params)
+            .send()
+            .await
+            .context("Token refresh request failed")?;
+
+        // Capture DPoP nonce from response headers
+        if let Some(nonce) = resp
+            .headers()
+            .get("dpop-nonce")
+            .and_then(|v| v.to_str().ok())
+        {
+            self.dpop_nonce = Some(nonce.to_string());
+        }
+
+        // Handle use_dpop_nonce retry
+        let status = resp.status();
+        if (status.as_u16() == 400 || status.as_u16() == 401) && self.dpop_nonce.is_some() {
+            let dpop_proof_retry = self.dpop_key.proof(
+                "POST",
+                &self.token_endpoint,
+                self.dpop_nonce.as_deref(),
+                None,
+            )?;
+            let resp2 = client
+                .post(&self.token_endpoint)
+                .header("DPoP", &dpop_proof_retry)
+                .form(&params)
+                .send()
+                .await
+                .context("Token refresh retry failed")?;
+
+            if !resp2.status().is_success() {
+                let status = resp2.status();
+                let text = resp2.text().await.unwrap_or_default();
+                anyhow::bail!("Token refresh failed ({status}): {text}");
+            }
+
+            // Update DPoP nonce from retry response
+            if let Some(nonce) = resp2
+                .headers()
+                .get("dpop-nonce")
+                .and_then(|v| v.to_str().ok())
+            {
+                self.dpop_nonce = Some(nonce.to_string());
+            }
+
+            let token_resp: TokenResponse = resp2
+                .json()
+                .await
+                .context("Failed to parse token refresh response")?;
+            self.access_token = token_resp.access_token;
+            if token_resp.refresh_token.is_some() {
+                self.refresh_token = token_resp.refresh_token;
+            }
+            return Ok(());
+        }
+
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Token refresh failed ({status}): {text}");
+        }
+
+        let token_resp: TokenResponse = resp
+            .json()
+            .await
+            .context("Failed to parse token refresh response")?;
+        self.access_token = token_resp.access_token;
+        if token_resp.refresh_token.is_some() {
+            self.refresh_token = token_resp.refresh_token;
+        }
+        Ok(())
+    }
 }
 
 /// Default path for the cached session file.
@@ -235,121 +351,364 @@ pub fn derive_session_key(machine_secret: &[u8], did: &str) -> [u8; 32] {
     key
 }
 
+/// Authorization server metadata (RFC 8414 / AT Protocol extensions).
+#[derive(Debug, Clone, Deserialize)]
+struct AuthServerMetadata {
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    #[serde(default)]
+    pushed_authorization_request_endpoint: Option<String>,
+}
+
+/// Protected resource metadata for discovering the authorization server.
+#[derive(Debug, Clone, Deserialize)]
+struct ProtectedResourceMetadata {
+    #[serde(default)]
+    authorization_servers: Vec<String>,
+}
+
 /// Token response from the authorization server.
 #[derive(Debug, Clone, Deserialize)]
 struct TokenResponse {
     access_token: String,
     #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
     sub: Option<String>,
 }
 
-// DPoP key + proof now live in the shared engine crate. Re-exported so the
-// `freeq_sdk::oauth::DpopKey` path stays stable for downstream consumers
-// (freeq-server, freeq-sdk-ffi, etc.).
-pub use freeq_oauth::DpopKey;
+/// A DPoP (Demonstrating Proof-of-Possession) key pair.
+#[derive(Debug, Clone)]
+pub struct DpopKey {
+    signing_key: p256::ecdsa::SigningKey,
+}
+
+impl DpopKey {
+    pub fn generate() -> Self {
+        let signing_key = p256::ecdsa::SigningKey::random(&mut rand::thread_rng());
+        Self { signing_key }
+    }
+
+    /// Serialize the private key as base64url for caching.
+    pub fn to_base64url(&self) -> String {
+        URL_SAFE_NO_PAD.encode(self.signing_key.to_bytes())
+    }
+
+    /// Deserialize from base64url.
+    pub fn from_base64url(s: &str) -> Result<Self> {
+        let bytes = URL_SAFE_NO_PAD.decode(s)?;
+        let signing_key = p256::ecdsa::SigningKey::from_slice(&bytes)
+            .map_err(|e| anyhow::anyhow!("Invalid DPoP key: {e}"))?;
+        Ok(Self { signing_key })
+    }
+
+    fn jwk(&self) -> serde_json::Value {
+        let verifying_key = self.signing_key.verifying_key();
+        let point = verifying_key.to_encoded_point(false);
+        let x = URL_SAFE_NO_PAD.encode(point.x().unwrap());
+        let y = URL_SAFE_NO_PAD.encode(point.y().unwrap());
+        serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": x,
+            "y": y,
+        })
+    }
+
+    /// Create a DPoP proof JWT for a request.
+    ///
+    /// When `access_token` is provided, includes the `ath` (access token hash)
+    /// claim as required by RFC 9449 §4.2 when the proof accompanies a token.
+    pub fn proof(
+        &self,
+        method: &str,
+        url: &str,
+        nonce: Option<&str>,
+        access_token: Option<&str>,
+    ) -> Result<String> {
+        use p256::ecdsa::{Signature, signature::Signer};
+
+        let header = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "ES256",
+            "jwk": self.jwk(),
+        });
+
+        let mut payload = serde_json::json!({
+            "jti": generate_random_string(16),
+            "htm": method,
+            "htu": url,
+            "iat": chrono::Utc::now().timestamp(),
+        });
+        if let Some(nonce) = nonce {
+            payload["nonce"] = serde_json::Value::String(nonce.to_string());
+        }
+        if let Some(token) = access_token {
+            // ath = base64url(SHA-256(access_token))
+            let hash = Sha256::digest(token.as_bytes());
+            payload["ath"] = serde_json::Value::String(URL_SAFE_NO_PAD.encode(hash));
+        }
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
+        let signing_input = format!("{header_b64}.{payload_b64}");
+
+        let sig: Signature = self.signing_key.sign(signing_input.as_bytes());
+        let sig_b64 = URL_SAFE_NO_PAD.encode(sig.to_bytes());
+
+        Ok(format!("{signing_input}.{sig_b64}"))
+    }
+}
+
+/// Prepared, but not yet started, AT Protocol OAuth login.
+///
+/// Holds the TCP listener, PKCE verifier, DPoP key, and PAR state needed to
+/// complete the flow. Callers that cannot hand the user's browser to
+/// `login()` (e.g. a web UI running in a separate process) can obtain the
+/// authorization URL with [`auth_url`](Self::auth_url), direct the user to
+/// it, and then call [`wait`](Self::wait) to exchange the resulting code
+/// for an [`OAuthSession`].
+pub struct PreparedLogin {
+    auth_url: String,
+    redirect_uri: String,
+    client_id: String,
+    state: String,
+    code_verifier: String,
+    token_endpoint: String,
+    pds_url: String,
+    dpop_key: DpopKey,
+    /// TCP listener for loopback OAuth callback. None for web-based flow.
+    listener: Option<TcpListener>,
+    did: String,
+    handle: String,
+}
+
+impl PreparedLogin {
+    /// Resolve the handle, discover the authorization server, and push a
+    /// PAR to obtain a browser-ready authorization URL.
+    pub async fn new(handle: &str) -> Result<Self> {
+        let resolver = DidResolver::http();
+
+        tracing::info!("Resolving handle: {handle}");
+        let did = resolver
+            .resolve_handle(handle)
+            .await
+            .context("Failed to resolve handle")?;
+        let did_doc = resolver
+            .resolve(&did)
+            .await
+            .context("Failed to resolve DID document")?;
+        let pds_url =
+            pds::pds_endpoint(&did_doc).context("No PDS service endpoint in DID document")?;
+        tracing::info!(did = %did, pds = %pds_url, "Resolved identity");
+
+        let auth_meta = discover_auth_server(&pds_url).await?;
+        tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
+        let listener = Some(TcpListener::bind("127.0.0.1:0").await?);
+        let port = listener.as_ref().unwrap().local_addr()?.port();
+
+        // Loopback OAuth client. The authorization server infers client
+        // metadata from these query parameters.
+        let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+        let scope = "atproto";
+        let client_id = format!(
+            "http://localhost?redirect_uri={}&scope={}",
+            urlencod(&redirect_uri),
+            urlencod(scope),
+        );
+
+        let (code_verifier, code_challenge) = generate_pkce();
+        let dpop_key = DpopKey::generate();
+        let state = generate_random_string(16);
+
+        let par_endpoint = auth_meta
+            .pushed_authorization_request_endpoint
+            .as_deref()
+            .context("Authorization server does not support PAR")?;
+
+        let auth_url = push_authorization_request(
+            par_endpoint,
+            &auth_meta.authorization_endpoint,
+            &client_id,
+            &redirect_uri,
+            &code_challenge,
+            &state,
+            handle,
+            &dpop_key,
+        )
+        .await?;
+
+        Ok(Self {
+            auth_url,
+            redirect_uri,
+            client_id,
+            state,
+            code_verifier,
+            token_endpoint: auth_meta.token_endpoint,
+            pds_url,
+            dpop_key,
+            listener,
+            did,
+            handle: handle.to_string(),
+        })
+    }
+
+    /// The URL the user must visit to authorize this login.
+    pub fn auth_url(&self) -> &str {
+        &self.auth_url
+    }
+
+    /// The OAuth `state` parameter used for this login.
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    /// Wait for the browser to be redirected back to the loopback listener,
+    /// then exchange the authorization code for tokens.
+    ///
+    /// Only valid for loopback (localhost) logins. Panics if called on a
+    /// web-based `PreparedLogin` created with [`for_web`](Self::for_web).
+    pub async fn wait(mut self) -> Result<OAuthSession> {
+        let listener = self
+            .listener
+            .take()
+            .expect("wait() called on web-based PreparedLogin; use handle_callback() instead");
+        let auth_code = wait_for_callback(listener, &self.state).await?;
+        self.exchange_and_finish(&auth_code).await
+    }
+
+    /// Exchange an authorization code received via a web redirect callback.
+    ///
+    /// Validates that `callback_state` matches `self.state()`, then
+    /// exchanges the code for tokens. Returns the completed `OAuthSession`.
+    pub async fn handle_callback(self, code: &str, callback_state: &str) -> Result<OAuthSession> {
+        if callback_state != self.state {
+            bail!(
+                "State mismatch in OAuth callback: expected {}, got {}",
+                self.state,
+                callback_state
+            );
+        }
+        self.exchange_and_finish(code).await
+    }
+    async fn exchange_and_finish(self, auth_code: &str) -> Result<OAuthSession> {
+        let (access_token, refresh_token, token_did) = exchange_code(
+            &self.token_endpoint,
+            auth_code,
+            &self.code_verifier,
+            &self.redirect_uri,
+            &self.client_id,
+            &self.dpop_key,
+        )
+        .await?;
+
+        check_token_did(&self.did, token_did.as_deref())?;
+
+        let dpop_nonce = probe_dpop_nonce(&self.pds_url, &access_token, &self.dpop_key).await;
+
+        tracing::info!(did = %self.did, dpop_nonce = ?dpop_nonce, has_refresh = refresh_token.is_some(), "OAuth login successful");
+        Ok(OAuthSession {
+            did: self.did,
+            handle: self.handle,
+            access_token,
+            refresh_token,
+            token_endpoint: self.token_endpoint,
+            client_id: self.client_id.clone(),
+            pds_url: self.pds_url,
+            dpop_key: self.dpop_key,
+            dpop_nonce,
+        })
+    }
+
+    /// Create a web-based OAuth login using a public redirect URI.
+    ///
+    /// Use this when freeq-webui is reachable at a public FQDN (e.g. via
+    /// `tailscale funnel`). Unlike [`new`](Self::new), this does NOT bind
+    /// a loopback TCP listener. The caller must:
+    ///
+    /// 1. Serve `/.well-known/oauth-client-metadata` at `public_url`
+    /// 2. Serve `GET {public_url}/auth/callback` to receive the auth code
+    /// 3. Call [`handle_callback`](Self::handle_callback) with the code + state
+    ///
+    /// `public_url` is the origin (scheme + host + optional port), e.g.
+    /// `https://myhost.tailnet.ts.net`.
+    pub async fn for_web(handle: &str, public_url: &str) -> Result<Self> {
+        let resolver = DidResolver::http();
+
+        tracing::info!("Resolving handle: {handle}");
+        let did = resolver
+            .resolve_handle(handle)
+            .await
+            .context("Failed to resolve handle")?;
+        let did_doc = resolver
+            .resolve(&did)
+            .await
+            .context("Failed to resolve DID document")?;
+        let pds_url =
+            pds::pds_endpoint(&did_doc).context("No PDS service endpoint in DID document")?;
+        tracing::info!(did = %did, pds = %pds_url, "Resolved identity");
+
+        let auth_meta = discover_auth_server(&pds_url).await?;
+        tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
+
+        // Web client: the client_id is the URL of the published metadata
+        // document; the PDS fetches it directly.
+        let redirect_uri = format!("{public_url}/auth/callback");
+        let client_id = format!("{public_url}/.well-known/oauth-client-metadata");
+
+        let (code_verifier, code_challenge) = generate_pkce();
+        let dpop_key = DpopKey::generate();
+        let state = generate_random_string(16);
+
+        let par_endpoint = auth_meta
+            .pushed_authorization_request_endpoint
+            .as_deref()
+            .context("Authorization server does not support PAR")?;
+
+        let auth_url = push_authorization_request(
+            par_endpoint,
+            &auth_meta.authorization_endpoint,
+            &client_id,
+            &redirect_uri,
+            &code_challenge,
+            &state,
+            handle,
+            &dpop_key,
+        )
+        .await?;
+
+        Ok(Self {
+            auth_url,
+            redirect_uri,
+            client_id,
+            state,
+            code_verifier,
+            token_endpoint: auth_meta.token_endpoint,
+            pds_url,
+            dpop_key,
+            listener: None,
+            did,
+            handle: handle.to_string(),
+        })
+    }
+}
 
 /// Perform the full OAuth login flow for a Bluesky/AT Protocol handle.
 ///
 /// Opens the user's browser for authorization. Returns an OAuthSession
 /// that can be used to create a PdsSessionSigner.
 pub async fn login(handle: &str) -> Result<OAuthSession> {
-    let resolver = DidResolver::http();
+    let prepared = PreparedLogin::new(handle).await?;
 
-    // 1. Resolve handle → DID → PDS
-    tracing::info!("Resolving handle: {handle}");
-    let did = resolver
-        .resolve_handle(handle)
-        .await
-        .context("Failed to resolve handle")?;
-    let did_doc = resolver
-        .resolve(&did)
-        .await
-        .context("Failed to resolve DID document")?;
-    let pds_url = pds::pds_endpoint(&did_doc).context("No PDS service endpoint in DID document")?;
-    tracing::info!(did = %did, pds = %pds_url, "Resolved identity");
-
-    // 2. Discover authorization server
-    let auth_meta = discover_auth_server(&pds_url).await?;
-    tracing::info!(issuer = %auth_meta.issuer, "Found authorization server");
-
-    // 3. Start local callback server
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let port = listener.local_addr()?.port();
-
-    // AT Protocol loopback OAuth:
-    // client_id = http://localhost with query params declaring scopes and redirect_uri
-    // The auth server infers metadata from these params for loopback clients.
-    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-    // Identity-only scope. Matches the freeq-server's `Login` purpose.
-    // Programs that need broader PDS permissions (e.g. blob upload) call
-    // their own `step_up()` with a wider scope; this default keeps the
-    // CLI consent screen narrow for the common case.
-    let scope = "atproto";
-    let client_id = format!(
-        "http://localhost?redirect_uri={}&scope={}",
-        urlencod(&redirect_uri),
-        urlencod(scope),
-    );
-
-    // 4. Generate PKCE and DPoP key
-    let (code_verifier, code_challenge) = generate_pkce();
-    let dpop_key = DpopKey::generate();
-    let state = generate_random_string(16);
-
-    // 5. PAR (Pushed Authorization Request) — required by Bluesky
-    let par_endpoint = auth_meta
-        .pushed_authorization_request_endpoint
-        .as_deref()
-        .context("Authorization server does not support PAR")?;
-
-    let auth_url = push_authorization_request(
-        par_endpoint,
-        &auth_meta.authorization_endpoint,
-        &client_id,
-        &redirect_uri,
-        &code_challenge,
-        &state,
-        handle,
-        &dpop_key,
-    )
-    .await?;
-
-    // 6. Open browser
     eprintln!("\nOpening browser for authorization...");
-    eprintln!("If the browser doesn't open, visit:\n  {auth_url}\n");
-    let _ = open::that(&auth_url);
+    eprintln!(
+        "If the browser doesn't open, visit:\n  {}\n",
+        prepared.auth_url()
+    );
+    let _ = open::that(prepared.auth_url());
 
-    // 7. Wait for callback
-    let auth_code = wait_for_callback(listener, &state).await?;
-    eprintln!("Authorization received. Exchanging token...");
-
-    // 8. Exchange code for tokens
-    let (access_token, token_did) = exchange_code(
-        &auth_meta.token_endpoint,
-        &auth_code,
-        &code_verifier,
-        &redirect_uri,
-        &client_id,
-        &dpop_key,
-    )
-    .await?;
-
-    // 9. Verify DID matches
-    check_token_did(&did, token_did.as_deref())?;
-
-    // 10. Probe PDS getSession to discover the DPoP nonce
-    //     The PDS will reject our first call but return the nonce we need.
-    let dpop_nonce = probe_dpop_nonce(&pds_url, &access_token, &dpop_key).await;
-
-    tracing::info!(did = %did, dpop_nonce = ?dpop_nonce, "OAuth login successful");
-    Ok(OAuthSession {
-        did,
-        handle: handle.to_string(),
-        access_token,
-        pds_url,
-        dpop_key,
-        dpop_nonce,
-    })
+    prepared.wait().await
 }
 
 /// Verify that the DID asserted by the token response (`sub`), when present,
@@ -364,19 +723,49 @@ fn check_token_did(resolved_did: &str, token_did: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Discover the authorization server for a PDS. Thin wrapper over the shared
-/// engine; the loopback CLI flow talks only to the user's own PDS, so a plain
-/// client (no SSRF guard) is fine.
-async fn discover_auth_server(pds_url: &str) -> Result<freeq_oauth::discovery::AuthServerMetadata> {
-    freeq_oauth::discovery::discover_auth_server(
-        &freeq_oauth::SharedClient(reqwest::Client::new()),
-        pds_url,
-    )
-    .await
+/// Discover the authorization server for a PDS.
+async fn discover_auth_server(pds_url: &str) -> Result<AuthServerMetadata> {
+    let client = reqwest::Client::new();
+
+    let pr_url = format!(
+        "{}/.well-known/oauth-protected-resource",
+        pds_url.trim_end_matches('/')
+    );
+    let pr_meta: ProtectedResourceMetadata = client
+        .get(&pr_url)
+        .send()
+        .await
+        .context("Failed to fetch protected resource metadata")?
+        .error_for_status()
+        .context("Protected resource metadata request failed")?
+        .json()
+        .await
+        .context("Failed to parse protected resource metadata")?;
+
+    let auth_server = pr_meta
+        .authorization_servers
+        .first()
+        .context("No authorization servers listed")?;
+
+    let as_url = format!(
+        "{}/.well-known/oauth-authorization-server",
+        auth_server.trim_end_matches('/')
+    );
+    let auth_meta: AuthServerMetadata = client
+        .get(&as_url)
+        .send()
+        .await
+        .context("Failed to fetch authorization server metadata")?
+        .error_for_status()
+        .context("Authorization server metadata request failed")?
+        .json()
+        .await
+        .context("Failed to parse authorization server metadata")?;
+
+    Ok(auth_meta)
 }
 
-/// Pushed Authorization Request (PAR). Delegates the request + DPoP nonce
-/// dance to the shared engine, then builds the authorization URL to open.
+/// Pushed Authorization Request (PAR).
 #[allow(clippy::too_many_arguments)]
 async fn push_authorization_request(
     par_endpoint: &str,
@@ -388,24 +777,84 @@ async fn push_authorization_request(
     login_hint: &str,
     dpop_key: &DpopKey,
 ) -> Result<String> {
-    let par = freeq_oauth::discovery::pushed_authorization_request(
-        &reqwest::Client::new(),
-        par_endpoint,
-        client_id,
-        redirect_uri,
-        code_challenge,
-        state,
-        login_hint,
-        // Narrow scope; SDK callers that need PDS write access do a separate
-        // wider-scope auth round rather than asking for it on every login.
-        "atproto",
-        dpop_key,
-    )
-    .await?;
+    let client = reqwest::Client::new();
+
+    let params = [
+        ("response_type", "code"),
+        ("client_id", client_id),
+        ("redirect_uri", redirect_uri),
+        ("code_challenge", code_challenge),
+        ("code_challenge_method", "S256"),
+        // Narrow scope. SDK callers that need PDS write access do a
+        // separate auth round with a wider scope rather than asking for
+        // it on every login.
+        ("scope", "atproto"),
+        ("state", state),
+        ("login_hint", login_hint),
+    ];
+
+    // Try without DPoP nonce first
+    let dpop_proof = dpop_key.proof("POST", par_endpoint, None, None)?;
+    let resp = client
+        .post(par_endpoint)
+        .header("DPoP", &dpop_proof)
+        .form(&params)
+        .send()
+        .await
+        .context("PAR request failed")?;
+
+    let status = resp.status();
+    let dpop_nonce = resp
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // If we got a use_dpop_nonce error, retry with the nonce
+    if status.as_u16() == 400
+        && let Some(nonce) = &dpop_nonce
+    {
+        let dpop_proof_retry = dpop_key.proof("POST", par_endpoint, Some(nonce), None)?;
+        let resp2 = client
+            .post(par_endpoint)
+            .header("DPoP", &dpop_proof_retry)
+            .form(&params)
+            .send()
+            .await
+            .context("PAR retry request failed")?;
+
+        if !resp2.status().is_success() {
+            let status = resp2.status();
+            let text = resp2.text().await.unwrap_or_default();
+            bail!("PAR failed ({status}): {text}");
+        }
+
+        let par_resp: serde_json::Value = resp2.json().await?;
+        let request_uri = par_resp["request_uri"]
+            .as_str()
+            .context("No request_uri in PAR response")?;
+
+        return Ok(format!(
+            "{authorization_endpoint}?client_id={}&request_uri={}",
+            urlencod(client_id),
+            urlencod(request_uri),
+        ));
+    }
+
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        bail!("PAR failed ({status}): {text}");
+    }
+
+    let par_resp: serde_json::Value = resp.json().await?;
+    let request_uri = par_resp["request_uri"]
+        .as_str()
+        .context("No request_uri in PAR response")?;
+
     Ok(format!(
         "{authorization_endpoint}?client_id={}&request_uri={}",
         urlencod(client_id),
-        urlencod(&par.request_uri),
+        urlencod(request_uri),
     ))
 }
 
@@ -487,33 +936,94 @@ async fn exchange_code(
     redirect_uri: &str,
     client_id: &str,
     dpop_key: &DpopKey,
-) -> Result<(String, Option<String>)> {
-    // Shared engine handles the DPoP nonce-retry dance; the loopback CLI
-    // flow has no SSRF concern (it talks to the user's own PDS) so a plain
-    // client is fine.
-    let exchanged = freeq_oauth::flow::exchange_code(
-        &reqwest::Client::new(),
-        token_endpoint,
-        code,
-        code_verifier,
-        redirect_uri,
-        client_id,
-        dpop_key,
-        None,
-    )
-    .await?;
-    let token_resp: TokenResponse = serde_json::from_value(exchanged.token_response)
+) -> Result<(String, Option<String>, Option<String>)> {
+    let client = reqwest::Client::new();
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", client_id),
+        ("code_verifier", code_verifier),
+    ];
+
+    // First attempt
+    let dpop_proof = dpop_key.proof("POST", token_endpoint, None, None)?;
+    let resp = client
+        .post(token_endpoint)
+        .header("DPoP", &dpop_proof)
+        .form(&params)
+        .send()
+        .await
+        .context("Token exchange request failed")?;
+
+    let status = resp.status();
+    let dpop_nonce = resp
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Retry with DPoP nonce if needed
+    if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
+        let nonce = dpop_nonce.as_deref().unwrap();
+        let dpop_proof_retry = dpop_key.proof("POST", token_endpoint, Some(nonce), None)?;
+        let resp2 = client
+            .post(token_endpoint)
+            .header("DPoP", &dpop_proof_retry)
+            .form(&params)
+            .send()
+            .await
+            .context("Token exchange retry failed")?;
+
+        if !resp2.status().is_success() {
+            let status = resp2.status();
+            let text = resp2.text().await.unwrap_or_default();
+            bail!("Token exchange failed ({status}): {text}");
+        }
+
+        let token_resp: TokenResponse = resp2
+            .json()
+            .await
+            .context("Failed to parse token response")?;
+        return Ok((
+            token_resp.access_token,
+            token_resp.refresh_token,
+            token_resp.sub,
+        ));
+    }
+
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        bail!("Token exchange failed ({status}): {text}");
+    }
+
+    let token_resp: TokenResponse = resp
+        .json()
+        .await
         .context("Failed to parse token response")?;
-    Ok((token_resp.access_token, token_resp.sub))
+    Ok((
+        token_resp.access_token,
+        token_resp.refresh_token,
+        token_resp.sub,
+    ))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-// PKCE + random-string generation are byte-identical to the shared engine;
-// re-use them. (This file keeps its own `urlencod` for now — it preserves
-// `-_.~` where the engine's percent-encodes them, and this flow's exact wire
-// output isn't covered by the characterization suite yet.)
-use freeq_oauth::{generate_pkce, generate_random_string};
+fn generate_pkce() -> (String, String) {
+    let verifier = generate_random_string(32);
+    let hash = Sha256::digest(verifier.as_bytes());
+    let challenge = URL_SAFE_NO_PAD.encode(hash);
+    (verifier, challenge)
+}
+
+fn generate_random_string(len: usize) -> String {
+    use rand::RngCore;
+    let mut bytes = vec![0u8; len];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(&bytes)
+}
 
 /// Probe the PDS getSession endpoint to discover the required DPoP nonce.
 /// Returns None if no nonce is required or if the probe fails.
@@ -655,6 +1165,9 @@ mod tests {
             did: "did:plc:test".to_string(),
             handle: "alice.test".to_string(),
             access_token: access_token.to_string(),
+            refresh_token: None,
+            token_endpoint: format!("{pds_url}/token"),
+            client_id: "http://localhost/.well-known/oauth-client-metadata".to_string(),
             pds_url,
             dpop_key: DpopKey::generate(),
             dpop_nonce: None,
@@ -669,9 +1182,9 @@ mod tests {
         let encoded = key.to_base64url();
         let decoded = DpopKey::from_base64url(&encoded).expect("roundtrip");
         assert_eq!(
-            key.to_base64url(),
-            decoded.to_base64url(),
-            "private key must survive roundtrip"
+            key.jwk(),
+            decoded.jwk(),
+            "public JWK must survive roundtrip"
         );
     }
 
@@ -802,7 +1315,7 @@ mod tests {
         assert_eq!(loaded.handle, session.handle);
         assert_eq!(loaded.access_token, session.access_token);
         assert_eq!(loaded.pds_url, session.pds_url);
-        assert_eq!(loaded.dpop_key.to_base64url(), session.dpop_key.to_base64url());
+        assert_eq!(loaded.dpop_key.jwk(), session.dpop_key.jwk());
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1048,7 +1561,7 @@ mod tests {
         );
         let base = spawn_app(router).await;
         let key = DpopKey::generate();
-        let (token, sub) = exchange_code(
+        let (token, _refresh, sub) = exchange_code(
             &format!("{base}/token"),
             "auth-code-1",
             "verifier",
@@ -1067,7 +1580,7 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let base = spawn_app(mock_token_endpoint("server-nonce-1", hits.clone())).await;
         let key = DpopKey::generate();
-        let (token, sub) = exchange_code(
+        let (token, _refresh, sub) = exchange_code(
             &format!("{base}/token"),
             "code",
             "verifier",

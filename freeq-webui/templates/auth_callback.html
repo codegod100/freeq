@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>freeq — completing sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=0">
+<style>
+:root{color-scheme:dark;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;--c1:#7ab7ff}
+*{box-sizing:border-box} html,body{height:100%;margin:0}
+body{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--bg);color:var(--fg);display:flex;align-items:center;justify-content:center}
+#box{width:100%;max-width:340px;padding:1.5rem;border:1px solid var(--border);border-radius:8px;background:#11151b;text-align:center}
+h1{font-size:1rem;margin:0 0 0.6rem;color:var(--c1)}
+p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}
+.error{color:#ef476f}
+</style>
+</head>
+<body>
+<div id="box">
+<h1>Completing sign in…</h1>
+<p id="status">Please wait.</p>
+</div>
+<script>
+(function() {
+  const el = document.getElementById('status');
+  const hash = window.location.hash;
+  if (!hash || hash.length < 7) {
+    el.textContent = 'No OAuth payload in URL. Try signing in again.';
+    el.className = 'error';
+    return;
+  }
+  const prefix = '#oauth=';
+  if (!hash.startsWith(prefix)) {
+    el.textContent = 'Unexpected OAuth payload format.';
+    el.className = 'error';
+    return;
+  }
+  const payload = hash.slice(prefix.length);
+  fetch('/auth/finish', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: 'payload=' + encodeURIComponent(payload)
+  })
+  .then(function(r) {
+    if (r.ok) {
+      window.location.replace('/chat/general');
+    } else {
+      return r.text().then(function(t) {
+        el.textContent = 'Sign in failed: ' + (t || r.status);
+        el.className = 'error';
+      });
+    }
+  })
+  .catch(function(e) {
+    el.textContent = 'Sign in failed: ' + e.message;
+    el.className = 'error';
+  });
+})();
+</script>
+</body>
+</html>

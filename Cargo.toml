@@ -16,7 +16,7 @@ members = [
     "freeq-av-image",
     "freeq-agent-kit",
     "freeq-eliza",
-    "freeq-agent-kit/examples/claude-mcp",
+    "freeq-webui",
 ]
 exclude = [
     "freeq-app/src-tauri",
@@ -45,6 +45,15 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 bs58 = "0.5"
 signature = "2"
 clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4"] }
+parking_lot = "0.12"
+tower = "0.5"
+datastar = { version = "0.3", features = ["axum"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tera = "2"
+async-stream = "0.3"
+futures-util = "0.3"
+async-trait = "0.1"
 tokio-rustls = "0.26"
 rustls-pemfile = "2"
 webpki-roots = "1"

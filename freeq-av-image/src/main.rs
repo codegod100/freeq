@@ -142,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
         session_id: args.session.clone(),
         our_broadcast: our_broadcast.clone(),
         my_nick: args.nick.clone(),
+        audio_only: false,
     };
 
     // Silent audio — we publish video only; the queue stays empty so the

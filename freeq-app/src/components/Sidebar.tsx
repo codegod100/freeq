@@ -86,7 +86,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   };
 
   return (
-    <aside data-testid="sidebar" role="navigation" aria-label="Channels and direct messages" className="w-64 h-full bg-bg-secondary flex flex-col shrink-0 overflow-hidden">
+    <aside data-testid="sidebar" role="navigation" aria-label="Channels and direct messages" className="w-52 md:w-56 h-full bg-bg-secondary flex flex-col shrink-0 overflow-hidden">
       {/* Brand */}
       <div className="h-14 flex items-center px-4 border-b border-border shrink-0 gap-2.5">
         <img src="/freeq.png" alt="" className="w-7 h-7" />
