@@ -93,6 +93,17 @@ fn upstream_client() -> Result<reqwest::Client, anyhow::Error> {
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .pool_max_idle_per_host(32)
         .tcp_keepalive(std::time::Duration::from_secs(30))
+        // Force IPv4. The broker runs in a Docker container that has NO IPv6
+        // route (bridge network, daemon IPv6 off) — only IPv4 (NAT) egress —
+        // yet the host resolver hands back AAAA records for IPv6-first CDNs
+        // like public.api.bsky.app (Bunny). Without this, the client attempts
+        // the unroutable IPv6 address and stalls on the 8s connect timeout
+        // before (maybe) falling back to IPv4 — the intermittent "can't
+        // resolve handle" first-login failures. Binding to an IPv4 local
+        // address makes every connection IPv4-only. (This is what the old
+        // "Miren egress / second TCP connection TimedOut" comments were really
+        // fighting — it was container IPv6, not the platform.)
+        .local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
         .build()?)
 }
 
@@ -126,27 +137,70 @@ impl ClientProvider for SsrfClients {
 
 async fn resolve_handle(handle: &str) -> Result<String, anyhow::Error> {
     let client = upstream_client()?;
-    // Try HTTPS well-known first
-    let url = format!("https://{handle}/.well-known/atproto-did");
-    if let Ok(resp) = client.get(&url).send().await
-        && resp.status().is_success()
-    {
-        let did = resp.text().await?.trim().to_string();
-        if did.starts_with("did:") {
-            return Ok(did);
+
+    // 1. HTTPS well-known first — custom domains AND bsky.social handles both
+    //    serve `/.well-known/atproto-did`. One retry to ride out a blip.
+    let well_known = format!("https://{handle}/.well-known/atproto-did");
+    for attempt in 1..=2 {
+        match client.get(&well_known).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(text) = resp.text().await {
+                    let did = text.trim().to_string();
+                    if did.starts_with("did:") {
+                        return Ok(did);
+                    }
+                }
+            }
+            Ok(resp) => tracing::debug!(
+                handle, status = %resp.status(), "resolve: well-known non-success, trying appview"
+            ),
+            Err(e) => tracing::debug!(handle, attempt, error = %e, "resolve: well-known request failed"),
         }
     }
 
-    // Fallback to public API (DNS TXT)
+    // 2. Fallback to the public appview resolver. CHECK THE STATUS before
+    //    parsing — a rate-limit (429) or 5xx returns a JSON error body with no
+    //    `did`, which previously surfaced as the confusing "No DID in
+    //    response" and failed the whole login. Retry transient statuses.
     let api_url = format!(
         "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={}",
         handle
     );
-    let json: serde_json::Value = client.get(&api_url).send().await?.json().await?;
-    let did = json["did"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No DID in response"))?;
-    Ok(did.to_string())
+    let mut last_err = "unknown".to_string();
+    for attempt in 1..=3 {
+        match client.get(&api_url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                        && let Some(did) = json["did"].as_str()
+                    {
+                        return Ok(did.to_string());
+                    }
+                    let snippet: String = body.chars().take(160).collect();
+                    last_err = format!("appview 2xx without a DID field (body: {snippet})");
+                    break; // a 2xx with no DID won't change on retry
+                }
+                last_err = format!("appview HTTP {status}");
+                // 429 / 5xx are transient — back off and retry.
+                if status.as_u16() == 429 || status.is_server_error() {
+                    tracing::warn!(handle, %status, attempt, "resolve: appview transient error, retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+                    continue;
+                }
+                break; // other 4xx (e.g. genuinely bad handle) — don't retry
+            }
+            Err(e) => {
+                last_err = format!("appview request error: {e}");
+                tracing::warn!(handle, attempt, error = %e, "resolve: appview request failed, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+            }
+        }
+    }
+
+    tracing::error!(handle, reason = %last_err, "handle resolution failed");
+    anyhow::bail!("Could not resolve handle '{handle}': {last_err}")
 }
 
 async fn resolve_did(did: &str) -> Result<DidDocument, anyhow::Error> {
