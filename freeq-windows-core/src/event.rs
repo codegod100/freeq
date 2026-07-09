@@ -268,6 +268,12 @@ pub fn convert_event(event: &freeq_sdk::event::Event) -> DomainEvent {
         Event::ChatHistoryTarget { nick, timestamp } => DomainEvent::Notice {
             text: format!("DM: {nick} (last: {})", timestamp.as_deref().unwrap_or("?")),
         },
+        Event::ReadMarker { target, timestamp } => DomainEvent::Notice {
+            text: format!(
+                "read marker: {target} (up to: {})",
+                timestamp.as_deref().unwrap_or("*")
+            ),
+        },
         Event::RawLine(line) => DomainEvent::Notice { text: line.clone() },
     }
 }

@@ -1469,6 +1469,10 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                 app.buffer_mut("status").push_system(&format!("← {line}"));
             }
         }
+        Event::ReadMarker { target, timestamp } => {
+            let ts = timestamp.as_deref().unwrap_or("*");
+            app.status_msg(&format!("Read marker: {target} (up to {ts})"));
+        }
     }
 }
 
