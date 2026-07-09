@@ -4814,7 +4814,7 @@ async fn reconcile_crdt_to_local(state: &Arc<SharedState>) {
 /// Shared test-state builder, re-exported so any module's tests can reuse the
 /// single `SharedState` constructor instead of duplicating it.
 #[cfg(test)]
-pub(crate) use s2s_adversarial_tests::test_state_with_db;
+pub(crate) use s2s_adversarial_tests::{test_state, test_state_with_db};
 
 #[cfg(test)]
 mod s2s_adversarial_tests {
@@ -4825,7 +4825,7 @@ mod s2s_adversarial_tests {
     use tokio::sync::mpsc;
 
     /// Build a minimal SharedState for testing (no DB, no iroh).
-    fn test_state() -> Arc<SharedState> {
+    pub(crate) fn test_state() -> Arc<SharedState> {
         test_state_inner(None)
     }
 
