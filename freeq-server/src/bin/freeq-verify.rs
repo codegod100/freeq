@@ -23,7 +23,9 @@ fn b64() -> base64::engine::general_purpose::GeneralPurpose {
 }
 
 fn decode_key(s: &str) -> Result<VerifyingKey, String> {
-    let bytes = b64().decode(s).map_err(|e| format!("bad base64 public key: {e}"))?;
+    let bytes = b64()
+        .decode(s)
+        .map_err(|e| format!("bad base64 public key: {e}"))?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
@@ -32,7 +34,9 @@ fn decode_key(s: &str) -> Result<VerifyingKey, String> {
 }
 
 fn decode_sig(s: &str) -> Result<Signature, String> {
-    let bytes = b64().decode(s).map_err(|e| format!("bad base64 signature: {e}"))?;
+    let bytes = b64()
+        .decode(s)
+        .map_err(|e| format!("bad base64 signature: {e}"))?;
     let arr: [u8; 64] = bytes
         .as_slice()
         .try_into()
