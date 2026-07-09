@@ -213,6 +213,10 @@ pub fn router(state: Arc<SharedState>) -> Router {
         )
         .route("/api/v1/signing-key", get(api_signing_key))
         .route("/api/v1/signing-keys/{did}", get(api_did_signing_key))
+        .route(
+            "/api/v1/signing-keys/{did}/{kid}",
+            get(api_did_signing_key_by_kid),
+        )
         .route("/api/v1/verify/{msgid}", get(api_verify_message))
         .route("/api/v1/channels/{name}/evidence", get(api_channel_evidence))
         .route("/api/v1/actors/{did}", get(api_actor_identity))
@@ -493,22 +497,55 @@ async fn api_signing_key(State(state): State<Arc<SharedState>>) -> Json<serde_js
     }))
 }
 
-/// Per-DID signing key: returns the client's registered session signing key.
+/// Per-DID signing key: the DID's latest registered signing key, from the
+/// durable store (the single source of truth — survives restart, covers every
+/// DID that ever registered). A specific historical key is fetched via
+/// `/{did}/{kid}`.
 async fn api_did_signing_key(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(did): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use base64::Engine;
     let did_decoded = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did));
-    if let Some(pubkey) = state.did_msg_keys.lock().get(did_decoded.as_ref()) {
-        Ok(Json(serde_json::json!({
+    match state
+        .with_db(|db| db.get_signing_key(did_decoded.as_ref()))
+        .flatten()
+    {
+        Some(pubkey) => Ok(Json(serde_json::json!({
             "did": did_decoded.as_ref(),
             "algorithm": "ed25519",
-            "public_key": pubkey,
+            "public_key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey),
             "encoding": "base64url",
-            "source": "client-session"
-        })))
-    } else {
-        Err(axum::http::StatusCode::NOT_FOUND)
+            "source": "key-store"
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
+    }
+}
+
+/// Per-DID, per-kid signing key: the exact historical key the DID registered
+/// under `kid`, from the durable store. This is the lookup a verifier uses when
+/// a signature names its kid — the key stays available after the signer's
+/// session ends, unlike `/{did}` which is the current one.
+async fn api_did_signing_key_by_kid(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Path((did, kid)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use base64::Engine;
+    let did_decoded = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did));
+    let kid_decoded = urlencoding::decode(&kid).unwrap_or(std::borrow::Cow::Borrowed(&kid));
+    match state
+        .with_db(|db| db.get_signing_key_by_kid(did_decoded.as_ref(), kid_decoded.as_ref()))
+        .flatten()
+    {
+        Some(pubkey) => Ok(Json(serde_json::json!({
+            "did": did_decoded.as_ref(),
+            "kid": kid_decoded.as_ref(),
+            "algorithm": "ed25519",
+            "public_key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey),
+            "encoding": "base64url",
+            "source": "key-store"
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
     }
 }
 

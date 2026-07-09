@@ -106,13 +106,22 @@ where
     Some(crate::canonical::canonicalize(&covered).expect("string map serializes"))
 }
 
-/// Derive the key id for a public key: base64url (unpadded) of the first
-/// 16 bytes of SHA-256 over the raw 32-byte key.
-pub fn derive_kid(key: &VerifyingKey) -> String {
+/// Derive the key id from a raw ed25519 public key: base64url (unpadded) of
+/// the first 16 bytes of SHA-256 over the raw key bytes.
+///
+/// Takes raw bytes (not a parsed `VerifyingKey`) so the server's key store can
+/// derive the same kid for any stored 32-byte blob without curve validation —
+/// the single kid source shared by the canonical, the store, and the fixtures.
+pub fn derive_kid_bytes(pubkey: &[u8]) -> String {
     use base64::Engine;
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(key.as_bytes());
+    let digest = Sha256::digest(pubkey);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&digest[..16])
+}
+
+/// Derive the key id for a public key (see [`derive_kid_bytes`]).
+pub fn derive_kid(key: &VerifyingKey) -> String {
+    derive_kid_bytes(key.as_bytes())
 }
 
 /// Sign the act tags in `tags` with `key`. Returns the sig tag value
