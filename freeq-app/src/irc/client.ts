@@ -9,6 +9,7 @@ import { FreeqClient, format } from '@freeq/sdk';
 import { useStore } from '../store';
 import { notify } from '../lib/notifications';
 import { prefetchProfiles } from '@freeq/sdk';
+import { shouldRejoinCall, AV_REJOIN_WINDOW_MS, type PendingCallRejoin } from '../lib/av-mesh';
 
 // ── Singleton SDK client ──
 
@@ -44,6 +45,12 @@ export function __setClientForTests(c: FreeqClient | null): void {
 export function __resetAvInstanceForTests(): void {
   currentAvInstance = null;
   pendingAvStart = null;
+  pendingCallRejoin = null;
+}
+
+/** Test-only: inspect the captured pending rejoin (null when none). */
+export function __getPendingCallRejoinForTests(): PendingCallRejoin | null {
+  return pendingCallRejoin;
 }
 
 // ── Public API (same signatures as before) ──
@@ -262,6 +269,12 @@ let pendingAvStart: { channel: string; did: string } | null = null;
 /// DID get distinct participant slots and broadcasts.
 let currentAvInstance: string | null = null;
 
+/// A call dropped by a connection blip, kept so a reconnect can rejoin the
+/// same session+instance within the server's AV grace window. Set only on a
+/// disconnect-driven teardown (see `connectionStateChanged`); cleared on
+/// explicit leave, once consumed by a rejoin, or once it passes the window.
+let pendingCallRejoin: PendingCallRejoin | null = null;
+
 function generateAvInstanceId(): string {
   // 4 random bytes → 8 lowercase hex chars. Plenty of entropy for
   // collision avoidance within a session; short enough that broadcast
@@ -407,6 +420,8 @@ export function leaveAvSession(channel: string, sessionId: string) {
   if (currentAvInstance) tags['+freeq.at/av-instance'] = currentAvInstance;
   client?.raw(format('TAGMSG', [channel], tags));
   currentAvInstance = null;
+  // Explicit leave — a reconnect must NOT drag us back into the call.
+  pendingCallRejoin = null;
   useStore.getState().setActiveAvSession(null);
 }
 
@@ -453,6 +468,27 @@ function wireEvents(c: FreeqClient) {
 
   c.on('connectionStateChanged', (state) => {
     s().setConnectionState(state);
+    // Left 'connected' while in a call: capture the call identity so the
+    // reconnect can rejoin the SAME session with the SAME instance within
+    // the server's AV grace window (mirrors macOS
+    // tearDownCallLocallyOnDisconnect). Guarded on `!pendingCallRejoin` so
+    // the intermediate disconnected → connecting transitions don't reset the
+    // drop timestamp — the window is measured from the actual drop.
+    const instance = currentAvInstance;
+    if (state !== 'connected' && !pendingCallRejoin && instance) {
+      const store = s();
+      const sess = store.activeAvSession
+        ? store.avSessions.get(store.activeAvSession)
+        : null;
+      if (store.avAudioActive && sess && sess.channel) {
+        pendingCallRejoin = {
+          channel: sess.channel,
+          sessionId: sess.id,
+          instance,
+          disconnectedAt: Date.now(),
+        };
+      }
+    }
   });
 
   c.on('registered', (nick) => {
@@ -491,6 +527,24 @@ function wireEvents(c: FreeqClient) {
       s().setActiveChannel(channel);
     }
     saveJoinedChannels();
+
+    // If a blip dropped us mid-call in this channel, rejoin the same AV
+    // session with the same instance — the server held the slot in its grace
+    // window, so this re-enters in place and instance-keyed peers see media
+    // continuity. joinAvSession re-sends av-join and re-activates the panel.
+    if (shouldRejoinCall(pendingCallRejoin, channel, Date.now())) {
+      const rejoin = pendingCallRejoin!;
+      pendingCallRejoin = null;
+      currentAvInstance = rejoin.instance; // stable across the blip
+      joinAvSession(rejoin.channel, rejoin.sessionId);
+      s().setAvAudioActive(true);
+    } else if (
+      pendingCallRejoin &&
+      Date.now() - pendingCallRejoin.disconnectedAt >= AV_REJOIN_WINDOW_MS
+    ) {
+      // Stale pending (past the window) — clear so it can't fire on a later join.
+      pendingCallRejoin = null;
+    }
   });
 
   c.on('channelLeft', (channel) => {
@@ -666,6 +720,7 @@ function wireEvents(c: FreeqClient) {
       s().setAvCameraOn(false);
       s().setActiveAvSession(null);
       currentAvInstance = null;
+      if (pendingCallRejoin?.sessionId === sess.id) pendingCallRejoin = null;
     }
   });
 
@@ -678,6 +733,7 @@ function wireEvents(c: FreeqClient) {
       s().setActiveAvSession(null);
       currentAvInstance = null;
     }
+    if (pendingCallRejoin?.sessionId === id) pendingCallRejoin = null;
     s().removeAvSession(id);
   });
 

@@ -49,6 +49,7 @@ const {
   __setClientForTests,
   __resetAvInstanceForTests,
   __wireEventsForTests,
+  __getPendingCallRejoinForTests,
 } = await import('./client');
 
 // Stub FreeqClient that records `.on` registrations and exposes an
@@ -458,5 +459,161 @@ describe('avSessionUpdate state=ended (wireEvents integration)', () => {
     expect(useStore.getState().avAudioActive).toBe(false);
     expect(useStore.getState().avCameraOn).toBe(false);
     expect(useStore.getState().activeAvSession).toBeNull();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Auto-rejoin after a reconnect (wireEvents integration)
+// ═══════════════════════════════════════════════════════════════
+//
+// The client half of the server's AV teardown grace: a connection blip that
+// drops us mid-call must be captured (channel + session + instance), and the
+// reconnect that re-joins the call's channel must re-send av-join for the
+// SAME session with the SAME instance so the server reactivates our held slot
+// in place and instance-keyed peers see media continuity.
+describe('auto-rejoin after reconnect (wireEvents integration)', () => {
+  // Seed an active call in the store + module state, returning the instance.
+  function enterCall(channel = '#room', sessionId = 'sess-1'): string {
+    joinAvSession(channel, sessionId); // mints currentAvInstance, sets activeAvSession
+    useStore.setState({
+      avAudioActive: true,
+      avSessions: new Map([[sessionId, {
+        id: sessionId,
+        channel,
+        createdBy: 'did:plc:me',
+        createdByNick: 'me',
+        participants: new Map(),
+        state: 'active',
+        startedAt: new Date(),
+      }]]),
+    });
+    return getAvInstanceId()!;
+  }
+
+  it('captures a pending rejoin when the connection drops mid-call', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    const instance = enterCall('#room', 'sess-1');
+    stub.emit('connectionStateChanged', 'connecting');
+
+    const pending = __getPendingCallRejoinForTests();
+    expect(pending).not.toBeNull();
+    expect(pending!.channel).toBe('#room');
+    expect(pending!.sessionId).toBe('sess-1');
+    expect(pending!.instance).toBe(instance);
+    expect(typeof pending!.disconnectedAt).toBe('number');
+  });
+
+  it('preserves the original drop timestamp across disconnected→connecting', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    enterCall('#room', 'sess-1');
+    stub.emit('connectionStateChanged', 'disconnected');
+    const first = __getPendingCallRejoinForTests()!.disconnectedAt;
+    stub.emit('connectionStateChanged', 'connecting');
+    expect(__getPendingCallRejoinForTests()!.disconnectedAt).toBe(first);
+  });
+
+  it('does NOT capture a pending rejoin when not in a call', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    useStore.setState({ avAudioActive: false, activeAvSession: null });
+    stub.emit('connectionStateChanged', 'disconnected');
+    expect(__getPendingCallRejoinForTests()).toBeNull();
+  });
+
+  it('re-sends av-join (same session + same instance) when rejoining the call channel', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    const instance = enterCall('#room', 'sess-1');
+    stub.emit('connectionStateChanged', 'disconnected');
+    stub.raw.mockClear();
+
+    // The reconnect re-registers and rejoins the channel.
+    stub.emit('channelJoined', '#room');
+
+    const tagMsg = stub.raw.mock.calls
+      .map((c: any[]) => c[0] as string)
+      .find((l) => command(l) === 'TAGMSG' && l.includes('av-join'));
+    expect(tagMsg, 'no av-join TAGMSG was re-sent on rejoin').toBeDefined();
+    const tags = parseTags(tagMsg!);
+    expect(tags['+freeq.at/av-join']).toBeDefined();
+    expect(tags['+freeq.at/av-id']).toBe('sess-1');
+    expect(tags['+freeq.at/av-instance']).toBe(instance);
+
+    expect(__getPendingCallRejoinForTests()).toBeNull();
+    expect(useStore.getState().activeAvSession).toBe('sess-1');
+    expect(useStore.getState().avAudioActive).toBe(true);
+  });
+
+  it('does NOT rejoin when a different channel is joined on reconnect', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    enterCall('#room', 'sess-1');
+    stub.emit('connectionStateChanged', 'disconnected');
+    stub.raw.mockClear();
+
+    stub.emit('channelJoined', '#other');
+
+    const rejoined = stub.raw.mock.calls
+      .map((c: any[]) => c[0] as string)
+      .some((l) => l.includes('av-join'));
+    expect(rejoined).toBe(false);
+    // Pending survives — the call channel hasn't come back yet.
+    expect(__getPendingCallRejoinForTests()).not.toBeNull();
+  });
+
+  it('does NOT rejoin once the grace window has passed, and clears the stale pending', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    const realNow = Date.now();
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(realNow);
+
+    enterCall('#room', 'sess-1');
+    stub.emit('connectionStateChanged', 'disconnected');
+    stub.raw.mockClear();
+
+    // 31s later — past the 30s grace.
+    nowSpy.mockReturnValue(realNow + 31_000);
+    stub.emit('channelJoined', '#room');
+
+    const rejoined = stub.raw.mock.calls
+      .map((c: any[]) => c[0] as string)
+      .some((l) => l.includes('av-join'));
+    expect(rejoined).toBe(false);
+    expect(__getPendingCallRejoinForTests()).toBeNull();
+  });
+
+  it('explicit leave clears a captured pending so a later rejoin never fires', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    enterCall('#room', 'sess-1');
+    stub.emit('connectionStateChanged', 'disconnected');
+    expect(__getPendingCallRejoinForTests()).not.toBeNull();
+
+    // User hangs up while offline (or the panel's leave fires).
+    leaveAvSession('#room', 'sess-1');
+    expect(__getPendingCallRejoinForTests()).toBeNull();
+
+    stub.raw.mockClear();
+    stub.emit('channelJoined', '#room');
+    const rejoined = stub.raw.mock.calls
+      .map((c: any[]) => c[0] as string)
+      .some((l) => l.includes('av-join'));
+    expect(rejoined).toBe(false);
   });
 });

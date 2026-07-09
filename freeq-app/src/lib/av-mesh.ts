@@ -96,6 +96,45 @@ function isSelf(p: RosterParticipant, me: SelfIdentity): boolean {
 }
 
 /**
+ * A call we were in when the connection dropped, captured so a reconnect can
+ * rejoin the *same* AV session with the *same* instance — reactivating the
+ * server's grace-held slot in place (see the server's AV teardown grace)
+ * rather than starting a fresh call. Peers keyed on the instance see the media
+ * continue seamlessly across the blip.
+ */
+export interface PendingCallRejoin {
+  channel: string;
+  sessionId: string;
+  /** The stable per-call instance suffix — MUST survive the blip unchanged. */
+  instance: string;
+  /** Epoch millis of the drop (`Date.now()`). */
+  disconnectedAt: number;
+}
+
+/** The server's AV teardown grace window (`AV_GRACE_SECS`), in millis. */
+export const AV_REJOIN_WINDOW_MS = 30_000;
+
+/**
+ * Whether a just-(re)joined channel should trigger an automatic call rejoin.
+ * Rejoin only when we have a pending call for THIS channel and the drop was
+ * recent enough that the server's AV grace window can't have expired — past
+ * that the slot (or the whole session, if we were the sole participant) is
+ * gone and a rejoin would just fail. Channel match is case-insensitive.
+ *
+ * Mirrors the macOS `shouldRejoinCall` decision so the two clients agree.
+ */
+export function shouldRejoinCall(
+  pending: PendingCallRejoin | null | undefined,
+  joinedChannel: string,
+  now: number,
+  windowMs: number = AV_REJOIN_WINDOW_MS,
+): boolean {
+  if (!pending) return false;
+  if (pending.channel.toLowerCase() !== joinedChannel.toLowerCase()) return false;
+  return now - pending.disconnectedAt < windowMs;
+}
+
+/**
  * Build the subscribe set for this client: one {@link Slot} per *other*
  * live participant. Excludes our own slot; everyone else (including our own
  * other devices) is subscribed so the mesh is complete.

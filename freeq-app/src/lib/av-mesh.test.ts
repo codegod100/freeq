@@ -18,8 +18,11 @@ import { describe, it, expect } from 'vitest';
 import {
   broadcastName,
   computeParticipantSlots,
+  shouldRejoinCall,
+  AV_REJOIN_WINDOW_MS,
   type RosterParticipant,
   type SelfIdentity,
+  type PendingCallRejoin,
 } from './av-mesh';
 
 // ── Full-party simulation harness ──────────────────────────────────
@@ -240,5 +243,48 @@ describe('rename mid-call is instance-robust', () => {
       { did: 'did:e', nick: 'eliza', instance: 'e1' },
     ];
     expect(findSplits('S', members)).toEqual([]);
+  });
+});
+
+// ── Auto-rejoin decision after a reconnect ─────────────────────────
+//
+// The client half of the server's AV teardown grace. If a blip drops us
+// mid-call and we reconnect within the grace window, rejoining the same
+// channel must re-enter the same session; a stale, mismatched, or absent
+// pending must not. Mirrors the macOS `shouldRejoinCall` tests.
+describe('shouldRejoinCall', () => {
+  const NOW = 1_000_000;
+  const pending = (channel: string, disconnectedAt: number): PendingCallRejoin => ({
+    channel,
+    sessionId: 'S1',
+    instance: 'devA',
+    disconnectedAt,
+  });
+
+  it('rejoins the same channel within the window', () => {
+    expect(shouldRejoinCall(pending('#freeq', NOW - 5_000), '#freeq', NOW)).toBe(true);
+  });
+
+  it('does not rejoin when there is no pending call', () => {
+    expect(shouldRejoinCall(null, '#freeq', NOW)).toBe(false);
+    expect(shouldRejoinCall(undefined, '#freeq', NOW)).toBe(false);
+  });
+
+  it('does not rejoin a different channel', () => {
+    expect(shouldRejoinCall(pending('#other', NOW - 5_000), '#freeq', NOW)).toBe(false);
+  });
+
+  it('does not rejoin once the grace window has passed', () => {
+    // Drop was 45s ago — past the 30s grace, the server slot is gone.
+    expect(shouldRejoinCall(pending('#freeq', NOW - 45_000), '#freeq', NOW)).toBe(false);
+  });
+
+  it('treats the exact window boundary as expired', () => {
+    expect(shouldRejoinCall(pending('#freeq', NOW - AV_REJOIN_WINDOW_MS), '#freeq', NOW)).toBe(false);
+  });
+
+  it('matches the channel case-insensitively', () => {
+    expect(shouldRejoinCall(pending('#Freeq', NOW - 1_000), '#freeq', NOW)).toBe(true);
+    expect(shouldRejoinCall(pending('#freeq', NOW - 1_000), '#FREEQ', NOW)).toBe(true);
   });
 });
