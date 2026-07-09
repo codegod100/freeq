@@ -66,9 +66,16 @@ pub(crate) fn relay_to_nick(
     event_id: String,
     multiline_lines: Option<&[crate::connection::draft_multiline::BatchLine]>,
 ) -> RouteResult {
-    // 1. Local delivery (case-insensitive nick lookup)
-    let _target_lower = target.to_lowercase();
-    let local_session = {
+    // 1. Local delivery. A `did:` target resolves through `did_sessions`
+    //    (any one bound session — the caller's fan-out reaches the rest via
+    //    the DID); a nick resolves case-insensitively via `nick_to_session`.
+    let local_session = if target.starts_with("did:") {
+        state
+            .did_sessions
+            .lock()
+            .get(target)
+            .and_then(|s| s.iter().next().cloned())
+    } else {
         let n2s = state.nick_to_session.lock();
         n2s.get_session(target).map(|s| s.to_string())
     };
@@ -110,4 +117,123 @@ pub(crate) fn relay_to_nick(
 
     // 3. No federation — nick doesn't exist
     RouteResult::Unreachable
+}
+
+/// Resolve a DM target — a nick **or** a `did:` identifier — to every local
+/// session that should receive it. Both forms resolve through the DID so all
+/// of a user's multi-device sessions are returned:
+///
+/// - `did:` target → every session bound to that DID (empty if none local).
+/// - nick target → the nick's session, then all sessions sharing its DID
+///   (or just that one session for a guest with no DID).
+/// - unknown nick → empty.
+///
+/// This is the single fan-out used by every DM delivery site so DID-addressed
+/// and nick-addressed delivery stay identical.
+pub(crate) fn local_sessions_for_target(state: &SharedState, target: &str) -> Vec<String> {
+    if target.starts_with("did:") {
+        return state
+            .did_sessions
+            .lock()
+            .get(target)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_default();
+    }
+
+    let session = match state.nick_to_session.lock().get_session(target) {
+        Some(s) => s.to_string(),
+        None => return Vec::new(),
+    };
+    match state.session_dids.lock().get(&session).cloned() {
+        Some(did) => state
+            .did_sessions
+            .lock()
+            .get(&did)
+            .map(|s| s.iter().cloned().collect())
+            .unwrap_or_else(|| vec![session]),
+        None => vec![session], // guest — no DID, single session
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    /// Bind a DID to a set of sessions in both directions.
+    fn bind_did(state: &SharedState, did: &str, sessions: &[&str]) {
+        let mut ds = state.did_sessions.lock();
+        let mut sd = state.session_dids.lock();
+        let set = ds.entry(did.to_string()).or_default();
+        for s in sessions {
+            set.insert(s.to_string());
+            sd.insert(s.to_string(), did.to_string());
+        }
+    }
+
+    #[test]
+    fn did_target_returns_all_sessions_bound_to_that_did() {
+        let state = crate::server::test_state();
+        bind_did(&state, "did:plc:bob", &["sess-b1", "sess-b2"]);
+        state.nick_to_session.lock().insert("bob", "sess-b1");
+
+        assert_eq!(
+            sorted(local_sessions_for_target(&state, "did:plc:bob")),
+            vec!["sess-b1".to_string(), "sess-b2".to_string()]
+        );
+    }
+
+    #[test]
+    fn nick_target_fans_out_through_its_did() {
+        let state = crate::server::test_state();
+        bind_did(&state, "did:plc:bob", &["sess-b1", "sess-b2"]);
+        state.nick_to_session.lock().insert("bob", "sess-b1");
+
+        // Addressing the nick reaches every device bound to the same DID.
+        assert_eq!(
+            sorted(local_sessions_for_target(&state, "bob")),
+            vec!["sess-b1".to_string(), "sess-b2".to_string()]
+        );
+    }
+
+    #[test]
+    fn guest_nick_with_no_did_resolves_to_its_single_session() {
+        let state = crate::server::test_state();
+        state.nick_to_session.lock().insert("guest", "sess-g");
+
+        assert_eq!(
+            local_sessions_for_target(&state, "guest"),
+            vec!["sess-g".to_string()]
+        );
+    }
+
+    #[test]
+    fn unknown_nick_or_did_resolves_to_nothing() {
+        let state = crate::server::test_state();
+        assert!(local_sessions_for_target(&state, "nobody").is_empty());
+        assert!(local_sessions_for_target(&state, "did:plc:nobody").is_empty());
+    }
+
+    #[test]
+    fn relay_to_nick_treats_a_local_did_target_as_local() {
+        let state = crate::server::test_state();
+        bind_did(&state, "did:plc:bob", &["sess-b1"]);
+        // A DID with a local session must route Local, not fall through to relay.
+        match relay_to_nick(
+            &state,
+            "alice",
+            Some("did:plc:alice"),
+            "did:plc:bob",
+            "hi",
+            "evt-1".to_string(),
+            None,
+        ) {
+            RouteResult::Local(sid) => assert_eq!(sid, "sess-b1"),
+            _ => panic!("expected Local for a DID with a local session"),
+        }
+    }
 }

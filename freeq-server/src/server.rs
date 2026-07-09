@@ -3233,16 +3233,17 @@ pub(crate) async fn process_s2s_message(
                     }
                 }
             } else {
-                // Case-insensitive nick lookup for PM delivery
-                let sid = state
-                    .nick_to_session
-                    .lock()
-                    .get_session(&target)
-                    .map(|s| s.to_string());
-                if let Some(sid) = sid {
-                    let has_tags = state.cap_message_tags.lock().contains(&sid);
-                    let wants_account =
-                        account.is_some() && state.cap_account_tag.lock().contains(&sid);
+                // DM target: a nick or a `did:`. Resolve to every local session
+                // bound to the recipient (DID fan-out) — a federated DID-addressed
+                // DM must reach the same person here, with no per-server nick
+                // interpretation.
+                let sids = crate::connection::routing::local_sessions_for_target(state, &target);
+                let tag_caps = state.cap_message_tags.lock();
+                let acct_caps = state.cap_account_tag.lock();
+                let conns = state.connections.lock();
+                for sid in &sids {
+                    let has_tags = tag_caps.contains(sid);
+                    let wants_account = account.is_some() && acct_caps.contains(sid);
                     let line = if !has_tags {
                         &plain_line
                     } else if wants_account {
@@ -3250,11 +3251,13 @@ pub(crate) async fn process_s2s_message(
                     } else {
                         &tagged_line
                     };
-                    let conns = state.connections.lock();
-                    if let Some(tx) = conns.get(&sid) {
+                    if let Some(tx) = conns.get(sid) {
                         let _ = tx.try_send(line.clone());
                     }
                 }
+                drop(conns);
+                drop(acct_caps);
+                drop(tag_caps);
 
                 // Persist DM if both sender and recipient have DIDs. Prefer the
                 // sender DID carried from the origin (a remote sender is not in
@@ -3391,35 +3394,40 @@ pub(crate) async fn process_s2s_message(
                 });
             }
 
-            // Deliver to local channel members
-            if target.starts_with('#') || target.starts_with('&') {
-                let tag_msg = crate::irc::Message {
-                    tags: tags.clone(),
-                    prefix: Some(from.clone()),
-                    command: "TAGMSG".to_string(),
-                    params: vec![target.clone()],
-                };
-                let tagged_line = format!("{tag_msg}\r\n");
+            // Wire forms — identical for channel and DM delivery.
+            let tag_msg = crate::irc::Message {
+                tags: tags.clone(),
+                prefix: Some(from.clone()),
+                command: "TAGMSG".to_string(),
+                params: vec![target.clone()],
+            };
+            let tagged_line = format!("{tag_msg}\r\n");
+            let plain_fallback = tags.get("+react").map(|emoji| {
+                format!(":{from} PRIVMSG {target} :\x01ACTION reacted with {emoji}\x01\r\n")
+            });
 
-                let plain_fallback = tags.get("+react").map(|emoji| {
-                    format!(":{from} PRIVMSG {target} :\x01ACTION reacted with {emoji}\x01\r\n")
-                });
-
-                let members: Vec<String> = state
+            // Resolve recipients: channel members, or (for a nick / `did:` DM)
+            // every local session bound to that recipient — a federated action
+            // addressed to a DID reaches the same person here.
+            let recipients: Vec<String> = if target.starts_with('#') || target.starts_with('&') {
+                state
                     .channels
                     .lock()
                     .get(&target.to_lowercase())
                     .map(|ch| ch.members.iter().cloned().collect())
-                    .unwrap_or_default();
-                let tag_caps = state.cap_message_tags.lock();
-                let conns = state.connections.lock();
-                for sid in &members {
-                    if let Some(tx) = conns.get(sid) {
-                        if tag_caps.contains(sid) {
-                            let _ = tx.try_send(tagged_line.clone());
-                        } else if let Some(ref fallback) = plain_fallback {
-                            let _ = tx.try_send(fallback.clone());
-                        }
+                    .unwrap_or_default()
+            } else {
+                crate::connection::routing::local_sessions_for_target(state, &target)
+            };
+
+            let tag_caps = state.cap_message_tags.lock();
+            let conns = state.connections.lock();
+            for sid in &recipients {
+                if let Some(tx) = conns.get(sid) {
+                    if tag_caps.contains(sid) {
+                        let _ = tx.try_send(tagged_line.clone());
+                    } else if let Some(ref fallback) = plain_fallback {
+                        let _ = tx.try_send(fallback.clone());
                     }
                 }
             }

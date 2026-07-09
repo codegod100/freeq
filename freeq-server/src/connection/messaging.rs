@@ -529,22 +529,30 @@ pub(super) fn handle_tagmsg(
             super::helpers::s2s_next_event_id(state),
             None, // TAGMSG carries no body, so multiline never applies here.
         ) {
-            RouteResult::Local(ref session) => {
-                // Deliver locally
-                if let Some(tx) = state.connections.lock().get(session) {
-                    let has_tags = state.cap_message_tags.lock().contains(session);
-                    let has_time = state.cap_server_time.lock().contains(session);
-                    if has_tags {
-                        let line = if has_time {
-                            &tagged_line_with_time
-                        } else {
-                            &tagged_line
-                        };
-                        let _ = tx.try_send(line.clone());
-                    } else if let Some(ref fallback) = plain_fallback {
-                        let _ = tx.try_send(fallback.clone());
+            RouteResult::Local(_) => {
+                // Deliver to every local session bound to the target — a `did:`
+                // target or a nick both fan out across the DID's devices.
+                let sessions = super::routing::local_sessions_for_target(state, target);
+                let tag_caps = state.cap_message_tags.lock();
+                let time_caps = state.cap_server_time.lock();
+                let conns = state.connections.lock();
+                for session in &sessions {
+                    if let Some(tx) = conns.get(session) {
+                        if tag_caps.contains(session) {
+                            let line = if time_caps.contains(session) {
+                                &tagged_line_with_time
+                            } else {
+                                &tagged_line
+                            };
+                            let _ = tx.try_send(line.clone());
+                        } else if let Some(ref fallback) = plain_fallback {
+                            let _ = tx.try_send(fallback.clone());
+                        }
                     }
                 }
+                drop(conns);
+                drop(time_caps);
+                drop(tag_caps);
                 // Also relay via S2S for cross-server visibility
                 super::helpers::s2s_broadcast(
                     state,
@@ -2499,38 +2507,17 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
             }
         }
     } else {
-        // DM: deliver to target nick
-        // Note: We don't use relay_to_nick here since it sends PRIVMSG, but we need TAGMSG.
-        // For DMs, we handle delivery manually here.
-        if let Some(session) = state
-            .nick_to_session
-            .lock()
-            .get_session(target)
-            .map(|s| s.to_string())
-        {
-            // Find all sessions for target's DID (multi-device support)
-            let target_sessions: Vec<String> = {
-                let target_did = state.session_dids.lock().get(&session).cloned();
-                if let Some(ref did) = target_did {
-                    state
-                        .did_sessions
-                        .lock()
-                        .get(did)
-                        .map(|s| s.iter().cloned().collect())
-                        .unwrap_or_else(|| vec![session.clone()])
-                } else {
-                    vec![session.clone()]
-                }
-            };
-
-            let tag_caps = state.cap_message_tags.lock();
-            let conns = state.connections.lock();
-            for target_session in &target_sessions {
-                if tag_caps.contains(target_session)
-                    && let Some(tx) = conns.get(target_session)
-                {
-                    let _ = tx.try_send(tagged_line.clone());
-                }
+        // DM: deliver the delete to every local session bound to the target
+        // (a nick or a `did:`), fanning out across the DID's devices.
+        // TAGMSG-specific, so we don't reuse relay_to_nick (it sends PRIVMSG).
+        let target_sessions = super::routing::local_sessions_for_target(state, target);
+        let tag_caps = state.cap_message_tags.lock();
+        let conns = state.connections.lock();
+        for target_session in &target_sessions {
+            if tag_caps.contains(target_session)
+                && let Some(tx) = conns.get(target_session)
+            {
+                let _ = tx.try_send(tagged_line.clone());
             }
         }
         // Note: For federated DM deletes, we'd need S2S support — not implemented yet
