@@ -575,6 +575,14 @@ class AppState: ObservableObject {
     /// different nick on the `left` signal than the one it joined with.
     internal var avInstanceToNick: [String: String] = [:]
 
+    /// If a connection blip tears down a live call, we stash its identity here
+    /// so a reconnect that re-joins the same channel can rejoin the *same* AV
+    /// session with the *same* instance — reactivating the server's grace-held
+    /// slot in place rather than starting a fresh call. Cleared on an explicit
+    /// leave (an intentional leave must never auto-rejoin) and once consumed or
+    /// once the grace window has passed.
+    internal var pendingCallRejoin: PendingCallRejoin? = nil
+
     func startCall(channel: String, sessionId: String) {
         guard client != nil || rawSenderForTest != nil else { return }
         // Native clients take the SFU's QUIC listener on :8080 — the
@@ -720,6 +728,8 @@ class AppState: ObservableObject {
             let instanceTag = currentAvInstance.map { ";+freeq.at/av-instance=\($0)" } ?? ""
             sendRawLine("@+freeq.at/av-leave;+freeq.at/av-id=\(sessionId)\(instanceTag) TAGMSG \(channel)")
         }
+        // Explicit leave — a reconnect must NOT drag us back into the call.
+        pendingCallRejoin = nil
         cameraCapture?.stop()
         cameraCapture = nil
         micCapture?.stop()
@@ -779,6 +789,20 @@ class AppState: ObservableObject {
     /// gone. Otherwise identical: stop capture, close the MoQ session, clear
     /// UI state.
     internal func tearDownCallLocallyOnDisconnect() {
+        // Capture the call identity BEFORE clearing state so a reconnect that
+        // re-joins this channel can rejoin the same session+instance within
+        // the server's AV grace window. Only when we're actually in a call.
+        if isInCall,
+           let channel = currentCallChannel,
+           let sessionId = currentCallSessionId,
+           let instance = currentAvInstance {
+            pendingCallRejoin = PendingCallRejoin(
+                channel: channel,
+                sessionId: sessionId,
+                instance: instance,
+                disconnectedAt: Date()
+            )
+        }
         cameraCapture?.stop()
         cameraCapture = nil
         micCapture?.stop()
@@ -2268,6 +2292,21 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 // Fetch pinned messages
                 state.fetchPins(channel: channel)
                 // Don't show "you joined" system message — the user knows they joined
+                // If a blip dropped us mid-call in this channel, rejoin the
+                // same AV session with the same instance — the server held the
+                // slot in its grace window, so this re-enters in place.
+                if shouldRejoinCall(pending: state.pendingCallRejoin, joinedChannel: channel, now: Date()),
+                   let rejoin = state.pendingCallRejoin {
+                    state.pendingCallRejoin = nil
+                    state.currentAvInstance = rejoin.instance
+                    print("[av] rejoining call after reconnect (session \(rejoin.sessionId))")
+                    state.startCall(channel: rejoin.channel, sessionId: rejoin.sessionId)
+                } else if let p = state.pendingCallRejoin,
+                          Date().timeIntervalSince(p.disconnectedAt) >= 30 {
+                    // Any other join clears a stale pending (wrong channel or
+                    // past the window) so it can't fire later.
+                    state.pendingCallRejoin = nil
+                }
             } else {
                 let msg = ChatMessage(
                     id: UUID().uuidString, from: "", text: "\(nick) joined",

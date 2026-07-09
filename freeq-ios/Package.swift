@@ -29,6 +29,7 @@ let package = Package(
                 "ServerConfig.swift",
                 "FreeqDirectory.swift",
                 "BufferNavigation.swift",
+                "AvRejoin.swift",
             ]
         ),
         .testTarget(
