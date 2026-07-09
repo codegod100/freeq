@@ -2997,6 +2997,7 @@ pub(crate) async fn process_s2s_message(
             msgid,
             sig,
             account,
+            recipient_did: stamped_recipient_did,
             tags: relayed_tags,
             multiline_lines,
             ..
@@ -3266,7 +3267,17 @@ pub(crate) async fn process_s2s_message(
                 let sender_did = account
                     .clone()
                     .or_else(|| state.nick_owners.lock().get(sender_nick).cloned());
-                let recipient_did = state.nick_owners.lock().get(&target).cloned();
+                // Recipient: honor the origin's stamp, cross-checked against our
+                // own resolution. On a mismatch we fall back (no durable row)
+                // rather than persist under a possibly-wrong identity.
+                let stamped_recipient_did =
+                    stamped_recipient_did.map(|d| sanitize_s2s_str(&d, 512));
+                let local_recipient =
+                    crate::connection::routing::recipient_did_for_target(state, &target);
+                let recipient_did = crate::connection::routing::reconcile_recipient_did(
+                    stamped_recipient_did.as_deref(),
+                    local_recipient.as_deref(),
+                );
                 if let (Some(s_did), Some(r_did)) =
                     (sender_did.as_deref(), recipient_did.as_deref())
                 {
@@ -5116,6 +5127,7 @@ mod s2s_adversarial_tests {
                 msgid: None,
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5169,6 +5181,7 @@ mod s2s_adversarial_tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 },
@@ -5255,6 +5268,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ML-MSG-1".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: Some(s2s_multiline_lines(&["first", "second", "third"])),
             },
@@ -5306,6 +5320,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("LONG-MSG-1".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5369,6 +5384,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ACCT-MSG-1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5423,6 +5439,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ACCT-MSG-2".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5479,6 +5496,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PROV-1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5534,6 +5552,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PROV-2".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5582,6 +5601,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ML-MSG-2".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: Some(s2s_multiline_lines(&["first", "second"])),
             },
@@ -5821,6 +5841,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PLAIN-MSG".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6009,6 +6030,7 @@ mod s2s_adversarial_tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 },
@@ -6115,6 +6137,7 @@ mod s2s_adversarial_tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 },
@@ -6391,6 +6414,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("dm-msg-001".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6439,6 +6463,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("DM-ACCT-D1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6484,6 +6509,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("DM-ACCT-P1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6525,6 +6551,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("DM-ACCT-P2".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6567,6 +6594,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PROVHIST-1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },

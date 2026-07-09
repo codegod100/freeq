@@ -100,6 +100,7 @@ pub(crate) fn relay_to_nick(
                 msgid: None, // PM relay — no msgid (recipient server assigns)
                 sig: None,   // PM relay — sig not available at routing layer
                 account: account.map(|a| a.to_string()),
+                recipient_did: recipient_did_for_target(state, target),
                 tags: s2s_tags,
                 multiline_lines: multiline_lines.map(|lines| {
                     lines
@@ -152,6 +153,45 @@ pub(crate) fn local_sessions_for_target(state: &SharedState, target: &str) -> Ve
             .map(|s| s.iter().cloned().collect())
             .unwrap_or_else(|| vec![session]),
         None => vec![session], // guest — no DID, single session
+    }
+}
+
+/// Resolve a DM target — a nick or a `did:` — to the recipient's DID, if this
+/// server can determine it authoritatively:
+///
+/// - `did:` target → itself (the address *is* the identity).
+/// - nick target → the local nick→DID ownership map.
+/// - a bare remote nick this server doesn't own → `None` (it can't guess; the
+///   unsound alternative is resolving the nick to whoever *it* thinks it is).
+///
+/// Used to key DM persistence and to stamp the recipient DID onto S2S relays.
+pub(crate) fn recipient_did_for_target(state: &SharedState, target: &str) -> Option<String> {
+    if target.starts_with("did:") {
+        return Some(target.to_string());
+    }
+    state.nick_owners.lock().get(&target.to_lowercase()).cloned()
+}
+
+/// Reconcile a peer-stamped recipient DID against what this server resolves
+/// locally, for keying a *durable* DM row. The stamp is origin-asserted and
+/// unauthenticated, so:
+///
+/// - both present and equal → trust it (persist).
+/// - both present and **different** → mismatch; fall back (return `None`, don't
+///   persist a durable row under a possibly-wrong identity).
+/// - only one present → use it (stamp honored when we can't resolve; local
+///   resolution used when an older peer sent no stamp).
+/// - neither → `None`.
+pub(crate) fn reconcile_recipient_did(
+    stamp: Option<&str>,
+    local: Option<&str>,
+) -> Option<String> {
+    match (stamp, local) {
+        (Some(s), Some(l)) if s == l => Some(s.to_string()),
+        (Some(_), Some(_)) => None, // mismatch → don't persist on an unverified stamp
+        (Some(s), None) => Some(s.to_string()),
+        (None, Some(l)) => Some(l.to_string()),
+        (None, None) => None,
     }
 }
 
@@ -216,6 +256,53 @@ mod tests {
         let state = crate::server::test_state();
         assert!(local_sessions_for_target(&state, "nobody").is_empty());
         assert!(local_sessions_for_target(&state, "did:plc:nobody").is_empty());
+    }
+
+    #[test]
+    fn recipient_did_resolves_did_target_to_itself_and_nick_via_owners() {
+        let state = crate::server::test_state();
+        state
+            .nick_owners
+            .lock()
+            .insert("bob".to_string(), "did:plc:bob".to_string());
+
+        // A DID target is its own recipient identity.
+        assert_eq!(
+            recipient_did_for_target(&state, "did:plc:whoever").as_deref(),
+            Some("did:plc:whoever")
+        );
+        // A known nick resolves through the ownership map (case-insensitive).
+        assert_eq!(
+            recipient_did_for_target(&state, "BOB").as_deref(),
+            Some("did:plc:bob")
+        );
+        // A nick this server doesn't own is unresolvable — no guessing.
+        assert_eq!(recipient_did_for_target(&state, "stranger"), None);
+    }
+
+    #[test]
+    fn reconcile_recipient_did_honors_stamp_but_refuses_mismatch() {
+        // Agree → trust.
+        assert_eq!(
+            reconcile_recipient_did(Some("did:plc:x"), Some("did:plc:x")).as_deref(),
+            Some("did:plc:x")
+        );
+        // Mismatch → fall back, do not persist under an unverified identity.
+        assert_eq!(
+            reconcile_recipient_did(Some("did:plc:x"), Some("did:plc:y")),
+            None
+        );
+        // Only the stamp (receiver can't resolve locally) → honor it.
+        assert_eq!(
+            reconcile_recipient_did(Some("did:plc:x"), None).as_deref(),
+            Some("did:plc:x")
+        );
+        // Only local (older peer sent no stamp) → today's behavior.
+        assert_eq!(
+            reconcile_recipient_did(None, Some("did:plc:x")).as_deref(),
+            Some("did:plc:x")
+        );
+        assert_eq!(reconcile_recipient_did(None, None), None);
     }
 
     #[test]

@@ -261,6 +261,16 @@ pub enum S2sMessage {
         /// `serde(default)` → older peers omit it (wire back-compat).
         #[serde(default)]
         account: Option<String>,
+        /// Recipient's DID for a directed (DM) message — resolved ONCE at the
+        /// origin (the authoritative point for the target nick) and stamped
+        /// here so a receiver keys durable DM history off the DID instead of
+        /// re-resolving the nick to whoever *it* thinks it is. Origin-asserted
+        /// and unauthenticated: receivers cross-check when they can and fall
+        /// back rather than persist on mismatch. `None` for channel messages
+        /// and when the origin couldn't resolve the recipient. `serde(default)`
+        /// → older peers omit it (wire back-compat).
+        #[serde(default)]
+        recipient_did: Option<String>,
         /// Application coordination tags (`+freeq.at/event` etc.) that ride
         /// with the message so federated clients render the same card the
         /// origin shows. `serde(default)` → older peers omit it, deserialize
@@ -1520,6 +1530,7 @@ mod tests {
             msgid: Some("MSG123".to_string()),
             sig: None,
             account: None,
+            recipient_did: None,
             tags: HashMap::new(),
             multiline_lines: None,
         };
@@ -1622,6 +1633,7 @@ mod tests {
             msgid: None,
             sig: None,
             account: None,
+            recipient_did: None,
             tags: HashMap::new(),
             multiline_lines: None,
         };
@@ -1643,6 +1655,7 @@ mod tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 };
@@ -1987,6 +2000,7 @@ mod tests {
             msgid: Some("01HZ".to_string()),
             sig: None,
             account: None,
+            recipient_did: None,
             tags: tags.clone(),
             multiline_lines: None,
         };

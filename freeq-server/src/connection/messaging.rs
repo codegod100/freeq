@@ -1003,6 +1003,7 @@ pub(super) fn handle_privmsg_with_multiline(
                     msgid: Some(msgid.clone()),
                     sig,
                     account: conn.authenticated_did.clone(),
+                    recipient_did: super::routing::recipient_did_for_target(state, target),
                     tags: s2s_tags,
                     // When this message originated as a draft/multiline
                     // batch, ship the per-line breakdown so the peer
@@ -1152,6 +1153,7 @@ pub(super) fn handle_privmsg_with_multiline(
                         msgid: Some(pm_msgid.clone()),
                         sig: pm_tags.get("+freeq.at/sig").cloned(),
                         account: conn.authenticated_did.clone(),
+                        recipient_did: super::routing::recipient_did_for_target(state, target),
                         tags: s2s_tags,
                         multiline_lines: multiline_lines.map(|lines| {
                             lines
@@ -1281,13 +1283,12 @@ pub(super) fn handle_privmsg_with_multiline(
             }
         }
 
-        // Persist DM if both sender and recipient have DIDs
+        // Persist the sender's own copy if both ends have DIDs. Resolve the
+        // recipient via the shared resolver so a `did:` target (and any nick
+        // this server owns) is keyed correctly — previously a bare `nick_owners`
+        // lookup missed DID-addressed DMs entirely.
         let sender_did = conn.authenticated_did.as_deref();
-        let recipient_did = state
-            .nick_owners
-            .lock()
-            .get(&target.to_lowercase())
-            .cloned();
+        let recipient_did = super::routing::recipient_did_for_target(state, target);
         if let (Some(s_did), Some(r_did)) = (sender_did, recipient_did.as_deref()) {
             let dm_key = crate::db::canonical_dm_key(s_did, r_did);
             let did_for_db = Some(s_did);
@@ -2258,6 +2259,7 @@ fn handle_edit(
                 msgid: Some(edit_msgid),
                 sig,
                 account: conn.authenticated_did.clone(),
+                recipient_did: super::routing::recipient_did_for_target(state, target),
                 tags: s2s_tags,
                 // Multi-line edit: pass the per-line breakdown so peer
                 // servers can re-emit BATCH frames to their own
