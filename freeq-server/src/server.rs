@@ -4811,6 +4811,11 @@ async fn reconcile_crdt_to_local(state: &Arc<SharedState>) {
     }
 }
 
+/// Shared test-state builder, re-exported so any module's tests can reuse the
+/// single `SharedState` constructor instead of duplicating it.
+#[cfg(test)]
+pub(crate) use s2s_adversarial_tests::test_state_with_db;
+
 #[cfg(test)]
 mod s2s_adversarial_tests {
     use super::*;
@@ -4825,8 +4830,9 @@ mod s2s_adversarial_tests {
     }
 
     /// Like `test_state` but with an in-memory SQLite DB attached, so
-    /// persistence paths (`identities`, `messages`, …) are exercised.
-    fn test_state_with_db() -> Arc<SharedState> {
+    /// persistence paths (`identities`, `messages`, …) are exercised. Shared
+    /// with other modules' tests (e.g. web endpoints) via the re-export below.
+    pub(crate) fn test_state_with_db() -> Arc<SharedState> {
         test_state_inner(Some(crate::db::Db::open_memory().unwrap()))
     }
 

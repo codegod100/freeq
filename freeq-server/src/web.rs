@@ -4650,3 +4650,67 @@ mod metrics_tests {
         assert!(out.ends_with('\n'));
     }
 }
+
+#[cfg(test)]
+mod signing_key_endpoint_tests {
+    use super::{api_did_signing_key, api_did_signing_key_by_kid};
+    use crate::server::test_state_with_db;
+    use axum::extract::{Path, State};
+    use base64::Engine;
+
+    fn b64(b: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    }
+
+    /// The `/api/v1/signing-keys/{did}` and `/{did}/{kid}` endpoints serve the
+    /// durable key store: `/{did}` returns the latest, `/{did}/{kid}` returns a
+    /// specific historical key, and misses are 404. Drives the real handlers.
+    #[tokio::test]
+    async fn endpoints_serve_the_durable_store() {
+        let state = test_state_with_db();
+        let did = "did:plc:endpoint";
+        let (k1, k2) = ([1u8; 32], [2u8; 32]);
+        let kid1 = freeq_sdk::act::derive_kid_bytes(&k1);
+        let kid2 = freeq_sdk::act::derive_kid_bytes(&k2);
+        state
+            .with_db(|db| {
+                db.save_signing_key(did, &k1)?;
+                db.save_signing_key(did, &k2)?;
+                Ok(())
+            })
+            .expect("db present");
+
+        // /{did} → latest (k2), from the key store.
+        let latest = api_did_signing_key(State(state.clone()), Path(did.to_string()))
+            .await
+            .expect("200");
+        assert_eq!(latest.0["public_key"], b64(&k2));
+        assert_eq!(latest.0["source"], "key-store");
+
+        // /{did}/{kid} → each specific historical key.
+        let by1 =
+            api_did_signing_key_by_kid(State(state.clone()), Path((did.to_string(), kid1.clone())))
+                .await
+                .expect("200 kid1");
+        assert_eq!(by1.0["public_key"], b64(&k1));
+        assert_eq!(by1.0["kid"], kid1);
+
+        let by2 = api_did_signing_key_by_kid(State(state.clone()), Path((did.to_string(), kid2)))
+            .await
+            .expect("200 kid2");
+        assert_eq!(by2.0["public_key"], b64(&k2));
+
+        // Unknown kid → 404.
+        let miss_kid = api_did_signing_key_by_kid(
+            State(state.clone()),
+            Path((did.to_string(), "nope".to_string())),
+        )
+        .await;
+        assert_eq!(miss_kid.unwrap_err(), axum::http::StatusCode::NOT_FOUND);
+
+        // Unknown DID → 404.
+        let miss_did =
+            api_did_signing_key(State(state), Path("did:plc:nobody".to_string())).await;
+        assert_eq!(miss_did.unwrap_err(), axum::http::StatusCode::NOT_FOUND);
+    }
+}
