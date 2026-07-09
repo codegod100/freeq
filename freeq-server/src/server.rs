@@ -2651,19 +2651,24 @@ pub(crate) async fn process_s2s_message(
 
     /// Send NAMES update to all local members of a channel (for nick list refresh).
     fn send_names_update(state: &SharedState, channel: &str) {
-        let channels = state.channels.lock();
-        let ch = match channels.get(channel) {
-            Some(ch) => ch,
-            None => return,
-        };
+        // Lock-ordering: take channels → (drop) → nick_to_session → (drop) →
+        // connections, never two at once. Holding channels+nick_to_session+
+        // connections nested here deadlocked against paths that take
+        // nick_to_session before channels (caught in prod 2026-07-09: an S2S
+        // NAMES update vs a reconnect auto-rejoin). Snapshotting under each
+        // lock independently removes this function from any ordering cycle.
 
-        // Build nick list (local + remote)
-        let n2s = state.nick_to_session.lock();
-        let mut nick_list: Vec<String> = ch
-            .members
-            .iter()
-            .filter_map(|s| {
-                n2s.get_nick(s).map(|n| {
+        // 1. Snapshot membership + op prefixes under `channels` only.
+        let (local_members, member_prefix, remote_entries) = {
+            let channels = state.channels.lock();
+            let ch = match channels.get(channel) {
+                Some(ch) => ch,
+                None => return,
+            };
+            let member_prefix: Vec<(String, &'static str)> = ch
+                .members
+                .iter()
+                .map(|s| {
                     let prefix = if ch.ops.contains(s) {
                         "@"
                     } else if ch.halfops.contains(s) {
@@ -2673,28 +2678,44 @@ pub(crate) async fn process_s2s_message(
                     } else {
                         ""
                     };
-                    format!("{prefix}{n}")
+                    (s.clone(), prefix)
                 })
-            })
-            .collect();
-        for (nick, rm) in &ch.remote_members {
-            let is_op = rm.is_op
-                || rm.did.as_ref().is_some_and(|d| {
-                    ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
-                });
-            let prefix = if is_op { "@" } else { "" };
-            nick_list.push(format!("{prefix}{nick}"));
-        }
-        let nick_str = nick_list.join(" ");
+                .collect();
+            let remote_entries: Vec<String> = ch
+                .remote_members
+                .iter()
+                .map(|(nick, rm)| {
+                    let is_op = rm.is_op
+                        || rm.did.as_ref().is_some_and(|d| {
+                            ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
+                        });
+                    let prefix = if is_op { "@" } else { "" };
+                    format!("{prefix}{nick}")
+                })
+                .collect();
+            let local_members: Vec<String> = ch.members.iter().cloned().collect();
+            (local_members, member_prefix, remote_entries)
+        };
 
-        // Send to each local member
-        let local_members: Vec<String> = ch.members.iter().cloned().collect();
-        drop(channels);
+        // 2. Resolve session ids → nicks under `nick_to_session` only.
+        let (nick_str, member_nicks) = {
+            let n2s = state.nick_to_session.lock();
+            let mut nick_list: Vec<String> = member_prefix
+                .iter()
+                .filter_map(|(sid, prefix)| n2s.get_nick(sid).map(|n| format!("{prefix}{n}")))
+                .collect();
+            nick_list.extend(remote_entries);
+            // Each local member's own nick, for the 353/366 reply target.
+            let member_nicks: Vec<(String, String)> = local_members
+                .iter()
+                .map(|sid| (sid.clone(), n2s.get_nick(sid).unwrap_or("*").to_string()))
+                .collect();
+            (nick_list.join(" "), member_nicks)
+        };
 
+        // 3. Send to each local member under `connections` only.
         let conns = state.connections.lock();
-        for session_id in &local_members {
-            // Look up this member's nick for the reply prefix
-            let member_nick = n2s.get_nick(session_id).unwrap_or("*");
+        for (session_id, member_nick) in &member_nicks {
             let names_line = format!(
                 ":{} 353 {} = {} :{}\r\n:{} 366 {} {} :End of /NAMES list\r\n",
                 state.server_name,
