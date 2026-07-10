@@ -514,62 +514,48 @@ pub(super) fn handle_tagmsg(
             },
         );
     } else {
-        // TAGMSG to a nick — route through federation layer.
-        use super::routing::{RouteResult, relay_to_nick};
-        // TAGMSG uses the same relay path as PRIVMSG.
-        // The text payload is empty for TAGMSG; tags ride in the from-line.
-        let from_nick = conn.nick.as_deref().unwrap_or("*").to_string();
-        let tag_text = plain_fallback.as_deref().unwrap_or("").to_string();
-        match relay_to_nick(
-            state,
-            &from_nick,
-            conn.authenticated_did.as_deref(),
-            target,
-            &tag_text,
-            super::helpers::s2s_next_event_id(state),
-            None, // TAGMSG carries no body, so multiline never applies here.
-        ) {
-            RouteResult::Local(_) => {
-                // Deliver to every local session bound to the target — a `did:`
-                // target or a nick both fan out across the DID's devices.
-                let sessions = super::routing::local_sessions_for_target(state, target);
-                let tag_caps = state.cap_message_tags.lock();
-                let time_caps = state.cap_server_time.lock();
-                let conns = state.connections.lock();
-                for session in &sessions {
-                    if let Some(tx) = conns.get(session) {
-                        if tag_caps.contains(session) {
-                            let line = if time_caps.contains(session) {
-                                &tagged_line_with_time
-                            } else {
-                                &tagged_line
-                            };
-                            let _ = tx.try_send(line.clone());
-                        } else if let Some(ref fallback) = plain_fallback {
-                            let _ = tx.try_send(fallback.clone());
-                        }
+        // TAGMSG to a nick or DID. Deliver to every local session bound to the
+        // target, and relay a *structured* Tagmsg to peers so a remote (or
+        // multi-homed) recipient receives the tags.
+        //
+        // We deliberately do NOT route through `relay_to_nick` here: it is
+        // PRIVMSG-shaped and, for a remote-only target, broadcasts an S2S
+        // *Privmsg* (the reaction's ACTION fallback), silently dropping the
+        // tags. Emitting an `S2sMessage::Tagmsg` unconditionally (peers dedup
+        // by event_id; a peer with no local session for the target just no-ops)
+        // is the same shape the PRIVMSG DM path already uses.
+        let sessions = super::routing::local_sessions_for_target(state, target);
+        {
+            let tag_caps = state.cap_message_tags.lock();
+            let time_caps = state.cap_server_time.lock();
+            let conns = state.connections.lock();
+            for session in &sessions {
+                if let Some(tx) = conns.get(session) {
+                    if tag_caps.contains(session) {
+                        let line = if time_caps.contains(session) {
+                            &tagged_line_with_time
+                        } else {
+                            &tagged_line
+                        };
+                        let _ = tx.try_send(line.clone());
+                    } else if let Some(ref fallback) = plain_fallback {
+                        let _ = tx.try_send(fallback.clone());
                     }
                 }
-                drop(conns);
-                drop(time_caps);
-                drop(tag_caps);
-                // Also relay via S2S for cross-server visibility
-                super::helpers::s2s_broadcast(
-                    state,
-                    crate::s2s::S2sMessage::Tagmsg {
-                        event_id: super::helpers::s2s_next_event_id(state),
-                        from: conn.nick.as_deref().unwrap_or("*").to_string(),
-                        target: target.to_string(),
-                        tags: tags.clone(),
-                        origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
-                    },
-                );
-            }
-            RouteResult::Relayed | RouteResult::Unreachable => {
-                // TAGMSG to remote user — best-effort relay (or silently dropped).
-                // No error sent: TAGMSG has no delivery expectation.
             }
         }
+        // Relay to peers for cross-server + multi-homed delivery. The receiver
+        // rebuilds the plain-client fallback from the tags.
+        super::helpers::s2s_broadcast(
+            state,
+            crate::s2s::S2sMessage::Tagmsg {
+                event_id: super::helpers::s2s_next_event_id(state),
+                from: conn.nick.as_deref().unwrap_or("*").to_string(),
+                target: target.to_string(),
+                tags: tags.clone(),
+                origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
+            },
+        );
     }
 }
 
