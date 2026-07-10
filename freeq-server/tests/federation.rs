@@ -1,16 +1,17 @@
-//! Two-server federation harness (Phase 2, item 5 of `docs/ACT-ROADMAP.md`;
-//! spec: `docs/FEDERATION-TEST-HARNESS.md`).
+//! Two-server federation harness.
 //!
 //! Boots two **real** `freeq-server` binaries, S2S-peered over iroh on
-//! localhost, and drives them with SDK clients — the cross-server coverage the
-//! in-process suites can't provide (Elements B/C shipped with unit tests only on
-//! their receive paths).
+//! localhost, and drives them with SDK clients — end-to-end cross-server
+//! coverage (DID-addressed delivery, DM persistence, dedup, TAGMSG relay)
+//! that the in-process suites cannot provide.
 //!
-//! These are **end-to-end** and excluded from the default suite: every test is
-//! `#[ignore]`, run explicitly with
-//! `cargo test -p freeq-server --test federation -- --ignored`.
+//! Excluded from the default suite: every test is `#[ignore]`, run explicitly
+//! with `cargo test -p freeq-server --test federation -- --ignored`
+//! (CI: `.github/workflows/federation.yml`, path-filtered).
 //!
-//! Design decisions live in the spec doc. Key mechanics:
+//! Design notes — subprocess (not in-process) so that a future job can pit
+//! mixed *versions* of the server against each other, which linking two
+//! versions of one crate into a single test binary can never do. Key mechanics:
 //! - iroh endpoint identity is derived from a pre-seeded key file, so both
 //!   endpoint IDs are known *before* either server boots (no log parsing).
 //! - peers dial by `id@127.0.0.1:port` (the direct-addr `--s2s-peers` form),
