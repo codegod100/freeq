@@ -150,7 +150,7 @@ Every message from a DID-authenticated user is cryptographically signed:
 
 For clients that don't support signing (legacy IRC clients), the server still signs as a fallback, providing message provenance through federation.
 
-Client session signing keys are published at `GET /api/v1/signing-keys/{did}` so any party can verify signatures independently.
+Client signing keys are published from a durable, append-only `(did, kid)` store: `GET /api/v1/signing-keys/{did}` returns the latest key and `GET /api/v1/signing-keys/{did}/{kid}` a specific historical key, so any party can verify signatures independently — including after the signer reconnects or goes offline. These endpoints serve the durable store, so they require a configured database (`--db`): a server run without persistence returns 404 and cannot provide verifiable identity for its users (their signatures are checkable only by that server, at the moment of receipt).
 
 ### Phase 2: End-to-End Encryption for DMs ✅ SHIPPED
 
