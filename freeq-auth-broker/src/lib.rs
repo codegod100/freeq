@@ -728,6 +728,8 @@ async fn auth_login(
 
     tracing::info!(handle = %handle, did = %did, popup = %is_popup, return_to = ?return_to, "BROKER_LOGIN_PARAMS_V3");
 
+    let state_prefix: String = oauth_state.chars().take(6).collect();
+
     state.pending.lock().await.insert(
         oauth_state.clone(),
         PendingAuth {
@@ -745,6 +747,8 @@ async fn auth_login(
             popup: is_popup,
         },
     );
+    let pending_count = state.pending.lock().await.len();
+    tracing::info!(state_prefix = %state_prefix, pending_count, "BROKER stored pending login state");
 
     let auth_url = format!(
         "{}?client_id={}&request_uri={}",
@@ -782,13 +786,28 @@ async fn auth_callback(
         }
     };
 
-    let pending = {
+    let (pending, remaining) = {
         let mut pending_map = state.pending.lock().await;
-        pending_map.remove(state_value)
+        let p = pending_map.remove(state_value);
+        (p, pending_map.len())
     };
     let pending = match pending {
         Some(p) => p,
-        None => return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response()),
+        None => {
+            // Distinguish the two failure modes: `remaining == 0` means the
+            // pending store was empty (a broker restart/redeploy wiped every
+            // in-flight login, or the state was already consumed) vs a
+            // non-empty store where THIS key is missing (callback hit twice /
+            // state mismatch). Previously this returned silently before any
+            // log line, so the failure was invisible.
+            let prefix: String = state_value.chars().take(6).collect();
+            tracing::warn!(
+                state_prefix = %prefix,
+                remaining_pending = remaining,
+                "OAuth callback: unknown state (login expired, consumed twice, or broker restarted mid-login)"
+            );
+            return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response());
+        }
     };
     tracing::info!(popup = %pending.popup, return_to = ?pending.return_to, "BROKER_CALLBACK_PARAMS_V3");
     let return_to = pending
