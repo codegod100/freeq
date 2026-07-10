@@ -1,0 +1,41 @@
+name: Federation e2e
+
+# The two-server harness spawns real freeq-server binaries and peers them over
+# iroh on localhost; it's #[ignore]'d out of the default suite. Runs in its own
+# workflow, path-filtered so it only triggers when server or SDK code changes —
+# most PRs skip it entirely.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'freeq-server/**'
+      - 'freeq-sdk/**'
+      - '.github/workflows/federation.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'freeq-server/**'
+      - 'freeq-sdk/**'
+      - '.github/workflows/federation.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  federation:
+    name: Federation e2e (two servers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux audio dev packages
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Serial: each test owns two server processes + several ports.
+      - name: Run federation harness
+        run: cargo test -p freeq-server --test federation -- --ignored --test-threads=1

@@ -70,6 +70,7 @@ av-native = ["iroh-live", "moq-relay", "moq-native", "moq-lite", "moq-token", "q
 
 [dev-dependencies]
 freeq-sdk = { path = "../freeq-sdk" }
+iroh = { workspace = true }
 serde_urlencoded = "0.7"
 rcgen = "0.13"
 tempfile = "3"
