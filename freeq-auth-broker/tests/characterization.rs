@@ -49,6 +49,7 @@ fn broker_state(freeq_server_url: &str) -> Arc<BrokerState> {
         }),
         store,
         pending: Mutex::new(std::collections::HashMap::new()),
+        completed: Mutex::new(std::collections::HashMap::new()),
         refresh_locks: Mutex::new(std::collections::HashMap::new()),
     })
 }
@@ -556,14 +557,25 @@ async fn callback_happy_path_web() {
         assert_eq!(rec.did, "did:plc:alice123");
     }
 
-    // One-time state: replaying the same callback must fail.
+    // The code is single-use, but the callback is IDEMPOTENT: replaying the
+    // same state replays the first request's redirect (not an error), because
+    // browsers/proxies re-request the callback URL and the first already
+    // completed the login. Regression pin for the 2026-07-10 web-login bug
+    // (the same state hit the callback 3× in 2s → "Invalid OAuth state").
     let replay = http()
         .get(format!("{base}/auth/callback?state=st1&code=CODE1"))
         .send()
         .await
         .unwrap();
-    assert_eq!(replay.status(), 200);
-    assert!(replay.text().await.unwrap().contains("Invalid OAuth state"));
+    assert!(replay.status().is_redirection(), "replay got {}", replay.status());
+    let replay_loc = replay.headers()["location"].to_str().unwrap().to_string();
+    assert_eq!(replay_loc, loc, "duplicate callback replays the same redirect");
+    // ...and did NOT re-run the single-use token exchange.
+    assert_eq!(
+        exch.lock().unwrap().requests.len(),
+        1,
+        "replay must not re-exchange the code"
+    );
 }
 
 #[tokio::test]

@@ -36,6 +36,14 @@ pub struct BrokerState {
     /// [`InMemoryStore`] (embedded default).
     pub store: Arc<dyn SessionStore>,
     pub pending: Mutex<std::collections::HashMap<String, PendingAuth>>,
+    /// Idempotency cache: `oauth_state` → (unix ts, final redirect URL) for a
+    /// just-completed login. The OAuth `code` is single-use, so a duplicate
+    /// callback (browsers/proxies re-request the URL — observed: the same
+    /// state hitting the callback 3× in 2s) can't re-run the exchange. We
+    /// replay the FIRST callback's redirect instead of erroring with "Invalid
+    /// OAuth state", so whichever duplicate the tab renders still logs in.
+    /// In-memory + short TTL (see `COMPLETED_TTL_SECS`).
+    pub completed: Mutex<std::collections::HashMap<String, (i64, String)>>,
     /// Per-broker-token refresh serialization. AT Proto refresh tokens are
     /// single-use (rotating): the PDS invalidates the old one when it issues a
     /// new one. Concurrent `/session` calls for the same token — which the
@@ -760,6 +768,9 @@ async fn auth_login(
     Ok(Redirect::temporary(&auth_url))
 }
 
+/// How long a completed login's redirect is replayable for duplicate callbacks.
+const COMPLETED_TTL_SECS: i64 = 120;
+
 async fn auth_callback(
     Query(q): Query<AuthCallbackQuery>,
     State(state): State<Arc<BrokerState>>,
@@ -794,17 +805,35 @@ async fn auth_callback(
     let pending = match pending {
         Some(p) => p,
         None => {
-            // Distinguish the two failure modes: `remaining == 0` means the
-            // pending store was empty (a broker restart/redeploy wiped every
-            // in-flight login, or the state was already consumed) vs a
-            // non-empty store where THIS key is missing (callback hit twice /
-            // state mismatch). Previously this returned silently before any
-            // log line, so the failure was invisible.
             let prefix: String = state_value.chars().take(6).collect();
+            // Idempotency: a duplicate callback for a state we JUST completed
+            // replays the first request's redirect instead of erroring — the
+            // single-use code is already spent, but the login succeeded, so
+            // whichever duplicate the browser renders should still land in the
+            // app. (Root cause of the "Invalid OAuth state" a user hit: the
+            // same state hitting the callback 3× within 2s.)
+            let replay = {
+                let now = chrono::Utc::now().timestamp();
+                let mut done = state.completed.lock().await;
+                done.retain(|_, (ts, _)| now - *ts < COMPLETED_TTL_SECS);
+                done.get(state_value).map(|(_, url)| url.clone())
+            };
+            if let Some(url) = replay {
+                tracing::info!(state_prefix = %prefix, "OAuth callback: replaying completed login (duplicate request)");
+                // `freeq://` needs a 302 (ASWebAuthenticationSession only
+                // intercepts those); web uses a 307.
+                if url.starts_with("freeq://") {
+                    return Ok(Redirect::to(&url).into_response());
+                }
+                return Ok(Redirect::temporary(&url).into_response());
+            }
+            // Not a replay: distinguish restart-wipe (remaining==0) from a
+            // stale/mismatched state (remaining>0). Previously this returned
+            // before any log line, so the failure was invisible.
             tracing::warn!(
                 state_prefix = %prefix,
                 remaining_pending = remaining,
-                "OAuth callback: unknown state (login expired, consumed twice, or broker restarted mid-login)"
+                "OAuth callback: unknown state (login expired or state mismatch)"
             );
             return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response());
         }
@@ -925,6 +954,10 @@ async fn auth_callback(
         );
         // Must be a 302 redirect — ASWebAuthenticationSession only intercepts
         // HTTP redirects with the custom scheme, not JS/meta-refresh in HTML.
+        state.completed.lock().await.insert(
+            state_value.to_string(),
+            (chrono::Utc::now().timestamp(), redirect.clone()),
+        );
         return Ok(axum::response::Redirect::to(&redirect).into_response());
     }
 
@@ -940,6 +973,11 @@ async fn auth_callback(
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&result).unwrap_or_default());
     let redirect = format!("{return_to}#oauth={payload}");
+    // Cache for idempotent replay on a duplicate callback (see COMPLETED_TTL_SECS).
+    state.completed.lock().await.insert(
+        state_value.to_string(),
+        (chrono::Utc::now().timestamp(), redirect.clone()),
+    );
     tracing::info!(redirect_base = %return_to, "OAuth callback redirecting to app");
     Ok(Redirect::temporary(&redirect).into_response())
 }
