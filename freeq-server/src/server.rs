@@ -1029,7 +1029,7 @@ impl SharedState {
     /// Resolve a DID to a display nick for UI surfaces (CHATHISTORY
     /// TARGETS, etc.). Chain: in-memory `did_nicks` → live session
     /// (`session_dids` reverse + `nick_to_session`) → persistent
-    /// `identities` table → raw DID as last resort.
+    /// `identities` table → message-history sender → raw DID as last resort.
     pub fn display_nick_for_did(&self, did: &str) -> String {
         if let Some(n) = self.did_nicks.lock().get(did).cloned() {
             return n;
@@ -1048,6 +1048,13 @@ impl SharedState {
         }
         if let Some(row) = self.with_db(|db| db.get_identity_by_did(did)).flatten() {
             return row.nick;
+        }
+        // Last resort before the raw DID: recover the nick the DID last sent
+        // under from stored messages. Covers conversations that predate durable
+        // identity binding and remote DIDs with no local `identities` row.
+        // Display-only — this never registers ownership of the recovered nick.
+        if let Some(nick) = self.with_db(|db| db.recent_nick_for_did(did)).flatten() {
+            return nick;
         }
         did.to_string()
     }
@@ -6698,6 +6705,33 @@ mod s2s_adversarial_tests {
         state.nick_owners.lock().clear();
         assert_eq!(state.display_nick_for_did(did_b), assigned);
         assert_eq!(state.display_nick_for_did(owner), "foo");
+    }
+
+    #[test]
+    fn display_nick_falls_back_to_message_history() {
+        let state = test_state_with_db();
+        let did = "did:plc:legacy";
+
+        // No did_nicks entry, no identities row — only message history, as for
+        // a conversation predating durable identity binding or a remote DID.
+        state.with_db(|db| {
+            db.insert_message(
+                "&dmkey",
+                "carol!c@freeq/plc/abcd",
+                "hey",
+                100,
+                &std::collections::HashMap::new(),
+                Some("h1"),
+                Some(did),
+            )
+        });
+
+        assert_eq!(state.display_nick_for_did(did), "carol");
+        // A DID with no history at all still degrades to the raw DID.
+        assert_eq!(
+            state.display_nick_for_did("did:plc:unknown"),
+            "did:plc:unknown"
+        );
     }
 
     // === commit-reveal verification ===

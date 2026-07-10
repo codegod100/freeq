@@ -1868,9 +1868,9 @@ fn handle_chathistory_targets(
 
         if let Some(partner) = partner_did {
             // Resolve DID → nick for display via the full chain
-            // (did_nicks → live session → identities table → raw DID),
-            // so an offline agent with a persisted/known binding still
-            // shows a name instead of the raw did:key.
+            // (did_nicks → live session → identities table → message
+            // history → raw DID), so an offline agent with a persisted or
+            // previously-seen binding still shows a name, not the raw did:key.
             let display_nick = state.display_nick_for_did(partner);
 
             let mut tags = std::collections::HashMap::new();
