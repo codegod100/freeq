@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 
 use crate::server::{BanEntry, ChannelState, TopicInfo};
 
@@ -416,6 +416,15 @@ impl Db {
         }
 
         self.migrate_signing_keys_to_kid_history()?;
+        // Index the DID column added by the migration above. Created here (not
+        // in the initial schema block) because `sender_did` doesn't exist until
+        // the ALTER runs. Backs the DID→last-nick history lookup, whose miss
+        // case (a partner who never posted here) would otherwise full-scan the
+        // whole messages table under the global DB lock.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_sender_did ON messages(sender_did)",
+            [],
+        )?;
 
         self.init_fts()?;
 
@@ -1802,6 +1811,35 @@ impl Db {
             None => Ok(None),
         }
     }
+
+    /// Recover the nick a DID last sent under, from stored message history.
+    /// The `sender` column holds a `nick!user@host` mask, so the bare nick is
+    /// the part before `!`. Covers DIDs that have no `identities` row — remote
+    /// DIDs whose messages were persisted on receipt, and threads that predate
+    /// durable identity binding. Only rows carrying a `sender_did` are visible:
+    /// messages persisted before that column existed are NULL and invisible, so
+    /// resolution needs at least one post-migration message from the DID.
+    /// Returns the most recent. Note the recovered nick may since have been
+    /// reassigned to a different DID — display-only, so a collision only mildly
+    /// misleads and never grants identity.
+    pub fn recent_nick_for_did(&self, did: &str) -> SqlResult<Option<String>> {
+        let mask: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sender FROM messages WHERE sender_did = ?1 ORDER BY id DESC LIMIT 1",
+                params![did],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(mask.and_then(|m| {
+            let nick = m.split('!').next().unwrap_or(&m).trim();
+            if nick.is_empty() || nick == did {
+                None
+            } else {
+                Some(nick.to_string())
+            }
+        }))
+    }
 }
 
 fn map_message_row(row: &rusqlite::Row) -> SqlResult<MessageRow> {
@@ -1845,6 +1883,75 @@ mod tests {
             Some("did:plc:alice"),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn recent_nick_for_did_recovers_bare_nick_from_history() {
+        let db = Db::open_memory().unwrap();
+        // A DID with no `identities` row (old/remote), but message history.
+        db.insert_message(
+            "#dev",
+            "bob!b@freeq/plc/xxxx",
+            "hi",
+            100,
+            &HashMap::new(),
+            Some("m1"),
+            Some("did:plc:bob"),
+        )
+        .unwrap();
+        db.insert_message(
+            "#dev",
+            "bobby!b@freeq/plc/xxxx",
+            "renamed",
+            200,
+            &HashMap::new(),
+            Some("m2"),
+            Some("did:plc:bob"),
+        )
+        .unwrap();
+
+        // Most recent mask wins; the `!user@host` suffix is stripped.
+        assert_eq!(
+            db.recent_nick_for_did("did:plc:bob").unwrap().as_deref(),
+            Some("bobby")
+        );
+        // Unknown DID resolves to nothing.
+        assert_eq!(db.recent_nick_for_did("did:plc:nobody").unwrap(), None);
+    }
+
+    #[test]
+    fn recent_nick_for_did_skips_rows_without_sender_did() {
+        let db = Db::open_memory().unwrap();
+        // Pre-migration rows carry NULL sender_did (no backfill) and must be
+        // invisible to the DID-keyed lookup.
+        db.insert_message(
+            "#dev",
+            "dave!d@host",
+            "legacy",
+            100,
+            &HashMap::new(),
+            Some("l1"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.recent_nick_for_did("did:plc:dave").unwrap(), None);
+    }
+
+    #[test]
+    fn recent_nick_for_did_ignores_degenerate_masks() {
+        let db = Db::open_memory().unwrap();
+        // Sender mask that is literally the DID (defensive) resolves to None.
+        db.insert_message(
+            "#dev",
+            "did:plc:ghost",
+            "x",
+            100,
+            &HashMap::new(),
+            Some("g1"),
+            Some("did:plc:ghost"),
+        )
+        .unwrap();
+        assert_eq!(db.recent_nick_for_did("did:plc:ghost").unwrap(), None);
     }
 
     #[test]

@@ -358,6 +358,8 @@ pub fn router(state: Arc<SharedState>) -> Router {
             // Same store instance auth_callback persists into.
             store,
             pending: tokio::sync::Mutex::new(Default::default()),
+            completed: tokio::sync::Mutex::new(Default::default()),
+            callback_locks: tokio::sync::Mutex::new(Default::default()),
             refresh_locks: tokio::sync::Mutex::new(Default::default()),
         });
         final_app = final_app.merge(freeq_auth_broker::session_router(broker_state));

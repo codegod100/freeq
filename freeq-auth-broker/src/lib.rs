@@ -36,6 +36,21 @@ pub struct BrokerState {
     /// [`InMemoryStore`] (embedded default).
     pub store: Arc<dyn SessionStore>,
     pub pending: Mutex<std::collections::HashMap<String, PendingAuth>>,
+    /// Idempotency cache: `oauth_state` → (unix ts, final redirect URL) for a
+    /// just-completed login. The OAuth `code` is single-use, so a duplicate
+    /// callback (browsers/proxies re-request the URL — observed: the same
+    /// state hitting the callback 3× in 2s) can't re-run the exchange. We
+    /// replay the FIRST callback's redirect instead of erroring with "Invalid
+    /// OAuth state", so whichever duplicate the tab renders still logs in.
+    /// In-memory + short TTL (see `COMPLETED_TTL_SECS`).
+    pub completed: Mutex<std::collections::HashMap<String, (i64, String)>>,
+    /// Per-`oauth_state` lock serializing callbacks for the same state. Without
+    /// it, two callbacks arriving DURING the (single-use) code exchange race:
+    /// the second finds the pending entry already consumed but the result not
+    /// yet cached in `completed`, and errors. The lock makes the duplicate wait
+    /// and then hit the completed cache. Different states don't contend.
+    /// Mirrors `refresh_locks`.
+    pub callback_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-broker-token refresh serialization. AT Proto refresh tokens are
     /// single-use (rotating): the PDS invalidates the old one when it issues a
     /// new one. Concurrent `/session` calls for the same token — which the
@@ -93,6 +108,17 @@ fn upstream_client() -> Result<reqwest::Client, anyhow::Error> {
         .pool_idle_timeout(std::time::Duration::from_secs(90))
         .pool_max_idle_per_host(32)
         .tcp_keepalive(std::time::Duration::from_secs(30))
+        // Force IPv4. The broker runs in a Docker container that has NO IPv6
+        // route (bridge network, daemon IPv6 off) — only IPv4 (NAT) egress —
+        // yet the host resolver hands back AAAA records for IPv6-first CDNs
+        // like public.api.bsky.app (Bunny). Without this, the client attempts
+        // the unroutable IPv6 address and stalls on the 8s connect timeout
+        // before (maybe) falling back to IPv4 — the intermittent "can't
+        // resolve handle" first-login failures. Binding to an IPv4 local
+        // address makes every connection IPv4-only. (This is what the old
+        // "Miren egress / second TCP connection TimedOut" comments were really
+        // fighting — it was container IPv6, not the platform.)
+        .local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
         .build()?)
 }
 
@@ -126,27 +152,70 @@ impl ClientProvider for SsrfClients {
 
 async fn resolve_handle(handle: &str) -> Result<String, anyhow::Error> {
     let client = upstream_client()?;
-    // Try HTTPS well-known first
-    let url = format!("https://{handle}/.well-known/atproto-did");
-    if let Ok(resp) = client.get(&url).send().await
-        && resp.status().is_success()
-    {
-        let did = resp.text().await?.trim().to_string();
-        if did.starts_with("did:") {
-            return Ok(did);
+
+    // 1. HTTPS well-known first — custom domains AND bsky.social handles both
+    //    serve `/.well-known/atproto-did`. One retry to ride out a blip.
+    let well_known = format!("https://{handle}/.well-known/atproto-did");
+    for attempt in 1..=2 {
+        match client.get(&well_known).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(text) = resp.text().await {
+                    let did = text.trim().to_string();
+                    if did.starts_with("did:") {
+                        return Ok(did);
+                    }
+                }
+            }
+            Ok(resp) => tracing::debug!(
+                handle, status = %resp.status(), "resolve: well-known non-success, trying appview"
+            ),
+            Err(e) => tracing::debug!(handle, attempt, error = %e, "resolve: well-known request failed"),
         }
     }
 
-    // Fallback to public API (DNS TXT)
+    // 2. Fallback to the public appview resolver. CHECK THE STATUS before
+    //    parsing — a rate-limit (429) or 5xx returns a JSON error body with no
+    //    `did`, which previously surfaced as the confusing "No DID in
+    //    response" and failed the whole login. Retry transient statuses.
     let api_url = format!(
         "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={}",
         handle
     );
-    let json: serde_json::Value = client.get(&api_url).send().await?.json().await?;
-    let did = json["did"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No DID in response"))?;
-    Ok(did.to_string())
+    let mut last_err = "unknown".to_string();
+    for attempt in 1..=3 {
+        match client.get(&api_url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                        && let Some(did) = json["did"].as_str()
+                    {
+                        return Ok(did.to_string());
+                    }
+                    let snippet: String = body.chars().take(160).collect();
+                    last_err = format!("appview 2xx without a DID field (body: {snippet})");
+                    break; // a 2xx with no DID won't change on retry
+                }
+                last_err = format!("appview HTTP {status}");
+                // 429 / 5xx are transient — back off and retry.
+                if status.as_u16() == 429 || status.is_server_error() {
+                    tracing::warn!(handle, %status, attempt, "resolve: appview transient error, retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+                    continue;
+                }
+                break; // other 4xx (e.g. genuinely bad handle) — don't retry
+            }
+            Err(e) => {
+                last_err = format!("appview request error: {e}");
+                tracing::warn!(handle, attempt, error = %e, "resolve: appview request failed, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+            }
+        }
+    }
+
+    tracing::error!(handle, reason = %last_err, "handle resolution failed");
+    anyhow::bail!("Could not resolve handle '{handle}': {last_err}")
 }
 
 async fn resolve_did(did: &str) -> Result<DidDocument, anyhow::Error> {
@@ -674,6 +743,8 @@ async fn auth_login(
 
     tracing::info!(handle = %handle, did = %did, popup = %is_popup, return_to = ?return_to, "BROKER_LOGIN_PARAMS_V3");
 
+    let state_prefix: String = oauth_state.chars().take(6).collect();
+
     state.pending.lock().await.insert(
         oauth_state.clone(),
         PendingAuth {
@@ -691,6 +762,8 @@ async fn auth_login(
             popup: is_popup,
         },
     );
+    let pending_count = state.pending.lock().await.len();
+    tracing::info!(state_prefix = %state_prefix, pending_count, "BROKER stored pending login state");
 
     let auth_url = format!(
         "{}?client_id={}&request_uri={}",
@@ -701,6 +774,9 @@ async fn auth_login(
 
     Ok(Redirect::temporary(&auth_url))
 }
+
+/// How long a completed login's redirect is replayable for duplicate callbacks.
+const COMPLETED_TTL_SECS: i64 = 120;
 
 async fn auth_callback(
     Query(q): Query<AuthCallbackQuery>,
@@ -728,13 +804,61 @@ async fn auth_callback(
         }
     };
 
-    let pending = {
+    let state_prefix: String = state_value.chars().take(6).collect();
+
+    // Serialize callbacks for the SAME state so concurrent duplicates (the
+    // browser fires the callback URL 2-3× at once) don't race between
+    // consuming the pending entry and caching the result. Different states
+    // don't contend. Held across the whole handler (incl. the code exchange).
+    let state_lock = {
+        let mut locks = state.callback_locks.lock().await;
+        locks
+            .entry(state_value.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _state_guard = state_lock.lock().await;
+
+    // Idempotency: if this state already completed (a prior OR concurrent
+    // duplicate finished first), replay its redirect instead of erroring — the
+    // single-use code is spent, but the login succeeded, so whichever duplicate
+    // the browser renders should still land in the app. (Root cause of the
+    // "Invalid OAuth state" a user hit: the same state hit the callback 3×.)
+    {
+        let now = chrono::Utc::now().timestamp();
+        let mut done = state.completed.lock().await;
+        done.retain(|_, (ts, _)| now - *ts < COMPLETED_TTL_SECS);
+        if let Some((_, url)) = done.get(state_value) {
+            let url = url.clone();
+            tracing::info!(state_prefix = %state_prefix, "OAuth callback: replaying completed login (duplicate request)");
+            // `freeq://` needs a 302 (ASWebAuthenticationSession only intercepts
+            // those); web uses a 307.
+            if url.starts_with("freeq://") {
+                return Ok(Redirect::to(&url).into_response());
+            }
+            return Ok(Redirect::temporary(&url).into_response());
+        }
+    }
+
+    let (pending, remaining) = {
         let mut pending_map = state.pending.lock().await;
-        pending_map.remove(state_value)
+        let p = pending_map.remove(state_value);
+        (p, pending_map.len())
     };
     let pending = match pending {
         Some(p) => p,
-        None => return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response()),
+        None => {
+            // Not completed (checked above under the lock) and not pending →
+            // genuinely unknown: login expired, or a state mismatch/restart
+            // (remaining==0 ⇒ store empty). Previously this returned before any
+            // log line, so the failure was invisible.
+            tracing::warn!(
+                state_prefix = %state_prefix,
+                remaining_pending = remaining,
+                "OAuth callback: unknown state (login expired or state mismatch)"
+            );
+            return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response());
+        }
     };
     tracing::info!(popup = %pending.popup, return_to = ?pending.return_to, "BROKER_CALLBACK_PARAMS_V3");
     let return_to = pending
@@ -852,6 +976,10 @@ async fn auth_callback(
         );
         // Must be a 302 redirect — ASWebAuthenticationSession only intercepts
         // HTTP redirects with the custom scheme, not JS/meta-refresh in HTML.
+        state.completed.lock().await.insert(
+            state_value.to_string(),
+            (chrono::Utc::now().timestamp(), redirect.clone()),
+        );
         return Ok(axum::response::Redirect::to(&redirect).into_response());
     }
 
@@ -867,6 +995,11 @@ async fn auth_callback(
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&result).unwrap_or_default());
     let redirect = format!("{return_to}#oauth={payload}");
+    // Cache for idempotent replay on a duplicate callback (see COMPLETED_TTL_SECS).
+    state.completed.lock().await.insert(
+        state_value.to_string(),
+        (chrono::Utc::now().timestamp(), redirect.clone()),
+    );
     tracing::info!(redirect_base = %return_to, "OAuth callback redirecting to app");
     Ok(Redirect::temporary(&redirect).into_response())
 }

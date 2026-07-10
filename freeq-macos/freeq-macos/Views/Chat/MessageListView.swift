@@ -659,11 +659,13 @@ struct MessageRow: View {
                     .italic()
                     .foregroundStyle(Theme.textSecondary)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if isSystem {
                 Text(message.text)
                     .font(.system(.body, design: .monospaced).weight(.light))
                     .foregroundStyle(Theme.textSecondary)
                     .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 let imageURLs = extractImageURLs(from: message.text)
                 let videoURLs = extractVideoURLs(from: message.text)
@@ -685,6 +687,11 @@ struct MessageRow: View {
                     } else {
                         Text(parseMessageText(cleanText))
                             .textSelection(.enabled)
+                            // Claim full wrapped height. Without this the row's
+                            // self-sizing host can allocate ~1 line while the
+                            // text renders 2, so anything below it (a reaction
+                            // badge) overlaps the wrapped line.
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 

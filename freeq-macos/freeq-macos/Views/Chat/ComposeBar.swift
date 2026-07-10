@@ -398,7 +398,15 @@ struct ComposeBar: View {
 
     private func pickFile() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image, .png, .jpeg, .gif, .mpeg4Movie, .movie, .mp3, .wav, .mpeg4Audio, .pdf]
+        // Media types stay first so the picker highlights them, but `.data`
+        // (the root byte-data type) makes ANY file selectable — HTML, text,
+        // archives, etc. Uploads of unknown/HTML types go up as
+        // application/octet-stream (see loadFile), so they download rather than
+        // render inline from the freeq origin.
+        panel.allowedContentTypes = [
+            .image, .png, .jpeg, .gif, .mpeg4Movie, .movie, .mp3, .wav, .mpeg4Audio, .pdf,
+            .html, .plainText, .json, .data,
+        ]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         if panel.runModal() == .OK, let url = panel.url {
@@ -450,6 +458,13 @@ struct ComposeBar: View {
         case "wav": contentType = "audio/wav"
         case "ogg": contentType = "audio/ogg"
         case "pdf": contentType = "application/pdf"
+        case "txt", "log", "md": contentType = "text/plain"
+        case "json": contentType = "application/json"
+        case "csv": contentType = "text/csv"
+        case "html", "htm":
+            // Served as a download (octet-stream), never inline text/html —
+            // serving user HTML from the freeq origin would be stored XSS.
+            contentType = "application/octet-stream"
         default: contentType = "application/octet-stream"
         }
         let preview = NSImage(contentsOf: url)

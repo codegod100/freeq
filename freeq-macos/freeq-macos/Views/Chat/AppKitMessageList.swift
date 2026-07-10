@@ -392,13 +392,39 @@ struct AppKitMessageListView: NSViewRepresentable {
 /// cell edges so the SwiftUI content's intrinsic height drives the (automatic)
 /// row height. The hosting view is created once and its `rootView` swapped on
 /// reuse — no per-reuse view-tree teardown.
+/// `NSHostingView` that reports when its intrinsic content size is invalidated.
+/// SwiftUI-internal state — e.g. expanding a coalesced presence pill — changes
+/// the content height without any model change the coordinator would catch, so
+/// the table never re-measures the row and the taller content overflows the
+/// cached row rect (clipped/overlapping, and the collapse control drifts out of
+/// reach). The cell listens to this to note the row's new height.
+private final class ReportingHostingView: NSHostingView<AnyView> {
+    var onIntrinsicSizeChange: (() -> Void)?
+
+    required init(rootView: AnyView) { super.init(rootView: rootView) }
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) not used") }
+
+    override func invalidateIntrinsicContentSize() {
+        super.invalidateIntrinsicContentSize()
+        onIntrinsicSizeChange?()
+    }
+}
+
 private final class HostingCellView: NSTableCellView {
     /// Per-cell clamp the coordinator updates on scroll so the hovered row's
     /// action bar stays inside the viewport. Injected into the hosted content.
     let clamp = RowClamp()
-    private var hosting: NSHostingView<AnyView>?
+    private var hosting: ReportingHostingView?
+    /// Last intrinsic height we synced to the table, so we only re-measure on a
+    /// real change (not every layout pass) and never loop.
+    private var lastIntrinsicHeight: CGFloat = -1
+    private var heightSyncScheduled = false
 
     func host(_ view: AnyView) {
+        // New content → new baseline height; don't treat its first measure as a
+        // change (which would fire a spurious re-measure during reuse/paint).
+        lastIntrinsicHeight = -1
         let rooted = AnyView(view.environment(clamp))
         // On hover: stop clipping the (taller-than-row) action bar and lift this
         // row's z above its neighbours so the overflow draws on top of them.
@@ -416,7 +442,8 @@ private final class HostingCellView: NSTableCellView {
             hosting.rootView = rooted
             return
         }
-        let h = NSHostingView(rootView: rooted)
+        let h = ReportingHostingView(rootView: rooted)
+        h.onIntrinsicSizeChange = { [weak self] in self?.scheduleHeightSync() }
         h.wantsLayer = true
         h.layer?.masksToBounds = false
         h.translatesAutoresizingMaskIntoConstraints = false
@@ -440,6 +467,39 @@ private final class HostingCellView: NSTableCellView {
             bottom,
         ])
         hosting = h
+    }
+
+    /// When the hosted SwiftUI content changes intrinsic height (e.g. a
+    /// coalesced presence pill expands/collapses), tell the table to re-measure
+    /// THIS row so it grows/shrinks to fit instead of clipping the new content.
+    /// Deferred + de-duped so we never mutate the table mid-layout or loop.
+    private func scheduleHeightSync() {
+        guard !heightSyncScheduled else { return }
+        heightSyncScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.heightSyncScheduled = false
+            guard let h = self.hosting else { return }
+            let newHeight = h.intrinsicContentSize.height
+            guard newHeight >= 0, abs(newHeight - self.lastIntrinsicHeight) > 0.5 else { return }
+            let hadBaseline = self.lastIntrinsicHeight >= 0
+            self.lastIntrinsicHeight = newHeight
+            // Skip the first measure (baseline set on host()); only real
+            // subsequent changes trigger a re-measure.
+            guard hadBaseline, let table = self.enclosingTableView() else { return }
+            let row = table.row(for: self)
+            guard row >= 0 else { return }
+            table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
+        }
+    }
+
+    private func enclosingTableView() -> NSTableView? {
+        var view: NSView? = superview
+        while let current = view {
+            if let table = current as? NSTableView { return table }
+            view = current.superview
+        }
+        return nil
     }
 }
 
