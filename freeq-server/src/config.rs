@@ -48,7 +48,9 @@ pub struct ServerConfig {
     pub iroh_port: Option<u16>,
 
     /// S2S peer iroh endpoint IDs to connect to on startup.
-    /// Comma-separated list of hex endpoint IDs.
+    /// Comma-separated. Each entry is `<endpoint-id>` (resolved via discovery)
+    /// or `<endpoint-id>@<host:port>` to dial a direct address, bypassing
+    /// discovery (LAN/static deployments, and the federation test harness).
     #[arg(long, value_delimiter = ',')]
     pub s2s_peers: Vec<String>,
 
@@ -74,6 +76,14 @@ pub struct ServerConfig {
     /// Defaults to the directory containing --db-path, or current directory.
     #[arg(long)]
     pub data_dir: Option<String>,
+
+    /// TEST/DEV ONLY: resolve these DIDs from a static in-memory map instead of
+    /// the network. Comma-separated `did=<publicKeyMultibase>` entries. When set,
+    /// the server uses a static DID resolver (no HTTP/PLC lookups). Used by the
+    /// federation test harness to authenticate test identities offline. Empty in
+    /// production — leave unset to use the real network resolver.
+    #[arg(long, value_delimiter = ',')]
+    pub did_resolver_static: Vec<String>,
 
     /// Maximum messages to retain per channel in the database.
     /// When exceeded, oldest messages are pruned. 0 = unlimited.
@@ -214,6 +224,7 @@ impl Default for ServerConfig {
             s2s_peer_trust: vec![],
             server_did: None,
             data_dir: None,
+            did_resolver_static: vec![],
             max_messages_per_channel: 10000,
             motd: None,
             motd_file: None,

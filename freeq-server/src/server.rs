@@ -1327,16 +1327,46 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Self {
-            resolver: DidResolver::http(),
-            config,
-        }
+        let resolver = resolver_from_config(&config);
+        Self { resolver, config }
     }
 
     /// Create a server with a custom DID resolver (for testing).
     pub fn with_resolver(config: ServerConfig, resolver: DidResolver) -> Self {
         Self { config, resolver }
     }
+}
+
+/// Build the DID resolver the binary runs with: the real network resolver by
+/// default, or a static in-memory map when `--did-resolver-static` is set
+/// (test/dev only — offline authentication for the federation harness).
+fn resolver_from_config(config: &ServerConfig) -> DidResolver {
+    if config.did_resolver_static.is_empty() {
+        return DidResolver::http();
+    }
+    let mut docs = std::collections::HashMap::new();
+    for entry in &config.did_resolver_static {
+        match entry.split_once('=') {
+            Some((did, mb)) if !did.is_empty() && !mb.is_empty() => {
+                docs.insert(
+                    did.to_string(),
+                    freeq_sdk::did::make_test_did_document(did, mb),
+                );
+            }
+            _ => tracing::warn!(
+                entry = %entry,
+                "Ignoring malformed --did-resolver-static entry (expected did=publicKeyMultibase)"
+            ),
+        }
+    }
+    tracing::warn!(
+        count = docs.len(),
+        "Using STATIC DID resolver (test/dev mode) — no network DID resolution"
+    );
+    DidResolver::static_map(docs)
+}
+
+impl Server {
 
     /// Build SharedState, opening the database and loading persisted data.
     fn build_state(&self) -> Result<Arc<SharedState>> {
