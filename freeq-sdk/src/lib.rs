@@ -15,6 +15,7 @@
 //! - [`event`] — Events emitted by the client
 //! - [`irc`] — IRC message parsing/formatting
 
+pub mod act;
 pub mod auth;
 pub mod av;
 pub mod bot;

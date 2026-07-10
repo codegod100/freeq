@@ -1016,3 +1016,188 @@ async fn nick_to_session_recovers_when_stale_entry_lingers() {
     h1.quit(None).await.ok();
     h2.quit(None).await.ok();
 }
+
+// ═══════════════════════════════════════════════════════════════
+// DID WIRE TARGETS (Element B): a PRIVMSG addressed to `did:plc:x`
+// delivers to every local session bound to that DID, and the
+// recipient sees the DID as the target (no per-server nick rewrite).
+// Nick-addressed DMs must still fan out to all devices too.
+// ═══════════════════════════════════════════════════════════════
+
+const DID_SENDER: &str = "did:plc:didsender";
+const DID_RECIP: &str = "did:plc:didrecip";
+
+async fn start_sender_recip(
+    key_sender: &PrivateKey,
+    key_recip: &PrivateKey,
+) -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let mut docs = HashMap::new();
+    docs.insert(
+        DID_SENDER.to_string(),
+        did::make_test_did_document(DID_SENDER, &key_sender.public_key_multibase()),
+    );
+    docs.insert(
+        DID_RECIP.to_string(),
+        did::make_test_did_document(DID_RECIP, &key_recip.public_key_multibase()),
+    );
+    let resolver = DidResolver::static_map(docs);
+    let config = freeq_server::config::ServerConfig {
+        listen_addr: "127.0.0.1:0".to_string(),
+        server_name: "test-didtarget".to_string(),
+        challenge_timeout_secs: 60,
+        ..Default::default()
+    };
+    freeq_server::server::Server::with_resolver(config, resolver)
+        .start()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn dm_to_did_target_reaches_all_recipient_devices() {
+    let key_s = PrivateKey::generate_ed25519();
+    let key_s_use = PrivateKey::ed25519_from_bytes(&key_s.secret_bytes()).unwrap();
+    let key_r = PrivateKey::generate_ed25519();
+    let key_r1 = PrivateKey::ed25519_from_bytes(&key_r.secret_bytes()).unwrap();
+    let key_r2 = PrivateKey::ed25519_from_bytes(&key_r.secret_bytes()).unwrap();
+    let (addr, _h) = start_sender_recip(&key_s, &key_r).await;
+
+    // Recipient: two devices, same DID.
+    let (hr1, mut rxr1) = connect_did(addr, DID_RECIP, "recip", key_r1).await;
+    wait_auth(&mut rxr1).await;
+    wait_registered(&mut rxr1).await;
+    let (hr2, mut rxr2) = connect_did(addr, DID_RECIP, "recip", key_r2).await;
+    wait_auth(&mut rxr2).await;
+    wait_registered(&mut rxr2).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Sender addresses the recipient's DID, not its nick.
+    let (hs, mut rxs) = connect_did(addr, DID_SENDER, "sender", key_s_use).await;
+    wait_auth(&mut rxs).await;
+    wait_registered(&mut rxs).await;
+    hs.privmsg(DID_RECIP, "hello by did").await.unwrap();
+
+    // Both recipient devices receive it, with the DID echoed as the target.
+    for (rx, dev) in [(&mut rxr1, "device 1"), (&mut rxr2, "device 2")] {
+        let msg = wait_event(
+            rx,
+            |e| matches!(e, Event::Message { text, .. } if text == "hello by did"),
+            dev,
+        )
+        .await;
+        assert!(
+            matches!(msg, Event::Message { target, .. } if target == DID_RECIP),
+            "{dev}: recipient must see the DID as the PRIVMSG target (no nick rewrite)"
+        );
+    }
+
+    // Regression: a nick-addressed DM must still fan out to both devices.
+    hs.privmsg("recip", "hello by nick").await.unwrap();
+    for (rx, dev) in [(&mut rxr1, "device 1"), (&mut rxr2, "device 2")] {
+        wait_event(
+            rx,
+            |e| matches!(e, Event::Message { text, .. } if text == "hello by nick"),
+            dev,
+        )
+        .await;
+    }
+
+    hs.quit(None).await.ok();
+    hr1.quit(None).await.ok();
+    hr2.quit(None).await.ok();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DID-KEYED DM PERSISTENCE (Element C): the sender's own server
+// keeps its copy of a DID-addressed DM, keyed by canonical_dm_key.
+// Before, the send-side persist only ran when nick_owners resolved
+// the target, so a `did:`-addressed DM left no sender-side history.
+// ═══════════════════════════════════════════════════════════════
+
+async fn start_sender_recip_db(
+    key_sender: &PrivateKey,
+    key_recip: &PrivateKey,
+) -> (
+    std::net::SocketAddr,
+    String,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let mut docs = HashMap::new();
+    docs.insert(
+        DID_SENDER.to_string(),
+        did::make_test_did_document(DID_SENDER, &key_sender.public_key_multibase()),
+    );
+    docs.insert(
+        DID_RECIP.to_string(),
+        did::make_test_did_document(DID_RECIP, &key_recip.public_key_multibase()),
+    );
+    let resolver = DidResolver::static_map(docs);
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db_path = tmp.path().to_str().unwrap().to_string();
+    std::mem::forget(tmp);
+    let config = freeq_server::config::ServerConfig {
+        listen_addr: "127.0.0.1:0".to_string(),
+        server_name: "test-didpersist".to_string(),
+        challenge_timeout_secs: 60,
+        db_path: Some(db_path.clone()),
+        ..Default::default()
+    };
+    let (addr, handle) = freeq_server::server::Server::with_resolver(config, resolver)
+        .start()
+        .await
+        .unwrap();
+    (addr, db_path, handle)
+}
+
+#[tokio::test]
+async fn sender_persists_its_own_copy_of_a_did_addressed_dm() {
+    let key_s = PrivateKey::generate_ed25519();
+    let key_s_use = PrivateKey::ed25519_from_bytes(&key_s.secret_bytes()).unwrap();
+    let key_r = PrivateKey::generate_ed25519();
+    let key_r1 = PrivateKey::ed25519_from_bytes(&key_r.secret_bytes()).unwrap();
+    let (addr, db_path, _h) = start_sender_recip_db(&key_s, &key_r).await;
+
+    // Recipient online so the send completes cleanly.
+    let (hr, mut rxr) = connect_did(addr, DID_RECIP, "recip", key_r1).await;
+    wait_auth(&mut rxr).await;
+    wait_registered(&mut rxr).await;
+
+    let (hs, mut rxs) = connect_did(addr, DID_SENDER, "sender", key_s_use).await;
+    wait_auth(&mut rxs).await;
+    wait_registered(&mut rxs).await;
+    hs.privmsg(DID_RECIP, "kept on the sender").await.unwrap();
+
+    // Recipient receiving it confirms the send path ran.
+    wait_event(
+        &mut rxr,
+        |e| matches!(e, Event::Message { text, .. } if text == "kept on the sender"),
+        "recipient receives DID-addressed DM",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The sender's server persisted its copy under the DID-keyed dm_key. The
+    // message body is encrypted-at-rest, but the `channel` key column is
+    // plaintext — and keying under canonical_dm_key(sender, recipient) is
+    // exactly what Element C guarantees. Exactly one DM was sent.
+    let dm_key = freeq_server::db::canonical_dm_key(DID_SENDER, DID_RECIP);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE channel = ?1",
+            rusqlite::params![dm_key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "sender's server must keep its own copy of a DID-addressed DM under the \
+         DID-keyed dm_key {dm_key}"
+    );
+
+    hs.quit(None).await.ok();
+    hr.quit(None).await.ok();
+}

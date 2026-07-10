@@ -213,6 +213,10 @@ pub fn router(state: Arc<SharedState>) -> Router {
         )
         .route("/api/v1/signing-key", get(api_signing_key))
         .route("/api/v1/signing-keys/{did}", get(api_did_signing_key))
+        .route(
+            "/api/v1/signing-keys/{did}/{kid}",
+            get(api_did_signing_key_by_kid),
+        )
         .route("/api/v1/verify/{msgid}", get(api_verify_message))
         .route("/api/v1/channels/{name}/evidence", get(api_channel_evidence))
         .route("/api/v1/actors/{did}", get(api_actor_identity))
@@ -495,22 +499,55 @@ async fn api_signing_key(State(state): State<Arc<SharedState>>) -> Json<serde_js
     }))
 }
 
-/// Per-DID signing key: returns the client's registered session signing key.
+/// Per-DID signing key: the DID's latest registered signing key, from the
+/// durable store (the single source of truth — survives restart, covers every
+/// DID that ever registered). A specific historical key is fetched via
+/// `/{did}/{kid}`.
 async fn api_did_signing_key(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(did): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use base64::Engine;
     let did_decoded = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did));
-    if let Some(pubkey) = state.did_msg_keys.lock().get(did_decoded.as_ref()) {
-        Ok(Json(serde_json::json!({
+    match state
+        .with_db(|db| db.get_signing_key(did_decoded.as_ref()))
+        .flatten()
+    {
+        Some(pubkey) => Ok(Json(serde_json::json!({
             "did": did_decoded.as_ref(),
             "algorithm": "ed25519",
-            "public_key": pubkey,
+            "public_key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey),
             "encoding": "base64url",
-            "source": "client-session"
-        })))
-    } else {
-        Err(axum::http::StatusCode::NOT_FOUND)
+            "source": "key-store"
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
+    }
+}
+
+/// Per-DID, per-kid signing key: the exact historical key the DID registered
+/// under `kid`, from the durable store. This is the lookup a verifier uses when
+/// a signature names its kid — the key stays available after the signer's
+/// session ends, unlike `/{did}` which is the current one.
+async fn api_did_signing_key_by_kid(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Path((did, kid)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use base64::Engine;
+    let did_decoded = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did));
+    let kid_decoded = urlencoding::decode(&kid).unwrap_or(std::borrow::Cow::Borrowed(&kid));
+    match state
+        .with_db(|db| db.get_signing_key_by_kid(did_decoded.as_ref(), kid_decoded.as_ref()))
+        .flatten()
+    {
+        Some(pubkey) => Ok(Json(serde_json::json!({
+            "did": did_decoded.as_ref(),
+            "kid": kid_decoded.as_ref(),
+            "algorithm": "ed25519",
+            "public_key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey),
+            "encoding": "base64url",
+            "source": "key-store"
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
     }
 }
 
@@ -4613,5 +4650,69 @@ mod metrics_tests {
             );
         }
         assert!(out.ends_with('\n'));
+    }
+}
+
+#[cfg(test)]
+mod signing_key_endpoint_tests {
+    use super::{api_did_signing_key, api_did_signing_key_by_kid};
+    use crate::server::test_state_with_db;
+    use axum::extract::{Path, State};
+    use base64::Engine;
+
+    fn b64(b: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    }
+
+    /// The `/api/v1/signing-keys/{did}` and `/{did}/{kid}` endpoints serve the
+    /// durable key store: `/{did}` returns the latest, `/{did}/{kid}` returns a
+    /// specific historical key, and misses are 404. Drives the real handlers.
+    #[tokio::test]
+    async fn endpoints_serve_the_durable_store() {
+        let state = test_state_with_db();
+        let did = "did:plc:endpoint";
+        let (k1, k2) = ([1u8; 32], [2u8; 32]);
+        let kid1 = freeq_sdk::act::derive_kid_bytes(&k1);
+        let kid2 = freeq_sdk::act::derive_kid_bytes(&k2);
+        state
+            .with_db(|db| {
+                db.save_signing_key(did, &k1)?;
+                db.save_signing_key(did, &k2)?;
+                Ok(())
+            })
+            .expect("db present");
+
+        // /{did} → latest (k2), from the key store.
+        let latest = api_did_signing_key(State(state.clone()), Path(did.to_string()))
+            .await
+            .expect("200");
+        assert_eq!(latest.0["public_key"], b64(&k2));
+        assert_eq!(latest.0["source"], "key-store");
+
+        // /{did}/{kid} → each specific historical key.
+        let by1 =
+            api_did_signing_key_by_kid(State(state.clone()), Path((did.to_string(), kid1.clone())))
+                .await
+                .expect("200 kid1");
+        assert_eq!(by1.0["public_key"], b64(&k1));
+        assert_eq!(by1.0["kid"], kid1);
+
+        let by2 = api_did_signing_key_by_kid(State(state.clone()), Path((did.to_string(), kid2)))
+            .await
+            .expect("200 kid2");
+        assert_eq!(by2.0["public_key"], b64(&k2));
+
+        // Unknown kid → 404.
+        let miss_kid = api_did_signing_key_by_kid(
+            State(state.clone()),
+            Path((did.to_string(), "nope".to_string())),
+        )
+        .await;
+        assert_eq!(miss_kid.unwrap_err(), axum::http::StatusCode::NOT_FOUND);
+
+        // Unknown DID → 404.
+        let miss_did =
+            api_did_signing_key(State(state), Path("did:plc:nobody".to_string())).await;
+        assert_eq!(miss_did.unwrap_err(), axum::http::StatusCode::NOT_FOUND);
     }
 }

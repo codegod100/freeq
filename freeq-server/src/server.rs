@@ -1334,16 +1334,46 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Self {
-            resolver: DidResolver::http(),
-            config,
-        }
+        let resolver = resolver_from_config(&config);
+        Self { resolver, config }
     }
 
     /// Create a server with a custom DID resolver (for testing).
     pub fn with_resolver(config: ServerConfig, resolver: DidResolver) -> Self {
         Self { config, resolver }
     }
+}
+
+/// Build the DID resolver the binary runs with: the real network resolver by
+/// default, or a static in-memory map when `--did-resolver-static` is set
+/// (test/dev only — offline authentication for the federation harness).
+fn resolver_from_config(config: &ServerConfig) -> DidResolver {
+    if config.did_resolver_static.is_empty() {
+        return DidResolver::http();
+    }
+    let mut docs = std::collections::HashMap::new();
+    for entry in &config.did_resolver_static {
+        match entry.split_once('=') {
+            Some((did, mb)) if !did.is_empty() && !mb.is_empty() => {
+                docs.insert(
+                    did.to_string(),
+                    freeq_sdk::did::make_test_did_document(did, mb),
+                );
+            }
+            _ => tracing::warn!(
+                entry = %entry,
+                "Ignoring malformed --did-resolver-static entry (expected did=publicKeyMultibase)"
+            ),
+        }
+    }
+    tracing::warn!(
+        count = docs.len(),
+        "Using STATIC DID resolver (test/dev mode) — no network DID resolution"
+    );
+    DidResolver::static_map(docs)
+}
+
+impl Server {
 
     /// Build SharedState, opening the database and loading persisted data.
     fn build_state(&self) -> Result<Arc<SharedState>> {
@@ -3004,6 +3034,7 @@ pub(crate) async fn process_s2s_message(
             msgid,
             sig,
             account,
+            recipient_did: stamped_recipient_did,
             tags: relayed_tags,
             multiline_lines,
             ..
@@ -3240,16 +3271,17 @@ pub(crate) async fn process_s2s_message(
                     }
                 }
             } else {
-                // Case-insensitive nick lookup for PM delivery
-                let sid = state
-                    .nick_to_session
-                    .lock()
-                    .get_session(&target)
-                    .map(|s| s.to_string());
-                if let Some(sid) = sid {
-                    let has_tags = state.cap_message_tags.lock().contains(&sid);
-                    let wants_account =
-                        account.is_some() && state.cap_account_tag.lock().contains(&sid);
+                // DM target: a nick or a `did:`. Resolve to every local session
+                // bound to the recipient (DID fan-out) — a federated DID-addressed
+                // DM must reach the same person here, with no per-server nick
+                // interpretation.
+                let sids = crate::connection::routing::local_sessions_for_target(state, &target);
+                let tag_caps = state.cap_message_tags.lock();
+                let acct_caps = state.cap_account_tag.lock();
+                let conns = state.connections.lock();
+                for sid in &sids {
+                    let has_tags = tag_caps.contains(sid);
+                    let wants_account = account.is_some() && acct_caps.contains(sid);
                     let line = if !has_tags {
                         &plain_line
                     } else if wants_account {
@@ -3257,11 +3289,13 @@ pub(crate) async fn process_s2s_message(
                     } else {
                         &tagged_line
                     };
-                    let conns = state.connections.lock();
-                    if let Some(tx) = conns.get(&sid) {
+                    if let Some(tx) = conns.get(sid) {
                         let _ = tx.try_send(line.clone());
                     }
                 }
+                drop(conns);
+                drop(acct_caps);
+                drop(tag_caps);
 
                 // Persist DM if both sender and recipient have DIDs. Prefer the
                 // sender DID carried from the origin (a remote sender is not in
@@ -3270,7 +3304,17 @@ pub(crate) async fn process_s2s_message(
                 let sender_did = account
                     .clone()
                     .or_else(|| state.nick_owners.lock().get(sender_nick).cloned());
-                let recipient_did = state.nick_owners.lock().get(&target).cloned();
+                // Recipient: honor the origin's stamp, cross-checked against our
+                // own resolution. On a mismatch we fall back (no durable row)
+                // rather than persist under a possibly-wrong identity.
+                let stamped_recipient_did =
+                    stamped_recipient_did.map(|d| sanitize_s2s_str(&d, 512));
+                let local_recipient =
+                    crate::connection::routing::recipient_did_for_target(state, &target);
+                let recipient_did = crate::connection::routing::reconcile_recipient_did(
+                    stamped_recipient_did.as_deref(),
+                    local_recipient.as_deref(),
+                );
                 if let (Some(s_did), Some(r_did)) =
                     (sender_did.as_deref(), recipient_did.as_deref())
                 {
@@ -3398,35 +3442,40 @@ pub(crate) async fn process_s2s_message(
                 });
             }
 
-            // Deliver to local channel members
-            if target.starts_with('#') || target.starts_with('&') {
-                let tag_msg = crate::irc::Message {
-                    tags: tags.clone(),
-                    prefix: Some(from.clone()),
-                    command: "TAGMSG".to_string(),
-                    params: vec![target.clone()],
-                };
-                let tagged_line = format!("{tag_msg}\r\n");
+            // Wire forms — identical for channel and DM delivery.
+            let tag_msg = crate::irc::Message {
+                tags: tags.clone(),
+                prefix: Some(from.clone()),
+                command: "TAGMSG".to_string(),
+                params: vec![target.clone()],
+            };
+            let tagged_line = format!("{tag_msg}\r\n");
+            let plain_fallback = tags.get("+react").map(|emoji| {
+                format!(":{from} PRIVMSG {target} :\x01ACTION reacted with {emoji}\x01\r\n")
+            });
 
-                let plain_fallback = tags.get("+react").map(|emoji| {
-                    format!(":{from} PRIVMSG {target} :\x01ACTION reacted with {emoji}\x01\r\n")
-                });
-
-                let members: Vec<String> = state
+            // Resolve recipients: channel members, or (for a nick / `did:` DM)
+            // every local session bound to that recipient — a federated action
+            // addressed to a DID reaches the same person here.
+            let recipients: Vec<String> = if target.starts_with('#') || target.starts_with('&') {
+                state
                     .channels
                     .lock()
                     .get(&target.to_lowercase())
                     .map(|ch| ch.members.iter().cloned().collect())
-                    .unwrap_or_default();
-                let tag_caps = state.cap_message_tags.lock();
-                let conns = state.connections.lock();
-                for sid in &members {
-                    if let Some(tx) = conns.get(sid) {
-                        if tag_caps.contains(sid) {
-                            let _ = tx.try_send(tagged_line.clone());
-                        } else if let Some(ref fallback) = plain_fallback {
-                            let _ = tx.try_send(fallback.clone());
-                        }
+                    .unwrap_or_default()
+            } else {
+                crate::connection::routing::local_sessions_for_target(state, &target)
+            };
+
+            let tag_caps = state.cap_message_tags.lock();
+            let conns = state.connections.lock();
+            for sid in &recipients {
+                if let Some(tx) = conns.get(sid) {
+                    if tag_caps.contains(sid) {
+                        let _ = tx.try_send(tagged_line.clone());
+                    } else if let Some(ref fallback) = plain_fallback {
+                        let _ = tx.try_send(fallback.clone());
                     }
                 }
             }
@@ -4818,6 +4867,11 @@ async fn reconcile_crdt_to_local(state: &Arc<SharedState>) {
     }
 }
 
+/// Shared test-state builder, re-exported so any module's tests can reuse the
+/// single `SharedState` constructor instead of duplicating it.
+#[cfg(test)]
+pub(crate) use s2s_adversarial_tests::{test_state, test_state_with_db};
+
 #[cfg(test)]
 mod s2s_adversarial_tests {
     use super::*;
@@ -4827,13 +4881,14 @@ mod s2s_adversarial_tests {
     use tokio::sync::mpsc;
 
     /// Build a minimal SharedState for testing (no DB, no iroh).
-    fn test_state() -> Arc<SharedState> {
+    pub(crate) fn test_state() -> Arc<SharedState> {
         test_state_inner(None)
     }
 
     /// Like `test_state` but with an in-memory SQLite DB attached, so
-    /// persistence paths (`identities`, `messages`, …) are exercised.
-    fn test_state_with_db() -> Arc<SharedState> {
+    /// persistence paths (`identities`, `messages`, …) are exercised. Shared
+    /// with other modules' tests (e.g. web endpoints) via the re-export below.
+    pub(crate) fn test_state_with_db() -> Arc<SharedState> {
         test_state_inner(Some(crate::db::Db::open_memory().unwrap()))
     }
 
@@ -5109,6 +5164,7 @@ mod s2s_adversarial_tests {
                 msgid: None,
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5162,6 +5218,7 @@ mod s2s_adversarial_tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 },
@@ -5248,6 +5305,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ML-MSG-1".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: Some(s2s_multiline_lines(&["first", "second", "third"])),
             },
@@ -5299,6 +5357,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("LONG-MSG-1".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5362,6 +5421,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ACCT-MSG-1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5416,6 +5476,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ACCT-MSG-2".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5472,6 +5533,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PROV-1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5527,6 +5589,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PROV-2".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -5575,6 +5638,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("ML-MSG-2".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: Some(s2s_multiline_lines(&["first", "second"])),
             },
@@ -5814,6 +5878,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PLAIN-MSG".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6002,6 +6067,7 @@ mod s2s_adversarial_tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 },
@@ -6108,6 +6174,7 @@ mod s2s_adversarial_tests {
                     msgid: None,
                     sig: None,
                     account: None,
+                    recipient_did: None,
                     tags: HashMap::new(),
                     multiline_lines: None,
                 },
@@ -6384,6 +6451,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("dm-msg-001".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6432,6 +6500,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("DM-ACCT-D1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6477,6 +6546,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("DM-ACCT-P1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6518,6 +6588,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("DM-ACCT-P2".to_string()),
                 sig: None,
                 account: None,
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },
@@ -6560,6 +6631,7 @@ mod s2s_adversarial_tests {
                 msgid: Some("PROVHIST-1".to_string()),
                 sig: None,
                 account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
                 tags: HashMap::new(),
                 multiline_lines: None,
             },

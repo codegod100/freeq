@@ -203,6 +203,89 @@ impl Db {
         Ok(db)
     }
 
+    /// Test helper: an in-memory DB whose `signing_keys` starts in the OLD
+    /// (pre-kid, PK=did) schema with one row, so `init()`'s migration runs and
+    /// backfills the kid — mirrors a real pre-migration database on first open.
+    #[cfg(test)]
+    pub(crate) fn open_memory_with_legacy_signing_keys() -> SqlResult<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE signing_keys (
+                 did           TEXT PRIMARY KEY,
+                 pubkey        BLOB NOT NULL,
+                 registered_at INTEGER NOT NULL
+             );",
+        )?;
+        conn.execute(
+            "INSERT INTO signing_keys (did, pubkey, registered_at) VALUES ('did:plc:legacy', ?1, 0)",
+            params![&[7u8; 32][..]],
+        )?;
+        let db = Self {
+            conn,
+            encryption_key: None,
+        };
+        db.init()?;
+        Ok(db)
+    }
+
+    /// One-time migration: the `signing_keys` table gained a `kid` column and a
+    /// composite PK `(did, kid)` so a DID's keys form an append-only history
+    /// (was PK `did`, overwrite-on-reregister). Old databases have no `kid`
+    /// column; since `ALTER` can't change a PK, copy the rows into a fresh table
+    /// and backfill `kid = derive_kid_bytes(pubkey)`. A no-op once migrated.
+    fn migrate_signing_keys_to_kid_history(&self) -> SqlResult<()> {
+        let has_kid: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('signing_keys') WHERE name = 'kid'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_kid {
+            return Ok(());
+        }
+
+        let legacy: Vec<(String, Vec<u8>, i64)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT did, pubkey, registered_at FROM signing_keys")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.collect::<SqlResult<Vec<_>>>()?
+        };
+        // Transactional: DROP + CREATE + backfill commit atomically, so a crash
+        // mid-migration can't leave the table dropped with the keys unrestored —
+        // the durable signing keys are the exact asset this store exists for.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TABLE signing_keys;
+             CREATE TABLE signing_keys (
+                 did            TEXT NOT NULL,
+                 kid            TEXT NOT NULL,
+                 pubkey         BLOB NOT NULL,
+                 registered_at  INTEGER NOT NULL,
+                 PRIMARY KEY (did, kid)
+             );",
+        )?;
+        for (did, pubkey, registered_at) in legacy {
+            let kid = freeq_sdk::act::derive_kid_bytes(&pubkey);
+            tx.execute(
+                "INSERT OR IGNORE INTO signing_keys (did, kid, pubkey, registered_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![did, kid, pubkey, registered_at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn init(&self) -> SqlResult<()> {
         self.conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -277,10 +360,18 @@ impl Db {
                 PRIMARY KEY (channel, member_did, epoch)
             );
 
+            -- Append-only history of client message-signing keys. Keyed by
+            -- (did, kid) so re-registering never overwrites — every key a DID
+            -- has used stays verifiable after a reconnect. kid is
+            -- base64url(sha256(pubkey)[..16]) (freeq_sdk::act::derive_kid_bytes).
+            -- get_signing_key(did) returns the latest; get_signing_key_by_kid
+            -- fetches a specific one. Legacy did-keyed rows are migrated below.
             CREATE TABLE IF NOT EXISTS signing_keys (
-                did            TEXT PRIMARY KEY,
+                did            TEXT NOT NULL,
+                kid            TEXT NOT NULL,
                 pubkey         BLOB NOT NULL,         -- raw 32-byte ed25519 public key
-                registered_at  INTEGER NOT NULL
+                registered_at  INTEGER NOT NULL,
+                PRIMARY KEY (did, kid)
             );
 
             CREATE TABLE IF NOT EXISTS user_channels (
@@ -324,6 +415,7 @@ impl Db {
             let _ = self.conn.execute(sql, []);
         }
 
+        self.migrate_signing_keys_to_kid_history()?;
         // Index the DID column added by the migration above. Created here (not
         // in the initial schema block) because `sender_did` doesn't exist until
         // the ALTER runs. Backs the DID→last-nick history lookup, whose miss
@@ -1523,27 +1615,61 @@ impl Db {
     //   • PROVENANCE FreeqBotDelegation/v1 cert verification
     //   • (future) cross-session signature checks for offline signers
 
-    /// UPSERT the registered signing key for a DID. `pubkey` must be 32 bytes.
+    /// Record a client message-signing key for a DID, keyed by its kid.
+    /// Append-only: re-registering a *different* key adds a row (history);
+    /// re-registering the *same* key is idempotent. `pubkey` must be 32 bytes.
     pub fn save_signing_key(&self, did: &str, pubkey: &[u8]) -> SqlResult<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        let kid = freeq_sdk::act::derive_kid_bytes(pubkey);
+        // Append-only: a new (did, kid) is inserted, never overwriting a
+        // different key. Re-registering an *existing* kid bumps registered_at
+        // so "latest" (`get_signing_key`) tracks the most recently used key,
+        // not the first one ever seen — no key is lost either way.
         self.conn.execute(
-            "INSERT INTO signing_keys (did, pubkey, registered_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(did) DO UPDATE SET pubkey=excluded.pubkey, registered_at=excluded.registered_at",
-            params![did, pubkey, now as i64],
+            "INSERT INTO signing_keys (did, kid, pubkey, registered_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(did, kid) DO UPDATE SET registered_at = excluded.registered_at",
+            params![did, kid, pubkey, now as i64],
         )?;
         Ok(())
     }
 
-    /// Look up the registered signing key for a DID. Returns the raw 32-byte
-    /// ed25519 public key, or None if the DID has never registered one.
+    /// The DID's most-recently-registered signing key (raw 32-byte ed25519
+    /// public key), or None. Used by the existing verify path, which wants the
+    /// current key; a specific historical key is fetched via
+    /// [`Db::get_signing_key_by_kid`].
     pub fn get_signing_key(&self, did: &str) -> SqlResult<Option<[u8; 32]>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT pubkey FROM signing_keys WHERE did = ?1")?;
-        let mut rows = stmt.query_map(params![did], |row| row.get::<_, Vec<u8>>(0))?;
+        // rowid DESC breaks ties: registered_at is second-granularity, so two
+        // keys registered in the same second must fall back to insertion order.
+        self.query_signing_key(
+            "SELECT pubkey FROM signing_keys WHERE did = ?1
+             ORDER BY registered_at DESC, rowid DESC LIMIT 1",
+            params![did],
+        )
+    }
+
+    /// The exact key a DID registered under `kid`, or None. This is the lookup
+    /// a verifier uses when a signature names its kid — the key stays available
+    /// after the signer reconnects (unlike the old overwrite-on-reregister).
+    pub fn get_signing_key_by_kid(&self, did: &str, kid: &str) -> SqlResult<Option<[u8; 32]>> {
+        self.query_signing_key(
+            "SELECT pubkey FROM signing_keys WHERE did = ?1 AND kid = ?2",
+            params![did, kid],
+        )
+    }
+
+    /// Shared read: run a single-column pubkey query, returning the 32-byte key
+    /// or None (also None if the stored blob is not 32 bytes — guards against a
+    /// manual edit or legacy corruption).
+    fn query_signing_key(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> SqlResult<Option<[u8; 32]>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query_map(params, |row| row.get::<_, Vec<u8>>(0))?;
         match rows.next() {
             Some(row) => {
                 let bytes = row?;
@@ -2531,7 +2657,7 @@ mod tests {
     }
 
     #[test]
-    fn signing_key_roundtrip_and_upsert() {
+    fn signing_key_roundtrip_and_get_latest() {
         let db = Db::open_memory().unwrap();
         let did = "did:plc:abc";
         assert!(db.get_signing_key(did).unwrap().is_none());
@@ -2540,7 +2666,8 @@ mod tests {
         db.save_signing_key(did, &key1).unwrap();
         assert_eq!(db.get_signing_key(did).unwrap(), Some(key1));
 
-        // UPSERT overwrites with the new key
+        // A newer key becomes the "latest" get_signing_key returns (key1 is
+        // retained as history — see signing_key_history_is_append_only).
         let key2 = [2u8; 32];
         db.save_signing_key(did, &key2).unwrap();
         assert_eq!(db.get_signing_key(did).unwrap(), Some(key2));
@@ -2552,15 +2679,64 @@ mod tests {
     }
 
     #[test]
+    fn signing_key_history_is_append_only() {
+        use freeq_sdk::act::derive_kid_bytes;
+        let db = Db::open_memory().unwrap();
+        let did = "did:plc:abc";
+        let (k1, k2) = ([1u8; 32], [2u8; 32]);
+        let (kid1, kid2) = (derive_kid_bytes(&k1), derive_kid_bytes(&k2));
+
+        db.save_signing_key(did, &k1).unwrap();
+        db.save_signing_key(did, &k2).unwrap(); // does NOT overwrite k1
+
+        // Both keys retained, each fetchable by its kid.
+        assert_eq!(db.get_signing_key_by_kid(did, &kid1).unwrap(), Some(k1));
+        assert_eq!(db.get_signing_key_by_kid(did, &kid2).unwrap(), Some(k2));
+
+        // Re-registering the same key is idempotent (no error, still resolves).
+        db.save_signing_key(did, &k1).unwrap();
+        assert_eq!(db.get_signing_key_by_kid(did, &kid1).unwrap(), Some(k1));
+    }
+
+    #[test]
+    fn signing_key_lookup_by_unknown_kid_or_did_is_none() {
+        use freeq_sdk::act::derive_kid_bytes;
+        let db = Db::open_memory().unwrap();
+        db.save_signing_key("did:plc:abc", &[1u8; 32]).unwrap();
+        let kid = derive_kid_bytes(&[1u8; 32]);
+        assert_eq!(
+            db.get_signing_key_by_kid("did:plc:abc", "nope").unwrap(),
+            None
+        );
+        assert_eq!(
+            db.get_signing_key_by_kid("did:plc:other", &kid).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn signing_key_legacy_rows_migrate_to_kid_history() {
+        // A DB created with the OLD schema (PK=did, no kid) must, after opening
+        // with the new code, have its key backfilled and fetchable by kid — and
+        // still returnable as the latest via get_signing_key.
+        let db = Db::open_memory_with_legacy_signing_keys().unwrap();
+        let did = "did:plc:legacy";
+        let key = [7u8; 32];
+        let kid = freeq_sdk::act::derive_kid_bytes(&key);
+        assert_eq!(db.get_signing_key_by_kid(did, &kid).unwrap(), Some(key));
+        assert_eq!(db.get_signing_key(did).unwrap(), Some(key));
+    }
+
+    #[test]
     fn signing_key_rejects_wrong_length_on_read() {
         // If somehow a non-32-byte blob ends up in the table, the read API
-        // returns None rather than panicking. This guards against a future
-        // schema change or a manual DB edit.
+        // returns None rather than panicking. This guards against a manual DB
+        // edit or legacy corruption.
         let db = Db::open_memory().unwrap();
         db.conn
             .execute(
-                "INSERT INTO signing_keys (did, pubkey, registered_at) VALUES (?1, ?2, ?3)",
-                params!["did:plc:short", &[1u8; 16][..], 0i64],
+                "INSERT INTO signing_keys (did, kid, pubkey, registered_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["did:plc:short", "somekid", &[1u8; 16][..], 0i64],
             )
             .unwrap();
         assert!(db.get_signing_key("did:plc:short").unwrap().is_none());
