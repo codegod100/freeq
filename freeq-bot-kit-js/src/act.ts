@@ -99,6 +99,13 @@ export async function verifyActTags(
   } catch {
     return { ok: false, reason: "bad-sig-format" };
   }
+  // base64url decoding silently tolerates junk/short input, so an ed25519 sig
+  // that isn't exactly 64 bytes reaches here — reject it as a format error to
+  // match Rust's BadSigFormat (reason parity feeds the Phase 2 validator's
+  // valid / invalid / unverifiable branch).
+  if (sig.length !== 64) {
+    return { ok: false, reason: "bad-sig-format" };
+  }
   const cryptoKey = await crypto.subtle.importKey("raw", rawPublicKey, "Ed25519", false, [
     "verify",
   ]);

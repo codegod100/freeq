@@ -167,9 +167,20 @@ pub(crate) fn local_sessions_for_target(state: &SharedState, target: &str) -> Ve
 /// Used to key DM persistence and to stamp the recipient DID onto S2S relays.
 pub(crate) fn recipient_did_for_target(state: &SharedState, target: &str) -> Option<String> {
     if target.starts_with("did:") {
-        return Some(target.to_string());
+        // Only a plausibly-shaped DID is accepted as an authoritative recipient;
+        // a junk `did:...` string must not get keyed into the durable store or
+        // stamped onto a broadcast.
+        return looks_like_did(target).then(|| target.to_string());
     }
     state.nick_owners.lock().get(&target.to_lowercase()).cloned()
+}
+
+/// Cheap syntactic DID check (no network): a known method prefix and a
+/// non-trivial length. Mirrors the S2S Join validation in `server.rs`.
+fn looks_like_did(s: &str) -> bool {
+    (s.starts_with("did:plc:") || s.starts_with("did:web:") || s.starts_with("did:key:"))
+        && s.len() >= 12
+        && s.len() <= 256
 }
 
 /// Reconcile a peer-stamped recipient DID against what this server resolves
@@ -278,6 +289,10 @@ mod tests {
         );
         // A nick this server doesn't own is unresolvable — no guessing.
         assert_eq!(recipient_did_for_target(&state, "stranger"), None);
+        // Junk `did:` strings are rejected — they must not reach the store.
+        assert_eq!(recipient_did_for_target(&state, "did:"), None);
+        assert_eq!(recipient_did_for_target(&state, "did:bogus:"), None);
+        assert_eq!(recipient_did_for_target(&state, "did:plc:x"), None); // too short
     }
 
     #[test]

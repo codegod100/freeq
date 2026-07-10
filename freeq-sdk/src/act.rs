@@ -349,6 +349,13 @@ mod tests {
             verify_act(offer_tags(), "rsa:kid:c2ln", &key),
             Err(ActSigError::UnsupportedAlgorithm("rsa".into()))
         );
+        // Correct kid, but the payload decodes to 3 bytes, not 64 → BadSigFormat
+        // (parity with the TS verifier's length guard).
+        let kid = derive_kid(&key);
+        assert_eq!(
+            verify_act(offer_tags(), &format!("ed25519:{kid}:AAAA"), &key),
+            Err(ActSigError::BadSigFormat)
+        );
     }
 
     /// The four shared vectors. Kept in one place so the generator and the

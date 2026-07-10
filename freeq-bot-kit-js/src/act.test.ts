@@ -115,6 +115,17 @@ describe("verification failures", () => {
     });
   });
 
+  it("wrong-length signature → bad-sig-format (parity with Rust's BadSigFormat)", async () => {
+    // Correct kid so the kid check passes; the payload decodes to 3 bytes, not
+    // 64. base64url tolerates it silently, so without the length guard this
+    // would fall through to a `sig-invalid` — diverging from Rust.
+    const kid = v.sigTag.split(":")[1];
+    expect(await verifyActTags(v.tags, `ed25519:${kid}:AAAA`, pub())).toEqual({
+      ok: false,
+      reason: "bad-sig-format",
+    });
+  });
+
   it("no act tags → no-act-tags (and signing returns null)", async () => {
     const none = { msgid: "01J", account: "did:plc:x" };
     expect(await verifyActTags(none, v.sigTag, pub())).toEqual({

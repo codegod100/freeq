@@ -260,7 +260,11 @@ impl Db {
             })?;
             rows.collect::<SqlResult<Vec<_>>>()?
         };
-        self.conn.execute_batch(
+        // Transactional: DROP + CREATE + backfill commit atomically, so a crash
+        // mid-migration can't leave the table dropped with the keys unrestored —
+        // the durable signing keys are the exact asset this store exists for.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
             "DROP TABLE signing_keys;
              CREATE TABLE signing_keys (
                  did            TEXT NOT NULL,
@@ -272,12 +276,13 @@ impl Db {
         )?;
         for (did, pubkey, registered_at) in legacy {
             let kid = freeq_sdk::act::derive_kid_bytes(&pubkey);
-            self.conn.execute(
+            tx.execute(
                 "INSERT OR IGNORE INTO signing_keys (did, kid, pubkey, registered_at)
                  VALUES (?1, ?2, ?3, ?4)",
                 params![did, kid, pubkey, registered_at],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1610,9 +1615,13 @@ impl Db {
             .unwrap_or_default()
             .as_secs();
         let kid = freeq_sdk::act::derive_kid_bytes(pubkey);
+        // Append-only: a new (did, kid) is inserted, never overwriting a
+        // different key. Re-registering an *existing* kid bumps registered_at
+        // so "latest" (`get_signing_key`) tracks the most recently used key,
+        // not the first one ever seen — no key is lost either way.
         self.conn.execute(
             "INSERT INTO signing_keys (did, kid, pubkey, registered_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(did, kid) DO NOTHING",
+             ON CONFLICT(did, kid) DO UPDATE SET registered_at = excluded.registered_at",
             params![did, kid, pubkey, now as i64],
         )?;
         Ok(())
