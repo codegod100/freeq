@@ -436,6 +436,66 @@ async fn did_dm_persists_on_receiver_under_dm_key() {
     // `connection::routing::tests::reconcile_recipient_did_honors_stamp_but_refuses_mismatch`.
 }
 
+// ── nick-addressed DM to a remote-only user (no recipient stamp) ──
+//
+// A DID-addressed DM always carries the origin's recipient_did stamp. A
+// *nick*-addressed DM to a user the origin doesn't own carries none — the
+// origin can't authoritatively resolve a nick it doesn't own, so it attaches
+// no recipient DID. The receiver must still deliver it, and — because it *does*
+// own that nick — key the durable copy from its own local resolution, exactly
+// as it did before the stamp existed. This drives the reconcile "no stamp →
+// local wins" branch end-to-end; the DID tests only cover the stamped branch.
+
+#[tokio::test]
+#[ignore = "e2e federation harness; run with --ignored"]
+async fn nick_dm_to_remote_user_crosses_and_persists_without_a_stamp() {
+    let alice = TestId::new("did:plc:alicens");
+    let bob = TestId::new("did:plc:bobns");
+    let (srv_a, srv_b) = spawn_pair(&[&alice, &bob]).await;
+
+    // Bob only on B, alice only on A. A does not own bob's nick, so a
+    // nick-addressed DM from A crosses with recipient_did = None.
+    let (hb, mut rxb) = connect(&srv_b, &bob, "bob");
+    wait_auth_and_register(&mut rxb).await;
+    let (ha, mut rxa) = connect(&srv_a, &alice, "alice");
+    wait_auth_and_register(&mut rxa).await;
+
+    // Resend the nick-addressed DM until it lands (also warms the S2S link).
+    let deadline = tokio::time::Instant::now() + S2S_SETTLE;
+    let mut target = None;
+    while tokio::time::Instant::now() < deadline {
+        ha.privmsg("bob", "nick across servers").await.ok();
+        if let Some(t) =
+            try_recv_message(&mut rxb, "nick across servers", Duration::from_secs(2)).await
+        {
+            target = Some(t);
+            break;
+        }
+    }
+    assert_eq!(
+        target.expect("bob received the nick-addressed DM across servers"),
+        "bob",
+        "recipient sees the nick echoed as target"
+    );
+
+    // B owns bob's nick, so it reconciles the absent stamp to its own local
+    // resolution and persists under canonical_dm_key(alice, bob) — the
+    // pre-stamp behaviour, still intact when no stamp arrives.
+    let dm_key = freeq_server::db::canonical_dm_key(&alice.did, &bob.did);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while dm_row_count(&srv_b.db_path, &dm_key) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        dm_row_count(&srv_b.db_path, &dm_key) >= 1,
+        "server B must persist the unstamped nick DM under {dm_key} via local resolution"
+    );
+
+    ha.quit(None).await.ok();
+    hb.quit(None).await.ok();
+    drop((srv_a, srv_b));
+}
+
 // ── TAGMSG to a remote-only DID relays as a structured Tagmsg ─────
 //
 // Regression guard for the cross-server TAGMSG gap: a reaction addressed to a
