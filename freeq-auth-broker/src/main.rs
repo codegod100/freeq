@@ -82,6 +82,7 @@ async fn main() {
         store,
         pending: Mutex::new(std::collections::HashMap::new()),
         completed: Mutex::new(std::collections::HashMap::new()),
+        callback_locks: Mutex::new(std::collections::HashMap::new()),
         refresh_locks: Mutex::new(std::collections::HashMap::new()),
     });
 

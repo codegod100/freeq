@@ -44,6 +44,13 @@ pub struct BrokerState {
     /// OAuth state", so whichever duplicate the tab renders still logs in.
     /// In-memory + short TTL (see `COMPLETED_TTL_SECS`).
     pub completed: Mutex<std::collections::HashMap<String, (i64, String)>>,
+    /// Per-`oauth_state` lock serializing callbacks for the same state. Without
+    /// it, two callbacks arriving DURING the (single-use) code exchange race:
+    /// the second finds the pending entry already consumed but the result not
+    /// yet cached in `completed`, and errors. The lock makes the duplicate wait
+    /// and then hit the completed cache. Different states don't contend.
+    /// Mirrors `refresh_locks`.
+    pub callback_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Per-broker-token refresh serialization. AT Proto refresh tokens are
     /// single-use (rotating): the PDS invalidates the old one when it issues a
     /// new one. Concurrent `/session` calls for the same token — which the
@@ -797,6 +804,42 @@ async fn auth_callback(
         }
     };
 
+    let state_prefix: String = state_value.chars().take(6).collect();
+
+    // Serialize callbacks for the SAME state so concurrent duplicates (the
+    // browser fires the callback URL 2-3× at once) don't race between
+    // consuming the pending entry and caching the result. Different states
+    // don't contend. Held across the whole handler (incl. the code exchange).
+    let state_lock = {
+        let mut locks = state.callback_locks.lock().await;
+        locks
+            .entry(state_value.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _state_guard = state_lock.lock().await;
+
+    // Idempotency: if this state already completed (a prior OR concurrent
+    // duplicate finished first), replay its redirect instead of erroring — the
+    // single-use code is spent, but the login succeeded, so whichever duplicate
+    // the browser renders should still land in the app. (Root cause of the
+    // "Invalid OAuth state" a user hit: the same state hit the callback 3×.)
+    {
+        let now = chrono::Utc::now().timestamp();
+        let mut done = state.completed.lock().await;
+        done.retain(|_, (ts, _)| now - *ts < COMPLETED_TTL_SECS);
+        if let Some((_, url)) = done.get(state_value) {
+            let url = url.clone();
+            tracing::info!(state_prefix = %state_prefix, "OAuth callback: replaying completed login (duplicate request)");
+            // `freeq://` needs a 302 (ASWebAuthenticationSession only intercepts
+            // those); web uses a 307.
+            if url.starts_with("freeq://") {
+                return Ok(Redirect::to(&url).into_response());
+            }
+            return Ok(Redirect::temporary(&url).into_response());
+        }
+    }
+
     let (pending, remaining) = {
         let mut pending_map = state.pending.lock().await;
         let p = pending_map.remove(state_value);
@@ -805,33 +848,12 @@ async fn auth_callback(
     let pending = match pending {
         Some(p) => p,
         None => {
-            let prefix: String = state_value.chars().take(6).collect();
-            // Idempotency: a duplicate callback for a state we JUST completed
-            // replays the first request's redirect instead of erroring — the
-            // single-use code is already spent, but the login succeeded, so
-            // whichever duplicate the browser renders should still land in the
-            // app. (Root cause of the "Invalid OAuth state" a user hit: the
-            // same state hitting the callback 3× within 2s.)
-            let replay = {
-                let now = chrono::Utc::now().timestamp();
-                let mut done = state.completed.lock().await;
-                done.retain(|_, (ts, _)| now - *ts < COMPLETED_TTL_SECS);
-                done.get(state_value).map(|(_, url)| url.clone())
-            };
-            if let Some(url) = replay {
-                tracing::info!(state_prefix = %prefix, "OAuth callback: replaying completed login (duplicate request)");
-                // `freeq://` needs a 302 (ASWebAuthenticationSession only
-                // intercepts those); web uses a 307.
-                if url.starts_with("freeq://") {
-                    return Ok(Redirect::to(&url).into_response());
-                }
-                return Ok(Redirect::temporary(&url).into_response());
-            }
-            // Not a replay: distinguish restart-wipe (remaining==0) from a
-            // stale/mismatched state (remaining>0). Previously this returned
-            // before any log line, so the failure was invisible.
+            // Not completed (checked above under the lock) and not pending →
+            // genuinely unknown: login expired, or a state mismatch/restart
+            // (remaining==0 ⇒ store empty). Previously this returned before any
+            // log line, so the failure was invisible.
             tracing::warn!(
-                state_prefix = %prefix,
+                state_prefix = %state_prefix,
                 remaining_pending = remaining,
                 "OAuth callback: unknown state (login expired or state mismatch)"
             );

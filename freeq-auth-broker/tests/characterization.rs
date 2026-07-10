@@ -50,6 +50,7 @@ fn broker_state(freeq_server_url: &str) -> Arc<BrokerState> {
         store,
         pending: Mutex::new(std::collections::HashMap::new()),
         completed: Mutex::new(std::collections::HashMap::new()),
+        callback_locks: Mutex::new(std::collections::HashMap::new()),
         refresh_locks: Mutex::new(std::collections::HashMap::new()),
     })
 }
@@ -224,6 +225,9 @@ struct ExchangeCapture {
     /// If set: reject proofs lacking this nonce with 400 use_dpop_nonce
     /// + DPoP-Nonce header (the standard resource-server dance).
     require_nonce: Option<String>,
+    /// Artificial latency on the exchange, to open the window a concurrent
+    /// duplicate callback would race into.
+    delay_ms: u64,
 }
 
 fn mock_token_endpoint(cap: Arc<std::sync::Mutex<ExchangeCapture>>) -> axum::Router {
@@ -237,11 +241,14 @@ fn mock_token_endpoint(cap: Arc<std::sync::Mutex<ExchangeCapture>>) -> axum::Rou
                     serde_urlencoded::from_bytes(&body).unwrap();
                 let proof = jwt_payload(headers.get("dpop").unwrap().to_str().unwrap());
                 let proof_nonce = proof.get("nonce").and_then(|n| n.as_str()).map(String::from);
-                let required = {
+                let (required, delay_ms) = {
                     let mut c = cap.lock().unwrap();
                     c.requests.push((form, proof));
-                    c.require_nonce.clone()
+                    (c.require_nonce.clone(), c.delay_ms)
                 };
+                if delay_ms > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
                 if let Some(required) = required
                     && proof_nonce.as_deref() != Some(required.as_str())
                 {
@@ -576,6 +583,104 @@ async fn callback_happy_path_web() {
         1,
         "replay must not re-exchange the code"
     );
+}
+
+// ── Idempotency: duplicate callbacks (browsers/proxies re-request the URL) ──
+
+/// A SEQUENTIAL duplicate — the first callback has fully finished before the
+/// second arrives (the observed real pattern: 3 hits ~1s apart). The second
+/// must replay the first's redirect, not error.
+#[tokio::test]
+async fn callback_sequential_duplicate_replays_and_no_reexchange() {
+    let server_cap = Arc::new(std::sync::Mutex::new(ServerCapture::default()));
+    let server_url = spawn(mock_freeq_server(server_cap)).await;
+    let exch = Arc::new(std::sync::Mutex::new(ExchangeCapture::default()));
+    let token_url = spawn(mock_token_endpoint(exch.clone())).await;
+
+    let state = broker_state(&server_url);
+    seed_pending(&state, "st1", pending(&format!("{token_url}/token"), "https://pds.example")).await;
+    let base = spawn(router(state)).await;
+
+    let first = http().get(format!("{base}/auth/callback?state=st1&code=CODE1")).send().await.unwrap();
+    let first_loc = first.headers()["location"].to_str().unwrap().to_string();
+
+    // Three more hits with the same state — all replay the same redirect.
+    for i in 0..3 {
+        let dup = http().get(format!("{base}/auth/callback?state=st1&code=CODE1")).send().await.unwrap();
+        assert!(dup.status().is_redirection(), "dup {i} got {}", dup.status());
+        assert_eq!(dup.headers()["location"].to_str().unwrap(), first_loc, "dup {i} redirect");
+    }
+    // The single-use code was exchanged exactly once across all four requests.
+    assert_eq!(exch.lock().unwrap().requests.len(), 1, "code exchanged more than once");
+}
+
+/// CONCURRENT duplicates — two callbacks for the same state arrive WHILE the
+/// first is still mid-exchange (mock delayed 300ms). The naive cache-after-
+/// success loses this race: the second finds pending consumed but the result
+/// not yet cached. Both must still succeed, and the code must be exchanged
+/// exactly once.
+#[tokio::test]
+async fn callback_concurrent_duplicates_both_succeed() {
+    let server_cap = Arc::new(std::sync::Mutex::new(ServerCapture::default()));
+    let server_url = spawn(mock_freeq_server(server_cap)).await;
+    let exch = Arc::new(std::sync::Mutex::new(ExchangeCapture::default()));
+    exch.lock().unwrap().delay_ms = 300;
+    let token_url = spawn(mock_token_endpoint(exch.clone())).await;
+
+    let state = broker_state(&server_url);
+    seed_pending(&state, "st1", pending(&format!("{token_url}/token"), "https://pds.example")).await;
+    let base = spawn(router(state)).await;
+
+    let url = format!("{base}/auth/callback?state=st1&code=CODE1");
+    let (a, b) = tokio::join!(
+        async { http().get(&url).send().await.unwrap() },
+        async {
+            // Stagger slightly so B lands inside A's exchange window.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            http().get(&url).send().await.unwrap()
+        },
+    );
+
+    for (name, resp) in [("A", a), ("B", b)] {
+        assert!(resp.status().is_redirection(), "{name} got {} (expected redirect)", resp.status());
+        let loc = resp.headers()["location"].to_str().unwrap();
+        assert!(loc.starts_with("https://irc.freeq.at#oauth="), "{name} redirect: {loc}");
+    }
+    // Exactly one code exchange despite two concurrent callbacks.
+    assert_eq!(exch.lock().unwrap().requests.len(), 1, "concurrent duplicates re-exchanged the code");
+}
+
+/// A genuinely unknown state (never seen) must STILL error — idempotency
+/// must not turn every unknown state into a success.
+#[tokio::test]
+async fn callback_unknown_state_still_errors() {
+    let server_cap = Arc::new(std::sync::Mutex::new(ServerCapture::default()));
+    let server_url = spawn(mock_freeq_server(server_cap)).await;
+    let state = broker_state(&server_url);
+    let base = spawn(router(state)).await;
+
+    let resp = http().get(format!("{base}/auth/callback?state=never-seen&code=X")).send().await.unwrap();
+    assert!(!resp.status().is_redirection(), "unknown state must not redirect");
+    assert!(resp.text().await.unwrap().contains("Invalid OAuth state"));
+}
+
+/// A completed state must not let a DIFFERENT unknown state ride its replay.
+#[tokio::test]
+async fn callback_replay_is_scoped_to_its_state() {
+    let server_cap = Arc::new(std::sync::Mutex::new(ServerCapture::default()));
+    let server_url = spawn(mock_freeq_server(server_cap)).await;
+    let exch = Arc::new(std::sync::Mutex::new(ExchangeCapture::default()));
+    let token_url = spawn(mock_token_endpoint(exch)).await;
+
+    let state = broker_state(&server_url);
+    seed_pending(&state, "st1", pending(&format!("{token_url}/token"), "https://pds.example")).await;
+    let base = spawn(router(state)).await;
+
+    // Complete st1, then hit a DIFFERENT unknown state — it must error.
+    let _ = http().get(format!("{base}/auth/callback?state=st1&code=CODE1")).send().await.unwrap();
+    let other = http().get(format!("{base}/auth/callback?state=st2&code=CODE1")).send().await.unwrap();
+    assert!(!other.status().is_redirection());
+    assert!(other.text().await.unwrap().contains("Invalid OAuth state"));
 }
 
 #[tokio::test]
