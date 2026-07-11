@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
 import { useStore } from '../store';
 import { sendWhois, getNick } from '../irc/client';
@@ -280,7 +281,13 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 
-  return (
+  // Portal to <body>: the right-sidebar shell has `will-change: transform`
+  // (from the sidebar toggle animation), which makes it the containing block
+  // for `position: fixed` descendants — so an in-tree popover positions
+  // relative to the sidebar and lands off-screen. Rendering into <body>
+  // escapes that ancestor so `position: fixed` is viewport-relative again.
+  // (Same fix the channel-list context menu already uses.)
+  return createPortal(
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div style={style} className="z-50 bg-bg-secondary border border-border rounded-xl shadow-2xl w-72 animate-fadeIn overflow-hidden">
@@ -546,6 +553,7 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
           )}
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
