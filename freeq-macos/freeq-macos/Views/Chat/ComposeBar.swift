@@ -188,7 +188,8 @@ struct ComposeBar: View {
                         autocompleteActive: { !currentSuggestions.isEmpty },
                         autocompleteAccept: acceptAutocomplete,
                         autocompleteMove: moveAutocomplete,
-                        autocompleteCancel: { autocompleteDismissed = true }
+                        autocompleteCancel: { autocompleteDismissed = true },
+                        onPasteImage: setPendingImage
                     )
                     .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 120)
                     .fixedSize(horizontal: false, vertical: true)
@@ -414,6 +415,18 @@ struct ComposeBar: View {
         }
     }
 
+    /// Stage an NSImage (dropped or pasted from the clipboard) as a pending
+    /// PNG upload. Shared by the drop handler and the composer's paste override.
+    private func setPendingImage(_ image: NSImage) {
+        guard let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let png = rep.representation(using: .png, properties: [:]) else { return }
+        pendingUpload = PendingUpload(
+            data: png, filename: "paste.png",
+            contentType: "image/png", preview: image
+        )
+    }
+
     private func handleDrop(_ providers: [NSItemProvider]) {
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier("public.file-url") {
@@ -425,16 +438,7 @@ struct ComposeBar: View {
             } else if provider.canLoadObject(ofClass: NSImage.self) {
                 provider.loadObject(ofClass: NSImage.self) { item, _ in
                     if let image = item as? NSImage {
-                        DispatchQueue.main.async {
-                            if let tiff = image.tiffRepresentation,
-                               let rep = NSBitmapImageRep(data: tiff),
-                               let png = rep.representation(using: .png, properties: [:]) {
-                                pendingUpload = PendingUpload(
-                                    data: png, filename: "paste.png",
-                                    contentType: "image/png", preview: image
-                                )
-                            }
-                        }
+                        DispatchQueue.main.async { setPendingImage(image) }
                     }
                 }
             }
@@ -727,6 +731,9 @@ struct ComposeTextView: NSViewRepresentable {
     var autocompleteAccept: (() -> Bool)? = nil
     var autocompleteMove: ((Int) -> Void)? = nil
     var autocompleteCancel: (() -> Void)? = nil
+    /// Called when the user pastes an image (e.g. a screenshot) into the
+    /// composer — staged as an upload instead of pasted as text.
+    var onPasteImage: ((NSImage) -> Void)? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
@@ -768,6 +775,7 @@ struct ComposeTextView: NSViewRepresentable {
         textView.autocompleteAccept = autocompleteAccept
         textView.autocompleteMove = autocompleteMove
         textView.autocompleteCancel = autocompleteCancel
+        textView.pasteImageAction = onPasteImage
 
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = false
@@ -790,6 +798,7 @@ struct ComposeTextView: NSViewRepresentable {
         textView.autocompleteAccept = autocompleteAccept
         textView.autocompleteMove = autocompleteMove
         textView.autocompleteCancel = autocompleteCancel
+        textView.pasteImageAction = onPasteImage
         textView.members = members
 
         // Honour focus-token bumps. Defer to the next runloop so the
@@ -842,8 +851,24 @@ class ComposeNSTextView: NSTextView {
     var autocompleteAccept: (() -> Bool)?
     var autocompleteMove: ((Int) -> Void)?
     var autocompleteCancel: (() -> Void)?
+    var pasteImageAction: ((NSImage) -> Void)?
     var members: [String] = []
     private var tabCompletionCandidates: [String] = []
+
+    /// Intercept ⌘V: if the clipboard holds an image (a screenshot, a copied
+    /// image) and no meaningful text, stage it as an upload instead of pasting.
+    /// Text (or mixed image+text) falls through to the normal paste.
+    override func paste(_ sender: Any?) {
+        let pb = NSPasteboard.general
+        let hasText = !(pb.string(forType: .string)?.isEmpty ?? true)
+        if !hasText,
+           pb.canReadObject(forClasses: [NSImage.self], options: nil),
+           let image = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
+            pasteImageAction?(image)
+            return
+        }
+        super.paste(sender)
+    }
     private var tabCompletionIndex: Int = 0
     private var tabCompletionPrefix: String = ""
 
