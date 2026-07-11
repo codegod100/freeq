@@ -4870,6 +4870,52 @@ async fn reconcile_crdt_to_local(state: &Arc<SharedState>) {
 /// Shared test-state builder, re-exported so any module's tests can reuse the
 /// single `SharedState` constructor instead of duplicating it.
 #[cfg(test)]
+mod nickmap_tests {
+    use super::NickMap;
+
+    // A multi-device user (same nick on two live sessions): when ONE session
+    // leaves, the OTHER must keep its session→nick reverse mapping — otherwise
+    // it stays in channels' member sets but vanishes from NAMES (can chat,
+    // invisible in the member list). Regression for the disconnect/ghost paths
+    // that called remove_by_nick, which wiped the reverse mapping for EVERY
+    // session sharing the nick.
+    #[test]
+    fn remove_by_session_preserves_a_live_sibling() {
+        let mut m = NickMap::new();
+        m.insert("chadfowler.com", "A"); // A primary
+        m.insert("chadfowler.com", "B"); // B now primary, A still tracked
+        m.remove_by_session("A"); // secondary leaves
+        assert_eq!(m.get_nick("B"), Some("chadfowler.com"), "live sibling lost its nick");
+        assert_eq!(m.get_nick("A"), None);
+        assert_eq!(m.get_session("chadfowler.com"), Some("B"));
+    }
+
+    #[test]
+    fn remove_by_session_promotes_sibling_when_primary_leaves() {
+        let mut m = NickMap::new();
+        m.insert("chadfowler.com", "A");
+        m.insert("chadfowler.com", "B"); // B primary
+        m.remove_by_session("B"); // primary leaves
+        assert_eq!(m.get_nick("A"), Some("chadfowler.com"));
+        assert_eq!(m.get_session("chadfowler.com"), Some("A"), "sibling not promoted");
+        assert_eq!(m.get_nick("B"), None);
+    }
+
+    // Documents the footgun: remove_by_nick wipes the reverse mapping for a
+    // live sibling too, which is why the single-session-leave paths must use
+    // remove_by_session instead.
+    #[test]
+    fn remove_by_nick_wipes_all_siblings() {
+        let mut m = NickMap::new();
+        m.insert("chadfowler.com", "A");
+        m.insert("chadfowler.com", "B");
+        m.remove_by_nick("chadfowler.com");
+        assert_eq!(m.get_nick("A"), None);
+        assert_eq!(m.get_nick("B"), None);
+    }
+}
+
+#[cfg(test)]
 pub(crate) use s2s_adversarial_tests::{test_state, test_state_with_db};
 
 #[cfg(test)]

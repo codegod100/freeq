@@ -3401,7 +3401,17 @@ where
                                 }
                                 drop(conns);
                                 drop(channels);
-                                state_clone.nick_to_session.lock().remove_by_nick(&nick_clone);
+                                // Remove only THIS (ghost) session's nick binding, not every
+                                // session sharing the nick. remove_by_nick wipes the sid→nick
+                                // reverse mapping for ALL sessions with this nick, so if the
+                                // user reconnected another device during the grace window, that
+                                // live device would keep its channel membership but vanish from
+                                // NAMES (can chat, invisible in the member list). remove_by_session
+                                // removes just the ghost and promotes a live sibling as primary.
+                                state_clone
+                                    .nick_to_session
+                                    .lock()
+                                    .remove_by_session(&ghost.session_id);
                                 // Evict the ghost's stale session_id from ch.members.
                                 // cleanup_session_state (called at disconnect) intentionally
                                 // skips cleanup_channel_membership to preserve ghost membership
@@ -3433,7 +3443,8 @@ where
                 // Guest user — immediate QUIT (no grace period)
                 let hostmask = conn.hostmask();
                 broadcast_quit(&state, &session_id, &hostmask);
-                state.nick_to_session.lock().remove_by_nick(nick);
+                // Remove only this session (multi-device safe — see the ghost path).
+                state.nick_to_session.lock().remove_by_session(&session_id);
                 broadcast_quit_s2s(&state, nick);
                 cleanup_session_state(&state, &session_id);
                 cleanup_channel_membership(&state, &session_id);
