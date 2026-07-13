@@ -59,7 +59,23 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static assets: cache first, network fallback.
+  // Static assets: cache first, network fallback, EXCEPT for the WASM client
+  // bundle which must always be fresh after deploys.
+  if (url.pathname === '/freeq_webui_client.js' || url.pathname === '/freeq_webui_client_bg.wasm') {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request))
+    );
+    return;
+  }
+
   event.respondWith(
     caches.match(request).then((cached) => {
       if (cached) return cached;

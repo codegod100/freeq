@@ -42,7 +42,7 @@ html,body{height:100dvh;overflow:hidden}
 }
 </style>
 </head>
-<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},connected:false}'>
+<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},current_nick:{{current_nick_json|safe}},connected:false}' data-attr:data-nick="$current_nick" data-nick="{{current_nick}}">
 <section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
   <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
     <div class="navbar-brand" style="min-height:2.5rem">

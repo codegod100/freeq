@@ -241,7 +241,7 @@ impl AppState {
             match store.load(session_id) {
                 Ok(Some(oauth)) => {
                     let did = oauth.did.clone();
-                    let nick = crate::sanitize_nick(&oauth.handle);
+                    let nick = crate::helpers::sanitize_nick(&oauth.handle);
                     *handle.auth.lock() = AuthState::Authenticated {
                         handle: oauth.handle.clone(),
                         did: did.clone(),
@@ -265,7 +265,7 @@ impl AppState {
 
 // ── Member tracking ────────────────────────────────────────────────────
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MemberEntry {
     pub nick: String,
     pub op: bool,
@@ -306,6 +306,7 @@ pub struct SessionHandle {
     pub lines_tx: broadcast::Sender<String>,
     pub joined: Mutex<HashSet<String>>,
     pub channel_members: Mutex<HashMap<String, HashMap<String, MemberEntry>>>,
+    pub pending_names: Mutex<HashSet<String>>,
     pub irc_rx_slot: Mutex<Option<mpsc::Receiver<String>>>,
     pub ws_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Auth state machine — the single source of truth.
@@ -317,6 +318,9 @@ pub struct SessionHandle {
     /// Updated by the WS task: "WaitCapAck" → "SaslChallenge" → "SaslResult".
     /// Cleared when ws_state transitions to Ready or Disconnected.
     pub reg_phase: Mutex<String>,
+    /// Current IRC nick as seen by the upstream server. Updated on NICK
+    /// registration, 433 fallback, and explicit /nick commands.
+    pub current_nick: Mutex<String>,
     /// Upstream WebSocket connection state. Transitions are atomic:
     /// Disconnected → Connecting (on spawn) → Registering (on TCP connect)
     /// → Ready (on CAP END/JOIN) → Disconnected (on WS close/error).
@@ -332,11 +336,13 @@ impl SessionHandle {
             lines_tx,
             joined: Mutex::new(HashSet::new()),
             channel_members: Mutex::new(HashMap::new()),
+            pending_names: Mutex::new(HashSet::new()),
             irc_rx_slot: Mutex::new(Some(irc_rx)),
             ws_task: Mutex::new(None),
             auth: Mutex::new(AuthState::default()),
             extracted_did: Mutex::new(None),
             reg_phase: Mutex::new(String::new()),
+            current_nick: Mutex::new(String::new()),
             ws_state: AtomicU8::new(WsState::Disconnected as u8),
         }
     }

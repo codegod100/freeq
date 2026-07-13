@@ -142,12 +142,14 @@ where
         Err(e) => {
             warn!("failed to parse SASL challenge, falling back to guest: {e}");
             auth_creds.take();
+            *session.auth.lock() = AuthState::Guest;
+            *session.extracted_did.lock() = None;
             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
             let _ = write
                 .send(WsMessage::Text(format!("JOIN {channel}\r\n").into()))
                 .await;
             session.set_ws_state(crate::state::WsState::Ready);
-            *session.reg_phase.lock() = String::new();
+            *session.reg_phase.lock() = "SASL(failed,guest)".to_string();
             *phase = RegPhase::Ready;
             return Ok(());
         }
@@ -167,12 +169,14 @@ where
         Err(e) => {
             warn!("failed to build DPoP proof, falling back to guest: {e}");
             auth_creds.take();
+            *session.auth.lock() = AuthState::Guest;
+            *session.extracted_did.lock() = None;
             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
             let _ = write
                 .send(WsMessage::Text(format!("JOIN {channel}\r\n").into()))
                 .await;
             session.set_ws_state(crate::state::WsState::Ready);
-            *session.reg_phase.lock() = String::new();
+            *session.reg_phase.lock() = "SASL(failed,guest)".to_string();
             *phase = RegPhase::Ready;
             return Ok(());
         }
@@ -203,12 +207,16 @@ pub async fn fetch_history(
     state: &AppState,
     channel: &str,
     limit: usize,
+    since: Option<i64>,
 ) -> Result<Vec<UpstreamHistoryMessage>> {
     let encoded = channel.replace('#', "%23");
-    let url = state
+    let mut url = state
         .upstream
         .base
         .join(&format!("api/v1/channels/{encoded}/history?limit={limit}"))?;
+    if let Some(ts) = since {
+        url.query_pairs_mut().append_pair("since", &ts.to_string());
+    }
     Ok(state.http.get(url).send().await?.json().await?)
 }
 
@@ -219,20 +227,9 @@ pub fn spawn_upstream_if_needed(
     upstream: Arc<Upstream>,
     channel: &str,
 ) {
-    let target = super::canonical_channel(channel);
-    let was_ready = session.get_ws_state() == WsState::Ready;
-    let mut task_guard = session.ws_task.lock();
-
-    if let Some(handle) = task_guard.take() {
-        if !handle.is_finished() {
-            if was_ready {
-                info!(session = %sid, "aborting upstream WS task for reconnect");
-            }
-            handle.abort();
-        }
-    }
-
-    if !was_ready {
+    let target = crate::helpers::canonical_channel(channel);
+    {
+        let mut task_guard = session.ws_task.lock();
         if let Some(handle) = &*task_guard {
             if !handle.is_finished() {
                 debug!(session = %sid, channel = %target, "WS task already running");
@@ -251,13 +248,13 @@ pub fn spawn_upstream_if_needed(
                 return;
             }
         }
+        *task_guard = None;
     }
 
     let irc_rx = session.irc_rx_slot.lock().take();
     let irc_rx = match irc_rx {
         Some(rx) => rx,
         None => {
-            drop(irc_rx); // release the lock guard
             let (tx, rx) = tokio::sync::mpsc::channel(256);
             *session.irc_tx.lock() = tx;
             *session.irc_rx_slot.lock() = Some(rx);
@@ -313,26 +310,29 @@ pub fn spawn_upstream_if_needed(
     let target_for_task = target.clone();
     let session_for_task = Arc::clone(&session);
 
-    *task_guard = Some(tokio::spawn(async move {
-        session_for_task.set_ws_state(WsState::Connecting);
-        debug!(session = %session_id, "ws_state → Connecting");
-        info!(session = %session_id, ws = %ws_url, channel = %target_for_task, "connecting to upstream /irc");
-        let result = run_upstream_ws(
-            ws_url,
-            lines_tx,
-            irc_rx,
-            target_for_task,
-            auth_creds,
-            session_for_task,
-            session_id.clone(),
-        )
-        .await;
-        if let Err(e) = result {
-            error!(session = %session_id, "upstream WS error: {e:#}");
-        } else {
-            info!(session = %session_id, "upstream WS closed cleanly");
-        }
-    }));
+    {
+        let mut task_guard = session.ws_task.lock();
+        *task_guard = Some(tokio::spawn(async move {
+            session_for_task.set_ws_state(WsState::Connecting);
+            debug!(session = %session_id, "ws_state → Connecting");
+            info!(session = %session_id, ws = %ws_url, channel = %target_for_task, "connecting to upstream /irc");
+            let result = run_upstream_ws(
+                ws_url,
+                lines_tx,
+                irc_rx,
+                target_for_task,
+                auth_creds,
+                session_for_task,
+                session_id.clone(),
+            )
+            .await;
+            if let Err(e) = result {
+                error!(session = %session_id, "upstream WS error: {e:#}");
+            } else {
+                info!(session = %session_id, "upstream WS closed cleanly");
+            }
+        }));
+    }
 }
 
 /// Server-issued SASL challenge that we echo back as `challenge_nonce`.
@@ -364,9 +364,16 @@ pub async fn run_upstream_ws(
 
     let nick = auth
         .as_ref()
-        .map(|a| super::sanitize_nick(&a.nick))
+        .map(|a| crate::helpers::sanitize_nick(&a.nick))
         .unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
+    *session.current_nick.lock() = nick.clone();
     debug!(session = %session_id, %nick, authenticated = auth.is_some(), "upstream IRC registration");
+    // Push the resolved nick to the browser so reaction tooltips show it
+    // instead of falling back to "you".
+    let _ = lines_tx.send(format!(
+        ":freeq-webui NOTICE * :__FREEQ_NICK__ {}",
+        nick.replace(['\n', '\r', ' '], "_")
+    ));
     // Start CAP negotiation before NICK/USER so the server delays
     // registration until CAP END, giving us time to complete SASL.
     ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
@@ -449,7 +456,12 @@ pub async fn run_upstream_ws(
                         // Retry with a random nick on 433 (Nickname in use).
                         if trimmed.contains(" 433 ") {
                             let fallback = format!("webui{:x}", rand::random::<u32>());
+                            *session.current_nick.lock() = fallback.clone();
                             let _ = write.send(WsMessage::Text(format!("NICK {fallback}\r\n").into())).await;
+                            let _ = lines_tx.send(format!(
+                                ":freeq-webui NOTICE * :__FREEQ_NICK__ {}",
+                                fallback.replace(['\n', '\r', ' '], "_")
+                            ));
                             info!("433 received; retrying NICK as {fallback}");
                         }
 
@@ -579,10 +591,24 @@ pub async fn run_upstream_ws(
                                         break 'bridge;
                                     }
                                     warn!("SASL authentication failed; proceeding as guest");
+                                    // Fall back to the handle as an unauthenticated nick.
+                                    // The server already knows us by the initial NICK;
+                                    // if that collides we will get a 433 and randomize.
+                                    let fallback = auth_creds.as_ref().map(|c| c.nick.clone()).unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
                                     auth_creds.take();
+                                    *session.current_nick.lock() = fallback.clone();
+                                    let _ = lines_tx.send(format!(
+                                        ":freeq-webui NOTICE * :__FREEQ_NICK__ {}",
+                                        fallback.replace(['\n', '\r', ' '], "_")
+                                    ));
+                                    let _ = write.send(WsMessage::Text(format!("NICK {fallback}\r\n").into())).await;
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
                                     let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
-                                    debug!(session = %session_id, "ws_state → Ready");
+                                    // Clear the authenticated auth state so post_send and the
+                                    // navbar stop showing the old handle.
+                                    *session.auth.lock() = AuthState::Guest;
+                                    *session.extracted_did.lock() = None;
+                                    debug!(session = %session_id, %fallback, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
                                     *session.reg_phase.lock() = "SASL(failed,guest)".to_string();
                                     phase = RegPhase::Ready;
@@ -607,8 +633,22 @@ pub async fn run_upstream_ws(
                                         &mut phase,
                                         &mut sasl_deadline,
                                     ).await {
-                                        warn!("SASL challenge response failed: {e}");
-                                        break 'bridge;
+                                        warn!(session = %session_id, "SASL challenge response failed: {e:#}; falling back to guest");
+                                        // Treat a failed challenge response like 904: clear auth and continue as guest.
+                                        auth_creds.take();
+                                        *session.auth.lock() = AuthState::Guest;
+                                        *session.extracted_did.lock() = None;
+                                        sasl_deadline = None;
+                                        let fallback = session.current_nick.lock().clone();
+                                        let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
+                                        let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                        debug!(session = %session_id, %fallback, "ws_state → Ready");
+                                        session.set_ws_state(WsState::Ready);
+                                        *session.reg_phase.lock() = "SASL(failed,guest)".to_string();
+                                        phase = RegPhase::Ready;
+                                        if flush_pending(&mut pending, &mut write, &session_id).await.is_err() {
+                                            break 'bridge;
+                                        }
                                     }
                                     continue;
                                 }

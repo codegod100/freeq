@@ -11,7 +11,22 @@
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="icon" href="/icon-192.png">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bulma@1.0.2/css/bulma.min.css">
-<script src="/datastar.js"></script>
+<script>
+// Promise that resolves once the WASM module is initialized.
+// The inline connection script awaits this before opening the SSE stream,
+// so server-emitted WASM effect scripts never run against an undefined
+// global function. If WASM fails to load, we surface an error and do not
+// fall back to inline HTML.
+window.freeqWasmReady = new Promise(function(resolve){
+  window.freeqWasmReadyResolve = resolve;
+});
+setTimeout(function(){
+  if (!window.freeqWasmReadyResolved) {
+    var status = document.getElementById('status');
+    if (status) { status.textContent = 'WASM failed to load'; }
+  }
+}, 5000);
+</script>
 <style>
 :root{--nick-1:#7ab7ff;--nick-2:#f78b6c;--nick-3:#c792ea;--nick-4:#ffd166;--nick-5:#06d6a0;--nick-6:#ef476f;--nick-7:#f4a261;--nick-8:#90e0ef;--self:#5cdb95}
 html,body{height:100dvh;overflow:hidden}
@@ -82,7 +97,7 @@ html,body{height:100dvh;overflow:hidden}
 }
 </style>
 </head>
-<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:"",my_reactions:{},picker_msgid:"",picker_open:false}' data-auth-handle="{{login_handle}}">
+<body data-auth-handle="{{login_handle}}" data-nick="{{current_nick}}">
 <section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
   <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
     <div class="navbar-brand" style="min-height:2.5rem">
@@ -90,41 +105,30 @@ html,body{height:100dvh;overflow:hidden}
       <span class="navbar-item is-size-6 has-text-weight-bold py-1">freeq</span>
       <span class="navbar-item has-text-link py-1">#{{channel}}</span>
       <button class="mobile-btn" type="button" onclick="toggleMembers()" aria-label="Members">&#x1F465;</button>
-      <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic" data-attr:style="$editing_topic ? 'display:none' : ''">{{topic}}</span><form class="field has-addons mb-0" data-attr:style="$auth_handle == '' || !$editing_topic ? 'display:none' : ''" data-on:submit="@post('/chat/{{channel}}/topic')"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" data-bind:topic_draft style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form><button class="button is-small is-dark ml-2" type="button" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
+      <span class="navbar-item has-text-grey-light is-size-7 py-1 is-hidden-mobile"><span id="channel-topic">{{topic}}</span><form class="field has-addons mb-0" method="post" action="/chat/{{channel}}/topic" style="display:none"><div class="control"><input class="input is-small" type="text" name="topic" placeholder="topic…" style="width:240px"></div><div class="control"><button class="button is-small is-link" type="submit">Set</button></div><div class="control"><button class="button is-small is-dark" type="button" data-on:click="$editing_topic=false">Cancel</button></div></form><button class="button is-small is-dark ml-2" type="button" data-attr:style="$auth_handle == '' || $editing_topic ? 'display:none' : ''" data-on:click="$editing_topic=true;$topic_draft=$topic">&#9998;</button></span>
     </div>
     <div class="navbar-end">
       <div class="navbar-item py-1">
-        <form id="join-form" data-signals="{channel:''}" data-on:submit="@post('/chat/_new/join')" data-signals-merge class="field has-addons">
-          <div class="control"><input class="input is-small" type="text" name="channel" placeholder="join #…" autocomplete="off" data-bind:channel style="width:80px"></div>
+        <form id="join-form" method="post" action="/chat/_new/join" class="field has-addons">
+          <div class="control"><input class="input is-small" type="text" name="channel" placeholder="join #…" autocomplete="off" style="width:80px"></div>
           <div class="control"><button class="button is-small is-link" type="submit">+</button></div>
         </form>
       </div>
-      <span class="navbar-item has-text-success is-size-7 py-1" data-attr:style="$auth_handle == '' ? 'display:none' : ''">&#x1f512; <span data-text="$auth_handle"></span></span>
-      <div class="navbar-item py-1" data-attr:style="$auth_handle == '' ? '' : 'display:none'"><a class="button is-small is-link is-outlined" href="/login">Sign in</a></div>
+      <span id="freeq-navbar"></span>
+      <textarea id="freeq-auth-data" style="display:none">{{ auth_json | safe }}</textarea>
       <div class="navbar-item py-1 is-size-7"><span id="status"><span class="dot"></span> <span>connecting…</span></span></div>
     </div>
   </nav>
   <div class="columns is-gapless is-mobile" style="flex:1;min-height:0;margin-top:0">
     <div class="column is-narrow" id="sidebar" style="width:165px;overflow-y:auto;border-right:1px solid var(--bulma-border)">
-      <div class="menu">
-        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle" data-target="my-channels" style="font-size:.65rem;letter-spacing:.05em">MY CHANNELS</p>
-        <ul class="menu-list" id="my-channels">
-        {% for ch in channels -%}{% if ch.name in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
-        {% endif %}{%- endfor %}</ul>
-        <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle collapsed" data-target="all-channels" style="font-size:.65rem;letter-spacing:.05em">ALL CHANNELS</p>
-        <ul class="menu-list" id="all-channels" style="display:none">
-        {% for ch in channels -%}{% if ch.name not in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
-        {% endif %}{%- endfor %}</ul>
-      </div>
+      <div id="freeq-sidebar"></div>
     </div>
     <div class="column" style="display:flex;flex-direction:column;min-height:0">
       <div id="messages" class="px-3 py-2">{{initial_messages_html|safe}}</div>
-      <form id="send-form" data-signals="{msg:'',uploading:false}" data-on:submit="@post('/chat/{{channel}}/send')" data-signals-merge class="field has-addons mb-0 px-2 py-2" style="border-top:1px solid var(--bulma-border);flex-shrink:0">
-        <div class="control is-expanded"><input class="input is-small" type="text" name="msg" placeholder="Send to #{{channel}}…" autocomplete="off" autofocus data-bind:msg data-attr:disabled="$uploading" data-attr:placeholder="$uploading ? 'Uploading image…' : 'Send to #{{channel}}…'"></div>
-        <div class="control"><button class="button is-small is-link" type="submit" data-attr:disabled="$uploading">Send</button></div>
-        <div class="control"><button class="button is-small is-dark" type="button" data-on:click="@post('/chat/{{channel}}/part')">x</button></div>
+      <div id="freeq-stream-root" style="display:none"></div>
+      <form id="send-form" method="post" action="/chat/{{channel}}/send" class="field has-addons mb-0 px-2 py-2" style="border-top:1px solid var(--bulma-border);flex-shrink:0">
+        <div class="control"><button class="button is-small is-link" type="submit">Send</button></div>
+        <div class="control"><button class="button is-small is-dark" type="submit" formaction="/chat/{{channel}}/part" formmethod="post">x</button></div>
       </form>
     </div>
     <div class="column is-narrow is-size-7" style="width:165px;overflow-y:auto;border-left:1px solid var(--bulma-border);padding:.3rem .4rem" id="member-panel"><div class="has-text-grey">-</div></div>
@@ -161,7 +165,7 @@ function bindSidebarToggles(){
     });
   });
 }
-bindSidebarToggles();
+window.bindSidebarToggles = bindSidebarToggles;
 
 // Mobile drawer helpers. On screens > 768px wide the sidebars render inline
 // (per the default flex layout); on mobile the CSS positions them off-screen
@@ -203,28 +207,31 @@ window.closeDrawers=closeDrawers;
   if(!picker)return;
   var EMOJIS=['👍','❤️','😂','🔥','😮','👎','🎉','🤔'];
   picker.innerHTML=EMOJIS.map(function(e){
-    return '<button type="button" data-emoji="'+e+'" data-on:click="$picker_open=false;window.reactFromPicker($picker_msgid,\''+e+'\')">'+e+'</button>';
+    return '<button type="button" data-emoji="'+e+'">'+e+'</button>';
   }).join('');
-  // Close on outside click via a tiny dispatch on the hidden input.
+  picker.addEventListener('click',function(ev){
+    var btn=ev.target.closest('button[data-emoji]');
+    if(!btn)return;
+    picker.classList.remove('open');
+    window.reactFromPicker(window.__pickerMsgid||'', btn.getAttribute('data-emoji'));
+  });
   document.addEventListener('click',function(ev){
     if(picker.contains(ev.target))return;
     if(ev.target.classList&&ev.target.classList.contains('react-btn'))return;
-    var el=document.querySelector('[data-bind\\:picker_open]');
-    if(!el)return;
-    el.value='false';
-    el.dispatchEvent(new Event('input',{bubbles:true}));
+    picker.classList.remove('open');
   });
 })();
 
-// Signal-mutating helpers. The `+` button calls openReactPicker(msgid) to
-// show the picker. Picker buttons call reactFromPicker(emoji) to toggle the
-// reaction and POST to the server. Both use the standard `data-bind` input +
-// `input` event pattern so DataStar picks up the change.
+// Reaction helpers. The `+` button calls openReactPicker(msgid) to show the
+// picker. Picker buttons call reactFromPicker(mid, emoji) to toggle the
 function openReactPicker(msgid){
   try{
     msgid=String(msgid||'');
     if(!msgid)return;
     window.__pickerMsgid=msgid;
+    document.body.setAttribute('data-picker-msgid', msgid);
+    var picker=document.getElementById('react-picker');
+    if(picker)picker.classList.add('open');
   }catch(e){console.error('openReactPicker failed',e);}
 }
 function reactFromPicker(mid,emoji){
@@ -233,13 +240,13 @@ function reactFromPicker(mid,emoji){
     if(!mid||!emoji)return;
     var body=document.body;
     var sigs={};
-    try{sigs=JSON.parse(body.getAttribute('data-signals')||'{}');}catch(e){}
+    try{sigs=JSON.parse(body.getAttribute('data-reaction-state')||'{}');}catch(e){}
     sigs.my_reactions=sigs.my_reactions||{};
     var list=sigs.my_reactions[mid]||[];
     var has=list.indexOf(emoji)>=0;
     list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
     sigs.my_reactions[mid]=list;
-    body.setAttribute('data-signals',JSON.stringify(sigs));
+    body.setAttribute('data-reaction-state',JSON.stringify(sigs));
 
     // Immediate UI update so the user sees feedback without waiting for refresh.
     updateReactionChip(mid,emoji,!has);
@@ -248,12 +255,12 @@ function reactFromPicker(mid,emoji){
     fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:mid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
       if(!r.ok){
         // Roll back local state and UI on server rejection.
-        try{sigs=JSON.parse(body.getAttribute('data-signals')||'{}');}catch(e){}
+        try{sigs=JSON.parse(body.getAttribute('data-reaction-state')||'{}');}catch(e){}
         sigs.my_reactions=sigs.my_reactions||{};
         var l=sigs.my_reactions[mid]||[];
         l=has?l.concat([emoji]):l.filter(function(e){return e!==emoji;});
         sigs.my_reactions[mid]=l;
-        body.setAttribute('data-signals',JSON.stringify(sigs));
+        body.setAttribute('data-reaction-state',JSON.stringify(sigs));
         updateReactionChip(mid,emoji,has);
         console.error((has?'unreact':'react')+' failed',r.status);
       }
@@ -270,7 +277,7 @@ function updateReactionChip(mid,emoji,mine){
   var container=row.querySelector('.reactions');
   if(!container)return;
   var chip=container.querySelector('.reaction-chip[data-emoji="'+emoji.replace(/"/g,'\\"')+'"]');
-  var me=document.body.getAttribute('data-auth-handle')||'you';
+  var me=document.body.getAttribute('data-nick')||'you';
   if(chip){
     var title=(chip.getAttribute('title')||'').split(', ').filter(function(n){return n&&n!==me;});
     if(mine)title.push(me);
@@ -296,34 +303,7 @@ function updateReactionChip(mid,emoji,mine){
 }
 // Update a chip based on a live reaction from another user.
 function updateReactionChipFromServer(mid,emoji,nick,added){
-  mid=String(mid||'');emoji=String(emoji||'');nick=String(nick||'');
-  if(!mid||!emoji||!nick)return;
-  var row=document.querySelector('.msg[data-msgid="'+mid.replace(/"/g,'\\"')+'"]');
-  if(!row)return;
-  var container=row.querySelector('.reactions');
-  if(!container)return;
-  var chip=container.querySelector('.reaction-chip[data-emoji="'+emoji.replace(/"/g,'\\"')+'"]');
-  if(chip){
-    var title=(chip.getAttribute('title')||'').split(', ').filter(function(n){return n&&n!==nick;});
-    if(added)title.push(nick);
-    var newTitle=title.join(', ');
-    var count=title.length;
-    chip.setAttribute('title',newTitle);
-    chip.textContent=count<=1?emoji:(emoji+' '+count);
-  }else if(added){
-    var b=document.createElement('button');
-    b.type='button';
-    b.className='reaction-chip';
-    b.setAttribute('data-emoji',emoji);
-    b.setAttribute('data-msgid',mid);
-    b.setAttribute('title',nick);
-    b.setAttribute('data-class:mine',"window.isReacted('"+mid.replace(/'/g,"\\'")+"','"+emoji.replace(/'/g,"\\'")+"')?'':''");
-    b.textContent=emoji;
-    b.onclick=function(){window.toggleReaction(mid,emoji);};
-    var plus=container.querySelector('.react-btn');
-    if(plus)container.insertBefore(b,plus);
-    else container.appendChild(b);
-  }
+  window.peer_reaction(mid,emoji,nick,added);
 }
 window.updateReactionChipFromServer=updateReactionChipFromServer;
 // Check if a (msgid, emoji) is in the current user's reaction set.
@@ -331,7 +311,7 @@ function isReacted(msgid,emoji){
   msgid=String(msgid||'');emoji=String(emoji||'');
   if(!msgid||!emoji)return false;
   var sigs={};
-  try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
+  try{sigs=JSON.parse(document.body.getAttribute('data-reaction-state')||'{}');}catch(e){}
   var list=(sigs.my_reactions&&sigs.my_reactions[msgid])||[];
   return list.indexOf(emoji)>=0;
 }
@@ -339,42 +319,7 @@ function isReacted(msgid,emoji){
 // Toggle a chip's reaction. Reads $my_reactions[msgid] from the body signal,
 // flips the entry for the given emoji, writes the signal back, then POSTs.
 function toggleReaction(msgid,emoji){
-  msgid=String(msgid||'');emoji=String(emoji||'');
-  if(!msgid||!emoji)return;
-  var sigs={};
-  try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
-  sigs.my_reactions=sigs.my_reactions||{};
-  var list=sigs.my_reactions[msgid]||[];
-  var has=list.indexOf(emoji)>=0;
-  list=has?list.filter(function(e){return e!==emoji;}):list.concat([emoji]);
-  sigs.my_reactions[msgid]=list;
-  document.body.setAttribute('data-signals',JSON.stringify(sigs));
-  // Re-render this row's chip set with the new .mine state.
-  var row=document.querySelector('.msg[data-msgid="'+msgid.replace(/"/g,'\\"')+'"]');
-  if(row){
-    var chips=row.querySelectorAll('.reaction-chip');
-    for(var i=0;i<chips.length;i++){
-      var e=chips[i].getAttribute('data-emoji');
-      if(!e)continue;
-      if(e===emoji){
-        if(has)chips[i].classList.remove('mine');
-        else chips[i].classList.add('mine');
-      }
-    }
-  }
-  var url='/chat/{{channel}}/'+(has?'unreact':'react');
-  fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({msgid:msgid,emoji:emoji}),credentials:'same-origin'}).then(function(r){
-    if(!r.ok){
-      // Roll back local state on server rejection.
-      try{sigs=JSON.parse(document.body.getAttribute('data-signals')||'{}');}catch(e){}
-      sigs.my_reactions=sigs.my_reactions||{};
-      var l=sigs.my_reactions[msgid]||[];
-      l=has?l.concat([emoji]):l.filter(function(e){return e!==emoji;});
-      sigs.my_reactions[msgid]=l;
-      document.body.setAttribute('data-signals',JSON.stringify(sigs));
-      console.error((has?'unreact':'react')+' failed',r.status);
-    }
-  });
+  window.toggle_reaction(msgid,emoji,"{{channel}}");
 }
 window.isReacted=isReacted;
 window.toggleReaction=toggleReaction;
@@ -453,47 +398,73 @@ function renderRequirement(req,depth){
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 (function(){var m=document.getElementById('messages');if(m){requestAnimationFrame(function(){requestAnimationFrame(function(){m.scrollTop=m.scrollHeight})});new MutationObserver(function(){m.scrollTop=m.scrollHeight}).observe(m,{childList:!0})}})();
-(function(){var inp=document.querySelector('#send-form input[name=msg]'),form=document.getElementById('send-form');if(!inp||!form)return;inp.addEventListener('paste',function(e){var items=e.clipboardData&&e.clipboardData.items;if(!items)return;for(var i=0;i<items.length;i++){if(items[i].type.indexOf('image/')!==0)continue;var file=items[i].getAsFile();if(!file)continue;e.preventDefault();form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:true}));var fd=new FormData;fd.append('file',file,'paste.'+(items[i].type.split('/')[1]||'png'));fd.append('channel','#{{channel}}');fetch('/upload',{method:'POST',body:fd}).then(function(r){var ct=r.headers.get('content-type')||'';var p=ct.includes('json')?r.json():r.text().then(function(t){throw new Error(t||'Upload failed')});return p.then(function(j){if(!r.ok)throw new Error(j.message||j.error||'Upload failed');return j.url})}).then(function(url){var start=inp.selectionStart||0,end=inp.selectionEnd||0,t=inp.value;inp.value=t.slice(0,start)+url+' '+t.slice(end);var pos=start+url.length+1;inp.setSelectionRange(pos,pos)}).catch(function(err){alert('Upload failed: '+err.message)}).finally(function(){form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:false}));inp.focus()});return}})})();
-(function(){
-  var s=localStorage.getItem('freeq_handle');
-  function connect(){
-    var src=new EventSource('/chat/{{channel}}/events');
-    src.addEventListener('datastar-patch-signals',function(e){
-      var l=e.data.split('\n');
-      for(var i=0;i<l.length;i++){if(l[i].startsWith('signals '))try{var s=JSON.parse(l[i].slice(8));if(s.msg!==undefined){var inp=document.querySelector('#send-form input[name=msg]');if(inp)inp.value=s.msg}}catch(e){}}
-    });
-    src.addEventListener('topicupdate',function(e){
-      var t=document.getElementById('channel-topic');
-      if(t){try{t.textContent=JSON.parse(e.data)}catch(x){t.textContent=e.data}}
-    });
-    src.addEventListener('datastar-patch-elements',function(e){
-      var l=e.data.split('\n'),sel=null,mode='outer',els=null;
-      for(var i=0;i<l.length;i++){
-        if(l[i].startsWith('selector '))sel=l[i].slice(9);
-        else if(l[i].startsWith('mode '))mode=l[i].slice(5);
-        else if(l[i].startsWith('elements '))els=l[i].slice(9);
-      }
-      if(!els)return;
-      if(sel==='body'||sel===' body'){var d=document.createElement('div');d.innerHTML=els;var ss=d.querySelectorAll('script[data-effect]');for(var i=0;i<ss.length;i++)try{(new Function(ss[i].textContent))()}catch(e){};return}
-      var t=sel?document.querySelector(sel):null;if(!t)return;
-      if(mode==='append')t.insertAdjacentHTML('beforeend',els);else t.innerHTML=els;
-    });
-    src.onopen=function(){var st=document.getElementById('status');if(st){st.classList.add('connected');st.lastChild.textContent='connected'}};
-  }
-  {% if show_login or show_oauth_prompt %}
-  if(s&&!sessionStorage.getItem('freeq_retry')){
-    sessionStorage.setItem('freeq_retry','1');
-    fetch('/login',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'identifier='+encodeURIComponent(s),redirect:'manual'}).then(connect);
-  }else{connect()}
-  {% else %}
-  connect();
-  {% endif %}
-})();
+(function(){var inp=document.querySelector('#send-form input[name=msg]'),form=document.getElementById('send-form');if(!inp||!form)return;inp.addEventListener('paste',function(e){var items=e.clipboardData&&e.clipboardData.items;if(!items)return;for(var i=0;i<items.length;i++){if(items[i].type.indexOf('image/')!==0)continue;var file=items[i].getAsFile();if(!file)continue;e.preventDefault();inp.disabled=true;var fd=new FormData;fd.append('file',file,'paste.'+(items[i].type.split('/')[1]||'png'));fd.append('channel','#{{channel}}');fetch('/upload',{method:'POST',body:fd}).then(function(r){var ct=r.headers.get('content-type')||'';var p=ct.includes('json')?r.json():r.text().then(function(t){throw new Error(t||'Upload failed')});return p.then(function(j){if(!r.ok)throw new Error(j.message||j.error||'Upload failed');return j.url})}).then(function(url){var start=inp.selectionStart||0,end=inp.selectionEnd||0,t=inp.value;inp.value=t.slice(0,start)+url+' '+t.slice(end);var pos=start+url.length+1;inp.setSelectionRange(pos,pos)}).catch(function(err){alert('Upload failed: '+err.message)}).finally(function(){form.setAttribute('data-signals',JSON.stringify({msg:inp.value,uploading:false}));inp.focus()});return}})})();
+(function(){var st=document.getElementById('status');if(st){st.classList.add('connected');st.lastChild.textContent='connected'}})();
 </script>
 <script>
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').catch(function(e){console.error('SW registration failed',e);});
+// Render an incoming IRC line into the chat. The server hands us the raw
+// line; for now we just stub a minimal HTML row. The full message render
+// (timestamps, nicks, reactions) lives in WASM and can be slotted in here.
+function renderIncomingLine(line, channel){
+  var m = String(line||'').trim();
+  if(!m) return '';
+  // Pass through synthetic nick-change notices verbatim so the client
+  // can update document.body[data-nick].
+  var nickMatch = m.match(/^:freeq-webui NOTICE \* :__FREEQ_NICK__ (\S+)/);
+  if(nickMatch){
+    document.body.setAttribute('data-nick', nickMatch[1]);
+    return '';
+  }
+  // Pull out the leading nick from a ":<nick>!..." prefix.
+  var nick = '';
+  var body = m.replace(/^:(\S+)![\S@]+\s\S+\s\S+\s:/, function(_, n){ nick = n; return ''; });
+  if(!nick){
+    var short = m.match(/^:(\S+)\s/);
+    if(short) nick = short[1];
+  }
+  var ts = new Date().toTimeString().slice(0,8);
+  return '<div class="msg"><span class="ts">'+ts+'</span><span class="body"><span class="nick n1">'+nick+'</span> '+body.replace(/</g,'&lt;')+'</span></div>';
 }
 </script>
-</body>
+      var chData = doc.getElementById('freeq-channels-data');
+      var authData = doc.getElementById('freeq-auth-data');
+      if(messages){ var el = document.getElementById('messages'); if(el) el.innerHTML = messages.innerHTML; }
+      if(memberPanel){ var el = document.getElementById('member-panel'); if(el) el.innerHTML = memberPanel.innerHTML; }
+      if(authData){ var el = document.getElementById('freeq-auth-data'); if(el){ el.textContent = authData.textContent; if(window.init_navbar){ window.init_navbar(); }} }
+      // Only refresh the channel list if the server actually changed the data
+      // (e.g., our membership changed). Avoid re-running Yew init here, which
+      // re-mounts RouteHandler and triggers another navigateChannel.
+      var oldData = document.getElementById('freeq-channels-data');
+      if(chData && oldData && chData.textContent !== oldData.textContent){
+        oldData.textContent = chData.textContent;
+        if(window.init_channel_list){ window.init_channel_list(); }
+      }
+      var topic = doc.getElementById('channel-topic');
+      if(topic){ var el = document.getElementById('channel-topic'); if(el) el.textContent = topic.textContent; }
+      if(window.attach_stream){ window.attach_stream(channel); }
+      if(form){
+        var input = form.querySelector('input[name=msg]');
+        if(input){
+          input.setAttribute('placeholder', 'Send to #' + channel + '…');
+        }
+      }
+    });
+};
+</script>
+<textarea id="freeq-channels-data" style="display:none">{{ channels_json | safe }}</textarea>
+<script type="module">
+import init, { update_member_panel, toggle_reaction, peer_reaction, init_channel_list, init_navbar, attach_stream, init_stream } from '/freeq_webui_client.js';
+await init();
+window.update_member_panel = update_member_panel;
+window.toggle_reaction = toggle_reaction;
+window.peer_reaction = peer_reaction;
+window.attach_stream = attach_stream;
+init_channel_list();
+init_navbar();
+init_stream();
+attach_stream('{{channel}}');
+if (window.bindSidebarToggles) { setTimeout(function(){ window.bindSidebarToggles(); }, 0); }
+  window.freeqWasmReadyResolved = true;
+  window.freeqWasmReadyResolve('ready');
+}
 </html>

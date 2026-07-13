@@ -1,0 +1,203 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [ master ]
+
+jobs:
+  native_tests:
+    name: Native Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-native-tests-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-doc-tests-
+            cargo-${{ runner.os }}-
+
+      - name: Run tests
+        run: cargo test --workspace --exclude gloo-net
+
+  browser_tests:
+    name: Browser Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Setup trunk
+        uses: jetli/trunk-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-browser-tests-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-browser-tests-
+            cargo-${{ runner.os }}-
+
+      - name: Run tests
+        run: |
+          for x in $(ls crates); do
+            # gloo-net is tested separately
+            if [[ "$x" == "net" ]]; then
+              continue
+            fi
+            wasm-pack test --headless --firefox --chrome crates/$x --all-features
+            wasm-pack test --headless --firefox --chrome crates/$x --no-default-features
+          done
+
+  node_tests:
+    name: Node Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-node-tests-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-node-tests-
+            cargo-${{ runner.os }}-
+
+      - name: Run tests
+        run: |
+          for x in $(ls crates); do
+            # gloo-net is tested separately
+            if [[ "$x" == "net" ]]; then
+              continue
+            fi
+            wasm-pack test --node crates/$x --all-features
+            wasm-pack test --node crates/$x --no-default-features
+          done
+
+  test-worker:
+    name: Test gloo-worker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Setup trunk
+        uses: jetli/trunk-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-browser-tests-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-test-worker-
+            cargo-${{ runner.os }}-
+
+      - name: Build and Run Test Server
+        run: |
+          cargo build -p example-markdown --bin example_markdown_test_server
+          nohup target/debug/example_markdown_test_server examples/markdown/dist &
+
+      - name: Build Test Worker
+        run: |
+          trunk build examples/markdown/index.html
+
+      - name: Run tests for gloo worker
+        run: |
+          wasm-pack test --headless --firefox --chrome  examples/markdown
+
+
+  test-net:
+    name: Test gloo-net
+    runs-on: ubuntu-latest
+    services:
+      httpbin:
+        image: kennethreitz/httpbin@sha256:599fe5e5073102dbb0ee3dbb65f049dab44fa9fc251f6835c9990f8fb196a72b
+        ports:
+          - 8080:80
+      echo_server:
+        image: jmalloc/echo-server@sha256:e43a10c9ecbd025df7ed6dac1e45551ce7bd676142600b0734fe7dcd10a47abe
+        ports:
+          - 8081:8080
+
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-test-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-test-
+            cargo-${{ runner.os }}-
+
+      - name: Run browser tests
+        env:
+          HTTPBIN_URL: "http://localhost:8080"
+          WS_ECHO_SERVER_URL: "ws://localhost:8081"
+          SSE_ECHO_SERVER_URL: "http://localhost:8081/.sse"
+        run: |
+          cd crates/net
+          wasm-pack test --chrome --firefox --headless --all-features
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          target: wasm32-unknown-unknown
+
+      - name: Run native tests
+        env:
+          HTTPBIN_URL: "http://localhost:8080"
+          WS_ECHO_SERVER_URL: "ws://localhost:8081"
+          SSE_ECHO_SERVER_URL: "http://localhost:8081/.sse"
+        run: cargo test -p gloo-net --all-features
