@@ -133,6 +133,40 @@ fn session_cookie_header(id: &str) -> HeaderValue {
     .expect("cookie header is always ASCII")
 }
 
+/// Derive a `https://host[:port]` URL from the incoming request, honoring
+/// `X-Forwarded-Proto` so a reverse proxy / Tailscale funnel can still get a
+/// working callback URI without the operator having to set FREEQ_PUBLIC_URL.
+/// Returns `None` for obviously-loopback hosts (so the legacy loopback OAuth
+/// flow keeps working for local dev).
+fn public_url_from_request(req: &axum::http::HeaderMap) -> Option<String> {
+    let host = req
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())?
+        .trim();
+    if host.is_empty() {
+        return None;
+    }
+    let host_clean = host.trim_start_matches('[').trim_end_matches(']');
+    let host_lower = host_clean.to_ascii_lowercase();
+    if host_lower == "127.0.0.1"
+        || host_lower == "localhost"
+        || host_lower == "::1"
+        || host_lower.starts_with("127.")
+    {
+        return None;
+    }
+    let scheme = req
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("http")
+        .split(',')
+        .next()
+        .unwrap_or("http")
+        .trim()
+        .to_string();
+    Some(format!("{scheme}://{host}"))
+}
+
 // Inline hex encoder — avoids pulling another crate for 8 lines.
 mod hex {
     pub fn encode<T: AsRef<[u8]>>(data: T) -> String {
@@ -264,11 +298,17 @@ async fn post_login(
     let session = state.session(&sid);
 
     // Determine OAuth flow: web-based if FREEQ_PUBLIC_URL is set,
-    // loopback (localhost) otherwise.
-    let is_web = state.public_url.is_some();
+    // otherwise derive a callback URL from the incoming Host header so a
+    // Tailscale funnel / reverse proxy / non-loopback user gets redirected
+    // back to their own host instead of 127.0.0.1.
+    let effective_public_url: Option<String> = match &state.public_url {
+        Some(u) => Some(u.clone()),
+        None => public_url_from_request(&req),
+    };
+    let is_web = effective_public_url.is_some();
 
     if is_web {
-        let public_url = state.public_url.as_ref().unwrap();
+        let public_url = effective_public_url.as_ref().unwrap();
         let prepared = match PreparedLogin::for_web(&handle, public_url).await {
             Ok(p) => p,
             Err(e) => {
@@ -452,10 +492,26 @@ async fn get_auth_status(State(state): State<AppState>, req: axum::http::HeaderM
 /// Serves the OAuth client metadata that Bluesky's PDS fetches to
 /// discover redirect URIs and client capabilities for a web-based
 /// OAuth flow (used when running behind `tailscale funnel`).
-async fn get_oauth_client_metadata(State(state): State<AppState>) -> Response {
-    let public_url = match &state.public_url {
-        Some(url) => url.clone(),
-        None => return (StatusCode::NOT_FOUND, "web OAuth not configured").into_response(),
+async fn get_oauth_client_metadata(
+    State(state): State<AppState>,
+    req: axum::http::HeaderMap,
+) -> Response {
+    // Prefer the operator-configured FREEQ_PUBLIC_URL; otherwise derive one from
+    // the incoming Host so Tailscale funnel / reverse proxy users don't have to
+    // set an env var just to log in.
+    let public_url = match state
+        .public_url
+        .clone()
+        .or_else(|| public_url_from_request(&req))
+    {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                "web OAuth not configured (set FREEQ_PUBLIC_URL or connect via a non-loopback host)",
+            )
+                .into_response();
+        }
     };
 
     let metadata = serde_json::json!({
@@ -657,6 +713,7 @@ async fn get_channels_page(State(state): State<AppState>, req: axum::http::Heade
         AuthState::Guest => (String::new(), String::new(), false),
     };
     let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
+    let current_nick = session.current_nick.lock().clone();
 
     let mut ctx = tera::Context::new();
     ctx.insert("channels", &channels);
@@ -668,8 +725,13 @@ async fn get_channels_page(State(state): State<AppState>, req: axum::http::Heade
     let auth_did_json = serde_json::to_string(&auth_did)
         .unwrap_or_else(|_| "\"\"".to_string())
         .replace('"', "&quot;");
+    let current_nick_json = serde_json::to_string(&current_nick)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
     ctx.insert("login_handle_json", &login_handle_json);
     ctx.insert("auth_did_json", &auth_did_json);
+    ctx.insert("current_nick_json", &current_nick_json);
+    ctx.insert("current_nick", &current_nick);
     ctx.insert("is_authenticated", &is_authenticated);
     ctx.insert("joined_channels", &joined);
 
@@ -737,6 +799,17 @@ async fn get_chat(
             });
         }
     }
+    // Prefer the local NAMES-list count for the active channel so the
+    // sidebar badge matches the in-channel member list (the upstream REST
+    // count includes sessions that are not currently in the IRC view).
+    let local_member_count: Option<usize> = if channels.iter().any(|c| c.name.eq_ignore_ascii_case(&channel)) {
+        Some(session.channel_members.lock()
+            .get(&canonical_channel(&channel))
+            .map(|m| m.len())
+            .unwrap_or(0))
+    } else {
+        None
+    };
 
     let topic = channels
         .iter()
@@ -768,6 +841,7 @@ async fn get_chat(
         AuthState::Guest => (String::new(), String::new(), false),
     };
     let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
+    let current_nick = session.current_nick.lock().clone();
     ctx.insert("login_handle", &login_handle);
     ctx.insert("auth_did", &auth_did);
     let topic_json = serde_json::to_string(&topic)
@@ -779,12 +853,18 @@ async fn get_chat(
     let auth_did_json = serde_json::to_string(&auth_did)
         .unwrap_or_else(|_| "\"\"".to_string())
         .replace('"', "&quot;");
+    let current_nick_json = serde_json::to_string(&current_nick)
+        .unwrap_or_else(|_| "\"\"".to_string())
+        .replace('"', "&quot;");
     ctx.insert("topic_json", &topic_json);
     ctx.insert("login_handle_json", &login_handle_json);
     ctx.insert("auth_did_json", &auth_did_json);
+    ctx.insert("current_nick_json", &current_nick_json);
+    ctx.insert("current_nick", &current_nick);
     ctx.insert("is_authenticated", &is_authenticated);
     ctx.insert("joined_channels", &joined);
     ctx.insert("show_login", &!is_authenticated);
+    ctx.insert("local_member_count", &local_member_count);
     let body = match state.tera.render("chat.html.tera", &ctx) {
         Ok(html) => html,
         Err(e) => {
@@ -916,28 +996,50 @@ async fn get_channel_events(
     let stream = async_stream::stream! {
         let status_patch = PatchSignals::new(r#"{"connected":true}"#);
         yield Ok::<Event, std::convert::Infallible>(status_patch.write_as_axum_sse_event());
+        let auth = session.auth.lock().clone();
+        let (auth_handle, auth_did) = match &auth {
+            AuthState::Authenticated { handle, did, .. } => (handle.clone(), did.clone()),
+            AuthState::Guest => (String::new(), String::new()),
+        };
+        let current_nick = session.current_nick.lock().clone();
+        let init_signals = serde_json::json!({
+            "auth_handle": auth_handle,
+            "auth_did": auth_did,
+            "current_nick": current_nick,
+        });
+        let init_patch = PatchSignals::new(&init_signals.to_string());
+        yield Ok::<Event, std::convert::Infallible>(init_patch.write_as_axum_sse_event());
         loop {
             match lines_rx.recv().await {
                 Ok(line) => {
                     let canon = canonical_channel(&channel);
                     if is_353(&line) {
-                        let entries = parse_353_members(&line);
-                        debug!(session = %sid, channel = %canon, count = entries.len(), "NAMES 353 parsed");
-                        let member_html = {
-                            let mut members = session.channel_members.lock();
-                            let map = members.entry(canon.clone()).or_default();
-                            for e in &entries {
-                                map.insert(e.nick.clone(), e.clone());
-                            }
-                            render_member_list(map)
-                        };
-                        let escaped = member_html.replace('\\', r"\\").replace('$', r"\$").replace('`', r"\`");
-                        let script = format!(r#"<script data-effect>document.getElementById('member-panel').innerHTML=`{}`</script>"#, escaped);
-                        let patch = PatchElements::new(script)
-                            .selector("body")
-                            .mode(ElementPatchMode::Append);
-                        yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
-                        continue;
+                        if let Some((reply_channel, entries)) = parse_353_members(&line) {
+                            let reply_canon = canonical_channel(&reply_channel);
+                            debug!(session = %sid, channel = %reply_canon, count = entries.len(), "NAMES 353 parsed");
+                            // Each new NAMES reply replaces; the server splits
+                            // one reply into multiple 353s which we
+                            // accumulate. A new NAMES (smaller count) resets
+                            // the list.
+                            let member_html = {
+                                let mut members = session.channel_members.lock();
+                                let map = members.entry(reply_canon.clone()).or_default();
+                                if map.len() > entries.len() {
+                                    map.clear();
+                                }
+                                for e in &entries {
+                                    map.insert(e.nick.clone(), e.clone());
+                                }
+                                render_member_list(map)
+                            };
+                            let escaped = member_html.replace('\\', r"\\").replace('$', r"\$").replace('`', r"\`");
+                            let script = format!(r#"<script data-effect>document.getElementById('member-panel').innerHTML=`{}`</script>"#, escaped);
+                            let patch = PatchElements::new(script)
+                                .selector("body")
+                                .mode(ElementPatchMode::Append);
+                            yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
+                            continue;
+                        }
                     }
                     // --- Extract real DID from ACCOUNT messages ---
                     if let Some(new_did) = parse_account_did(&line) {
@@ -1081,6 +1183,25 @@ async fn get_channel_events(
                         warn!(session = %sid, "SASL authentication failed");
                         let signals = PatchSignals::new(r#"{"auth_handle":"","auth_did":""}"#);
                         yield Ok::<Event, std::convert::Infallible>(signals.write_as_axum_sse_event());
+                        continue;
+                    }
+                    // --- current_nick pushed by the upstream task ---
+                    // The WS bridge sends `:freeq-webui NOTICE * :__FREEQ_NICK__ <nick>`
+                    // when it picks a nick (initial registration, 433 fallback). Mirror
+                    // it to the browser via signals and a script that updates the static
+                    // attribute the reaction tooltip reads.
+                    if let Some(nick) = line.strip_prefix(":freeq-webui NOTICE * :__FREEQ_NICK__ ") {
+                        let nick = nick.trim();
+                        debug!(session = %sid, nick, "upstream nick advertised");
+                        let signals = serde_json::json!({ "current_nick": nick }).to_string();
+                        let patch = PatchSignals::new(&signals);
+                        yield Ok::<Event, std::convert::Infallible>(patch.write_as_axum_sse_event());
+                        let escaped = nick.replace("\\", "\\\\").replace("\'", "\\'");
+                        let script = ExecuteScript::new(format!(
+                            "document.body.setAttribute('data-nick', '{}')",
+                            escaped
+                        ));
+                        yield Ok::<Event, std::convert::Infallible>(script.write_as_axum_sse_event());
                         continue;
                     }
                     // --- Extract DID from auth NOTICE ("authenticated as did:plc:...") ---
@@ -1247,6 +1368,7 @@ async fn post_channel_send(
             warn!(session = %sid, "NICK command failed: {e}");
             return (StatusCode::SERVICE_UNAVAILABLE, "upstream WS gone").into_response();
         }
+        *session.current_nick.lock() = new_nick.to_string();
         debug!(session = %sid, nick = %new_nick, "NICK queued to upstream");
         let clear = PatchSignals::new(r#"{"msg":""}"#);
         let clear_event = clear.write_as_axum_sse_event();
@@ -1286,8 +1408,11 @@ async fn post_channel_send(
     // long-lived /events SSE never receives this line.
     let ts = Utc::now().format("%H:%M:%S").to_string();
     let safe = html_escape(&msg);
+    let nick_display = session.current_nick.lock().clone();
+    let nick_display = if nick_display.is_empty() { String::from("you") } else { nick_display };
+    let nick_safe = html_escape(&nick_display);
     let echo_html = format!(
-        r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick n1">you</span> {safe}</span></div>"#
+        r#"<div class="msg"><span class="ts">{ts}</span><span class="body"><span class="nick n1">{nick_safe}</span> {safe}</span></div>"#
     );
     let echo = PatchElements::new(echo_html)
         .selector("#messages")
@@ -2108,17 +2233,27 @@ fn parse_account_did(line: &str) -> Option<String> {
     Some(did.to_string())
 }
 
-/// Parse nicks from a 353 (RPL_NAMREPLY) line, stripping IRC mode
-/// prefixes (`@` op, `%` halfop, `+` voice, plus `~`/`&` owner/admin)
-/// and dropping empty tokens (e.g. from a trailing space). Returns one
-/// [`MemberEntry`] per nick with the mode flags set from its prefixes.
-fn parse_353_members(line: &str) -> Vec<MemberEntry> {
+/// Parse a 353 (RPL_NAMREPLY) line. Returns `(channel, entries)`.
+/// The channel is parsed from the line so 353s for other channels we
+/// are in don't pollute the current channel's member list. The IRC
+/// server splits one NAMES reply into multiple 353 chunks, and 366
+/// (RPL_ENDOFNAMES) ends it; the SSE handler resets the per-channel
+/// list on each fresh NAMES so a new reply replaces rather than
+/// accumulates.
+fn parse_353_members(line: &str) -> Option<(String, Vec<MemberEntry>)> {
     let line = line.trim_end_matches(['\r', '\n']);
-    let names = match line.rfind(" :") {
-        Some(i) => &line[i + 2..],
-        None => return Vec::new(),
-    };
-    names
+    let rest = line.strip_prefix(':')?;
+    let rest = rest.splitn(2, ' ').nth(1)?;
+    // `353 <me> <visibility> <channel> :<nicks>`
+    let mut parts = rest.splitn(5, ' ');
+    if parts.next()? != "353" {
+        return None;
+    }
+    parts.next()?; // <me>
+    parts.next()?; // <visibility>
+    let channel = parts.next()?.trim_start_matches(':').to_string();
+    let names_part = parts.next()?.trim_start_matches(':');
+    let entries = names_part
         .split(' ')
         .filter(|t| !t.is_empty())
         .map(|token| {
@@ -2129,13 +2264,19 @@ fn parse_353_members(line: &str) -> Vec<MemberEntry> {
             let nick = &token[pfx_len..];
             let pfx = &token[..pfx_len];
             MemberEntry {
-                nick: nick.to_string(),
+                // Store the nick case-folded so duplicate inserts from
+                // multiple 353 chunks dedupe (IRC nicks are
+                // case-insensitive). We keep the original-case display
+                // in `nick` and also remember the folded form so lookups
+                // work either way.
+                nick: nick.to_ascii_lowercase(),
                 op: pfx.contains('@') || pfx.contains('~') || pfx.contains('&'),
                 halfop: pfx.contains('%'),
                 voiced: pfx.contains('+'),
             }
         })
-        .collect()
+        .collect();
+    Some((channel, entries))
 }
 /// as live IRC lines. `sender` is a full hostmask like
 /// `nick!user@host`; we display just the nick. `timestamp` is epoch

@@ -1,0 +1,5 @@
+filegroup(
+    name = "freeq_sdk_srcs",
+    srcs = glob(["src/**/*.rs", "Cargo.toml"]),
+    visibility = ["PUBLIC"],
+)

@@ -317,6 +317,9 @@ pub struct SessionHandle {
     /// Updated by the WS task: "WaitCapAck" → "SaslChallenge" → "SaslResult".
     /// Cleared when ws_state transitions to Ready or Disconnected.
     pub reg_phase: Mutex<String>,
+    /// Current IRC nick as seen by the upstream server. Updated on NICK
+    /// registration, 433 fallback, and explicit /nick commands.
+    pub current_nick: Mutex<String>,
     /// Upstream WebSocket connection state. Transitions are atomic:
     /// Disconnected → Connecting (on spawn) → Registering (on TCP connect)
     /// → Ready (on CAP END/JOIN) → Disconnected (on WS close/error).
@@ -337,6 +340,7 @@ impl SessionHandle {
             auth: Mutex::new(AuthState::default()),
             extracted_did: Mutex::new(None),
             reg_phase: Mutex::new(String::new()),
+            current_nick: Mutex::new(String::new()),
             ws_state: AtomicU8::new(WsState::Disconnected as u8),
         }
     }

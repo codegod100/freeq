@@ -82,7 +82,7 @@ html,body{height:100dvh;overflow:hidden}
 }
 </style>
 </head>
-<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:"",my_reactions:{},picker_msgid:"",picker_open:false}' data-auth-handle="{{login_handle}}">
+<body data-signals='{auth_handle:{{login_handle_json|safe}},auth_did:{{auth_did_json|safe}},current_nick:{{current_nick_json|safe}},topic:{{topic_json|safe}},connected:false,editing_topic:false,topic_draft:"",my_reactions:{},picker_msgid:"",picker_open:false}' data-attr:data-nick="$current_nick" data-auth-handle="{{login_handle}}" data-nick="{{current_nick}}">
 <section class="section py-2 px-0" style="height:100dvh;display:flex;flex-direction:column">
   <nav class="navbar is-dark" role="navigation" style="min-height:2.5rem;flex-shrink:0">
     <div class="navbar-brand" style="min-height:2.5rem">
@@ -110,7 +110,7 @@ html,body{height:100dvh;overflow:hidden}
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle" data-target="my-channels" style="font-size:.65rem;letter-spacing:.05em">MY CHANNELS</p>
         <ul class="menu-list" id="my-channels">
         {% for ch in channels -%}{% if ch.name in joined_channels %}{% set active = ch.name == "#" ~ channel -%}
-        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{{ch.members}}</button></li>
+        <li class="channel-row"><a class="channel-link is-size-7 py-1 px-2{% if active %} is-active{% endif %}" href="/chat/{{ch.name|replace(from="#",to="")}}"{% if ch.topic %} title="{{ch.topic}}"{% endif %}><span style="overflow-wrap:anywhere">{{ch.name}}</span></a><button type="button" class="tag is-rounded is-dark is-small policy-tag" title="Channel policy" onclick="event.stopPropagation();showPolicy('{{ch.name|replace(from='#',to='')}}')">{% if active and local_member_count is defined and local_member_count is not none %}{{local_member_count}}{% else %}{{ch.members}}{% endif %}</button></li>
         {% endif %}{%- endfor %}</ul>
         <p class="menu-label has-text-grey-light px-2 pt-2 mb-0 sidebar-toggle collapsed" data-target="all-channels" style="font-size:.65rem;letter-spacing:.05em">ALL CHANNELS</p>
         <ul class="menu-list" id="all-channels" style="display:none">
@@ -270,7 +270,7 @@ function updateReactionChip(mid,emoji,mine){
   var container=row.querySelector('.reactions');
   if(!container)return;
   var chip=container.querySelector('.reaction-chip[data-emoji="'+emoji.replace(/"/g,'\\"')+'"]');
-  var me=document.body.getAttribute('data-auth-handle')||'you';
+  var me=document.body.getAttribute('data-nick')||'you';
   if(chip){
     var title=(chip.getAttribute('title')||'').split(', ').filter(function(n){return n&&n!==me;});
     if(mine)title.push(me);

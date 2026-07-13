@@ -1,0 +1,50 @@
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/Frando/moq?branch=deps/iroh-main"]
+git = "https://github.com/Frando/moq"
+branch = "deps/iroh-main"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/Frando/web-transport?rev=f7a523f1"]
+git = "https://github.com/Frando/web-transport"
+rev = "f7a523f1"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/RustAudio/cpal.git?branch=master"]
+git = "https://github.com/RustAudio/cpal.git"
+branch = "master"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/chad/ghostly?branch=main"]
+git = "https://github.com/chad/ghostly"
+branch = "main"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/n0-computer/iroh-gossip?rev=1038f721"]
+git = "https://github.com/n0-computer/iroh-gossip"
+rev = "1038f721"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/n0-computer/iroh-live?rev=edd9bcc530a615f3ab3a6919e96790a077905376"]
+git = "https://github.com/n0-computer/iroh-live"
+rev = "edd9bcc530a615f3ab3a6919e96790a077905376"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/n0-computer/iroh-smol-kv?branch=iroh-097"]
+git = "https://github.com/n0-computer/iroh-smol-kv"
+branch = "iroh-097"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/n0-computer/iroh?rev=8af8370b"]
+git = "https://github.com/n0-computer/iroh"
+rev = "8af8370b"
+replace-with = "vendored-sources"
+
+[source."git+https://github.com/n0-computer/noq?branch=main"]
+git = "https://github.com/n0-computer/noq"
+branch = "main"
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

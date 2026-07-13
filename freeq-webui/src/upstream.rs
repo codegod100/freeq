@@ -366,7 +366,14 @@ pub async fn run_upstream_ws(
         .as_ref()
         .map(|a| super::sanitize_nick(&a.nick))
         .unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
+    *session.current_nick.lock() = nick.clone();
     debug!(session = %session_id, %nick, authenticated = auth.is_some(), "upstream IRC registration");
+    // Push the resolved nick to the browser so reaction tooltips show it
+    // instead of falling back to "you".
+    let _ = lines_tx.send(format!(
+        ":freeq-webui NOTICE * :__FREEQ_NICK__ {}",
+        nick.replace(['\n', '\r', ' '], "_")
+    ));
     // Start CAP negotiation before NICK/USER so the server delays
     // registration until CAP END, giving us time to complete SASL.
     ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
@@ -449,7 +456,12 @@ pub async fn run_upstream_ws(
                         // Retry with a random nick on 433 (Nickname in use).
                         if trimmed.contains(" 433 ") {
                             let fallback = format!("webui{:x}", rand::random::<u32>());
+                            *session.current_nick.lock() = fallback.clone();
                             let _ = write.send(WsMessage::Text(format!("NICK {fallback}\r\n").into())).await;
+                            let _ = lines_tx.send(format!(
+                                ":freeq-webui NOTICE * :__FREEQ_NICK__ {}",
+                                fallback.replace(['\n', '\r', ' '], "_")
+                            ));
                             info!("433 received; retrying NICK as {fallback}");
                         }
 

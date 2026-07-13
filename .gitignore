@@ -100,3 +100,26 @@ freeq-site/docs/
 freeq-site/.git_commit
 freeq-ios/.build/
 .devenv/
+
+# Buck2 build outputs and caches
+/buck-out/
+/.buck-out/
+
+# Reindeer-vendored Cargo sources and registry caches — regeneratable
+# via `reindeer vendor` from freeq-webui/reindeer.toml. Kept out of git
+# because they balloon the repo (1000+ crates).
+freeq-webui/third-party/vendor/
+freeq-webui/third-party/.cargo/registry/
+freeq-webui/third-party/.cargo/git/
+freeq-webui/Cargo.lock
+/.buck-target/
+
+# Reindeer auto-generated BUCK (regenerate with `reindeer buckify`)
+
+# Reindeer runtime caches
+freeq-webui/third-party/.cargo/.global-cache
+freeq-webui/third-party/.cargo/.package-cache
+
+# Runtime session caches (created by freeq-app and freeq-webui at runtime)
+.dev-data/
+freeq-webui/.dev-data/
