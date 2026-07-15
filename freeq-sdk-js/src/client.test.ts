@@ -231,6 +231,60 @@ describe('messaging methods', () => {
     expect(seen.length).toBe(1);
   });
 
+  // ── DID-addressed DMs ──────────────────────────────────────────────
+  // A DM to a peer whose DID we know goes out addressed to the DID, and the
+  // local thread is keyed by that DID — so the same conversation reaches the
+  // right identity on any server and never splits between nick and DID.
+
+  it('sendMessage() to a known-DID nick addresses the DID on the wire', async () => {
+    const { client, ws } = await makeRegistered();
+    client.nickToDid = (n) => (n.toLowerCase() === 'bob' ? 'did:plc:bob' : undefined);
+    client.sendMessage('bob', 'hi bob');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG'));
+    expect(line).toMatch(/PRIVMSG did:plc:bob :hi bob/);
+  });
+
+  it('sendMessage() to an unknown nick addresses the nick unchanged', async () => {
+    const { client, ws } = await makeRegistered();
+    client.nickToDid = () => undefined; // guest / unresolved peer
+    client.sendMessage('carol', 'hi carol');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG'));
+    expect(line).toMatch(/PRIVMSG carol :hi carol/);
+  });
+
+  it('sendMessage() addressed directly to a DID passes it through', async () => {
+    const { client, ws } = await makeRegistered();
+    client.sendMessage('did:plc:bob', 'hi by did');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG'));
+    expect(line).toMatch(/PRIVMSG did:plc:bob :hi by did/);
+  });
+
+  it('local echo of a known-DID DM is keyed under the DID (one thread)', async () => {
+    const { client } = await makeRegistered();
+    client.nickToDid = (n) => (n.toLowerCase() === 'bob' ? 'did:plc:bob' : undefined);
+    const seen: string[] = [];
+    client.on('message', (channel) => seen.push(channel));
+    client.sendMessage('bob', 'hi');
+    expect(seen).toEqual(['did:plc:bob']);
+  });
+
+  it('an incoming DM keys under the sender DID learned from its account tag', async () => {
+    // We share no channel with bob, so no JOIN/WHOIS taught us his DID. His
+    // message's account tag must still key the thread under his DID — the
+    // same key our own sends to him use — so the conversation is one thread.
+    const { client, ws } = await makeRegistered();
+    const seen: string[] = [];
+    client.on('message', (channel) => seen.push(channel));
+    ws.recv('@account=did:plc:bob :bob!b@freeq/plc/xx PRIVMSG alice :hey there');
+    await flushAsync();
+    expect(seen).toEqual(['did:plc:bob']);
+    // And a later reply from us now resolves bob → same DID key.
+    expect(client.getDidForNick('bob')).toBe('did:plc:bob');
+  });
+
   it('sendReply() sets +reply tag', async () => {
     const { client, ws } = await makeRegistered();
     client.sendReply('#foo', 'msg123', 'replying');
