@@ -2223,7 +2223,7 @@ export class FreeqClient extends EventEmitter {
       const wantedCaps: string[] = [];
       const caps = [
         'message-tags', 'server-time', 'batch', 'multi-prefix',
-        'echo-message', 'account-notify', 'extended-join', 'away-notify',
+        'echo-message', 'account-notify', 'account-tag', 'extended-join', 'away-notify',
         'draft/chathistory', 'draft/multiline', 'draft/read-marker',
       ];
       for (const c of caps) {

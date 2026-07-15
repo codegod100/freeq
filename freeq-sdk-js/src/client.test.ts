@@ -967,6 +967,21 @@ describe('read markers (draft/read-marker)', () => {
     expect(reqLine).toBeDefined();
     expect(reqLine).toContain('draft/read-marker');
   });
+
+  it('requests account-tag so incoming DMs carry the sender DID', async () => {
+    // Without account-tag the server never stamps the sender's DID onto a DM,
+    // so a first DM from a peer we share no channel with keys under the bare
+    // nick and later splits when the DID is learned. account-tag closes that.
+    const { FreeqClient } = await import('./client.js');
+    const client = new FreeqClient({ url: 'wss://test/irc', nick: 'caps', skipInitialBrokerRefresh: true });
+    client.connect();
+    await flushAsync();
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1]!;
+    ws.recv(':srv CAP * LS :message-tags server-time account-notify account-tag');
+    await flushAsync();
+    const reqLine = ws.sent.find((l) => l.startsWith('CAP REQ'));
+    expect(reqLine).toContain('account-tag');
+  });
 });
 
 describe('inbound: identity and MOTD', () => {
