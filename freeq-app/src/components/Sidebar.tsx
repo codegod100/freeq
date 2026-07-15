@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from '../store';
-import { joinChannel, partChannel, disconnect, startAvSession, endAvSession, leaveAvSession, getNick } from '../irc/client';
+import { joinChannel, partChannel, disconnect, startAvSession, endAvSession, leaveAvSession, getNick, getClient } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
 import { MicIcon, MicOffIcon, CameraOnIcon, CameraOffIcon, PhoneOffIcon } from './CallPanel';
 import { fetchProfile, getCachedProfile } from '../lib/profiles';
 import { parseAwayStatus } from '../lib/status';
+import { resolveIdentityName } from '../lib/identity';
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -308,6 +309,13 @@ function ChannelButton({ ch, isActive, onSelect, icon, showPreview }: {
   const preview = lastMsg ? `${lastMsg.from}: ${lastMsg.text}` : null;
   const lastTime = lastMsg ? formatSidebarTime(new Date(lastMsg.timestamp)) : null;
 
+  // A DID-keyed DM resolves to a human name (learned nick → AT profile →
+  // compact DID). Channels and nick DMs pass through unchanged.
+  const label = resolveIdentityName(ch.name, {
+    nickForDid: (did) => getClient()?.getNickForDid(did),
+    nameForDid: (did) => getCachedProfile(did)?.handle || getCachedProfile(did)?.displayName,
+  }).replace(/^[#&]/, '');
+
   return (
     <div data-channel-key={ch.name.toLowerCase()}>
     <button
@@ -336,7 +344,7 @@ function ChannelButton({ ch, isActive, onSelect, icon, showPreview }: {
       )}
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1">
-          <span className="truncate text-[15px]">{ch.name.replace(/^[#&]/, '')}</span>
+          <span className="truncate text-[15px]">{label}</span>
           {(ch.isEncrypted || (!ch.name.startsWith('#') && ch.members.values().next().value?.did)) && (
             <span className="text-[10px] text-success shrink-0" title="End-to-end encrypted">🔒</span>
           )}

@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react';
 import type { AvParticipant } from '../store';
 import { useStore, uniqueMemberCount } from '../store';
-import { setTopic as sendTopic, startAvSession } from '../irc/client';
+import { setTopic as sendTopic, startAvSession, getClient } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
+import { isDid, resolveIdentityName } from '../lib/identity';
 
 interface TopBarProps {
   onToggleSidebar?: () => void;
@@ -27,9 +28,12 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
   const isDM = activeChannel !== 'server' && !activeChannel.startsWith('#');
   const setChannelSettings = useStore((s) => s.setChannelSettingsOpen);
 
-  // For DMs, resolve partner profile
+  // For DMs, resolve partner profile. A DID-keyed DM (the thread name IS the
+  // peer's DID) is its own partner DID even before we have a member row.
   const partnerWhois = isDM ? whoisCache.get(activeChannel.toLowerCase()) : undefined;
-  const partnerDid = isDM ? (ch?.members.values().next().value?.did || partnerWhois?.did) : undefined;
+  const partnerDid = isDM
+    ? (isDid(activeChannel) ? activeChannel : (ch?.members.values().next().value?.did || partnerWhois?.did))
+    : undefined;
   const [partnerProfileState, setPartnerProfileState] = useState<{ did: string; profile: ATProfile | null } | null>(null);
   useEffect(() => {
     if (!isDM || !partnerDid) return;
@@ -40,6 +44,14 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
     return () => { cancelled = true; };
   }, [isDM, partnerDid]);
   const partnerProfile = partnerProfileState && partnerProfileState.did === partnerDid ? partnerProfileState.profile : null;
+
+  // DM title: a DID-keyed thread resolves to a human name — the nick the SDK
+  // learned for the DID, then the AT profile, then a compact DID as last
+  // resort. A nick-keyed DM renders unchanged.
+  const dmTitle = resolveIdentityName(activeChannel, {
+    nickForDid: (did) => getClient()?.getNickForDid(did),
+    nameForDid: () => partnerProfile?.handle || partnerProfile?.displayName,
+  });
 
   const startEdit = () => {
     setTopicDraft(topic);
@@ -86,7 +98,7 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
         {isChannel && <span className="text-accent text-base font-bold shrink-0">#</span>}
         {isDM && <span className="text-fg-dim text-base shrink-0">💬</span>}
         <span className="font-bold text-base text-fg truncate">
-          {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : isDM ? activeChannel : 'Server'}
+          {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : isDM ? dmTitle : 'Server'}
         </span>
         {ch?.isEncrypted && (
           <span className="text-success text-xs shrink-0" title="End-to-end encrypted channel">🔒</span>

@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { sendWhois, getNick } from '../irc/client';
 import { REPORT_REASONS, reportUser } from '../lib/safety';
 import { parseAwayStatus } from '../lib/status';
+import { isDid } from '../lib/identity';
 import { showToast } from './Toast';
 import * as e2ee from '../lib/e2ee';
 
@@ -264,8 +265,12 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
   }, [effectiveDid, nick]);
 
   const startDM = () => {
-    addChannel(nick);
-    setActive(nick);
+    // Open the thread under the same canonical key the SDK sends/echoes
+    // under — the peer's DID when we know it, else the nick. Opening by nick
+    // while the echo keys by DID would split one person into two threads.
+    const key = effectiveDid && isDid(effectiveDid) ? effectiveDid : nick;
+    addChannel(key);
+    setActive(key);
     onClose();
   };
 
