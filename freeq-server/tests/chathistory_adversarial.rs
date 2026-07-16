@@ -878,6 +878,43 @@ async fn chathistory_targets_requires_auth() {
     .await;
 }
 
+#[tokio::test]
+async fn chathistory_targets_carry_the_partner_did_tag() {
+    // Every persisted DM has a DID partner by construction (persistence
+    // requires both ends' DIDs), and the TARGETS handler resolves it before
+    // converting to a display nick. The line must carry that DID as a
+    // `freeq.at/partner-did` tag so clients can key the conversation by
+    // identity instead of re-deriving it from the display nick — the nick is
+    // ambiguous (renames, per-server) and was the source of thread splits.
+    let key_a = PrivateKey::generate_ed25519();
+    let key_b = PrivateKey::generate_ed25519();
+    let r = resolver(vec![(DID_A, &key_a), (DID_B, &key_b)]);
+    let (addr, _h) = start(r).await;
+    run(addr, move |addr| {
+        let mut alice = C::with_sasl(addr, "ptd_alice", DID_A, key_a);
+        alice.reg();
+        alice.drain();
+        let mut bob = C::with_sasl(addr, "ptd_bob", DID_B, key_b);
+        bob.reg();
+        bob.drain();
+
+        alice.tx("PRIVMSG ptd_bob :hello for targets");
+        bob.rx(|l| l.contains("hello for targets"), "DM delivered");
+        std::thread::sleep(Duration::from_millis(200));
+
+        alice.tx("CHATHISTORY TARGETS * * 50");
+        let line = alice.rx(
+            |l| l.contains("CHATHISTORY TARGETS") && l.contains("ptd_bob"),
+            "targets entry for bob",
+        );
+        assert!(
+            line.contains(&format!("freeq.at/partner-did={DID_B}")),
+            "TARGETS line must carry the partner DID tag: {line}"
+        );
+    })
+    .await;
+}
+
 // ═══════════════════════════════════════════════════════════════
 // CHATHISTORY PAGINATION
 // ═══════════════════════════════════════════════════════════════

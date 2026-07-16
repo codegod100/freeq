@@ -1827,6 +1827,7 @@ fn handle_chathistory_targets(
 
     let has_batch = state.cap_batch.lock().contains(session_id);
     let has_time = state.cap_server_time.lock().contains(session_id);
+    let has_tags = state.cap_message_tags.lock().contains(session_id);
 
     let dm_conversations = state
         .with_db(|db| db.dm_conversations(requester_did, limit))
@@ -1878,6 +1879,14 @@ fn handle_chathistory_targets(
                     .format("%Y-%m-%dT%H:%M:%S.000Z")
                     .to_string();
                 tags.insert("time".to_string(), ts_str);
+            }
+            // The partner's stable identity, so clients can key the
+            // conversation by DID instead of re-deriving it from the display
+            // nick (ambiguous across renames/servers — the source of DM
+            // thread splits). Old clients ignore the tag; clients that never
+            // negotiated message-tags keep getting the untagged line.
+            if has_tags {
+                tags.insert("freeq.at/partner-did".to_string(), partner.to_string());
             }
 
             if !tags.is_empty() {
