@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect, useMemo, type KeyboardEvent, 
 import { useStore } from '../store';
 import { sendMessage, sendReply, sendEdit, sendMarkdown, joinChannel, partChannel, setTopic, setMode, kickUser, inviteUser, setAway, rawCommand, sendWhois } from '../irc/client';
 import { detectStepUpRequired, requestStepUp } from '../lib/oauth-step-up';
+import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker, EMOJI_DATA } from './EmojiPicker';
 import { SlashCommands, getCommandCount } from './SlashCommands';
 import { FormatToolbar } from './FormatToolbar';
@@ -787,8 +788,8 @@ export function ComposeBox() {
                 : activeChannel === 'server'
                   ? 'Type /help for commands...'
                   : ch?.isEncrypted
-                    ? `🔒 Message ${ch?.name || activeChannel} (encrypted)`
-                    : `Message ${ch?.name || activeChannel}`
+                    ? `🔒 Message ${displayNameForKey(ch?.name || activeChannel)} (encrypted)`
+                    : `Message ${displayNameForKey(ch?.name || activeChannel)}`
             }
             rows={1}
             className="flex-1 bg-transparent px-3 py-2.5 text-base text-fg outline-none placeholder:text-fg-dim resize-none min-h-[44px] max-h-[200px] leading-relaxed"

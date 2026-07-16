@@ -6,7 +6,7 @@ import { SpeakerIcon } from './SessionIndicator';
 import { MicIcon, MicOffIcon, CameraOnIcon, CameraOffIcon, PhoneOffIcon } from './CallPanel';
 import { fetchProfile, getCachedProfile } from '../lib/profiles';
 import { parseAwayStatus } from '../lib/status';
-import { resolveIdentityName } from '../lib/identity';
+import { isDid, resolveIdentityName, findMemberByKey } from '../lib/identity';
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -577,15 +577,9 @@ function DmAvatar({ nick }: { nick: string }) {
   const channels = useStore((s) => s.channels);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
 
-  // Find DID for this nick across all channel member lists
-  const did = (() => {
-    const lower = nick.toLowerCase();
-    for (const ch of channels.values()) {
-      const m = ch.members.get(lower);
-      if (m?.did) return m.did;
-    }
-    return null;
-  })();
+  // The thread key is either the peer's DID already, or a nick we resolve to
+  // one via the channel member lists.
+  const did = isDid(nick) ? nick : (findMemberByKey(channels, nick)?.member.did ?? null);
 
   useEffect(() => {
     if (!did) { setAvatarUrl(null); return; }
@@ -612,11 +606,8 @@ function DmAvatar({ nick }: { nick: string }) {
  *  in any shared channel. Muted + truncated so it never crowds the row. */
 function DmStatusText({ nick }: { nick: string }) {
   const status = useStore((s) => {
-    for (const ch of s.channels.values()) {
-      const m = ch.members.get(nick.toLowerCase());
-      if (m) return parseAwayStatus(m.away);
-    }
-    return null;
+    const hit = findMemberByKey(s.channels, nick);
+    return hit ? parseAwayStatus(hit.member.away) : null;
   });
   if (!status) return null;
   return (
@@ -626,22 +617,18 @@ function DmStatusText({ nick }: { nick: string }) {
   );
 }
 
-/** Shows a green/yellow online dot for a DM contact. */
+/** Shows a green/yellow online dot for a DM contact. `nick` is the thread key
+ *  — a nick or a DID. */
 function OnlineDot({ nick }: { nick: string }) {
   const channels = useStore((s) => s.channels);
-  // Check if this nick is online in any shared channel
-  for (const [, ch] of channels) {
-    const member = ch.members.get(nick.toLowerCase());
-    if (member) {
-      const isAway = member.away != null;
-      return (
-        <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-bg-secondary ${
-          isAway ? 'bg-warning' : 'bg-success'
-        }`} />
-      );
-    }
-  }
-  return null;
+  const hit = findMemberByKey(channels, nick, true);
+  if (!hit) return null;
+  const isAway = hit.member.away != null;
+  return (
+    <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-bg-secondary ${
+      isAway ? 'bg-warning' : 'bg-success'
+    }`} />
+  );
 }
 
 function formatSidebarTime(d: Date): string {

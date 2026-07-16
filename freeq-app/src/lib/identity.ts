@@ -44,3 +44,41 @@ export function resolveIdentityName(
   }
   return shortenDid(id);
 }
+
+interface MemberLike {
+  did?: string;
+  away?: string | null;
+}
+interface ChannelLike {
+  members: Map<string, MemberLike>;
+}
+
+/**
+ * Locate a DM peer's member record across channels, given a thread key that
+ * may be a **nick or a DID**. Members carry both, so match on whichever form
+ * the key takes — a DID-keyed DM would otherwise find nothing in the
+ * nick-keyed member maps, reporting a peer who is plainly online as offline.
+ *
+ * `channelsOnly` restricts the search to real channels (`#…`), which presence
+ * needs so a DM buffer's own member map can't answer for itself.
+ */
+export function findMemberByKey(
+  channels: Map<string, ChannelLike>,
+  key: string,
+  channelsOnly = false,
+): { nick: string; member: MemberLike } | null {
+  const byDid = isDid(key);
+  const lower = key.toLowerCase();
+  for (const [name, ch] of channels) {
+    if (channelsOnly && !name.startsWith('#')) continue;
+    if (byDid) {
+      for (const [nick, member] of ch.members) {
+        if (member.did === key) return { nick, member };
+      }
+    } else {
+      const member = ch.members.get(lower);
+      if (member) return { nick: lower, member };
+    }
+  }
+  return null;
+}

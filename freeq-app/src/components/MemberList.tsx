@@ -2,9 +2,10 @@ import { useState, useEffect } from 'react';
 import { useStore, type Member } from '../store';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
 import { UserPopover } from './UserPopover';
-import { sendWhois } from '../irc/client';
+import { sendWhois, getClient } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
 import { parseAwayStatus } from '../lib/status';
+import { isDid, resolveIdentityName, findMemberByKey } from '../lib/identity';
 import * as e2ee from '../lib/e2ee';
 
 const NICK_COLORS = [
@@ -114,33 +115,34 @@ export function MemberList() {
   );
 }
 
-/** Determine online/away status by checking shared channel member lists (not the DM member map) */
-function usePresence(nick: string): { online: boolean; away: string | null } {
+/** Determine online/away status by checking shared channel member lists (not
+ *  the DM member map). `key` is the DM thread key — a nick or a DID. */
+function usePresence(key: string): { online: boolean; away: string | null } {
   const channels = useStore((s) => s.channels);
-  const nickLower = nick.toLowerCase();
-  for (const [name, ch] of channels) {
-    if (!name.startsWith('#')) continue; // skip DM buffers
-    const member = ch.members.get(nickLower);
-    if (member) {
-      return { online: true, away: member.away ?? null };
-    }
-  }
-  return { online: false, away: null };
+  const hit = findMemberByKey(channels, key, true);
+  return { online: !!hit, away: hit?.member.away ?? null };
 }
 
 /** Rich profile panel shown in the right sidebar for DMs */
 function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: Map<string, any>; isEncrypted?: boolean } }) {
+  // `nick` is the DM thread key — a nick, or the peer's DID once the thread is
+  // DID-keyed. Resolve it to a real nick for the lookups that need one (WHOIS
+  // is a nick command; a DID target would just fail).
+  const channels = useStore((s) => s.channels);
+  const peerNick = isDid(nick)
+    ? (findMemberByKey(channels, nick)?.nick ?? getClient()?.getNickForDid(nick))
+    : nick;
   const whoisCache = useStore((s) => s.whoisCache);
-  const whois = whoisCache.get(nick.toLowerCase());
+  const whois = peerNick ? whoisCache.get(peerNick.toLowerCase()) : undefined;
   const partnerMember = channel.members.values().next().value;
-  const did = partnerMember?.did || whois?.did;
+  const did = isDid(nick) ? nick : (partnerMember?.did || whois?.did);
   const [profile, setProfile] = useState<ATProfile | null>(null);
   const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
   const presence = usePresence(nick);
 
   useEffect(() => {
-    sendWhois(nick);
-  }, [nick]);
+    if (peerNick) sendWhois(peerNick);
+  }, [peerNick]);
 
   useEffect(() => {
     if (did) {
@@ -154,7 +156,13 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
     }
   }, [did]);
 
-  const displayName = profile?.displayName || whois?.realname || nick;
+  // Never show a raw DID as the peer's name: prefer a real name, else the
+  // resolved nick, and only compact the DID when nothing resolves.
+  const label = resolveIdentityName(nick, {
+    nickForDid: () => peerNick,
+    nameForDid: () => profile?.handle || profile?.displayName,
+  });
+  const displayName = profile?.displayName || whois?.realname || label;
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 
@@ -205,8 +213,8 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
       <div className="pt-2 px-4 pb-4 text-center">
         {/* Display name */}
         <div className="font-semibold text-fg text-base">{displayName}</div>
-        {displayName !== nick && (
-          <div className="text-sm text-fg-muted">{nick}</div>
+        {displayName !== label && (
+          <div className="text-sm text-fg-muted">{label}</div>
         )}
 
         {/* AT Handle — linked to Bluesky (not for did:key users) */}

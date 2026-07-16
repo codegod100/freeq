@@ -2025,9 +2025,15 @@ export class FreeqClient extends EventEmitter {
 
       // Error numerics
       case '401': {
-        const failNick = msg.params[1];
-        this.emit('systemMessage', failNick || 'server',
-          `${failNick} is offline — message saved, they'll see it next time they connect`);
+        const failTarget = msg.params[1];
+        // The target may be a DID (a DID-addressed DM); show a name rather
+        // than a raw did:… string. The buffer key stays the target itself,
+        // so the notice lands in that conversation.
+        const shown = failTarget && isDid(failTarget)
+          ? (this.getNickForDid(failTarget) ?? failTarget)
+          : failTarget;
+        this.emit('systemMessage', failTarget || 'server',
+          `${shown} is offline — message saved, they'll see it next time they connect`);
         break;
       }
       case '404':

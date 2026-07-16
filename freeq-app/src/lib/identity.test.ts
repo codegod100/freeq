@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isDid, shortenDid, resolveIdentityName } from './identity';
+import { isDid, shortenDid, resolveIdentityName, findMemberByKey } from './identity';
 
 describe('isDid', () => {
   it('recognizes DIDs and rejects nicks / partials', () => {
@@ -42,5 +42,37 @@ describe('resolveIdentityName', () => {
 
   it('compacts when there are no sources at all', () => {
     expect(resolveIdentityName(did)).toBe('plc:k2n3…t5j7');
+  });
+});
+
+describe('findMemberByKey', () => {
+  const bot = { did: 'did:key:z6MkBot', away: null };
+  const carol = { did: undefined, away: 'lunch' };
+  const channels = new Map([
+    ['#dev', { members: new Map([['didtestbot', bot], ['carol', carol]]) }],
+    // A DM buffer keyed by the peer's DID, holding its own member record.
+    ['did:key:z6mkbot', { members: new Map([['didtestbot', bot]]) }],
+  ]);
+
+  it('finds a peer by DID — the case a nick-keyed lookup misses', () => {
+    expect(findMemberByKey(channels, 'did:key:z6MkBot')?.nick).toBe('didtestbot');
+  });
+
+  it('finds a peer by nick, case-insensitively', () => {
+    expect(findMemberByKey(channels, 'DidTestBot')?.nick).toBe('didtestbot');
+    expect(findMemberByKey(channels, 'carol')?.member.away).toBe('lunch');
+  });
+
+  it('returns null for an unknown peer', () => {
+    expect(findMemberByKey(channels, 'did:plc:nobody')).toBeNull();
+    expect(findMemberByKey(channels, 'nobody')).toBeNull();
+  });
+
+  it('channelsOnly ignores DM buffers so they cannot answer for themselves', () => {
+    const dmOnly = new Map([
+      ['did:key:z6mkbot', { members: new Map([['didtestbot', bot]]) }],
+    ]);
+    expect(findMemberByKey(dmOnly, 'did:key:z6MkBot', true)).toBeNull();
+    expect(findMemberByKey(dmOnly, 'did:key:z6MkBot', false)?.nick).toBe('didtestbot');
   });
 });
