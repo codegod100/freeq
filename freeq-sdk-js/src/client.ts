@@ -1994,6 +1994,11 @@ export class FreeqClient extends EventEmitter {
               // emit a single `message` event (or push into a parent
               // batch if this was nested).
               await this.dispatchAssembledMultiline(batch);
+            } else if (batch.type === 'draft/chathistory-targets') {
+              // The TARGETS list envelope: its lines are CHATHISTORY
+              // TARGETS commands, each already handled individually, and it
+              // has no target of its own — emitting it as a historyBatch
+              // handed the app a meaningless ('', []) every login.
             } else {
               this.emit('historyBatch', batch.target, batch.messages);
             }
@@ -2005,14 +2010,30 @@ export class FreeqClient extends EventEmitter {
       case 'CHATHISTORY': {
         const sub = msg.params[0];
         if (sub === 'TARGETS' && msg.params[1]) {
-          const targetNick = msg.params[1];
+          const displayNick = msg.params[1];
           const timestamp = msg.params[2] || undefined;
+          // The server names the conversation partner's identity in the
+          // `freeq.at/partner-did` tag; the param is only a display nick
+          // (possibly historical — offline peers, renames). Key the
+          // conversation by the DID when present: emit it as the target and
+          // fetch history by it, so the reply batch (whose target echoes the
+          // request) is DID-keyed too — live messages and replay then agree
+          // on what a conversation is. Absent tag (older server) → nick
+          // behavior, unchanged.
+          const partnerDid = msg.tags['freeq.at/partner-did'];
+          const key = partnerDid && isDid(partnerDid) ? partnerDid : displayNick;
+          if (key !== displayNick) {
+            // Learn the display direction only (DID→nick): the nick may be
+            // historical, so binding it for addressing (nick→DID) could
+            // route a fresh nick owner's messages to the old identity.
+            this._didToNick.set(key, displayNick.toLowerCase());
+          }
           // Canonical event name (renamed from `dmTarget` — CHATHISTORY
           // TARGETS returns channels too, not just DMs).
-          this.emit('historyTarget', targetNick, timestamp);
+          this.emit('historyTarget', key, timestamp);
           // Deprecated alias — kept for one release for backwards compat.
-          this.emit('dmTarget', targetNick);
-          this.requestHistory({ target: targetNick, mode: 'latest' });
+          this.emit('dmTarget', key);
+          this.requestHistory({ target: key, mode: 'latest' });
         }
         break;
       }

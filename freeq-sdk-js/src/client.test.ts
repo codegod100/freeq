@@ -285,6 +285,45 @@ describe('messaging methods', () => {
     expect(client.getDidForNick('bob')).toBe('did:plc:bob');
   });
 
+  it('TARGETS with freeq.at/partner-did keys the conversation by the DID', async () => {
+    // The server's conversation list carries each DM partner's DID as a tag.
+    // The client must key the conversation by that DID — emit it as the
+    // target, fetch history by it (the reply batch then arrives DID-keyed),
+    // and learn the display binding so the DID renders as a name at once.
+    const { client, ws } = await makeRegistered();
+    const targets: string[] = [];
+    client.on('historyTarget', (t) => targets.push(t));
+    ws.recv(
+      '@time=2026-07-16T21:12:22.000Z;freeq.at/partner-did=did:key:z6MkBot :srv CHATHISTORY TARGETS didtestbot',
+    );
+    await flushAsync();
+    expect(targets).toEqual(['did:key:z6MkBot']);
+    const fetch = ws.sent.find((l) => l.startsWith('CHATHISTORY LATEST'));
+    expect(fetch).toContain('did:key:z6MkBot');
+    expect(client.getNickForDid('did:key:z6MkBot')).toBe('didtestbot');
+  });
+
+  it('the TARGETS envelope batch does not emit an empty historyBatch', async () => {
+    const { client, ws } = await makeRegistered();
+    const batches: string[] = [];
+    client.on('historyBatch', (channel) => batches.push(channel));
+    ws.recv(':srv BATCH +cht1 draft/chathistory-targets');
+    ws.recv('@batch=cht1;freeq.at/partner-did=did:plc:bob :srv CHATHISTORY TARGETS bob');
+    ws.recv(':srv BATCH -cht1');
+    await flushAsync();
+    expect(batches).toEqual([]); // no ('', []) noise for the envelope
+  });
+
+  it('TARGETS without the tag (old server) keeps nick behavior unchanged', async () => {
+    const { client, ws } = await makeRegistered();
+    const targets: string[] = [];
+    client.on('historyTarget', (t) => targets.push(t));
+    ws.recv(':srv CHATHISTORY TARGETS bob');
+    await flushAsync();
+    expect(targets).toEqual(['bob']);
+    expect(ws.sent.find((l) => l.startsWith('CHATHISTORY LATEST'))).toContain('bob');
+  });
+
   it('does not split a DM thread when the peer DID is learned mid-conversation', async () => {
     // Regression for the bug live-testing caught: a DM keyed under the peer's
     // bare nick, then re-keyed to their DID once a WHOIS resolved it — two
