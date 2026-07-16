@@ -1520,11 +1520,12 @@ export class FreeqClient extends EventEmitter {
         if (msg.prefix.includes('!spawn@freeq/spawn')) {
           this.emit('agentDespawned', { nick: from, reason: reason || undefined });
         }
-        // Forget any cached DID binding for this nick.
-        const lc = from.toLowerCase();
-        const did = this._nickToDid.get(lc);
-        this._nickToDid.delete(lc);
-        if (did) this._didToNick.delete(did);
+        // Forget the nick→DID binding: a released nick can be recycled by
+        // someone else, and addressing must never follow a stale one. Keep
+        // did→nick — a DID is permanent and that direction is display-only,
+        // so an offline peer still shows a name instead of a raw did:… string
+        // (a rename overwrites it on the next JOIN/WHOIS).
+        this._nickToDid.delete(from.toLowerCase());
         break;
       }
 

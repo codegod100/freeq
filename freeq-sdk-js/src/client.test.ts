@@ -468,7 +468,14 @@ describe('identity resolution', () => {
     expect(client.getNickForDid('did:plc:carol')).toBe('carol');
   });
 
-  it('cache is cleared on QUIT', async () => {
+  it('QUIT forgets nick→DID (addressing) but keeps DID→nick (display)', async () => {
+    // The two directions carry different risk. A released nick can be
+    // recycled by someone else, so addressing must forget it. A DID is
+    // permanent and the reverse map is display-only, so keeping it lets an
+    // offline peer still render as a name rather than a raw did:… string —
+    // which is exactly when we need it (the "is offline" notice, a DM title
+    // for a peer who logged off). A rename overwrites it on the next
+    // JOIN/WHOIS, so it cannot drift silently.
     const { client, ws } = await makeRegistered();
     ws.recv(':srv 330 alice dave did:plc:dave :is authenticated as');
     await flushAsync();
@@ -476,7 +483,7 @@ describe('identity resolution', () => {
     ws.recv(':dave!user@host QUIT :goodbye');
     await flushAsync();
     expect(client.getDidForNick('dave')).toBeUndefined();
-    expect(client.getNickForDid('did:plc:dave')).toBeUndefined();
+    expect(client.getNickForDid('did:plc:dave')).toBe('dave');
   });
 });
 
