@@ -285,6 +285,27 @@ describe('messaging methods', () => {
     expect(client.getDidForNick('bob')).toBe('did:plc:bob');
   });
 
+  it('does not split a DM thread when the peer DID is learned mid-conversation', async () => {
+    // Regression for the bug live-testing caught: a DM keyed under the peer's
+    // bare nick, then re-keyed to their DID once a WHOIS resolved it — two
+    // threads for one person. With the account tag on the message, the DID is
+    // known from message one, and an interleaved WHOIS must not fork a second
+    // thread. All messages from the peer stay under a single DID key.
+    const { client, ws } = await makeRegistered();
+    const threads: string[] = [];
+    client.on('message', (channel) => threads.push(channel));
+
+    ws.recv('@account=did:plc:bob :bob!b@freeq/plc/xx PRIVMSG alice :one');
+    await flushAsync();
+    // A redundant WHOIS DID numeric arrives later (same binding) …
+    ws.recv(':srv 330 alice bob did:plc:bob :is logged in as');
+    // … and a second DM follows.
+    ws.recv('@account=did:plc:bob :bob!b@freeq/plc/xx PRIVMSG alice :two');
+    await flushAsync();
+
+    expect([...new Set(threads)]).toEqual(['did:plc:bob']);
+  });
+
   it('sendReply() sets +reply tag', async () => {
     const { client, ws } = await makeRegistered();
     client.sendReply('#foo', 'msg123', 'replying');
