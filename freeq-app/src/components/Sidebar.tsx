@@ -64,14 +64,16 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     .filter((ch) => !ch.name.startsWith('#') && !ch.name.startsWith('&') && ch.name !== 'server')
     .filter((ch) => !hiddenDMs.has(ch.name.toLowerCase()))
     .filter((ch) => {
-      // Hide conversations with blocked users (nick first, then DID via shared channels)
-      const lower = ch.name.toLowerCase();
-      if (blockedNicks.includes(lower)) return false;
+      // Hide conversations with blocked users. The thread key is a nick or a
+      // DID: check a DID key against blocked DIDs directly, a nick against
+      // blocked nicks, and finally the member record (found by either form)
+      // for its DID — a DID-keyed thread must not resurface a blocked user.
+      const key = ch.name;
+      if (isDid(key) && blockedDids.includes(key)) return false;
+      if (blockedNicks.includes(key.toLowerCase())) return false;
       if (blockedDids.length > 0) {
-        for (const c of channels.values()) {
-          const m = c.members.get(lower);
-          if (m?.did && blockedDids.includes(m.did)) return false;
-        }
+        const m = findMemberByKey(channels, key)?.member;
+        if (m?.did && blockedDids.includes(m.did)) return false;
       }
       return true;
     })
