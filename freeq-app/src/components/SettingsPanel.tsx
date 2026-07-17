@@ -1,4 +1,5 @@
 import { useStore } from '../store';
+import { displayNameForKey } from '../lib/display-name';
 import { requestPermission } from '../lib/notifications';
 import { getPreferences, setPreferences } from '../lib/db';
 import { useState, useEffect } from 'react';
@@ -220,10 +221,13 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function BlockedUserRow({ id, mono, onUnblock }: { id: string; mono?: boolean; onUnblock: () => void }) {
+  // A DID entry resolves to the peer's known name where possible; the full
+  // DID stays one hover away (title) so the entry is still exact.
+  const label = displayNameForKey(id);
   return (
     <div className="flex items-center justify-between text-sm gap-2">
-      <span className={`text-fg truncate ${mono ? 'font-mono text-xs' : ''}`} title={id}>
-        {id}
+      <span className={`text-fg truncate ${mono && label === id ? 'font-mono text-xs' : ''}`} title={id}>
+        {label}
       </span>
       <button onClick={onUnblock} className="text-xs text-danger hover:underline shrink-0">
         Unblock
