@@ -59,8 +59,7 @@ async fn wait_owner(
                 from,
                 target,
                 text,
-                tags,
-            })) => {
+                tags, .. })) => {
                 if tags.contains_key("batch") {
                     continue;
                 }
@@ -627,8 +626,7 @@ async fn main() -> Result<()> {
                 from,
                 target,
                 text,
-                tags,
-            })) => {
+                tags, .. })) => {
                 if tags.contains_key("batch") {
                     continue;
                 }

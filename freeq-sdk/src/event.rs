@@ -42,6 +42,13 @@ pub enum Event {
         text: String,
         /// IRCv3 message tags (empty if none).
         tags: std::collections::HashMap<String, String>,
+        /// For a DM: the canonical conversation key — the peer's DID when
+        /// known, else their nick (`address::dm_peer_key`). `None` for
+        /// channel messages. Direction-independent: our echo and the peer's
+        /// reply carry the same value, so one person is one thread. Assumes
+        /// one authenticated identity per client session (a multi-account
+        /// consumer must namespace its stores per account).
+        dm_key: Option<String>,
     },
 
     /// A TAGMSG (tags only, no body) — used for reactions, typing indicators, etc.
@@ -49,6 +56,9 @@ pub enum Event {
         from: String,
         target: String,
         tags: std::collections::HashMap<String, String>,
+        /// Same as [`Event::Message::dm_key`]: the DM conversation key,
+        /// `None` for channels.
+        dm_key: Option<String>,
     },
 
     /// BATCH start (e.g., chathistory)
@@ -69,6 +79,20 @@ pub enum Event {
     ChatHistoryTarget {
         nick: String,
         timestamp: Option<String>,
+        /// The partner's DID from the server's `freeq.at/partner-did` tag —
+        /// the conversation's stable identity (key threads by this, not the
+        /// display nick). `None` from servers that don't send the tag.
+        partner_did: Option<String>,
+    },
+
+    /// A nick↔DID binding was learned (extended-join, WHOIS, or a message's
+    /// account tag). Consumers should fold any nick-keyed DM thread for
+    /// `nick` into the DID-keyed one — a cold first DM keys by nick until
+    /// the peer's identity is learned here. Emitted only when the binding
+    /// is new or changed.
+    MemberDid {
+        nick: String,
+        did: String,
     },
 
     /// NAMES list for a channel (one 353 reply; may arrive in multiple parts).

@@ -53,6 +53,7 @@ class MessageMapperTest {
         account = account,
         origin = origin,
         reactions = reactions,
+        dmKey = null,
     )
 
     @Test fun preserves_basic_fields() {

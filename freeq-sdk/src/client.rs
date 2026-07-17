@@ -257,15 +257,122 @@ pub(crate) struct CapsState {
 }
 pub(crate) type CapsAcked = Arc<parking_lot::Mutex<CapsState>>;
 
+/// Session-learned nick↔DID bindings, shared between the read loop (which
+/// learns them) and `ClientHandle` (which resolves send targets through
+/// them). The two directions deliberately have different lifetimes:
+///
+/// - `nick_to_did` is addressing-grade: cleared when the nick's owner quits,
+///   because a released nick can be recycled by someone else and routing
+///   must never follow a stale binding.
+/// - `did_to_nick` is display/keying-grade and retained: a DID is permanent,
+///   and a DM thread must keep its key (and name) after the peer goes
+///   offline. A rename overwrites it on the next join/whois/message.
+#[derive(Default)]
+pub(crate) struct DidMapsState {
+    /// lowercase nick → DID. Addressing-grade; cleared on QUIT.
+    nick_to_did: HashMap<String, String>,
+    /// DID → lowercase nick. Display/keying-grade; survives QUIT.
+    did_to_nick: HashMap<String, String>,
+}
+
+impl DidMapsState {
+    /// Learn an authoritative binding (extended-join, WHOIS 330, account
+    /// tag). Returns true when new/changed — the caller emits
+    /// [`Event::MemberDid`] exactly then.
+    fn learn(&mut self, nick: &str, did: &str) -> bool {
+        let lc = nick.to_lowercase();
+        let is_new = self.nick_to_did.get(&lc).map(|d| d.as_str()) != Some(did);
+        self.nick_to_did.insert(lc.clone(), did.to_string());
+        self.did_to_nick.insert(did.to_string(), lc);
+        is_new
+    }
+
+    /// Learn the display direction only (CHATHISTORY TARGETS): the display
+    /// nick may be historical, so it must not become an addressing binding.
+    fn learn_display(&mut self, did: &str, nick: &str) {
+        self.did_to_nick.insert(did.to_string(), nick.to_lowercase());
+    }
+
+    /// The peer's DID whose retained display nick is `nick`, if any.
+    fn reverse_did_for_nick(&self, nick: &str) -> Option<String> {
+        let lc = nick.to_lowercase();
+        self.did_to_nick
+            .iter()
+            .find(|(_, n)| **n == lc)
+            .map(|(d, _)| d.clone())
+    }
+
+    /// DM buffer/thread key: loose resolution (addressing map, then the
+    /// retained display binding) so an offline peer's thread keeps one key.
+    fn dm_key(&self, peer: &str) -> String {
+        crate::address::dm_peer_key(peer, |n| {
+            self.nick_to_did
+                .get(&n.to_lowercase())
+                .cloned()
+                .or_else(|| self.reverse_did_for_nick(n))
+        })
+    }
+
+    /// Wire target: strict resolution (addressing map only) — routing never
+    /// rides a display binding.
+    fn wire_target(&self, peer: &str) -> String {
+        crate::address::dm_peer_key(peer, |n| self.nick_to_did.get(&n.to_lowercase()).cloned())
+    }
+
+    /// A nick's owner quit: forget the addressing binding (the nick can be
+    /// recycled) but keep the display binding (the DID is permanent).
+    fn forget_nick(&mut self, nick: &str) {
+        self.nick_to_did.remove(&nick.to_lowercase());
+    }
+
+    /// A user renamed: move their addressing binding to the new nick and
+    /// refresh the display binding.
+    fn rename(&mut self, old_nick: &str, new_nick: &str) {
+        if let Some(did) = self.nick_to_did.remove(&old_nick.to_lowercase()) {
+            self.learn(new_nick, &did);
+        }
+    }
+}
+
+pub(crate) type DidMaps = Arc<parking_lot::Mutex<DidMapsState>>;
+
+/// Compute the DM key for an inbound/echoed message, or `None` for channels.
+/// The peer is the non-self end: our echo's peer is the target, an incoming
+/// message's peer is the sender.
+fn dm_key_for(
+    maps: &DidMaps,
+    own_nick: &str,
+    from: &str,
+    target: &str,
+) -> Option<String> {
+    if target.starts_with('#') || target.starts_with('&') {
+        return None;
+    }
+    let peer = if from.eq_ignore_ascii_case(own_nick) { target } else { from };
+    Some(maps.lock().dm_key(peer))
+}
+
 /// A handle to a running IRC client connection.
 #[derive(Clone)]
 pub struct ClientHandle {
     cmd_tx: mpsc::Sender<Command>,
     echo_registry: EchoRegistry,
     caps_acked: CapsAcked,
+    did_maps: DidMaps,
 }
 
 impl ClientHandle {
+    /// Resolve a DM send target to the peer's DID when addressing-grade
+    /// known (strict map only — never a display binding), else unchanged.
+    /// Channels pass through. The signature canonical covers the resolved
+    /// target, matching what the server verifies.
+    fn resolve_wire_target(&self, target: &str) -> String {
+        if target.starts_with('#') || target.starts_with('&') {
+            return target.to_string();
+        }
+        self.did_maps.lock().wire_target(target)
+    }
+
     pub async fn join(&self, channel: &str) -> Result<()> {
         self.cmd_tx.send(Command::Join(channel.to_string())).await?;
         Ok(())
@@ -282,6 +389,7 @@ impl ClientHandle {
     /// targeting old servers should pre-encode or call
     /// `send_multiline_chunks` with explicit chunks.
     pub async fn privmsg(&self, target: &str, text: &str) -> Result<()> {
+        let target = &self.resolve_wire_target(target);
         // Route through multiline when the text spans lines OR is long enough
         // that a single PRIVMSG would risk server-side truncation.
         let multiline_ready = (text.contains('\n') || text.len() > MULTILINE_PER_CHUNK_BYTES) && {
@@ -332,6 +440,7 @@ impl ClientHandle {
         chunks: Vec<MultilineChunk>,
         opener_tags: std::collections::HashMap<String, String>,
     ) -> Result<()> {
+        let target = &self.resolve_wire_target(target);
         self.cmd_tx
             .send(Command::SendMultiline {
                 target: target.to_string(),
@@ -425,6 +534,7 @@ impl ClientHandle {
         text: &str,
         tags: std::collections::HashMap<String, String>,
     ) -> Result<()> {
+        let target = &self.resolve_wire_target(target);
         let multiline_ready = (text.contains('\n') || text.len() > MULTILINE_PER_CHUNK_BYTES) && {
             let caps = self.caps_acked.lock();
             caps.acked.contains("draft/multiline") && caps.acked.contains("batch")
@@ -1248,15 +1358,18 @@ pub fn connect_with_stream(
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let echo_registry: EchoRegistry = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+    let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
 
     let handle = ClientHandle {
         cmd_tx: cmd_tx.clone(),
         echo_registry: echo_registry.clone(),
         caps_acked: caps_acked.clone(),
+        did_maps: did_maps.clone(),
     };
 
     let echo_reg = echo_registry.clone();
     let caps_for_loop = caps_acked.clone();
+    let maps_for_loop = did_maps.clone();
     tokio::spawn(async move {
         let _ = event_tx.send(Event::Connected).await;
         let result = match conn {
@@ -1271,6 +1384,7 @@ pub fn connect_with_stream(
                     cmd_rx,
                     echo_reg,
                     caps_for_loop,
+                    maps_for_loop,
                 )
                 .await
             }
@@ -1285,6 +1399,7 @@ pub fn connect_with_stream(
                     cmd_rx,
                     echo_reg,
                     caps_for_loop,
+                    maps_for_loop,
                 )
                 .await
             }
@@ -1300,6 +1415,7 @@ pub fn connect_with_stream(
                     cmd_rx,
                     echo_reg,
                     caps_for_loop,
+                    maps_for_loop,
                 )
                 .await
             }
@@ -1315,6 +1431,7 @@ pub fn connect_with_stream(
                     cmd_rx,
                     echo_reg,
                     caps_for_loop,
+                    maps_for_loop,
                 )
                 .await
             }
@@ -1346,15 +1463,18 @@ pub fn connect(
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let echo_registry: EchoRegistry = std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new()));
     let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+    let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
 
     let handle = ClientHandle {
         cmd_tx: cmd_tx.clone(),
         echo_registry: echo_registry.clone(),
         caps_acked: caps_acked.clone(),
+        did_maps: did_maps.clone(),
     };
 
     let echo_reg = echo_registry.clone();
     let caps_for_loop = caps_acked.clone();
+    let maps_for_loop = did_maps.clone();
     tokio::spawn(async move {
         if let Err(e) = run_client(
             config,
@@ -1363,6 +1483,7 @@ pub fn connect(
             cmd_rx,
             echo_reg,
             caps_for_loop,
+            maps_for_loop,
         )
         .await
         {
@@ -1384,6 +1505,7 @@ async fn run_client(
     cmd_rx: mpsc::Receiver<Command>,
     echo_registry: EchoRegistry,
     caps_acked: CapsAcked,
+    did_maps: DidMaps,
 ) -> Result<()> {
     let conn = establish_connection(&config).await?;
     let _ = event_tx.send(Event::Connected).await;
@@ -1399,6 +1521,7 @@ async fn run_client(
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await
         }
@@ -1413,6 +1536,7 @@ async fn run_client(
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await
         }
@@ -1428,6 +1552,7 @@ async fn run_client(
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await
         }
@@ -1443,6 +1568,7 @@ async fn run_client(
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await
         }
@@ -1678,6 +1804,7 @@ async fn run_irc<R, W>(
     mut cmd_rx: mpsc::Receiver<Command>,
     echo_registry: EchoRegistry,
     caps_acked: CapsAcked,
+    did_maps: DidMaps,
 ) -> Result<()>
 where
     R: tokio::io::AsyncBufRead + Unpin,
@@ -1695,6 +1822,9 @@ where
 
     let mut sasl_in_progress = false;
     let mut registered = false;
+    // Our own confirmed nick (001, self-NICK) — needed to tell which end of
+    // a DM is the peer when computing dm_key.
+    let mut own_nick = String::new();
     let mut nick_tries: u32 = 0;
     let mut web_token = config.web_token.clone();
     let mut authenticated_did: Option<String> = None;
@@ -1872,7 +2002,13 @@ where
                                     }
                                 } else if let Some(id) = ref_id.strip_prefix('-') {
                                     if let Some(batch) = multiline_batches.remove(id) {
-                                        dispatch_assembled_multiline(&event_tx, batch).await;
+                                        let dm_key = dm_key_for(
+                                            &did_maps,
+                                            &own_nick,
+                                            &batch.from,
+                                            &batch.target,
+                                        );
+                                        dispatch_assembled_multiline(&event_tx, batch, dm_key).await;
                                     } else {
                                         let _ = event_tx.send(Event::BatchEnd { id: id.to_string() }).await;
                                     }
@@ -1881,6 +2017,7 @@ where
                         }
                         "001" => {
                             let nick = msg.params.first().cloned().unwrap_or_default();
+                            own_nick = nick.clone();
                             let _ = event_tx.send(Event::Registered { nick }).await;
                             registered = true;
                             // Flush any commands that were queued before registration
@@ -1917,6 +2054,14 @@ where
                             let account = msg.params.get(1)
                                 .filter(|a| !a.is_empty() && a.as_str() != "*")
                                 .cloned();
+                            if let Some(did) = account.as_deref()
+                                && crate::address::is_did(did)
+                                && did_maps.lock().learn(&nick, did)
+                            {
+                                let _ = event_tx
+                                    .send(Event::MemberDid { nick: nick.clone(), did: did.to_string() })
+                                    .await;
+                            }
                             let _ = event_tx.send(Event::Joined { channel, nick, account }).await;
                         }
                         "PART" => {
@@ -1934,6 +2079,10 @@ where
                                 .to_string();
                             let new_nick = msg.params.first().cloned().unwrap_or_default();
                             if !old_nick.is_empty() && !new_nick.is_empty() {
+                                if old_nick.eq_ignore_ascii_case(&own_nick) {
+                                    own_nick = new_nick.clone();
+                                }
+                                did_maps.lock().rename(&old_nick, &new_nick);
                                 let _ = event_tx.send(Event::NickChanged { old_nick, new_nick }).await;
                             }
                         }
@@ -2078,6 +2227,16 @@ where
                             if msg.params.len() >= 3 {
                                 let nick = msg.params[1].clone();
                                 let account = &msg.params[2];
+                                if crate::address::is_did(account)
+                                    && did_maps.lock().learn(&nick, account)
+                                {
+                                    let _ = event_tx
+                                        .send(Event::MemberDid {
+                                            nick: nick.clone(),
+                                            did: account.clone(),
+                                        })
+                                        .await;
+                                }
                                 let label = msg.params.get(3).map(|s| s.as_str()).unwrap_or("is authenticated as");
                                 let info = format!("{nick} {label} {account}");
                                 let _ = event_tx.send(Event::WhoisReply { nick, info }).await;
@@ -2102,6 +2261,7 @@ where
                                 .unwrap_or("")
                                 .to_string();
                             let reason = msg.params.first().cloned().unwrap_or_default();
+                            did_maps.lock().forget_nick(&nick);
                             let _ = event_tx.send(Event::UserQuit { nick, reason }).await;
                         }
                         "PRIVMSG" | "NOTICE" => {
@@ -2161,7 +2321,27 @@ where
                                         let _ = tx.send(msgid.clone());
                                     }
 
-                                    let _ = event_tx.send(Event::Message { from, target, text, tags }).await;
+                                    // Learn the sender's DID from the account
+                                    // tag (a cold first DM would otherwise key
+                                    // by nick until too late) and announce a
+                                    // new binding so consumers can merge.
+                                    if !target.starts_with('#')
+                                        && !target.starts_with('&')
+                                        && !from.eq_ignore_ascii_case(&own_nick)
+                                        && let Some(did) = tags.get("account")
+                                        && crate::address::is_did(did)
+                                        && did_maps.lock().learn(&from, did)
+                                    {
+                                        let _ = event_tx
+                                            .send(Event::MemberDid {
+                                                nick: from.clone(),
+                                                did: did.clone(),
+                                            })
+                                            .await;
+                                    }
+                                    let dm_key =
+                                        dm_key_for(&did_maps, &own_nick, &from, &target);
+                                    let _ = event_tx.send(Event::Message { from, target, text, tags, dm_key }).await;
                                 }
                             }
                         }
@@ -2172,7 +2352,8 @@ where
                                     .unwrap_or("")
                                     .to_string();
                                 let target = msg.params[0].clone();
-                                let _ = event_tx.send(Event::TagMsg { from, target, tags: msg.tags.clone() }).await;
+                                let dm_key = dm_key_for(&did_maps, &own_nick, &from, &target);
+                                let _ = event_tx.send(Event::TagMsg { from, target, tags: msg.tags.clone(), dm_key }).await;
                             }
                         }
                         "CHATHISTORY" => {
@@ -2181,10 +2362,23 @@ where
                             if msg.params.first().map(|s| s.as_str()) == Some("TARGETS") {
                                 if let Some(nick) = msg.params.get(1) {
                                     let timestamp = msg.tags.get("time").cloned();
+                                    // The server names the conversation's
+                                    // stable identity in the partner-did tag;
+                                    // learn display-only (the nick may be
+                                    // historical — never addressing-grade).
+                                    let partner_did = msg
+                                        .tags
+                                        .get("freeq.at/partner-did")
+                                        .filter(|d| crate::address::is_did(d))
+                                        .cloned();
+                                    if let Some(ref did) = partner_did {
+                                        did_maps.lock().learn_display(did, nick);
+                                    }
                                     let _ = event_tx
                                         .send(Event::ChatHistoryTarget {
                                             nick: nick.clone(),
                                             timestamp,
+                                            partner_did,
                                         })
                                         .await;
                                 }
@@ -2264,6 +2458,7 @@ where
 async fn dispatch_assembled_multiline(
     event_tx: &mpsc::Sender<Event>,
     batch: InboundMultilineBatch,
+    dm_key: Option<String>,
 ) {
     let mut text = String::new();
     for (i, line) in batch.lines.iter().enumerate() {
@@ -2282,6 +2477,7 @@ async fn dispatch_assembled_multiline(
             target: batch.target,
             text,
             tags,
+            dm_key,
         })
         .await;
     // Nested-batch parent (e.g. multiline inside CHATHISTORY) is
@@ -2853,7 +3049,7 @@ mod multiline_tests {
             ],
             parent_batch_id: None,
         };
-        dispatch_assembled_multiline(&tx, batch).await;
+        dispatch_assembled_multiline(&tx, batch, None).await;
         match rx.recv().await.unwrap() {
             Event::Message {
                 from, target, text, ..
@@ -2889,7 +3085,7 @@ mod multiline_tests {
             ],
             parent_batch_id: None,
         };
-        dispatch_assembled_multiline(&tx, batch).await;
+        dispatch_assembled_multiline(&tx, batch, None).await;
         match rx.recv().await.unwrap() {
             Event::Message { text, .. } => assert_eq!(text, "alphabeta\ngamma"),
             other => panic!("expected Message, got {other:?}"),
@@ -2922,7 +3118,7 @@ mod multiline_tests {
             ],
             parent_batch_id: None,
         };
-        dispatch_assembled_multiline(&tx, batch).await;
+        dispatch_assembled_multiline(&tx, batch, None).await;
         match rx.recv().await.unwrap() {
             Event::Message { tags, .. } => {
                 assert_eq!(tags.get("msgid").map(String::as_str), Some("01XYZ"));
@@ -3164,6 +3360,7 @@ mod multiline_tests {
     async fn privmsg_auto_routes_to_multiline_when_cap_acked() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         caps_acked
             .lock()
             .acked
@@ -3173,6 +3370,7 @@ mod multiline_tests {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             caps_acked,
+            did_maps,
         };
         handle.privmsg("#test", "alpha\nbeta\ngamma").await.unwrap();
         match cmd_rx.recv().await.unwrap() {
@@ -3201,11 +3399,13 @@ mod multiline_tests {
     async fn privmsg_falls_back_to_single_when_cap_not_acked() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         // No caps acked
         let handle = ClientHandle {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             caps_acked,
+            did_maps,
         };
         handle.privmsg("#test", "a\nb").await.unwrap();
         match cmd_rx.recv().await.unwrap() {
@@ -3225,6 +3425,7 @@ mod multiline_tests {
     async fn send_tagged_auto_routes_to_multiline_with_opener_tags() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         caps_acked
             .lock()
             .acked
@@ -3234,6 +3435,7 @@ mod multiline_tests {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             caps_acked,
+            did_maps,
         };
         let mut tags = std::collections::HashMap::new();
         tags.insert("+freeq.at/event".to_string(), "reveal".to_string());
@@ -3266,6 +3468,7 @@ mod multiline_tests {
     async fn privmsg_single_line_never_routes_to_multiline() {
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         caps_acked
             .lock()
             .acked
@@ -3275,6 +3478,7 @@ mod multiline_tests {
             cmd_tx,
             echo_registry: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             caps_acked,
+            did_maps,
         };
         handle.privmsg("#test", "hello world").await.unwrap();
         match cmd_rx.recv().await.unwrap() {
@@ -3301,6 +3505,7 @@ mod multiline_tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel::<Command>(16);
         let echo_registry: EchoRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         let config = ConnectConfig {
             server_addr: "test".to_string(),
             nick: "tester".to_string(),
@@ -3323,6 +3528,7 @@ mod multiline_tests {
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await;
         });
@@ -3414,6 +3620,7 @@ mod multiline_tests {
         let (_cmd_tx, cmd_rx) = mpsc::channel::<Command>(16);
         let echo_registry: EchoRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         let config = ConnectConfig {
             server_addr: "test".to_string(),
             nick: "tester".to_string(),
@@ -3436,6 +3643,7 @@ mod multiline_tests {
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await;
         });
@@ -3590,6 +3798,7 @@ mod irc_loop_tests {
         let (cmd_tx, cmd_rx) = mpsc::channel::<Command>(64);
         let echo_registry: EchoRegistry = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let caps_acked: CapsAcked = Arc::new(parking_lot::Mutex::new(CapsState::default()));
+        let did_maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
         let config = test_config(nick);
 
         let (reader, writer) = tokio::io::split(client_side);
@@ -3603,6 +3812,7 @@ mod irc_loop_tests {
                 cmd_rx,
                 echo_registry,
                 caps_acked,
+                did_maps,
             )
             .await;
         });
@@ -4496,7 +4706,7 @@ mod irc_loop_tests {
 
         let got = tokio::time::timeout(tokio::time::Duration::from_millis(400), async {
             while let Some(ev) = events.recv().await {
-                if let Event::TagMsg { from, target, tags } = ev {
+                if let Event::TagMsg { from, target, tags, .. } = ev {
                     return Some((from, target, tags));
                 }
             }
@@ -4646,5 +4856,70 @@ mod irc_loop_tests {
             account.is_none(),
             "account `*` sentinel must be treated as unauthenticated (None)"
         );
+    }
+}
+
+#[cfg(test)]
+mod did_maps_tests {
+    use super::*;
+
+    const BOB: &str = "did:plc:bob";
+
+    #[test]
+    fn learn_reports_new_and_changed_bindings_only() {
+        let mut m = DidMapsState::default();
+        assert!(m.learn("Bob", BOB)); // new
+        assert!(!m.learn("bob", BOB)); // same (case-insensitive nick)
+        assert!(m.learn("bob", "did:plc:other")); // changed
+    }
+
+    #[test]
+    fn learn_display_never_creates_an_addressing_binding() {
+        let mut m = DidMapsState::default();
+        m.learn_display(BOB, "bob");
+        assert_eq!(m.wire_target("bob"), "bob"); // strict: unresolved
+        assert_eq!(m.dm_key("bob"), BOB); // loose: display reverse applies
+    }
+
+    #[test]
+    fn forget_nick_clears_addressing_but_keeps_display() {
+        let mut m = DidMapsState::default();
+        m.learn("bob", BOB);
+        m.forget_nick("bob");
+        assert_eq!(m.wire_target("bob"), "bob"); // routing must not follow
+        assert_eq!(m.dm_key("bob"), BOB); // thread key survives the quit
+        assert_eq!(m.did_to_nick.get(BOB).map(String::as_str), Some("bob"));
+    }
+
+    #[test]
+    fn rename_moves_the_binding() {
+        let mut m = DidMapsState::default();
+        m.learn("bob", BOB);
+        m.rename("bob", "bobby");
+        assert_eq!(m.wire_target("bobby"), BOB);
+        assert_eq!(m.wire_target("bob"), "bob");
+        assert_eq!(m.did_to_nick.get(BOB).map(String::as_str), Some("bobby"));
+    }
+
+    #[test]
+    fn keys_pass_dids_through_and_leave_guests_untouched() {
+        let m = DidMapsState::default();
+        assert_eq!(m.dm_key(BOB), BOB);
+        assert_eq!(m.dm_key("Guest7"), "Guest7"); // no mangling
+        assert_eq!(m.wire_target(BOB), BOB);
+    }
+
+    #[test]
+    fn dm_key_for_selects_the_peer_end_and_skips_channels() {
+        let maps: DidMaps = Arc::new(parking_lot::Mutex::new(DidMapsState::default()));
+        maps.lock().learn("bob", BOB);
+        // Channel → None.
+        assert_eq!(dm_key_for(&maps, "me", "bob", "#dev"), None);
+        // Incoming: peer is the sender.
+        assert_eq!(dm_key_for(&maps, "me", "bob", "me").as_deref(), Some(BOB));
+        // Echo of our own send: peer is the target.
+        assert_eq!(dm_key_for(&maps, "me", "me", "bob").as_deref(), Some(BOB));
+        // Guest peer stays nick-keyed.
+        assert_eq!(dm_key_for(&maps, "me", "guest9", "me").as_deref(), Some("guest9"));
     }
 }

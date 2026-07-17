@@ -869,6 +869,9 @@ fn process_p2p_event(app: &mut App, event: freeq_sdk::p2p::P2pEvent) {
 
 fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle) {
     match event {
+        // Nick<->DID binding learned. Adopted in the TUI's DID-DM pass;
+        // ignored until then (this keeps the build from breaking, no more).
+        Event::MemberDid { .. } => {}
         Event::Connected => {
             app.connection_state = "connected".to_string();
             app.status_msg(&format!(
@@ -921,8 +924,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             from,
             target,
             text,
-            tags,
-        } => {
+            tags, .. } => {
             // Try E2EE decryption if we have a key for this channel
             let (text, was_encrypted) = {
                 let buf_key =
@@ -1166,7 +1168,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
         Event::BatchEnd { id } => {
             app.end_batch(&id);
         }
-        Event::TagMsg { from, target, tags } => {
+        Event::TagMsg { from, target, tags, .. } => {
             // Delete: mark the target line as deleted; don't display a new line.
             if let Some(deleted_msgid) = tags
                 .get("+draft/delete")
@@ -1451,7 +1453,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                 }
             }
         }
-        Event::ChatHistoryTarget { nick, timestamp } => {
+        Event::ChatHistoryTarget { nick, timestamp, .. } => {
             let ts_display = timestamp.as_deref().unwrap_or("?");
             app.buffer_mut("status")
                 .push_system(&format!("  DM: {nick}  (last: {ts_display})"));

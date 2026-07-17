@@ -33,6 +33,11 @@ fun ChatDetailScreen(
     // Don't cache channelState - it changes on reconnect when channels are recreated
     val channelState = appState.channels.firstOrNull { it.name.equals(channelName, ignoreCase = true) }
         ?: appState.dmBuffers.firstOrNull { it.name.equals(channelName, ignoreCase = true) }
+        // A nick-keyed DM can merge into its DID-keyed thread while open
+        // (the peer's first reply teaches the binding): follow it.
+        ?: appState.didForNick(channelName)?.let { did ->
+            appState.dmBuffers.firstOrNull { it.name == did }
+        }
 
     var showMembers by remember { mutableStateOf(false) }
     var showSearch by remember { mutableStateOf(false) }
@@ -73,7 +78,7 @@ fun ChatDetailScreen(
                         else Modifier
                     ) {
                         Text(
-                            channelName,
+                            if (isChannel) channelName else appState.displayNameForKey(channelName),
                             fontSize = 17.sp,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -246,10 +251,11 @@ fun ChatDetailScreen(
                 origin = origin,
                 onDismiss = { profileTarget = null },
                 onNavigateToDM = { dmNick ->
-                    appState.getOrCreateDM(dmNick)
+                    val key = appState.didForNick(dmNick) ?: dmNick
+                    appState.getOrCreateDM(key)
                     showMembers = false
                     profileTarget = null
-                    onNavigateToChat?.invoke(dmNick)
+                    onNavigateToChat?.invoke(key)
                 }
             )
         }

@@ -2520,7 +2520,12 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 for msg in sorted { dm.appendIfNew(msg) }
             }
 
-        case .chatHistoryTarget(let nick, let timestamp):
+        case .memberDid:
+            // Emitted by the updated SDK when a nick<->DID binding is
+            // learned. Adopted in the iOS DID-DM pass; ignored until then.
+            break
+
+        case .chatHistoryTarget(let nick, let timestamp, _):
             // Server tells us "you have history with this peer"; create the
             // DM buffer and seed lastActivity from the server-provided
             // timestamp (`time` tag, ISO8601). Without this, every DM

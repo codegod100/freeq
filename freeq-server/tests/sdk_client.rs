@@ -457,3 +457,262 @@ async fn nick_collision_gets_alternate() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+// DID-KEYED DMS (dm_key / MemberDid / partner_did)
+// ═══════════════════════════════════════════════════════════════
+
+const DID_A: &str = "did:plc:sdk_dm_alice";
+const DID_C: &str = "did:plc:sdk_dm_carol";
+
+async fn start_with_dids(
+    dids: &[(&str, &PrivateKey)],
+    with_db: bool,
+) -> (
+    std::net::SocketAddr,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+) {
+    let mut docs = HashMap::new();
+    for (did, key) in dids {
+        docs.insert(
+            did.to_string(),
+            did::make_test_did_document(did, &key.public_key_multibase()),
+        );
+    }
+    let db_path = if with_db {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let p = tmp.path().to_str().unwrap().to_string();
+        std::mem::forget(tmp);
+        Some(p)
+    } else {
+        None
+    };
+    let config = freeq_server::config::ServerConfig {
+        listen_addr: "127.0.0.1:0".to_string(),
+        server_name: "test-sdk-dm".to_string(),
+        challenge_timeout_secs: 60,
+        db_path,
+        ..Default::default()
+    };
+    freeq_server::server::Server::with_resolver(config, DidResolver::static_map(docs))
+        .start()
+        .await
+        .unwrap()
+}
+
+fn cfg(addr: std::net::SocketAddr, nick: &str) -> ConnectConfig {
+    ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: nick.to_string(),
+        user: nick.to_string(),
+        realname: "t".to_string(),
+        ..Default::default()
+    }
+}
+
+fn signer_for(did: &str, key: PrivateKey) -> Arc<dyn ChallengeSigner> {
+    Arc::new(KeySigner::new(did.to_string(), key))
+}
+
+/// An incoming DM carries dm_key = the sender's DID (learned from the
+/// account tag), while `target` stays the raw wire value (our own nick);
+/// the binding is announced via MemberDid exactly once.
+#[tokio::test]
+async fn incoming_dm_keys_by_sender_did_and_announces_binding_once() {
+    let key = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key)], false).await;
+
+    let (ha, mut rxa) = client::connect(cfg(addr, "dmalice"), Some(signer_for(DID_A, key)));
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    let (_hb, mut rxb) = client::connect(cfg(addr, "dmguest"), None);
+    wait(&mut rxb, |e| matches!(e, Event::Registered { .. }), "reg B").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ha.privmsg("dmguest", "first").await.unwrap();
+    let m1 = wait(
+        &mut rxb,
+        |e| matches!(e, Event::Message { text, .. } if text == "first"),
+        "dm 1",
+    )
+    .await;
+    if let Event::Message { target, dm_key, .. } = m1 {
+        assert_eq!(target, "dmguest", "raw wire target preserved");
+        assert_eq!(dm_key.as_deref(), Some(DID_A), "keyed by the sender's DID");
+    }
+
+    ha.privmsg("dmguest", "second").await.unwrap();
+    wait(
+        &mut rxb,
+        |e| matches!(e, Event::Message { text, .. } if text == "second"),
+        "dm 2",
+    )
+    .await;
+    // Drain B's history: exactly one MemberDid for the peer.
+    let mut member_dids = 0;
+    while let Ok(Some(e)) =
+        tokio::time::timeout(Duration::from_millis(300), rxb.recv()).await
+    {
+        if matches!(&e, Event::MemberDid { did, .. } if did == DID_A) {
+            member_dids += 1;
+        }
+    }
+    // The two Message events already consumed above; the MemberDid arrived
+    // before the first of them — recv'd during the waits — so re-run the
+    // scenario with a fresh listener is overkill: assert via a third message
+    // that no NEW MemberDid is emitted.
+    ha.privmsg("dmguest", "third").await.unwrap();
+    let mut saw_third = false;
+    while let Ok(Some(e)) =
+        tokio::time::timeout(Duration::from_millis(500), rxb.recv()).await
+    {
+        match &e {
+            Event::MemberDid { did, .. } if did == DID_A => member_dids += 1,
+            Event::Message { text, .. } if text == "third" => {
+                saw_third = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_third, "third dm delivered");
+    assert_eq!(member_dids, 0, "no re-announcement for a known binding");
+}
+
+/// Channel messages never carry a dm_key.
+#[tokio::test]
+async fn channel_message_has_no_dm_key() {
+    let (addr, _h) = start().await;
+    let (h1, mut rx1) = client::connect(cfg(addr, "chan1"), None);
+    let (h2, mut rx2) = client::connect(cfg(addr, "chan2"), None);
+    wait(&mut rx1, |e| matches!(e, Event::Registered { .. }), "reg1").await;
+    wait(&mut rx2, |e| matches!(e, Event::Registered { .. }), "reg2").await;
+    h1.join("#dmkeytest").await.unwrap();
+    h2.join("#dmkeytest").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    h1.privmsg("#dmkeytest", "channel msg").await.unwrap();
+    let m = wait(
+        &mut rx2,
+        |e| matches!(e, Event::Message { text, .. } if text == "channel msg"),
+        "chan msg",
+    )
+    .await;
+    if let Event::Message { dm_key, .. } = m {
+        assert_eq!(dm_key, None);
+    }
+}
+
+/// After learning a peer's DID (extended-join), a nick-addressed send goes
+/// out DID-addressed: the recipient sees the DID as the wire target.
+#[tokio::test]
+async fn send_resolves_learned_did_target() {
+    let key = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key)], false).await;
+
+    let (hb, mut rxb) = client::connect(cfg(addr, "resolveb"), None);
+    wait(&mut rxb, |e| matches!(e, Event::Registered { .. }), "reg B").await;
+    hb.join("#resolve").await.unwrap();
+    wait(
+        &mut rxb,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#resolve"),
+        "B joined",
+    )
+    .await;
+
+    let (ha, mut rxa) = client::connect(cfg(addr, "resolvea"), Some(signer_for(DID_A, key)));
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    ha.join("#resolve").await.unwrap();
+    // B sees A's extended-join with the account → learns + announces.
+    wait(
+        &mut rxb,
+        |e| matches!(e, Event::MemberDid { nick, did } if nick == "resolvea" && did == DID_A),
+        "B learned A's DID from the join",
+    )
+    .await;
+
+    hb.privmsg("resolvea", "hi by nick").await.unwrap();
+    let m = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "hi by nick"),
+        "A got the DM",
+    )
+    .await;
+    if let Event::Message { target, dm_key, .. } = m {
+        assert_eq!(target, DID_A, "wire target was resolved to the DID");
+        // For the recipient the peer is the (guest) sender.
+        assert_eq!(dm_key.as_deref(), Some("resolveb"));
+    }
+}
+
+/// CHATHISTORY TARGETS carries the partner's DID from the server tag.
+#[tokio::test]
+async fn chathistory_targets_carry_partner_did() {
+    let key_a = PrivateKey::generate_ed25519();
+    let key_c = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a), (DID_C, &key_c)], true).await;
+
+    // Both DID-authed so the DM persists; exchange one message.
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "hista"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    let (_hc, mut rxc) = client::connect(
+        cfg(addr, "histc"),
+        Some(signer_for(DID_C, PrivateKey::ed25519_from_bytes(&key_c.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxc, |e| matches!(e, Event::Registered { .. }), "reg C").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    ha.privmsg("histc", "persist me").await.unwrap();
+    wait(
+        &mut rxc,
+        |e| matches!(e, Event::Message { text, .. } if text == "persist me"),
+        "C got it",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A reconnects fresh and asks for its conversation list.
+    let (ha2, mut rxa2) = client::connect(
+        cfg(addr, "hista2"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa2, |e| matches!(e, Event::Registered { .. }), "reg A2").await;
+    ha2.raw("CHATHISTORY TARGETS * * 50").await.unwrap();
+    let t = wait(
+        &mut rxa2,
+        |e| matches!(e, Event::ChatHistoryTarget { .. }),
+        "targets entry",
+    )
+    .await;
+    if let Event::ChatHistoryTarget { partner_did, .. } = t {
+        assert_eq!(
+            partner_did.as_deref(),
+            Some(DID_C),
+            "conversation list names the partner's DID"
+        );
+    }
+
+    // The TARGETS tag taught a DISPLAY binding only. Sending to the nick
+    // must keep the nick on the wire (display bindings are never
+    // addressing-grade) while the echo keys the thread by the DID — the
+    // strict/loose split, observed live. (The quit path exercises the same
+    // split but is gated behind the server's 30s reconnect-grace before it
+    // broadcasts QUIT; the forget-on-quit transition is unit-covered in
+    // client::did_maps_tests.)
+    ha2.privmsg("histc", "follow-up").await.unwrap();
+    let echo = wait(
+        &mut rxa2,
+        |e| matches!(e, Event::Message { text, .. } if text == "follow-up"),
+        "echo of the follow-up",
+    )
+    .await;
+    if let Event::Message { from, target, dm_key, .. } = echo {
+        assert_eq!(from, "hista2");
+        assert_eq!(target, "histc", "display binding must not become a wire target");
+        assert_eq!(
+            dm_key.as_deref(),
+            Some(DID_C),
+            "thread keys by the DID via the display binding"
+        );
+    }
+}

@@ -17,6 +17,7 @@ dictionary IrcMessage {
     string? account;
     string? origin;
     sequence<ReactionTally> reactions;
+    string? dm_key;
 };
 
 dictionary ReactionTally {
@@ -46,6 +47,7 @@ dictionary TagMessage {
     string from;
     string target;
     sequence<TagEntry> tags;
+    string? dm_key;
 };
 
 [Enum]
@@ -67,7 +69,8 @@ interface FreeqEvent {
     UserQuit(string nick, string reason);
     BatchStart(string id, string batch_type, string target);
     BatchEnd(string id);
-    ChatHistoryTarget(string nick, string? timestamp);
+    ChatHistoryTarget(string nick, string? timestamp, string? partner_did);
+    MemberDid(string nick, string did);
     // draft/read-marker (S1): reply to our mark/get, or another of our
     // devices advancing the marker. timestamp null = server reports none.
     ReadMarker(string target, string? timestamp);

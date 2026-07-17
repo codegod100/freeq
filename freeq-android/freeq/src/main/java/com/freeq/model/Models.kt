@@ -185,6 +185,15 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val blockedDids = mutableStateListOf<String>()
     val blockedNicks = mutableStateListOf<String>()
 
+    // DID → display nick, learned from the conversation list's partner-did
+    // tag and every nick↔DID binding. Display-grade: survives the peer going
+    // offline, so a DID-keyed thread keeps rendering as a name.
+    val didDisplayNames = mutableStateMapOf<String, String>()
+
+    /** Human label for a thread key that may be a raw DID (see DidDisplay). */
+    fun displayNameForKey(key: String): String =
+        DidDisplay.displayName(key, didDisplayNames, knownDids)
+
     // Nick → server-bound DID learned from message account-tags. Keyed by
     // lowercased nick. Backfills channel member entries (the FFI NAMES reply
     // carries no DID) so DID-gated UI has a real source.
@@ -794,6 +803,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
      *  this is what makes DID-gated UI (verified badge, profile sheet) work. */
     fun recordUserDid(nick: String, did: String) {
         knownDids[nick.lowercase()] = did
+        didDisplayNames[did] = nick
         for (ch in channels) {
             val idx = ch.members.indexOfFirst { it.nick.equals(nick, ignoreCase = true) }
             if (idx >= 0 && ch.members[idx].did != did) {
@@ -904,7 +914,10 @@ class AppState(application: Application) : AndroidViewModel(application) {
         if (nick.value.equals(oldNick, ignoreCase = true)) {
             nick.value = newNick
         }
-        knownDids.remove(oldNick.lowercase())?.let { knownDids[newNick.lowercase()] = it }
+        knownDids.remove(oldNick.lowercase())?.let { did ->
+            knownDids[newNick.lowercase()] = did
+            didDisplayNames[did] = newNick
+        }
     }
 
     fun awayMessage(nick: String): String? {
@@ -1144,7 +1157,11 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                         )
                     }
                 } else {
-                    val bufferName = if (isSelf) ircMsg.target else ircMsg.fromNick
+                    // The SDK's canonical conversation key (peer DID when
+                    // known, else nick) — one person, one thread. Fallback
+                    // preserves behavior against an older SDK.
+                    val bufferName = ircMsg.dmKey
+                        ?: (if (isSelf) ircMsg.target else ircMsg.fromNick)
                     val dm = state.getOrCreateDM(bufferName)
                     dm.appendIfNew(msg)
                     if (!fromBlocked) state.incrementUnread(bufferName)
@@ -1304,7 +1321,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
                 // Typing indicators
                 tags["+typing"]?.let { typing ->
-                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value) ?: return@let
+                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value, event.msg.dmKey) ?: return@let
                     lookupBuffer(bufferName)?.let { ch ->
                         if (typing == "active") ch.typingUsers[from] = Date()
                         else if (typing == "done") ch.typingUsers.remove(from)
@@ -1313,7 +1330,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
                 // Message deletion (self-echo already applied optimistically by deleteMessage)
                 tags["+draft/delete"]?.let { deleteId ->
-                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value) ?: return@let
+                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value, event.msg.dmKey) ?: return@let
                     lookupBuffer(bufferName)?.applyDelete(deleteId)
                 }
 
@@ -1321,7 +1338,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 val emoji = tags["+react"]
                 val replyId = tags["+reply"]
                 if (emoji != null && replyId != null) {
-                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value)
+                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value, event.msg.dmKey)
                     if (bufferName != null) {
                         lookupBuffer(bufferName)?.applyReaction(replyId, emoji, from)
                     }
@@ -1358,7 +1375,25 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 // its last-activity from the server-time tag so the chat
                 // list orders correctly on cold launch before per-DM
                 // history backfills (matches iOS 70c4ae3/6dff8b2).
-                state.getOrCreateDM(event.nick).seedActivityFromTarget(event.timestamp)
+                // Key by the conversation's stable identity when the server
+                // names it (freeq.at/partner-did); the display nick renders
+                // via displayNameForKey.
+                val key = event.partnerDid ?: event.nick
+                event.partnerDid?.let { state.didDisplayNames[it] = event.nick }
+                state.getOrCreateDM(key).seedActivityFromTarget(event.timestamp)
+            }
+
+            is FreeqEvent.MemberDid -> {
+                // A nick↔DID binding was learned (join/whois/account tag).
+                // Record it and fold any nick-keyed DM thread into the
+                // DID-keyed one — a cold first DM keys by nick until now.
+                state.recordUserDid(event.nick, event.did)
+                if (DidDisplay.mergeDmBuffers(
+                        state.dmBuffers, state.unreadCounts, event.nick, event.did
+                    ) && state.activeChannel.value.equals(event.nick, ignoreCase = true)
+                ) {
+                    state.activeChannel.value = event.did
+                }
             }
 
             is FreeqEvent.WhoisReply -> {

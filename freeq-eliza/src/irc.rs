@@ -810,8 +810,7 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             Event::TagMsg {
                 from: _,
                 target,
-                tags,
-            } => {
+                tags, .. } => {
                 let actor = tags.get("+freeq.at/av-actor").cloned().unwrap_or_default();
                 match classify_av_event(&target, &tags, &cfg.channels, &cfg.nick) {
                     AvAction::Start {
