@@ -333,6 +333,48 @@ describe('messaging methods', () => {
     expect([...new Set(seen)]).toEqual(['did:key:z6MkLobot']);
   });
 
+  it('the offline notice (401) files under the DID thread, not a nick shell', async () => {
+    // The 401 notice used to buffer under the raw fail target, creating a
+    // nick-keyed ghost thread containing nothing but system notices.
+    const { client, ws } = await makeRegistered();
+    ws.recv('@freeq.at/partner-did=did:key:z6MkFed :srv CHATHISTORY TARGETS fedtestbot');
+    await flushAsync();
+    const seen: string[] = [];
+    client.on('systemMessage', (channel) => seen.push(channel));
+    ws.recv(':srv 401 alice fedtestbot :No such nick/channel');
+    await flushAsync();
+    expect(seen).toEqual(['did:key:z6MkFed']);
+  });
+
+  it('a history batch with no learned binding recovers the partner DID from its rows', async () => {
+    // If the conversation-list entry never arrived (login burst), no binding
+    // exists when history is fetched by nick — the batch must not create a
+    // nick-keyed thread when its own rows name the partner's DID.
+    const { client, ws } = await makeRegistered();
+    const batches: string[] = [];
+    client.on('historyBatch', (channel) => batches.push(channel));
+    ws.recv(':srv BATCH +h1 chathistory bob');
+    ws.recv('@batch=h1;account=did:plc:bob;msgid=m1 :bob!b@h PRIVMSG alice :old message');
+    ws.recv(':srv BATCH -h1');
+    // The batched-message path suspends across more microtasks than a plain
+    // PRIVMSG; one flushAsync races the batch close.
+    for (let i = 0; i < 4; i++) await flushAsync();
+    expect(batches).toEqual(['did:plc:bob']);
+    expect(client.getNickForDid('did:plc:bob')).toBe('bob'); // binding learned
+  });
+
+  it('sendMarkdown() resolves the DM target like sendMessage', async () => {
+    const { client, ws } = await makeRegistered();
+    client.nickToDid = (n) => (n.toLowerCase() === 'bob' ? 'did:plc:bob' : undefined);
+    const seen: string[] = [];
+    client.on('message', (channel) => seen.push(channel));
+    client.sendMarkdown('bob', '**hi**');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG') && l.includes('**hi**'));
+    expect(line).toContain('PRIVMSG did:plc:bob');
+    expect(seen).toEqual(['did:plc:bob']);
+  });
+
   it('the TARGETS envelope batch does not emit an empty historyBatch', async () => {
     const { client, ws } = await makeRegistered();
     const batches: string[] = [];

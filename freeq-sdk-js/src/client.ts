@@ -495,10 +495,15 @@ export class FreeqClient extends EventEmitter {
     const wireText = isMultiline ? text.replace(/\n/g, '\\n') : text;
     const tags: Record<string, string> = { '+freeq.at/mime': 'text/markdown' };
     if (isMultiline) tags['+freeq.at/multiline'] = '';
-    this.signedPrivmsg(target, wireText, tags);
+    // Same target discipline as sendMessageInternal: strict DID resolution
+    // for the wire, canonical (loose) key for the local echo.
+    const isChannel = target.startsWith('#') || target.startsWith('&');
+    const wireTarget = isChannel ? target : this.wireDmTarget(target);
+    const bufKey = isChannel ? target : this.dmKey(target);
+    this.signedPrivmsg(wireTarget, wireText, tags);
 
     if (!this.ackedCaps.has('echo-message')) {
-      this.emit('message', target, {
+      this.emit('message', bufKey, {
         id: crypto.randomUUID(),
         from: this._nick,
         text: wireText,
@@ -2025,7 +2030,27 @@ export class FreeqClient extends EventEmitter {
               // has no target of its own — emitting it as a historyBatch
               // handed the app a meaningless ('', []) every login.
             } else {
-              this.emit('historyBatch', batch.target, batch.messages);
+              let key = batch.target;
+              if (key && !key.startsWith('#') && !key.startsWith('&')) {
+                key = this.dmKey(key);
+                if (!isDid(key)) {
+                  // No binding was ever learned for this conversation (its
+                  // TARGETS entry may have been lost to the login burst).
+                  // The replayed rows themselves name the partner: recover
+                  // the DID from a non-self account tag and learn the
+                  // display binding, so the batch cannot mint a nick-keyed
+                  // twin of a DID-keyed thread.
+                  const own = this._authDid;
+                  const partner = batch.messages
+                    .map((m) => m.tags?.['account'])
+                    .find((a) => a && isDid(a) && a !== own);
+                  if (partner) {
+                    this._didToNick.set(partner, batch.target.toLowerCase());
+                    key = partner;
+                  }
+                }
+              }
+              this.emit('historyBatch', key, batch.messages);
             }
           }
         }
@@ -2073,13 +2098,14 @@ export class FreeqClient extends EventEmitter {
       // Error numerics
       case '401': {
         const failTarget = msg.params[1];
-        // The target may be a DID (a DID-addressed DM); show a name rather
-        // than a raw did:… string. The buffer key stays the target itself,
-        // so the notice lands in that conversation.
+        // Show a name rather than a raw did:… string, and file the notice
+        // under the CANONICAL conversation key (dmKey) — keying by the raw
+        // fail target created a nick-keyed ghost thread holding nothing but
+        // offline notices whenever the wire target was a nick.
         const shown = failTarget && isDid(failTarget)
           ? (this.getNickForDid(failTarget) ?? failTarget)
           : failTarget;
-        this.emit('systemMessage', failTarget || 'server',
+        this.emit('systemMessage', failTarget ? this.dmKey(failTarget) : 'server',
           `${shown} is offline — message saved, they'll see it next time they connect`);
         break;
       }
