@@ -6,7 +6,7 @@ import { SpeakerIcon } from './SessionIndicator';
 import { MicIcon, MicOffIcon, CameraOnIcon, CameraOffIcon, PhoneOffIcon } from './CallPanel';
 import { fetchProfile, getCachedProfile } from '../lib/profiles';
 import { parseAwayStatus } from '../lib/status';
-import { isDid, findMemberByKey } from '../lib/identity';
+import { isDid, shortenDid, findMemberByKey } from '../lib/identity';
 import { displayNameForKey } from '../lib/display-name';
 
 interface SidebarProps {
@@ -99,6 +99,26 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       };
       return last(b) - last(a);
     });
+
+  // Disambiguate identical DM labels. A peer who has used several DID
+  // identities over time (common for bots) is honestly several threads, all
+  // resolving to the same display name — suffix the compact DID so the
+  // entries are tellable apart.
+  const dmLabels = new Map<string, string>();
+  {
+    const counts = new Map<string, number>();
+    for (const ch of dmList) {
+      const l = displayNameForKey(ch.name);
+      counts.set(l, (counts.get(l) ?? 0) + 1);
+    }
+    for (const ch of dmList) {
+      const l = displayNameForKey(ch.name);
+      dmLabels.set(
+        ch.name,
+        (counts.get(l) ?? 0) > 1 && isDid(ch.name) ? `${l} · ${shortenDid(ch.name)}` : l,
+      );
+    }
+  }
 
   const handleJoin = () => {
     const ch = joinInput.trim();
@@ -223,7 +243,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
                 </span>
               )}
             </div>
-            {!dmsCollapsed && dmList.map((ch) => <ChannelButton key={ch.name} ch={ch as any} isActive={activeChannel.toLowerCase() === ch.name.toLowerCase()} onSelect={setActive} icon="@" showPreview />)}
+            {!dmsCollapsed && dmList.map((ch) => <ChannelButton key={ch.name} ch={ch as any} isActive={activeChannel.toLowerCase() === ch.name.toLowerCase()} onSelect={setActive} icon="@" showPreview label={dmLabels.get(ch.name)} />)}
           </>
           );
         })()}
@@ -314,12 +334,14 @@ function SelfAvatar({ nick, did }: { nick: string; did: string | null }) {
   );
 }
 
-function ChannelButton({ ch, isActive, onSelect, icon, showPreview }: {
+function ChannelButton({ ch, isActive, onSelect, icon, showPreview, label: labelOverride }: {
   ch: { name: string; mentionCount: number; unreadCount: number; messages: any[]; members: Map<string, any>; isEncrypted?: boolean };
   isActive: boolean;
   onSelect: (name: string) => void;
   icon: string;
   showPreview?: boolean;
+  /** Precomputed display label (used to disambiguate duplicate DM names). */
+  label?: string;
 }) {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
   const isFav = useStore((s) => s.favorites.has(ch.name.toLowerCase()));
@@ -334,7 +356,7 @@ function ChannelButton({ ch, isActive, onSelect, icon, showPreview }: {
 
   // A DID-keyed DM resolves to a human name (learned nick → AT profile →
   // compact DID). Channels and nick DMs pass through unchanged.
-  const label = displayNameForKey(ch.name).replace(/^[#&]/, '');
+  const label = (labelOverride ?? displayNameForKey(ch.name)).replace(/^[#&]/, '');
 
   return (
     <div data-channel-key={ch.name.toLowerCase()}>
