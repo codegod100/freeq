@@ -303,6 +303,36 @@ describe('messaging methods', () => {
     expect(client.getNickForDid('did:key:z6MkBot')).toBe('didtestbot');
   });
 
+  it('a DM sent by nick to an OFFLINE peer still keys under their DID thread', async () => {
+    // The offline-peer split: the peer is offline, so nothing this session
+    // teaches nick→DID (QUIT clears it; no shared channel; no incoming
+    // messages). Only the conversation list's DID→nick display binding
+    // exists. Sending by nick then echoed into a nick-keyed thread while the
+    // server persisted the same message under the DID conversation — one
+    // person, two buffers. Buffer keying must reverse the display binding;
+    // the wire target stays the nick (addressing is strict).
+    const { client, ws } = await makeRegistered();
+    ws.recv('@freeq.at/partner-did=did:key:z6MkLobot :srv CHATHISTORY TARGETS lobot');
+    await flushAsync();
+    expect(client.getDidForNick('lobot')).toBeUndefined(); // addressing NOT taught
+
+    const seen: string[] = [];
+    client.on('message', (channel) => seen.push(channel));
+    client.sendMessage('lobot', 'llll');
+    await flushAsync();
+
+    // Wire: addressed by nick (strict — no display-grade routing).
+    const line = ws.sent.find((l) => l.includes('PRIVMSG') && l.includes('llll'));
+    expect(line).toMatch(/PRIVMSG lobot :llll/);
+    // Local echo: filed under the DID thread, not a new nick thread.
+    expect(seen).toEqual(['did:key:z6MkLobot']);
+
+    // Server echo (echo-message) with the nick target keys the same way.
+    ws.recv(`:alice!u@h PRIVMSG lobot :llll`);
+    await flushAsync();
+    expect([...new Set(seen)]).toEqual(['did:key:z6MkLobot']);
+  });
+
   it('the TARGETS envelope batch does not emit an empty historyBatch', async () => {
     const { client, ws } = await makeRegistered();
     const batches: string[] = [];

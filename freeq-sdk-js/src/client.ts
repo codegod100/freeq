@@ -313,11 +313,13 @@ export class FreeqClient extends EventEmitter {
   ): string | null {
     const isChannel = target.startsWith('#') || target.startsWith('&');
 
-    // Wire target + local buffer key for a DM: the peer's DID when known,
-    // else the nick unchanged. `target` stays the caller's input for E2EE
-    // peer resolution; `wireTarget` is what we address, sign over, and key
-    // the thread under. For a channel the two are identical.
-    const wireTarget = isChannel ? target : this.dmKey(target);
+    // Wire target for a DM: the peer's DID when addressing-grade known, else
+    // the nick unchanged (strict — routing must not ride a display binding).
+    // `target` stays the caller's input for E2EE peer resolution; `bufKey`
+    // is where the local echo files — resolved loosely (dmKey) so a send to
+    // an offline peer's nick still lands in the DID-keyed thread.
+    const wireTarget = isChannel ? target : this.wireDmTarget(target);
+    const bufKey = isChannel ? target : this.dmKey(target);
 
     // +E channels require the `+encrypted` tag on every PRIVMSG —
     // refuse rather than leak plaintext into a room the rest of the
@@ -380,7 +382,7 @@ export class FreeqClient extends EventEmitter {
           this.emitMultilineBatch(wireTarget, chunks, extraOpenerTags, { '+encrypted': '' });
         }
       });
-      this.maybeLocalEcho(wireTarget, text, willEncrypt);
+      this.maybeLocalEcho(bufKey, text, willEncrypt);
       return null; // Async; can't return batch id meaningfully here
     }
 
@@ -412,7 +414,7 @@ export class FreeqClient extends EventEmitter {
           if (sig) openerTagsWithSig['+freeq.at/sig'] = sig;
           this.emitMultilineBatch(wireTarget, group, openerTagsWithSig);
         });
-        this.maybeLocalEcho(wireTarget, body, willEncrypt);
+        this.maybeLocalEcho(bufKey, body, willEncrypt);
       }
       // Async signing — batch id isn't synchronously available.
       return null;
@@ -421,7 +423,7 @@ export class FreeqClient extends EventEmitter {
     // Fits in one PRIVMSG (or no multiline cap) → single PRIVMSG. Legacy path
     // preserves \n escaping + +freeq.at/multiline for receivers that decode it.
     this.sendLegacyPlaintext(wireTarget, text, extraOpenerTags);
-    this.maybeLocalEcho(wireTarget, text, willEncrypt);
+    this.maybeLocalEcho(bufKey, text, willEncrypt);
     return null;
   }
 
@@ -917,9 +919,32 @@ export class FreeqClient extends EventEmitter {
    * the local buffer key we file under, so "bob" and "did:plc:bob" are one
    * conversation and a DID-addressed DM reaches the right identity on any
    * server. A guest / unresolved nick passes through, so nick DMs are intact.
+   *
+   * Buffer keying additionally consults the REVERSE of the display binding
+   * (DID→nick, learned from the server's conversation list): for an OFFLINE
+   * peer nothing this session teaches nick→DID, so without the reverse an
+   * echo or incoming line addressed by nick files under a nick thread while
+   * the server persists the same conversation under the DID — one person,
+   * two buffers. The reverse binding is server-asserted conversation
+   * identity, safe for grouping; wire ADDRESSING stays strict (didForNick
+   * only) so routing semantics never ride a possibly-stale display nick.
    */
   private dmKey(peer: string): string {
+    return dmPeerKey(peer, (n) => this.didForNick(n) ?? this.reverseDidForNick(n));
+  }
+
+  /** Strict resolver for wire targets: DID only when addressing-grade known. */
+  private wireDmTarget(peer: string): string {
     return dmPeerKey(peer, (n) => this.didForNick(n));
+  }
+
+  /** The DID whose known display nick is `nick`, if exactly that binding exists. */
+  private reverseDidForNick(nick: string): string | undefined {
+    const lc = nick.toLowerCase();
+    for (const [did, n] of this._didToNick) {
+      if (n === lc) return did;
+    }
+    return undefined;
   }
 
   /** The recipient DID for a DM target that may be a nick or already a DID. */
