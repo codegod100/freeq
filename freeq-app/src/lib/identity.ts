@@ -62,6 +62,37 @@ interface ChannelLike {
  * `channelsOnly` restricts the search to real channels (`#…`), which presence
  * needs so a DM buffer's own member map can't answer for itself.
  */
+/**
+ * Whether the peer of a DM thread key is blocked, under every form a block
+ * can be recorded in: the key itself (DID or nick), the peer's member record
+ * (found by either key form), or — for a DID key — the peer's known display
+ * nick (a block recorded while they were offline stores only the nick).
+ * `nickForDid` supplies the retained DID→nick display binding.
+ *
+ * The single source of truth for "is this conversation with a blocked user";
+ * used by the sidebar filter and the in-thread blocked banner so the two
+ * can't disagree.
+ */
+export function isPeerBlocked(
+  channels: Map<string, ChannelLike>,
+  key: string,
+  blockedNicks: string[],
+  blockedDids: string[],
+  nickForDid?: (did: string) => string | undefined | null,
+): boolean {
+  if (isDid(key) && blockedDids.includes(key)) return true;
+  if (blockedNicks.includes(key.toLowerCase())) return true;
+  if (isDid(key)) {
+    const peerNick = nickForDid?.(key)?.toLowerCase();
+    if (peerNick && blockedNicks.includes(peerNick)) return true;
+  }
+  if (blockedDids.length > 0) {
+    const m = findMemberByKey(channels, key)?.member;
+    if (m?.did && blockedDids.includes(m.did)) return true;
+  }
+  return false;
+}
+
 export function findMemberByKey(
   channels: Map<string, ChannelLike>,
   key: string,

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useCallback, useState, useMemo, memo } from 'react';
 import { useStore, uniqueMemberCount, type Message, type PinnedMessage } from '../store';
-import { getNick, requestHistory, sendReaction, sendUnreact, joinChannel } from '../irc/client';
+import { getNick, getClient, requestHistory, sendReaction, sendUnreact, joinChannel } from '../irc/client';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
-import { isDid } from '../lib/identity';
+import { isDid, isPeerBlocked } from '../lib/identity';
 import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker } from './EmojiPicker';
 import { UserPopover } from './UserPopover';
@@ -1239,6 +1239,17 @@ export function MessageList() {
     return msgs.filter((m) => !m.isSystem || !JOIN_PART_RE.test(m.text));
   }, [rawMessages, showJoinPart, blockedDids, blockedNicks, activeMembers]);
 
+  // In-thread blocked indicator: a blocked peer's thread is hidden from the
+  // sidebar but still reachable (quick switcher), and their messages are
+  // filtered — without a banner the history just looks silently one-sided.
+  const allChannels = useStore((s) => s.channels);
+  const peerBlocked =
+    activeChannel !== 'server' &&
+    !activeChannel.startsWith('#') &&
+    !activeChannel.startsWith('&') &&
+    isPeerBlocked(allChannels, activeChannel, blockedNicks, blockedDids,
+      (did) => getClient()?.getNickForDid(did));
+
   const lastReadMsgId = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.lastReadMsgId);
   const pins = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.pins ?? EMPTY_PINS);
   const density = useStore((s) => s.messageDensity);
@@ -1355,6 +1366,24 @@ export function MessageList() {
       {activeChannel.startsWith('#') && pins.length > 0 && (
         <div className="sticky top-0 z-10">
           <PinnedBar pins={pins} messages={messages} />
+        </div>
+      )}
+      {peerBlocked && (
+        <div className="sticky top-0 z-10 px-4 py-2 bg-danger/10 border-b border-danger/30 text-sm text-fg-muted flex items-center justify-between gap-2">
+          <span>
+            You've blocked <span className="font-semibold">{displayNameForKey(activeChannel)}</span> — their messages are hidden.
+          </span>
+          <button
+            className="text-danger hover:underline shrink-0 text-xs"
+            onClick={() => {
+              const s = useStore.getState();
+              s.unblockUser(activeChannel);
+              const peerNick = getClient()?.getNickForDid(activeChannel);
+              if (peerNick) s.unblockUser(peerNick);
+            }}
+          >
+            Unblock
+          </button>
         </div>
       )}
       {messages.length === 0 && showSkeleton && activeChannel !== 'server' && (

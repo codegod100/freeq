@@ -6,7 +6,7 @@ import { SpeakerIcon } from './SessionIndicator';
 import { MicIcon, MicOffIcon, CameraOnIcon, CameraOffIcon, PhoneOffIcon } from './CallPanel';
 import { fetchProfile, getCachedProfile } from '../lib/profiles';
 import { parseAwayStatus } from '../lib/status';
-import { isDid, shortenDid, findMemberByKey } from '../lib/identity';
+import { isDid, shortenDid, findMemberByKey, isPeerBlocked } from '../lib/identity';
 import { displayNameForKey } from '../lib/display-name';
 
 interface SidebarProps {
@@ -64,27 +64,8 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const dmList = allJoined
     .filter((ch) => !ch.name.startsWith('#') && !ch.name.startsWith('&') && ch.name !== 'server')
     .filter((ch) => !hiddenDMs.has(ch.name.toLowerCase()))
-    .filter((ch) => {
-      // Hide conversations with blocked users. The thread key is a nick or a
-      // DID: check a DID key against blocked DIDs directly, a nick against
-      // blocked nicks, and finally the member record (found by either form)
-      // for its DID — a DID-keyed thread must not resurface a blocked user.
-      const key = ch.name;
-      if (isDid(key) && blockedDids.includes(key)) return false;
-      if (blockedNicks.includes(key.toLowerCase())) return false;
-      if (isDid(key)) {
-        // A block recorded against the nick (peer was offline at block time,
-        // so no DID was resolvable) must still hide the DID-keyed thread —
-        // bridge through the SDK's retained DID→nick binding.
-        const peerNick = getClient()?.getNickForDid(key)?.toLowerCase();
-        if (peerNick && blockedNicks.includes(peerNick)) return false;
-      }
-      if (blockedDids.length > 0) {
-        const m = findMemberByKey(channels, key)?.member;
-        if (m?.did && blockedDids.includes(m.did)) return false;
-      }
-      return true;
-    })
+    .filter((ch) => !isPeerBlocked(channels, ch.name, blockedNicks, blockedDids,
+      (did) => getClient()?.getNickForDid(did)))
     // Most-recent conversation first (standard messenger order). The old
     // alphabetical-by-key sort produced arbitrary placement once thread keys
     // could be DIDs. Skip system messages — the time label and preview do,
