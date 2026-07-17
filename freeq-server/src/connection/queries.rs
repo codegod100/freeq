@@ -35,10 +35,12 @@ pub(super) fn handle_whois(
 
         if let Some(rm) = remote_info {
             // Remote user — show what we know
-            let realname = match (&rm.handle, &rm.did) {
-                (Some(h), _) => format!("{h} (via S2S federation)"),
-                (_, Some(d)) => format!("{d} (via S2S federation)"),
-                _ => "Remote user (via S2S federation)".to_string(),
+            // Realname is a human-name slot: use the handle when known, never
+            // the raw DID (clients render realname as a display name; the DID
+            // travels machine-readable in its own 330 numeric below).
+            let realname = match &rm.handle {
+                Some(h) => format!("{h} (via S2S federation)"),
+                None => "Remote user (via S2S federation)".to_string(),
             };
             let whoisuser = Message::from_server(
                 server_name,
@@ -208,11 +210,15 @@ pub(super) fn handle_whois(
         return;
     };
 
-    // 311 RPL_WHOISUSER
+    let did = state.session_dids.lock().get(&target_session).cloned();
+
+    // 311 RPL_WHOISUSER — host is the target's cloak (DID-derived, or the
+    // guest cloak), matching what JOIN/PRIVMSG hostmasks already show.
+    let cloak = super::cloak_for_did(did.as_deref());
     let whoisuser = Message::from_server(
         server_name,
         irc::RPL_WHOISUSER,
-        vec![my_nick, target_nick, "~u", "host", "*", "IRC User"],
+        vec![my_nick, target_nick, "~u", &cloak, "*", "IRC User"],
     );
     send(state, session_id, format!("{whoisuser}\r\n"));
 
@@ -225,7 +231,6 @@ pub(super) fn handle_whois(
     send(state, session_id, format!("{whoisserver}\r\n"));
 
     // 330 RPL_WHOISACCOUNT — show DID if authenticated
-    let did = state.session_dids.lock().get(&target_session).cloned();
 
     if let Some(ref did) = did {
         let whoisaccount = Message::from_server(
@@ -355,7 +360,8 @@ pub(super) fn handle_who(
             for session in &ch.members {
                 if let Some(member_nick) = n2s.get_nick(session) {
                     let user = "~u";
-                    let host = "host";
+                    let host =
+                        super::cloak_for_did(state.session_dids.lock().get(session).map(|s| s.as_str()));
                     let away_flag = if away.contains_key(session) { "G" } else { "H" };
                     let op_flag = if ch.ops.contains(session) {
                         "@"
@@ -378,7 +384,7 @@ pub(super) fn handle_who(
                             nick,
                             &channel,
                             user,
-                            host,
+                            &host,
                             server_name,
                             member_nick,
                             &flags,
@@ -406,6 +412,7 @@ pub(super) fn handle_who(
             let away = state.session_away.lock();
             let away_flag = if away.contains_key(session) { "G" } else { "H" };
             let did_info = state.session_dids.lock().get(session).cloned();
+            let host = super::cloak_for_did(did_info.as_deref());
             let realname = match did_info {
                 Some(did) => format!("0 {did}"),
                 None => "0 IRC User".to_string(),
@@ -417,7 +424,7 @@ pub(super) fn handle_who(
                     nick,
                     "*",
                     "~u",
-                    "host",
+                    &host,
                     server_name,
                     target,
                     away_flag,
@@ -568,5 +575,112 @@ fn broadcast_away(
         if let Some(tx) = conns.get(sid) {
             let _ = tx.try_send(line.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Run handle_whois against a test state, capturing every line sent.
+    fn whois_lines(
+        state: &Arc<SharedState>,
+        requester: &Connection,
+        target: &str,
+    ) -> Vec<String> {
+        let out = RefCell::new(Vec::new());
+        let send = |_s: &Arc<SharedState>, _sid: &str, line: String| {
+            out.borrow_mut().push(line);
+        };
+        handle_whois(requester, target, state, "test-server", &requester.id, &send);
+        out.into_inner()
+    }
+
+    fn test_conn(id: &str, nick: &str) -> Connection {
+        let mut c = Connection::new(id.to_string());
+        c.nick = Some(nick.to_string());
+        c.registered = true;
+        c
+    }
+
+    #[test]
+    fn whois_311_carries_the_cloaked_host_not_placeholders() {
+        let state = crate::server::test_state();
+        // Target: a DID-authenticated local user.
+        state.nick_to_session.lock().insert("bob", "sess-bob");
+        state
+            .session_dids
+            .lock()
+            .insert("sess-bob".to_string(), "did:plc:bobbobbob123".to_string());
+
+        let requester = test_conn("sess-alice", "alice");
+        let lines = whois_lines(&state, &requester, "bob");
+        let l311 = lines
+            .iter()
+            .find(|l| l.contains(" 311 "))
+            .expect("311 present");
+        assert!(
+            l311.contains("freeq/plc/bobbobbo"),
+            "311 must carry the DID-derived cloak, got: {l311}"
+        );
+        assert!(
+            !l311.contains(" host "),
+            "311 must not use the literal placeholder host: {l311}"
+        );
+    }
+
+    #[test]
+    fn whois_311_for_guests_shows_the_guest_cloak() {
+        let state = crate::server::test_state();
+        state.nick_to_session.lock().insert("guesty", "sess-g");
+
+        let requester = test_conn("sess-alice", "alice");
+        let lines = whois_lines(&state, &requester, "guesty");
+        let l311 = lines
+            .iter()
+            .find(|l| l.contains(" 311 "))
+            .expect("311 present");
+        assert!(
+            l311.contains("freeq/guest"),
+            "guest 311 must carry the guest cloak, got: {l311}"
+        );
+    }
+
+    #[test]
+    fn remote_whois_realname_is_not_a_raw_did() {
+        let state = crate::server::test_state();
+        // A remote (S2S) member with a DID but no handle — the case that used
+        // to put the raw DID into the realname, which clients rendered as the
+        // user's display name.
+        let mut ch = crate::server::ChannelState::default();
+        ch.remote_members.insert(
+            "fedbot".to_string(),
+            crate::server::RemoteMember {
+                origin: "remoteorigin1234".to_string(),
+                did: Some("did:key:z6MkRemoteBot".to_string()),
+                handle: None,
+                is_op: false,
+                actor_class: None,
+            },
+        );
+        state.channels.lock().insert("#fed".to_string(), ch);
+
+        let requester = test_conn("sess-alice", "alice");
+        let lines = whois_lines(&state, &requester, "fedbot");
+        let l311 = lines
+            .iter()
+            .find(|l| l.contains(" 311 "))
+            .expect("311 present");
+        assert!(
+            !l311.contains("did:key:"),
+            "realname must not be a raw DID, got: {l311}"
+        );
+        // The DID still travels in its own numeric (330), machine-readable.
+        let l330 = lines
+            .iter()
+            .find(|l| l.contains(" 330 "))
+            .expect("330 present");
+        assert!(l330.contains("did:key:z6MkRemoteBot"), "330 carries the DID: {l330}");
     }
 }

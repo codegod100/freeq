@@ -237,20 +237,27 @@ impl Connection {
     /// Authenticated users: shortened DID (e.g. "did/plc/4qsy..xmns")
     /// Guests: "freeq/guest"
     pub(crate) fn cloaked_host(&self) -> String {
-        if let Some(ref did) = self.authenticated_did {
-            // e.g. did:plc:4qsyxmnsblo4luuycm3572bq → plc/4qsyxmns
-            let short = did.strip_prefix("did:").unwrap_or(did);
-            let parts: Vec<&str> = short.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                let method = parts[0];
-                let id = &parts[1][..parts[1].len().min(8)];
-                format!("freeq/{method}/{id}")
-            } else {
-                "freeq/did".to_string()
-            }
+        cloak_for_did(self.authenticated_did.as_deref())
+    }
+}
+
+/// The cloaked hostname for a DID (or a guest, when `None`) — the single
+/// derivation shared by live-connection hostmasks and lookups (WHOIS/WHO)
+/// that only have a target session's DID in hand.
+pub(crate) fn cloak_for_did(did: Option<&str>) -> String {
+    if let Some(did) = did {
+        // e.g. did:plc:4qsyxmnsblo4luuycm3572bq → freeq/plc/4qsyxmns
+        let short = did.strip_prefix("did:").unwrap_or(did);
+        let parts: Vec<&str> = short.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let method = parts[0];
+            let id = &parts[1][..parts[1].len().min(8)];
+            format!("freeq/{method}/{id}")
         } else {
-            "freeq/guest".to_string()
+            "freeq/did".to_string()
         }
+    } else {
+        "freeq/guest".to_string()
     }
 }
 
