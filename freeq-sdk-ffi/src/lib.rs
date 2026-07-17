@@ -318,7 +318,9 @@ impl FreeqClient {
 
                 // Pump events
                 while let Some(event) = event_rx.recv().await {
-                    let ffi_event = convert_event(&event);
+                    let Some(ffi_event) = convert_event(&event) else {
+                        continue;
+                    };
                     if let FreeqEvent::Disconnected { .. } = &ffi_event {
                         *connected_store.lock().unwrap() = false;
                     }
@@ -451,9 +453,15 @@ impl FreeqClient {
 
 // ── Event conversion ──
 
-fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
+/// Convert an SDK event to its FFI form. `None` for events not yet exposed
+/// through the UDL (adding a variant requires regenerating the checked-in
+/// Kotlin/Swift bindings, which happens in the native build environments).
+fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
     use freeq_sdk::event::Event;
-    match event {
+    Some(match event {
+        // Not in the UDL yet — exposed in the FFI-surface change alongside
+        // dm_key/partner_did; consumers get it once bindings regenerate.
+        Event::MemberDid { .. } => return None,
         Event::Connected => FreeqEvent::Connected,
         Event::Registered { nick } => FreeqEvent::Registered { nick: nick.clone() },
         Event::Authenticated { did } => FreeqEvent::Authenticated { did: did.clone() },
@@ -473,6 +481,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
             target,
             text,
             tags,
+            ..
         } => {
             let msgid = tags.get("msgid").cloned();
             let reply_to = tags.get("+reply").cloned();
@@ -519,7 +528,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
                 },
             }
         }
-        Event::TagMsg { from, target, tags } => {
+        Event::TagMsg { from, target, tags, .. } => {
             let tag_entries = tags
                 .iter()
                 .map(|(k, v)| TagEntry {
@@ -625,7 +634,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
             target: target.clone(),
         },
         Event::BatchEnd { id } => FreeqEvent::BatchEnd { id: id.clone() },
-        Event::ChatHistoryTarget { nick, timestamp } => FreeqEvent::ChatHistoryTarget {
+        Event::ChatHistoryTarget { nick, timestamp, .. } => FreeqEvent::ChatHistoryTarget {
             nick: nick.clone(),
             timestamp: timestamp.clone(),
         },
@@ -646,7 +655,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> FreeqEvent {
         Event::RawLine(_) => FreeqEvent::Notice {
             text: String::new(),
         },
-    }
+    })
 }
 
 // ── E2EE Manager ───────────────────────────────────────────────────
@@ -2399,8 +2408,9 @@ mod tests {
             target: "#naptest".to_string(),
             text: "hi".to_string(),
             tags,
+            dm_key: None,
         };
-        let out = convert_event(&ev);
+        let out = convert_event(&ev).expect("exposed event");
         let FreeqEvent::Message { msg } = out else {
             panic!("expected Message variant");
         };
@@ -2424,8 +2434,9 @@ mod tests {
             target: "#x".to_string(),
             text: "no reactions here".to_string(),
             tags,
+            dm_key: None,
         };
-        let out = convert_event(&ev);
+        let out = convert_event(&ev).expect("exposed event");
         let FreeqEvent::Message { msg } = out else {
             panic!("expected Message variant");
         };
