@@ -283,7 +283,10 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
     zIndex: 100,
   };
 
-  const displayName = profile?.displayName || whois?.realname || displayNameForKey(nick);
+  // A realname whose first token is a DID is not a human name — the server
+  // sends "did:key:… (via S2S federation)" for remote users it can't name.
+  const saneRealname = whois?.realname && !isDid(whois.realname.split(' ')[0]) ? whois.realname : undefined;
+  const displayName = profile?.displayName || saneRealname || displayNameForKey(nick);
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 

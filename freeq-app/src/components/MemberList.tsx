@@ -163,7 +163,10 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
     nickForDid: () => peerNick,
     nameForDid: () => profile?.handle || profile?.displayName,
   });
-  const displayName = profile?.displayName || whois?.realname || label;
+  // Same guard as UserPopover: a realname whose first token is a DID is the
+  // server's "did:… (via S2S federation)" placeholder, not a human name.
+  const saneRealname = whois?.realname && !isDid(whois.realname.split(' ')[0]) ? whois.realname : undefined;
+  const displayName = profile?.displayName || saneRealname || label;
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 
