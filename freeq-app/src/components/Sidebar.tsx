@@ -87,11 +87,15 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     })
     // Most-recent conversation first (standard messenger order). The old
     // alphabetical-by-key sort produced arbitrary placement once thread keys
-    // could be DIDs. Threads with no messages yet sort last.
+    // could be DIDs. Skip system messages — the time label and preview do,
+    // and a fresh system line (join/quit/notice) must not bump a stale
+    // thread to the top. Threads with no real messages sort last.
     .sort((a, b) => {
-      const last = (ch: { messages: { timestamp: string | number | Date }[] }) => {
-        const m = ch.messages[ch.messages.length - 1];
-        return m ? new Date(m.timestamp).getTime() : 0;
+      const last = (ch: { messages: { timestamp: string | number | Date; isSystem?: boolean }[] }) => {
+        for (let i = ch.messages.length - 1; i >= 0; i--) {
+          if (!ch.messages[i].isSystem) return new Date(ch.messages[i].timestamp).getTime();
+        }
+        return 0;
       };
       return last(b) - last(a);
     });
