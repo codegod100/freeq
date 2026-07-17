@@ -5,6 +5,7 @@ import { setTopic as sendTopic, startAvSession, getClient } from '../irc/client'
 import { SpeakerIcon } from './SessionIndicator';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
 import { isDid, resolveIdentityName } from '../lib/identity';
+import { UserPopover } from './UserPopover';
 
 interface TopBarProps {
   onToggleSidebar?: () => void;
@@ -19,6 +20,7 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
   const connectionState = useStore((s) => s.connectionState);
   const [editing, setEditing] = useState(false);
   const [topicDraft, setTopicDraft] = useState('');
+  const [peerCard, setPeerCard] = useState<{ x: number; y: number } | null>(null);
 
   const ch = channels.get(activeChannel.toLowerCase());
   const whoisCache = useStore((s) => s.whoisCache);
@@ -97,9 +99,30 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
       <div className="flex items-center gap-2 min-w-0 shrink">
         {isChannel && <span className="text-accent text-base font-bold shrink-0">#</span>}
         {isDM && <span className="text-fg-dim text-base shrink-0">💬</span>}
-        <span className="font-bold text-base text-fg truncate" title={isDM && isDid(activeChannel) ? activeChannel : undefined}>
-          {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : isDM ? dmTitle : 'Server'}
-        </span>
+        {isDM ? (
+          // The title opens the peer's card. This must not depend on their
+          // messages being visible — after a block those are hidden, and this
+          // is then the only in-thread path to the card (and to unblock).
+          <button
+            className="font-bold text-base text-fg truncate hover:underline text-left"
+            title={isDid(activeChannel) ? activeChannel : undefined}
+            onClick={(e) => setPeerCard({ x: e.clientX, y: e.clientY })}
+          >
+            {dmTitle}
+          </button>
+        ) : (
+          <span className="font-bold text-base text-fg truncate">
+            {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : 'Server'}
+          </span>
+        )}
+        {peerCard && isDM && (
+          <UserPopover
+            nick={(partnerDid && getClient()?.getNickForDid(partnerDid)) || dmTitle}
+            did={partnerDid}
+            position={peerCard}
+            onClose={() => setPeerCard(null)}
+          />
+        )}
         {ch?.isEncrypted && (
           <span className="text-success text-xs shrink-0" title="End-to-end encrypted channel">🔒</span>
         )}
