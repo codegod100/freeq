@@ -85,7 +85,16 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       }
       return true;
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    // Most-recent conversation first (standard messenger order). The old
+    // alphabetical-by-key sort produced arbitrary placement once thread keys
+    // could be DIDs. Threads with no messages yet sort last.
+    .sort((a, b) => {
+      const last = (ch: { messages: { timestamp: string | number | Date }[] }) => {
+        const m = ch.messages[ch.messages.length - 1];
+        return m ? new Date(m.timestamp).getTime() : 0;
+      };
+      return last(b) - last(a);
+    });
 
   const handleJoin = () => {
     const ch = joinInput.trim();
