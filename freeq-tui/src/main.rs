@@ -871,7 +871,11 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
     match event {
         // Nick<->DID binding learned. Adopted in the TUI's DID-DM pass;
         // ignored until then (this keeps the build from breaking, no more).
-        Event::MemberDid { .. } => {}
+        Event::MemberDid { nick, did } => {
+            // A nick↔DID binding was learned: remember the display name and
+            // fold any nick-keyed DM thread into the DID-keyed one.
+            app.record_member_did(&nick, &did);
+        }
         Event::Connected => {
             app.connection_state = "connected".to_string();
             app.status_msg(&format!(
@@ -924,15 +928,25 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             from,
             target,
             text,
-            tags, .. } => {
+            tags,
+            dm_key, .. } => {
+            // One conversation, one buffer: channels key by name; DMs key
+            // by the SDK's dm_key (peer DID when known, else nick) so an
+            // echo and the peer's reply land in the same thread.
+            let buf_name = if target.starts_with('#') || target.starts_with('&') {
+                target.clone()
+            } else {
+                dm_key.clone().unwrap_or_else(|| {
+                    if from == app.nick {
+                        target.clone()
+                    } else {
+                        from.clone()
+                    }
+                })
+            };
             // Try E2EE decryption if we have a key for this channel
             let (text, was_encrypted) = {
-                let buf_key =
-                    if target.starts_with('#') || target.starts_with('&') || from == app.nick {
-                        target.to_lowercase()
-                    } else {
-                        from.to_lowercase()
-                    };
+                let buf_key = crate::app::buffer_key(&buf_name);
                 if let Some(key) = app.channel_keys.get(&buf_key) {
                     if freeq_sdk::e2ee::is_encrypted(&text) {
                         match freeq_sdk::e2ee::decrypt(key, &text) {
@@ -1000,15 +1014,6 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                 .get("+draft/edit")
                 .filter(|v| crate::app::is_valid_msgid(v))
             {
-                let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
-                    if from == app.nick {
-                        target.clone()
-                    } else {
-                        from.clone()
-                    }
-                } else {
-                    target.clone()
-                };
                 app.apply_edit(
                     &from,
                     batch_id.map(|s| s.as_str()),
@@ -1027,15 +1032,6 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             if text.starts_with('\x01') && text.ends_with('\x01') {
                 let inner = &text[1..text.len() - 1];
                 if let Some(action) = inner.strip_prefix("ACTION ") {
-                    let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
-                        if from == app.nick {
-                            target.clone()
-                        } else {
-                            from.clone()
-                        }
-                    } else {
-                        target.clone()
-                    };
                     push_line_to_buffer(
                         app,
                         batch_id,
@@ -1056,15 +1052,6 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                 }
             } else if let Some(ref media) = media {
                 // Rich media message
-                let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
-                    if from == app.nick {
-                        target.clone()
-                    } else {
-                        from.clone()
-                    }
-                } else {
-                    target.clone()
-                };
                 let display = format_media_display(media);
                 let img_url = if media.content_type.starts_with("image/") {
                     Some(media.url.clone())
@@ -1096,15 +1083,6 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                 // Check for link preview in tags
                 let link_preview = freeq_sdk::media::LinkPreview::from_tags(&tags);
                 if let Some(preview) = link_preview {
-                    let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
-                        if from == app.nick {
-                            target.clone()
-                        } else {
-                            from.clone()
-                        }
-                    } else {
-                        target.clone()
-                    };
                     let display = format_link_preview(&preview);
                     push_line_to_buffer(
                         app,
@@ -1124,15 +1102,6 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                         },
                     );
                 } else {
-                    let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
-                        if from == app.nick {
-                            target.clone()
-                        } else {
-                            from.clone()
-                        }
-                    } else {
-                        target.clone()
-                    };
                     push_line_to_buffer(
                         app,
                         batch_id,
@@ -1168,40 +1137,34 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
         Event::BatchEnd { id } => {
             app.end_batch(&id);
         }
-        Event::TagMsg { from, target, tags, .. } => {
-            // Delete: mark the target line as deleted; don't display a new line.
-            if let Some(deleted_msgid) = tags
-                .get("+draft/delete")
-                .filter(|v| crate::app::is_valid_msgid(v))
-            {
-                let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
+        Event::TagMsg { from, target, tags, dm_key, .. } => {
+            // Same conversation keying as Event::Message.
+            let buf_name = if target.starts_with('#') || target.starts_with('&') {
+                target.clone()
+            } else {
+                dm_key.clone().unwrap_or_else(|| {
                     if from == app.nick {
                         target.clone()
                     } else {
                         from.clone()
                     }
-                } else {
-                    target.clone()
-                };
+                })
+            };
+            // Delete: mark the target line as deleted; don't display a new line.
+            if let Some(deleted_msgid) = tags
+                .get("+draft/delete")
+                .filter(|v| crate::app::is_valid_msgid(v))
+            {
                 let batch_id = tags.get("batch").map(|s| s.as_str());
                 app.apply_delete(&from, batch_id, &buf_name, deleted_msgid);
                 return;
             }
             // Handle reactions
             if let Some(reaction) = freeq_sdk::media::Reaction::from_tags(&tags) {
-                let buf_name = if !target.starts_with('#') && !target.starts_with('&') {
-                    if from == app.nick {
-                        target.clone()
-                    } else {
-                        from.clone()
-                    }
-                } else {
-                    target.clone()
-                };
                 let target_msgid = tags.get("+reply").cloned();
                 let target_preview = target_msgid
                     .as_deref()
-                    .and_then(|id| app.buffers.get(&buf_name.to_lowercase())?.find_by_msgid(id))
+                    .and_then(|id| app.buffers.get(&crate::app::buffer_key(&buf_name))?.find_by_msgid(id))
                     .map(|line| {
                         let snippet: String = line.text.chars().take(40).collect();
                         if line.text.chars().count() > 40 {
@@ -1429,6 +1392,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             }
         }
         Event::NickChanged { old_nick, new_nick } => {
+            app.did_rename(&old_nick, &new_nick);
             let msg = format!("{old_nick} is now known as {new_nick}");
             for (name, buf) in app.buffers.iter_mut() {
                 if name == "status" {
@@ -1453,7 +1417,14 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                 }
             }
         }
-        Event::ChatHistoryTarget { nick, timestamp, .. } => {
+        Event::ChatHistoryTarget {
+            nick,
+            timestamp,
+            partner_did,
+        } => {
+            if let Some(ref did) = partner_did {
+                app.record_member_did(&nick, did);
+            }
             let ts_display = timestamp.as_deref().unwrap_or("?");
             app.buffer_mut("status")
                 .push_system(&format!("  DM: {nick}  (last: {ts_display})"));
@@ -2298,14 +2269,29 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                         } else {
                             ""
                         };
-                        app.status_msg(&format!("  {name}{marker}"));
+                        // DID-keyed DMs list as the peer's nick, with the
+                        // compacted DID for disambiguation.
+                        let label = if freeq_sdk::address::is_did(name) {
+                            format!(
+                                "{} [{}]",
+                                app.display_name(name),
+                                crate::app::shorten_did(name)
+                            )
+                        } else {
+                            name.clone()
+                        };
+                        app.status_msg(&format!("  {label}{marker}"));
                     }
                     app.status_msg("  /switch <name> to switch");
                 } else {
-                    // Fuzzy match: find buffer whose name contains the arg
+                    // Fuzzy match: find buffer whose key or display name
+                    // contains the arg (DID-keyed DMs match by nick).
                     let target = arg.to_lowercase();
                     let names = app.buffer_names();
-                    if let Some(name) = names.iter().find(|n| n.contains(&target)) {
+                    if let Some(name) = names.iter().find(|n| {
+                        n.to_lowercase().contains(&target)
+                            || app.display_name(n).to_lowercase().contains(&target)
+                    }) {
                         let name = name.clone();
                         app.switch_to(&name);
                     } else {

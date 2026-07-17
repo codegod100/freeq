@@ -563,6 +563,40 @@ pub struct App {
     /// hostname cloaks like `freeq/plc/xxx` in join system messages and
     /// /whois output without changing the SDK Event::Joined signature.
     pub nick_hosts: HashMap<String, String>,
+    /// Display names for DID-keyed DM buffers (DID → nick). Fed by
+    /// `Event::MemberDid` and the conversation list's partner DIDs.
+    /// Display-grade only — never used to address outgoing messages.
+    pub did_names: HashMap<String, String>,
+}
+
+/// Canonical buffer-map key for a name. Nicks and channels are
+/// case-insensitive in IRC and key by lowercase; DIDs are case-sensitive
+/// identifiers (did:key is base58) that also double as the wire target
+/// for DID-keyed DMs, so they pass through unchanged.
+pub fn buffer_key(name: &str) -> String {
+    if freeq_sdk::address::is_did(name) {
+        name.to_string()
+    } else {
+        name.to_lowercase()
+    }
+}
+
+/// Compact a DID for display: `did:plc:k2n3e2vsihf3farequ44t5j7` →
+/// `plc:k2n3…t5j7`. Non-DIDs pass through unchanged.
+pub fn shorten_did(s: &str) -> String {
+    if !freeq_sdk::address::is_did(s) {
+        return s.to_string();
+    }
+    let mut parts = s.splitn(3, ':');
+    let (_, method, id) = (parts.next(), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let chars: Vec<char> = id.chars().collect();
+    if chars.len() <= 12 {
+        format!("{method}:{id}")
+    } else {
+        let head: String = chars[..4].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        format!("{method}:{head}…{tail}")
+    }
 }
 
 /// Results from background tasks that need to update the UI.
@@ -618,13 +652,103 @@ impl App {
             p2p_event_rx: None,
             pending_url: None,
             nick_hosts: HashMap::new(),
+            did_names: HashMap::new(),
         }
     }
 
     /// Get or create a buffer.
     pub fn buffer_mut(&mut self, name: &str) -> &mut Buffer {
-        let key = name.to_lowercase();
+        let key = buffer_key(name);
         self.buffers.entry(key).or_insert_with(|| Buffer::new(name))
+    }
+
+    /// Human name for a buffer key that may be a raw DID: the learned
+    /// display binding, else the compacted DID. Plain names pass through.
+    pub fn display_name(&self, key: &str) -> String {
+        if !freeq_sdk::address::is_did(key) {
+            return key.to_string();
+        }
+        match self.did_names.get(key) {
+            Some(nick) => nick.clone(),
+            None => shorten_did(key),
+        }
+    }
+
+    /// Record a learned nick↔DID binding: remember the display name and
+    /// fold any nick-keyed DM buffer into the DID-keyed one (a cold first
+    /// DM keys by nick until the peer's DID is learned — without the
+    /// merge, one person becomes two threads).
+    pub fn record_member_did(&mut self, nick: &str, did: &str) {
+        if !freeq_sdk::address::is_did(did)
+            || nick.starts_with('#')
+            || nick.starts_with('&')
+            || nick.eq_ignore_ascii_case(did)
+        {
+            return;
+        }
+        self.did_names.insert(did.to_string(), nick.to_string());
+        self.merge_dm_buffer(nick, did);
+    }
+
+    /// Fold the nick-keyed DM buffer into the DID-keyed one. Messages
+    /// dedupe by msgid; unread state carries over; the active buffer,
+    /// any E2EE key, and in-flight batches follow the re-key.
+    fn merge_dm_buffer(&mut self, nick: &str, did: &str) {
+        let nick_key = buffer_key(nick);
+        let did_key = buffer_key(did);
+        if nick_key == did_key {
+            return;
+        }
+        let Some(nick_buf) = self.buffers.remove(&nick_key) else {
+            return;
+        };
+        match self.buffers.get_mut(&did_key) {
+            Some(did_buf) => {
+                let known: HashSet<&str> = did_buf
+                    .messages
+                    .iter()
+                    .filter_map(|l| l.msgid.as_deref())
+                    .collect();
+                let fresh: Vec<BufferLine> = nick_buf
+                    .messages
+                    .into_iter()
+                    .filter(|l| l.msgid.as_deref().is_none_or(|id| !known.contains(id)))
+                    .collect();
+                for line in fresh {
+                    did_buf.messages.push_back(line);
+                    if did_buf.messages.len() > MAX_MESSAGES {
+                        did_buf.messages.pop_front();
+                    }
+                }
+                did_buf.unread += nick_buf.unread;
+                did_buf.has_mention |= nick_buf.has_mention;
+            }
+            None => {
+                let mut buf = nick_buf;
+                buf.name = did.to_string();
+                self.buffers.insert(did_key.clone(), buf);
+            }
+        }
+        if let Some(key) = self.channel_keys.remove(&nick_key) {
+            self.channel_keys.entry(did_key.clone()).or_insert(key);
+        }
+        for batch in self.batches.values_mut() {
+            if buffer_key(&batch.target) == nick_key {
+                batch.target = did.to_string();
+            }
+        }
+        if self.active_buffer == nick_key {
+            self.active_buffer = did_key;
+        }
+    }
+
+    /// Keep DID display names current across a peer's nick change.
+    pub fn did_rename(&mut self, old_nick: &str, new_nick: &str) {
+        for nick in self.did_names.values_mut() {
+            if nick.eq_ignore_ascii_case(old_nick) {
+                *nick = new_nick.to_string();
+            }
+        }
     }
 
     /// Push a system message to the status buffer.
@@ -718,6 +842,11 @@ impl App {
     /// Flush a batch into its target buffer (prepended as history).
     pub fn end_batch(&mut self, id: &str) {
         if let Some(mut batch) = self.batches.remove(id) {
+            // Targetless batches (e.g. chathistory-targets) have nowhere to
+            // flush — dropping them beats minting a nameless buffer.
+            if batch.target.is_empty() {
+                return;
+            }
             let buf = self.buffer_mut(&batch.target);
             batch.lines.sort_by_key(|a| a.0);
             let was_empty = batch.lines.is_empty();
@@ -778,7 +907,7 @@ impl App {
         {
             return batch.apply_edit(editor_nick, original_msgid, new_msgid, new_text);
         }
-        let key = buf_name.to_lowercase();
+        let key = buffer_key(buf_name);
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.apply_edit(editor_nick, original_msgid, new_msgid, new_text)
         } else {
@@ -800,7 +929,7 @@ impl App {
         {
             return batch.apply_delete(deleter_nick, msgid);
         }
-        let key = buf_name.to_lowercase();
+        let key = buffer_key(buf_name);
         if let Some(buf) = self.buffers.get_mut(&key) {
             buf.apply_delete(deleter_nick, msgid)
         } else {
@@ -812,7 +941,7 @@ impl App {
     /// Remove a buffer (e.g. after being kicked from a channel).
     /// Switches to the previous buffer if the removed one was active.
     pub fn remove_buffer(&mut self, name: &str) {
-        let key = name.to_lowercase();
+        let key = buffer_key(name);
         self.buffers.remove(&key);
         if self.active_buffer == key {
             // Switch to first available buffer, or "status"
@@ -846,7 +975,7 @@ impl App {
 
     /// Switch to a named buffer.
     pub fn switch_to(&mut self, name: &str) {
-        let key = name.to_lowercase();
+        let key = buffer_key(name);
         if self.buffers.contains_key(&key) {
             self.active_buffer = key;
             self.clear_active_unread();
@@ -1186,6 +1315,7 @@ mod tests {
             p2p_event_rx: None,
             pending_url: None,
             nick_hosts: HashMap::new(),
+            did_names: HashMap::new(),
         };
         app.start_batch("b1", "#test");
         app.end_batch("b1");
@@ -1660,6 +1790,104 @@ mod tests {
         let last = MAX_MESSAGES + 4;
         let last_id = format!("id{last:04}");
         assert!(buf.find_by_msgid(&last_id).is_some());
+    }
+
+    const DID: &str = "did:plc:k2n3e2vsihf3farequ44t5j7";
+    // did:key ids are base58 — mixed case matters on the wire.
+    const DID_KEY: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+
+    #[test]
+    fn buffer_key_lowercases_nicks_and_channels_but_not_dids() {
+        assert_eq!(buffer_key("#Rust"), "#rust");
+        assert_eq!(buffer_key("Alice"), "alice");
+        assert_eq!(buffer_key(DID_KEY), DID_KEY);
+    }
+
+    #[test]
+    fn shorten_did_compacts_long_ids() {
+        assert_eq!(shorten_did(DID), "plc:k2n3…t5j7");
+        assert_eq!(shorten_did("did:web:example.com"), "web:example.com");
+        assert_eq!(shorten_did("alice"), "alice");
+    }
+
+    #[test]
+    fn display_name_prefers_binding_then_shortens() {
+        let mut app = App::new("me", false);
+        assert_eq!(app.display_name("alice"), "alice");
+        assert_eq!(app.display_name(DID), "plc:k2n3…t5j7");
+        app.record_member_did("alice", DID);
+        assert_eq!(app.display_name(DID), "alice");
+    }
+
+    #[test]
+    fn member_did_rekeys_a_lone_nick_thread() {
+        let mut app = App::new("me", false);
+        app.buffer_mut("Alice").push(line("hi", "alice", Some("01A")));
+        app.active_buffer = "alice".to_string();
+
+        app.record_member_did("alice", DID);
+
+        assert!(!app.buffers.contains_key("alice"));
+        let buf = app.buffers.get(DID).expect("re-keyed buffer");
+        assert_eq!(buf.name, DID);
+        assert_eq!(buf.messages.len(), 1);
+        // The open thread follows the re-key.
+        assert_eq!(app.active_buffer, DID);
+    }
+
+    #[test]
+    fn member_did_folds_nick_thread_into_existing_did_thread() {
+        let mut app = App::new("me", false);
+        let nick_buf = app.buffer_mut("alice");
+        nick_buf.push(line("cold-start", "alice", Some("01A")));
+        nick_buf.push(line("dupe", "alice", Some("01B")));
+        nick_buf.unread = 2;
+        let did_buf = app.buffer_mut(DID);
+        did_buf.push(line("dupe", "alice", Some("01B")));
+        did_buf.unread = 1;
+
+        app.record_member_did("alice", DID);
+
+        assert!(!app.buffers.contains_key("alice"));
+        let buf = app.buffers.get(DID).unwrap();
+        // 01B deduped by msgid; 01A carried over.
+        assert_eq!(buf.messages.len(), 2);
+        assert!(buf.find_by_msgid("01A").is_some());
+        assert_eq!(buf.unread, 3);
+    }
+
+    #[test]
+    fn member_did_moves_e2ee_key_with_the_thread() {
+        let mut app = App::new("me", false);
+        app.buffer_mut("alice").push(line("hi", "alice", Some("01A")));
+        app.channel_keys.insert("alice".to_string(), [7u8; 32]);
+
+        app.record_member_did("alice", DID);
+
+        assert!(!app.channel_keys.contains_key("alice"));
+        assert_eq!(app.channel_keys.get(DID), Some(&[7u8; 32]));
+    }
+
+    #[test]
+    fn member_did_ignores_channels_and_self_bindings() {
+        let mut app = App::new("me", false);
+        app.buffer_mut("#general").push(line("hi", "alice", Some("01A")));
+
+        app.record_member_did("#general", DID);
+        assert!(app.buffers.contains_key("#general"));
+        assert!(!app.buffers.contains_key(DID));
+
+        // A non-DID never becomes a thread key.
+        app.record_member_did("alice", "not-a-did");
+        assert!(!app.did_names.contains_key("not-a-did"));
+    }
+
+    #[test]
+    fn did_rename_tracks_display_name() {
+        let mut app = App::new("me", false);
+        app.record_member_did("alice", DID);
+        app.did_rename("Alice", "alicia");
+        assert_eq!(app.display_name(DID), "alicia");
     }
 }
 

@@ -229,14 +229,16 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             let unread = buf.map(|b| b.unread).unwrap_or(0);
             let has_mention = buf.map(|b| b.has_mention).unwrap_or(false);
             let is_active = n == &app.active_buffer;
+            // DID-keyed DM buffers render as the peer's nick, not the raw DID.
+            let label = app.display_name(n);
 
             if is_active {
-                Line::from(n.as_str())
+                Line::from(label)
             } else if has_mention {
                 // Red bold for mentions
                 Line::from(vec![
                     Span::styled(
-                        n.as_str(),
+                        label,
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(format!(" ({unread})"), Style::default().fg(Color::Red)),
@@ -244,11 +246,11 @@ fn draw_tab_bar(frame: &mut Frame, app: &App, area: Rect) {
             } else if unread > 0 {
                 // Cyan for unread activity
                 Line::from(vec![
-                    Span::styled(n.as_str(), Style::default().fg(Color::Cyan)),
+                    Span::styled(label, Style::default().fg(Color::Cyan)),
                     Span::styled(format!(" ({unread})"), Style::default().fg(Color::Cyan)),
                 ])
             } else {
-                Line::from(n.as_str())
+                Line::from(label)
             }
         })
         .collect();
@@ -272,9 +274,10 @@ fn draw_messages(frame: &mut Frame, app: &mut App, area: Rect) {
             Some(b) => b,
             None => return,
         };
+        let display = app.display_name(&buffer.name);
         match &buffer.topic {
-            Some(topic) => format!(" {} — {} ", buffer.name, topic),
-            None => format!(" {} ", buffer.name),
+            Some(topic) => format!(" {display} — {topic} "),
+            None => format!(" {display} "),
         }
     };
 
