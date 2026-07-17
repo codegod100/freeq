@@ -158,7 +158,12 @@ fun MainScreen(appState: AppState) {
                     channelName = channelName,
                     onBack = { navController.popBackStack() },
                     onNavigateToChat = { nick ->
-                        navController.navigate("chat/$nick")
+                        // Open DMs under their canonical key (peer DID when
+                        // known) so the thread the echo lands in is the one
+                        // on screen.
+                        val key = if (nick.startsWith("#")) nick
+                            else appState.didForNick(nick) ?: nick
+                        navController.navigate("chat/$key")
                     }
                 )
             }

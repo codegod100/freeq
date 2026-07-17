@@ -22,8 +22,15 @@ internal object TagMsgRouter {
      *   TAGMSG is our own nick (the recipient), so the buffer is named
      *   after the sender (`from`).
      */
-    fun routeTo(target: String, from: String, selfNick: String): String? {
+    fun routeTo(
+        target: String,
+        from: String,
+        selfNick: String,
+        dmKey: String? = null,
+    ): String? {
         if (from.equals(selfNick, ignoreCase = true)) return null
-        return if (target.startsWith("#")) target else from
+        // DM buffers are keyed by the SDK's canonical conversation key (peer
+        // DID when known); fall back to the sender's nick for older SDKs.
+        return if (target.startsWith("#")) target else (dmKey ?: from)
     }
 }

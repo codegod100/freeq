@@ -176,7 +176,7 @@ fun ComposeBar(
                     val placeholder = when {
                         replyingTo != null -> "Reply..."
                         editingMessage != null -> "Edit message..."
-                        else -> "Message ${activeChannel ?: ""}"
+                        else -> "Message ${activeChannel?.let { appState.displayNameForKey(it) } ?: ""}"
                     }
                     Text(placeholder, fontSize = 15.sp)
                 },

@@ -212,7 +212,8 @@ fun ChatsTab(
                                     ChatRow(
                                         conversation = conversation,
                                         unreadCount = appState.unreadCounts[conversation.name] ?: 0,
-                                        onClick = { onChannelClick(conversation.name) }
+                                        onClick = { onChannelClick(conversation.name) },
+                                        displayName = appState.displayNameForKey(conversation.name)
                                     )
                                 }
                             }
@@ -220,7 +221,8 @@ fun ChatsTab(
                             ChatRow(
                                 conversation = conversation,
                                 unreadCount = appState.unreadCounts[conversation.name] ?: 0,
-                                onClick = { onChannelClick(conversation.name) }
+                                onClick = { onChannelClick(conversation.name) },
+                                displayName = appState.displayNameForKey(conversation.name)
                             )
                         }
                         HorizontalDivider(
@@ -246,7 +248,8 @@ fun ChatsTab(
 private fun ChatRow(
     conversation: ChannelState,
     unreadCount: Int,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    displayName: String = conversation.name,
 ) {
     val isChannel = conversation.name.startsWith("#")
     val lastMessage = conversation.messages.lastOrNull { it.from.isNotEmpty() && !it.isDeleted }
@@ -278,7 +281,7 @@ private fun ChatRow(
                 )
             }
         } else {
-            UserAvatar(nick = conversation.name, size = 50.dp)
+            UserAvatar(nick = displayName, size = 50.dp)
         }
 
         // Content
@@ -289,7 +292,7 @@ private fun ChatRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = conversation.name,
+                    text = displayName,
                     fontSize = 16.sp,
                     fontWeight = if (unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
                     color = MaterialTheme.colorScheme.onBackground,
