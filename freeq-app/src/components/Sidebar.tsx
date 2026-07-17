@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useStore } from '../store';
-import { joinChannel, partChannel, disconnect, startAvSession, endAvSession, leaveAvSession, getNick } from '../irc/client';
+import { joinChannel, partChannel, disconnect, startAvSession, endAvSession, leaveAvSession, getNick, getClient } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
 import { MicIcon, MicOffIcon, CameraOnIcon, CameraOffIcon, PhoneOffIcon } from './CallPanel';
 import { fetchProfile, getCachedProfile } from '../lib/profiles';
@@ -72,6 +72,13 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       const key = ch.name;
       if (isDid(key) && blockedDids.includes(key)) return false;
       if (blockedNicks.includes(key.toLowerCase())) return false;
+      if (isDid(key)) {
+        // A block recorded against the nick (peer was offline at block time,
+        // so no DID was resolvable) must still hide the DID-keyed thread —
+        // bridge through the SDK's retained DID→nick binding.
+        const peerNick = getClient()?.getNickForDid(key)?.toLowerCase();
+        if (peerNick && blockedNicks.includes(peerNick)) return false;
+      }
       if (blockedDids.length > 0) {
         const m = findMemberByKey(channels, key)?.member;
         if (m?.did && blockedDids.includes(m.did)) return false;
