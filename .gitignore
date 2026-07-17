@@ -46,3 +46,7 @@ __pycache__/
 *.pyo
 *.so
 result
+
+# freeq-webui local session store
+.dev-data/
+freeq-webui/.dev-data/
