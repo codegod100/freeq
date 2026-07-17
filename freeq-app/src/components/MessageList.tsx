@@ -2,6 +2,8 @@ import { useEffect, useRef, useCallback, useState, useMemo, memo } from 'react';
 import { useStore, uniqueMemberCount, type Message, type PinnedMessage } from '../store';
 import { getNick, requestHistory, sendReaction, sendUnreact, joinChannel } from '../irc/client';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
+import { isDid } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker } from './EmojiPicker';
 import { UserPopover } from './UserPopover';
 import { BlueskyEmbed } from './BlueskyEmbed';
@@ -419,7 +421,7 @@ function MessageContentImpl({ msg, channel, onNickClick }: {
     const color = msg.isSelf ? '#b18cff' : nickColor(msg.from);
     return (
       <div className="text-fg-muted italic text-[15px] mt-0.5">
-        <span style={{ color }} className="font-semibold not-italic">{'* '}{msg.from}</span>{' '}{msg.text}
+        <span style={{ color }} className="font-semibold not-italic">{'* '}{displayNameForKey(msg.from)}</span>{' '}{msg.text}
       </div>
     );
   }
@@ -710,9 +712,10 @@ function FullMessageImpl({ msg, channel, onNickClick }: MessageProps) {
           <button
             className="font-semibold text-[15px] hover:underline"
             style={{ color }}
+            title={isDid(msg.from) ? msg.from : undefined}
             onClick={(e) => onNickClick(msg.from, member?.did, origin, e)}
           >
-            {msg.from}
+            {displayNameForKey(msg.from)}
           </button>
           {member?.did && !isFederated && <VerifiedBadge />}
           {isFederated && <ViaBadge origin={origin!} />}
@@ -1438,7 +1441,7 @@ export function MessageList() {
             {shouldShowDateSep(messages, i) && <DateSeparator date={msg.timestamp} />}
             {msg.deleted ? (
               <div className="px-4 py-0.5 text-xs italic text-[var(--text-muted)] opacity-50">
-                Message from {msg.from} deleted
+                Message from {displayNameForKey(msg.from)} deleted
               </div>
             ) : msg.isSystem ? (
               <SystemMessage msg={msg} />

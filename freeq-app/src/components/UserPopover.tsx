@@ -6,6 +6,7 @@ import { sendWhois, getNick } from '../irc/client';
 import { REPORT_REASONS, reportUser } from '../lib/safety';
 import { parseAwayStatus } from '../lib/status';
 import { isDid } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
 import { showToast } from './Toast';
 import * as e2ee from '../lib/e2ee';
 
@@ -282,7 +283,7 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
     zIndex: 100,
   };
 
-  const displayName = profile?.displayName || whois?.realname || nick;
+  const displayName = profile?.displayName || whois?.realname || displayNameForKey(nick);
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 

@@ -97,7 +97,7 @@ export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersO
       <div className="flex items-center gap-2 min-w-0 shrink">
         {isChannel && <span className="text-accent text-base font-bold shrink-0">#</span>}
         {isDM && <span className="text-fg-dim text-base shrink-0">💬</span>}
-        <span className="font-bold text-base text-fg truncate">
+        <span className="font-bold text-base text-fg truncate" title={isDM && isDid(activeChannel) ? activeChannel : undefined}>
           {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : isDM ? dmTitle : 'Server'}
         </span>
         {ch?.isEncrypted && (

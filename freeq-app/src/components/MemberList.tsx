@@ -6,6 +6,7 @@ import { sendWhois, getClient } from '../irc/client';
 import { SpeakerIcon } from './SessionIndicator';
 import { parseAwayStatus } from '../lib/status';
 import { isDid, resolveIdentityName, findMemberByKey } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
 import * as e2ee from '../lib/e2ee';
 
 const NICK_COLORS = [
@@ -411,7 +412,7 @@ function MemberItem({ member, onClick, inCall }: MemberItemProps) {
         <span className={`truncate text-[15px] ${
           member.away ? 'text-fg-dim' : 'text-fg-muted group-hover:text-fg'
         }`}>
-          {member.nick}
+          {displayNameForKey(member.nick)}
         </span>
 
         {member.actorClass === 'agent' && (
