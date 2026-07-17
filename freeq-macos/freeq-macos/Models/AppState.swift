@@ -1644,7 +1644,12 @@ extension AppState {
             guard let batch = batches.removeValue(forKey: id) else { return }
             HistoryBatchRouting.apply(buffer: batch, channels: &channels, dmBuffers: &dmBuffers)
 
-        case .chatHistoryTarget(let targetNick, let timestamp):
+        case .memberDid:
+            // Emitted by the updated SDK when a nick<->DID binding is
+            // learned. Adopted in the macOS DID-DM pass; ignored until then.
+            break
+
+        case .chatHistoryTarget(let targetNick, let timestamp, _):
             if closedDMs.contains(targetNick.lowercased()) { return }
             let dm = getOrCreateDM(targetNick)
             profileCache.fetchProfileIfPossible(nick: targetNick)
