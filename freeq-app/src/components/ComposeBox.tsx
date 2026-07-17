@@ -776,7 +776,7 @@ export function ComposeBox() {
           <div className="flex items-end">
           <textarea
             data-testid="compose-input"
-            aria-label={`Message ${activeChannel}`}
+            aria-label={`Message ${displayNameForKey(activeChannel)}`}
             ref={inputRef}
             value={text}
             onChange={(e) => { setText(e.target.value); onInput(); }}

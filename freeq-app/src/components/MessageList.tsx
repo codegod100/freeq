@@ -1389,9 +1389,11 @@ export function MessageList() {
           ) : (
             <>
               <div className="text-3xl mb-2">💬</div>
-              <div className="text-xl text-fg font-bold">Conversation with {activeChannel}</div>
+              <div className="text-xl text-fg font-bold" title={isDid(activeChannel) ? activeChannel : undefined}>
+                Conversation with {displayNameForKey(activeChannel)}
+              </div>
               <div className="text-sm mt-2 text-center max-w-xs leading-relaxed text-fg-dim">
-                Direct messages are private between you and <span className="text-fg-muted">{activeChannel}</span>.
+                Direct messages are private between you and <span className="text-fg-muted">{displayNameForKey(activeChannel)}</span>.
               </div>
             </>
           )}

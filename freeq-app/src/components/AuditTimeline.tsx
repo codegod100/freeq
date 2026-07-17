@@ -3,6 +3,7 @@
  * Fetches from GET /api/v1/channels/{name}/audit
  */
 import { useEffect, useState } from 'react';
+import { displayNameForKey } from '../lib/display-name';
 
 interface AuditEvent {
   timestamp: string;
@@ -74,7 +75,7 @@ export function AuditTimeline({ channel, onClose }: AuditTimelineProps) {
         <div className="flex items-center gap-2">
           <span className="text-lg">📋</span>
           <span className="font-semibold text-fg">Audit Timeline</span>
-          <span className="text-sm text-fg-dim">{channel}</span>
+          <span className="text-sm text-fg-dim">{displayNameForKey(channel)}</span>
         </div>
         <button onClick={onClose} className="text-fg-dim hover:text-fg text-lg">✕</button>
       </div>
