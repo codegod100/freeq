@@ -12,6 +12,7 @@ import { parse, prefixNick, format } from './parser.js';
 import { Transport } from './transport.js';
 import * as signing from './signing.js';
 import * as e2ee from './e2ee.js';
+import { dmPeerKey, isDid } from './address.js';
 import { prefetchProfiles } from './profiles.js';
 import type {
   IRCMessage, Message, Member, AvSession, AvParticipant,
@@ -312,6 +313,12 @@ export class FreeqClient extends EventEmitter {
   ): string | null {
     const isChannel = target.startsWith('#') || target.startsWith('&');
 
+    // Wire target + local buffer key for a DM: the peer's DID when known,
+    // else the nick unchanged. `target` stays the caller's input for E2EE
+    // peer resolution; `wireTarget` is what we address, sign over, and key
+    // the thread under. For a channel the two are identical.
+    const wireTarget = isChannel ? target : this.dmKey(target);
+
     // +E channels require the `+encrypted` tag on every PRIVMSG —
     // refuse rather than leak plaintext into a room the rest of the
     // members expect encrypted.
@@ -335,11 +342,11 @@ export class FreeqClient extends EventEmitter {
 
     const willEncrypt =
       e2ee.hasChannelKey(target) ||
-      (!isChannel && e2ee.isE2eeReady() && !!this.didForNick(target));
+      (!isChannel && e2ee.isE2eeReady() && !!this.remoteDidFor(target));
 
     // ── E2EE path ──
     if (willEncrypt) {
-      const remoteDid = !isChannel ? this.didForNick(target) : null;
+      const remoteDid = !isChannel ? this.remoteDidFor(target) : null;
       const encryptFn = isChannel
         ? () => e2ee.encryptChannel(target, text)
         : () => e2ee.encryptMessage(remoteDid!, text, this.serverOrigin);
@@ -347,7 +354,7 @@ export class FreeqClient extends EventEmitter {
       encryptFn().then((encrypted) => {
         if (!encrypted) {
           // Encryption failed — fall back to signed plaintext
-          this.sendLegacyPlaintext(target, text, extraOpenerTags);
+          this.sendLegacyPlaintext(wireTarget, text, extraOpenerTags);
           return;
         }
         this.cacheEchoPlaintext(encrypted, text);
@@ -357,7 +364,7 @@ export class FreeqClient extends EventEmitter {
             '+encrypted': '',
             ...extraOpenerTags,
           };
-          this.raw(format('PRIVMSG', [target, encrypted], tags));
+          this.raw(format('PRIVMSG', [wireTarget, encrypted], tags));
         } else {
           // Ciphertext too big → chunk across a multiline BATCH with
           // concat=true. Receiver concatenates fragments and decrypts once.
@@ -365,15 +372,15 @@ export class FreeqClient extends EventEmitter {
           if (chunks.length > this.multilineMaxLines) {
             this.emit(
               'systemMessage',
-              target,
+              wireTarget,
               `Message too large to send: ciphertext exceeds server multiline limit (${this.multilineMaxLines} lines).`,
             );
             return;
           }
-          this.emitMultilineBatch(target, chunks, extraOpenerTags, { '+encrypted': '' });
+          this.emitMultilineBatch(wireTarget, chunks, extraOpenerTags, { '+encrypted': '' });
         }
       });
-      this.maybeLocalEcho(target, text, willEncrypt);
+      this.maybeLocalEcho(wireTarget, text, willEncrypt);
       return null; // Async; can't return batch id meaningfully here
     }
 
@@ -400,12 +407,12 @@ export class FreeqClient extends EventEmitter {
         // text) and reads `+freeq.at/sig` from the opener tags. Per-batch
         // signing keeps each emitted message independently verifiable.
         const body = this.assembleMultiline(group);
-        signing.signMessage(target, body).then((sig) => {
+        signing.signMessage(wireTarget, body).then((sig) => {
           const openerTagsWithSig: Record<string, string> = { ...extraOpenerTags };
           if (sig) openerTagsWithSig['+freeq.at/sig'] = sig;
-          this.emitMultilineBatch(target, group, openerTagsWithSig);
+          this.emitMultilineBatch(wireTarget, group, openerTagsWithSig);
         });
-        this.maybeLocalEcho(target, body, willEncrypt);
+        this.maybeLocalEcho(wireTarget, body, willEncrypt);
       }
       // Async signing — batch id isn't synchronously available.
       return null;
@@ -413,8 +420,8 @@ export class FreeqClient extends EventEmitter {
 
     // Fits in one PRIVMSG (or no multiline cap) → single PRIVMSG. Legacy path
     // preserves \n escaping + +freeq.at/multiline for receivers that decode it.
-    this.sendLegacyPlaintext(target, text, extraOpenerTags);
-    this.maybeLocalEcho(target, text, willEncrypt);
+    this.sendLegacyPlaintext(wireTarget, text, extraOpenerTags);
+    this.maybeLocalEcho(wireTarget, text, willEncrypt);
     return null;
   }
 
@@ -904,6 +911,36 @@ export class FreeqClient extends EventEmitter {
     return this._nickToDid.get(targetNick.toLowerCase()) ?? this.nickToDid?.(targetNick);
   }
 
+  /**
+   * Canonical DM identity for a peer — its DID when known, else the peer
+   * unchanged (see `address.ts`). Used as BOTH the wire target we address and
+   * the local buffer key we file under, so "bob" and "did:plc:bob" are one
+   * conversation and a DID-addressed DM reaches the right identity on any
+   * server. A guest / unresolved nick passes through, so nick DMs are intact.
+   */
+  private dmKey(peer: string): string {
+    return dmPeerKey(peer, (n) => this.didForNick(n));
+  }
+
+  /** The recipient DID for a DM target that may be a nick or already a DID. */
+  private remoteDidFor(target: string): string | undefined {
+    return isDid(target) ? target : this.didForNick(target);
+  }
+
+  /**
+   * Learn a sender's nick↔DID binding from an inbound message's `account`
+   * tag. Without this, the first DM from a peer we share no channel with (so
+   * no JOIN/WHOIS taught us their DID) would key under the bare nick while
+   * our own sends key under the DID — splitting one conversation in two.
+   */
+  private rememberSenderDid(from: string, tags?: Record<string, string>): void {
+    const did = tags?.['+freeq.at/account'] ?? tags?.['account'];
+    if (!did || !isDid(did) || !from || from.startsWith('#') || from.startsWith('&')) return;
+    const lc = from.toLowerCase();
+    this._nickToDid.set(lc, did);
+    this._didToNick.set(did, lc);
+  }
+
   /** Resolve nick to DID — set by the app layer for E2EE support. */
   nickToDid: ((nick: string) => string | undefined) | null = null;
 
@@ -1054,7 +1091,11 @@ export class FreeqClient extends EventEmitter {
     const target = batch.target;
     const isChannel = target.startsWith('#') || target.startsWith('&');
     const isSelf = this.isSelfSender(from, openerTags);
-    const bufName = isChannel ? target : (isSelf ? target : from);
+    if (!isChannel && !isSelf) this.rememberSenderDid(from, openerTags);
+    // DM thread key = the peer's canonical DID when known (else the nick):
+    // our own echo is keyed by the wire target, an incoming DM by the sender,
+    // and both collapse to the same DID so a conversation is never split.
+    const bufName = isChannel ? target : this.dmKey(isSelf ? target : from);
 
     const wireText = this.assembleMultiline(lines);
 
@@ -1479,11 +1520,12 @@ export class FreeqClient extends EventEmitter {
         if (msg.prefix.includes('!spawn@freeq/spawn')) {
           this.emit('agentDespawned', { nick: from, reason: reason || undefined });
         }
-        // Forget any cached DID binding for this nick.
-        const lc = from.toLowerCase();
-        const did = this._nickToDid.get(lc);
-        this._nickToDid.delete(lc);
-        if (did) this._didToNick.delete(did);
+        // Forget the nick→DID binding: a released nick can be recycled by
+        // someone else, and addressing must never follow a stale one. Keep
+        // did→nick — a DID is permanent and that direction is display-only,
+        // so an offline peer still shows a name instead of a raw did:… string
+        // (a rename overwrites it on the next JOIN/WHOIS).
+        this._nickToDid.delete(from.toLowerCase());
         break;
       }
 
@@ -1508,7 +1550,12 @@ export class FreeqClient extends EventEmitter {
         const isAction = text.startsWith('\x01ACTION ') && text.endsWith('\x01');
         const isChannel = target.startsWith('#') || target.startsWith('&');
         const isSelf = this.isSelfSender(from, msg.tags);
-        const bufName = isChannel ? target : (isSelf ? target : from);
+        if (!isChannel && !isSelf) this.rememberSenderDid(from, msg.tags);
+        // DM thread key = the peer's canonical DID when known (else the nick):
+        // our own echo is keyed by the wire target, an incoming DM by the
+        // sender, and both collapse to the same DID so a conversation is
+        // never split.
+        const bufName = isChannel ? target : this.dmKey(isSelf ? target : from);
 
         // If this PRIVMSG is a chunk of an open `draft/multiline` batch,
         // accumulate it raw and defer ALL processing (decryption,
@@ -1694,7 +1741,12 @@ export class FreeqClient extends EventEmitter {
         const target = msg.params[0];
         const isChannel = target.startsWith('#') || target.startsWith('&');
         const isSelf = this.isSelfSender(from, msg.tags);
-        const bufName = isChannel ? target : (isSelf ? target : from);
+        if (!isChannel && !isSelf) this.rememberSenderDid(from, msg.tags);
+        // DM thread key = the peer's canonical DID when known (else the nick):
+        // our own echo is keyed by the wire target, an incoming DM by the
+        // sender, and both collapse to the same DID so a conversation is
+        // never split.
+        const bufName = isChannel ? target : this.dmKey(isSelf ? target : from);
 
         const deleteOf = msg.tags['+draft/delete'];
         if (deleteOf) { this.emit('messageDeleted', bufName, deleteOf); break; }
@@ -1942,6 +1994,11 @@ export class FreeqClient extends EventEmitter {
               // emit a single `message` event (or push into a parent
               // batch if this was nested).
               await this.dispatchAssembledMultiline(batch);
+            } else if (batch.type === 'draft/chathistory-targets') {
+              // The TARGETS list envelope: its lines are CHATHISTORY
+              // TARGETS commands, each already handled individually, and it
+              // has no target of its own — emitting it as a historyBatch
+              // handed the app a meaningless ('', []) every login.
             } else {
               this.emit('historyBatch', batch.target, batch.messages);
             }
@@ -1953,14 +2010,30 @@ export class FreeqClient extends EventEmitter {
       case 'CHATHISTORY': {
         const sub = msg.params[0];
         if (sub === 'TARGETS' && msg.params[1]) {
-          const targetNick = msg.params[1];
+          const displayNick = msg.params[1];
           const timestamp = msg.params[2] || undefined;
+          // The server names the conversation partner's identity in the
+          // `freeq.at/partner-did` tag; the param is only a display nick
+          // (possibly historical — offline peers, renames). Key the
+          // conversation by the DID when present: emit it as the target and
+          // fetch history by it, so the reply batch (whose target echoes the
+          // request) is DID-keyed too — live messages and replay then agree
+          // on what a conversation is. Absent tag (older server) → nick
+          // behavior, unchanged.
+          const partnerDid = msg.tags['freeq.at/partner-did'];
+          const key = partnerDid && isDid(partnerDid) ? partnerDid : displayNick;
+          if (key !== displayNick) {
+            // Learn the display direction only (DID→nick): the nick may be
+            // historical, so binding it for addressing (nick→DID) could
+            // route a fresh nick owner's messages to the old identity.
+            this._didToNick.set(key, displayNick.toLowerCase());
+          }
           // Canonical event name (renamed from `dmTarget` — CHATHISTORY
           // TARGETS returns channels too, not just DMs).
-          this.emit('historyTarget', targetNick, timestamp);
+          this.emit('historyTarget', key, timestamp);
           // Deprecated alias — kept for one release for backwards compat.
-          this.emit('dmTarget', targetNick);
-          this.requestHistory({ target: targetNick, mode: 'latest' });
+          this.emit('dmTarget', key);
+          this.requestHistory({ target: key, mode: 'latest' });
         }
         break;
       }
@@ -1974,9 +2047,15 @@ export class FreeqClient extends EventEmitter {
 
       // Error numerics
       case '401': {
-        const failNick = msg.params[1];
-        this.emit('systemMessage', failNick || 'server',
-          `${failNick} is offline — message saved, they'll see it next time they connect`);
+        const failTarget = msg.params[1];
+        // The target may be a DID (a DID-addressed DM); show a name rather
+        // than a raw did:… string. The buffer key stays the target itself,
+        // so the notice lands in that conversation.
+        const shown = failTarget && isDid(failTarget)
+          ? (this.getNickForDid(failTarget) ?? failTarget)
+          : failTarget;
+        this.emit('systemMessage', failTarget || 'server',
+          `${shown} is offline — message saved, they'll see it next time they connect`);
         break;
       }
       case '404':
@@ -2172,7 +2251,7 @@ export class FreeqClient extends EventEmitter {
       const wantedCaps: string[] = [];
       const caps = [
         'message-tags', 'server-time', 'batch', 'multi-prefix',
-        'echo-message', 'account-notify', 'extended-join', 'away-notify',
+        'echo-message', 'account-notify', 'account-tag', 'extended-join', 'away-notify',
         'draft/chathistory', 'draft/multiline', 'draft/read-marker',
       ];
       for (const c of caps) {

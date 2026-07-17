@@ -5,6 +5,8 @@ import { useStore } from '../store';
 import { sendWhois, getNick } from '../irc/client';
 import { REPORT_REASONS, reportUser } from '../lib/safety';
 import { parseAwayStatus } from '../lib/status';
+import { isDid } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
 import { showToast } from './Toast';
 import * as e2ee from '../lib/e2ee';
 
@@ -264,8 +266,12 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
   }, [effectiveDid, nick]);
 
   const startDM = () => {
-    addChannel(nick);
-    setActive(nick);
+    // Open the thread under the same canonical key the SDK sends/echoes
+    // under — the peer's DID when we know it, else the nick. Opening by nick
+    // while the echo keys by DID would split one person into two threads.
+    const key = effectiveDid && isDid(effectiveDid) ? effectiveDid : nick;
+    addChannel(key);
+    setActive(key);
     onClose();
   };
 
@@ -277,7 +283,10 @@ export function UserPopover({ nick, did, origin, position, onClose }: UserPopove
     zIndex: 100,
   };
 
-  const displayName = profile?.displayName || whois?.realname || nick;
+  // A realname whose first token is a DID is not a human name — the server
+  // sends "did:key:… (via S2S federation)" for remote users it can't name.
+  const saneRealname = whois?.realname && !isDid(whois.realname.split(' ')[0]) ? whois.realname : undefined;
+  const displayName = profile?.displayName || saneRealname || displayNameForKey(nick);
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 

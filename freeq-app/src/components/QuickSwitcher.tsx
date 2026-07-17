@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useStore } from '../store';
 import { joinChannel } from '../irc/client';
+import { displayNameForKey } from '../lib/display-name';
 
 interface QuickSwitcherProps {
   open: boolean;
@@ -18,10 +19,11 @@ export function QuickSwitcher({ open, onClose }: QuickSwitcherProps) {
   const results = useMemo(() => {
     const items: { type: 'channel' | 'action'; name: string; label: string }[] = [];
 
-    // Joined channels
+    // Joined channels. `name` stays the real key we switch to; `label` is the
+    // human form, so a DID-keyed DM lists as a name not a raw did:… string.
     for (const ch of channels.values()) {
       if (ch.isJoined) {
-        items.push({ type: 'channel', name: ch.name, label: ch.name });
+        items.push({ type: 'channel', name: ch.name, label: displayNameForKey(ch.name) });
       }
     }
 

@@ -231,6 +231,120 @@ describe('messaging methods', () => {
     expect(seen.length).toBe(1);
   });
 
+  // ── DID-addressed DMs ──────────────────────────────────────────────
+  // A DM to a peer whose DID we know goes out addressed to the DID, and the
+  // local thread is keyed by that DID — so the same conversation reaches the
+  // right identity on any server and never splits between nick and DID.
+
+  it('sendMessage() to a known-DID nick addresses the DID on the wire', async () => {
+    const { client, ws } = await makeRegistered();
+    client.nickToDid = (n) => (n.toLowerCase() === 'bob' ? 'did:plc:bob' : undefined);
+    client.sendMessage('bob', 'hi bob');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG'));
+    expect(line).toMatch(/PRIVMSG did:plc:bob :hi bob/);
+  });
+
+  it('sendMessage() to an unknown nick addresses the nick unchanged', async () => {
+    const { client, ws } = await makeRegistered();
+    client.nickToDid = () => undefined; // guest / unresolved peer
+    client.sendMessage('carol', 'hi carol');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG'));
+    expect(line).toMatch(/PRIVMSG carol :hi carol/);
+  });
+
+  it('sendMessage() addressed directly to a DID passes it through', async () => {
+    const { client, ws } = await makeRegistered();
+    client.sendMessage('did:plc:bob', 'hi by did');
+    await flushAsync();
+    const line = ws.sent.find((l) => l.includes('PRIVMSG'));
+    expect(line).toMatch(/PRIVMSG did:plc:bob :hi by did/);
+  });
+
+  it('local echo of a known-DID DM is keyed under the DID (one thread)', async () => {
+    const { client } = await makeRegistered();
+    client.nickToDid = (n) => (n.toLowerCase() === 'bob' ? 'did:plc:bob' : undefined);
+    const seen: string[] = [];
+    client.on('message', (channel) => seen.push(channel));
+    client.sendMessage('bob', 'hi');
+    expect(seen).toEqual(['did:plc:bob']);
+  });
+
+  it('an incoming DM keys under the sender DID learned from its account tag', async () => {
+    // We share no channel with bob, so no JOIN/WHOIS taught us his DID. His
+    // message's account tag must still key the thread under his DID — the
+    // same key our own sends to him use — so the conversation is one thread.
+    const { client, ws } = await makeRegistered();
+    const seen: string[] = [];
+    client.on('message', (channel) => seen.push(channel));
+    ws.recv('@account=did:plc:bob :bob!b@freeq/plc/xx PRIVMSG alice :hey there');
+    await flushAsync();
+    expect(seen).toEqual(['did:plc:bob']);
+    // And a later reply from us now resolves bob → same DID key.
+    expect(client.getDidForNick('bob')).toBe('did:plc:bob');
+  });
+
+  it('TARGETS with freeq.at/partner-did keys the conversation by the DID', async () => {
+    // The server's conversation list carries each DM partner's DID as a tag.
+    // The client must key the conversation by that DID — emit it as the
+    // target, fetch history by it (the reply batch then arrives DID-keyed),
+    // and learn the display binding so the DID renders as a name at once.
+    const { client, ws } = await makeRegistered();
+    const targets: string[] = [];
+    client.on('historyTarget', (t) => targets.push(t));
+    ws.recv(
+      '@time=2026-07-16T21:12:22.000Z;freeq.at/partner-did=did:key:z6MkBot :srv CHATHISTORY TARGETS didtestbot',
+    );
+    await flushAsync();
+    expect(targets).toEqual(['did:key:z6MkBot']);
+    const fetch = ws.sent.find((l) => l.startsWith('CHATHISTORY LATEST'));
+    expect(fetch).toContain('did:key:z6MkBot');
+    expect(client.getNickForDid('did:key:z6MkBot')).toBe('didtestbot');
+  });
+
+  it('the TARGETS envelope batch does not emit an empty historyBatch', async () => {
+    const { client, ws } = await makeRegistered();
+    const batches: string[] = [];
+    client.on('historyBatch', (channel) => batches.push(channel));
+    ws.recv(':srv BATCH +cht1 draft/chathistory-targets');
+    ws.recv('@batch=cht1;freeq.at/partner-did=did:plc:bob :srv CHATHISTORY TARGETS bob');
+    ws.recv(':srv BATCH -cht1');
+    await flushAsync();
+    expect(batches).toEqual([]); // no ('', []) noise for the envelope
+  });
+
+  it('TARGETS without the tag (old server) keeps nick behavior unchanged', async () => {
+    const { client, ws } = await makeRegistered();
+    const targets: string[] = [];
+    client.on('historyTarget', (t) => targets.push(t));
+    ws.recv(':srv CHATHISTORY TARGETS bob');
+    await flushAsync();
+    expect(targets).toEqual(['bob']);
+    expect(ws.sent.find((l) => l.startsWith('CHATHISTORY LATEST'))).toContain('bob');
+  });
+
+  it('does not split a DM thread when the peer DID is learned mid-conversation', async () => {
+    // Regression for the bug live-testing caught: a DM keyed under the peer's
+    // bare nick, then re-keyed to their DID once a WHOIS resolved it — two
+    // threads for one person. With the account tag on the message, the DID is
+    // known from message one, and an interleaved WHOIS must not fork a second
+    // thread. All messages from the peer stay under a single DID key.
+    const { client, ws } = await makeRegistered();
+    const threads: string[] = [];
+    client.on('message', (channel) => threads.push(channel));
+
+    ws.recv('@account=did:plc:bob :bob!b@freeq/plc/xx PRIVMSG alice :one');
+    await flushAsync();
+    // A redundant WHOIS DID numeric arrives later (same binding) …
+    ws.recv(':srv 330 alice bob did:plc:bob :is logged in as');
+    // … and a second DM follows.
+    ws.recv('@account=did:plc:bob :bob!b@freeq/plc/xx PRIVMSG alice :two');
+    await flushAsync();
+
+    expect([...new Set(threads)]).toEqual(['did:plc:bob']);
+  });
+
   it('sendReply() sets +reply tag', async () => {
     const { client, ws } = await makeRegistered();
     client.sendReply('#foo', 'msg123', 'replying');
@@ -393,7 +507,14 @@ describe('identity resolution', () => {
     expect(client.getNickForDid('did:plc:carol')).toBe('carol');
   });
 
-  it('cache is cleared on QUIT', async () => {
+  it('QUIT forgets nick→DID (addressing) but keeps DID→nick (display)', async () => {
+    // The two directions carry different risk. A released nick can be
+    // recycled by someone else, so addressing must forget it. A DID is
+    // permanent and the reverse map is display-only, so keeping it lets an
+    // offline peer still render as a name rather than a raw did:… string —
+    // which is exactly when we need it (the "is offline" notice, a DM title
+    // for a peer who logged off). A rename overwrites it on the next
+    // JOIN/WHOIS, so it cannot drift silently.
     const { client, ws } = await makeRegistered();
     ws.recv(':srv 330 alice dave did:plc:dave :is authenticated as');
     await flushAsync();
@@ -401,7 +522,7 @@ describe('identity resolution', () => {
     ws.recv(':dave!user@host QUIT :goodbye');
     await flushAsync();
     expect(client.getDidForNick('dave')).toBeUndefined();
-    expect(client.getNickForDid('did:plc:dave')).toBeUndefined();
+    expect(client.getNickForDid('did:plc:dave')).toBe('dave');
   });
 });
 
@@ -912,6 +1033,21 @@ describe('read markers (draft/read-marker)', () => {
     const reqLine = ws.sent.find((l) => l.startsWith('CAP REQ'));
     expect(reqLine).toBeDefined();
     expect(reqLine).toContain('draft/read-marker');
+  });
+
+  it('requests account-tag so incoming DMs carry the sender DID', async () => {
+    // Without account-tag the server never stamps the sender's DID onto a DM,
+    // so a first DM from a peer we share no channel with keys under the bare
+    // nick and later splits when the DID is learned. account-tag closes that.
+    const { FreeqClient } = await import('./client.js');
+    const client = new FreeqClient({ url: 'wss://test/irc', nick: 'caps', skipInitialBrokerRefresh: true });
+    client.connect();
+    await flushAsync();
+    const ws = MockWebSocket.instances[MockWebSocket.instances.length - 1]!;
+    ws.recv(':srv CAP * LS :message-tags server-time account-notify account-tag');
+    await flushAsync();
+    const reqLine = ws.sent.find((l) => l.startsWith('CAP REQ'));
+    expect(reqLine).toContain('account-tag');
   });
 });
 

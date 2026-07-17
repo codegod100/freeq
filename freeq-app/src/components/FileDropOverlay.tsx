@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useStore } from '../store';
+import { displayNameForKey } from '../lib/display-name';
 import { showToast } from './Toast';
 
 export function FileDropOverlay() {
@@ -67,7 +68,7 @@ export function FileDropOverlay() {
             <path d="M20 16.7V19a2 2 0 01-2 2H6a2 2 0 01-2-2v-2.3" />
           </svg>
           <div className="text-xl font-bold text-accent">Drop file to upload</div>
-          <div className="text-sm text-fg-dim mt-1">to {activeChannel}</div>
+          <div className="text-sm text-fg-dim mt-1">to {displayNameForKey(activeChannel)}</div>
         </div>
       </div>
     </div>
