@@ -3362,7 +3362,8 @@ data class IrcMessage (
     var `timestampMs`: kotlin.Long, 
     var `account`: kotlin.String?, 
     var `origin`: kotlin.String?, 
-    var `reactions`: List<ReactionTally>
+    var `reactions`: List<ReactionTally>, 
+    var `dmKey`: kotlin.String?
 ) {
     
     companion object
@@ -3390,6 +3391,7 @@ public object FfiConverterTypeIrcMessage: FfiConverterRustBuffer<IrcMessage> {
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
             FfiConverterSequenceTypeReactionTally.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
@@ -3409,7 +3411,8 @@ public object FfiConverterTypeIrcMessage: FfiConverterRustBuffer<IrcMessage> {
             FfiConverterLong.allocationSize(value.`timestampMs`) +
             FfiConverterOptionalString.allocationSize(value.`account`) +
             FfiConverterOptionalString.allocationSize(value.`origin`) +
-            FfiConverterSequenceTypeReactionTally.allocationSize(value.`reactions`)
+            FfiConverterSequenceTypeReactionTally.allocationSize(value.`reactions`) +
+            FfiConverterOptionalString.allocationSize(value.`dmKey`)
     )
 
     override fun write(value: IrcMessage, buf: ByteBuffer) {
@@ -3429,6 +3432,7 @@ public object FfiConverterTypeIrcMessage: FfiConverterRustBuffer<IrcMessage> {
             FfiConverterOptionalString.write(value.`account`, buf)
             FfiConverterOptionalString.write(value.`origin`, buf)
             FfiConverterSequenceTypeReactionTally.write(value.`reactions`, buf)
+            FfiConverterOptionalString.write(value.`dmKey`, buf)
     }
 }
 
@@ -3569,7 +3573,8 @@ public object FfiConverterTypeTagEntry: FfiConverterRustBuffer<TagEntry> {
 data class TagMessage (
     var `from`: kotlin.String, 
     var `target`: kotlin.String, 
-    var `tags`: List<TagEntry>
+    var `tags`: List<TagEntry>, 
+    var `dmKey`: kotlin.String?
 ) {
     
     companion object
@@ -3584,19 +3589,22 @@ public object FfiConverterTypeTagMessage: FfiConverterRustBuffer<TagMessage> {
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceTypeTagEntry.read(buf),
+            FfiConverterOptionalString.read(buf),
         )
     }
 
     override fun allocationSize(value: TagMessage) = (
             FfiConverterString.allocationSize(value.`from`) +
             FfiConverterString.allocationSize(value.`target`) +
-            FfiConverterSequenceTypeTagEntry.allocationSize(value.`tags`)
+            FfiConverterSequenceTypeTagEntry.allocationSize(value.`tags`) +
+            FfiConverterOptionalString.allocationSize(value.`dmKey`)
     )
 
     override fun write(value: TagMessage, buf: ByteBuffer) {
             FfiConverterString.write(value.`from`, buf)
             FfiConverterString.write(value.`target`, buf)
             FfiConverterSequenceTypeTagEntry.write(value.`tags`, buf)
+            FfiConverterOptionalString.write(value.`dmKey`, buf)
     }
 }
 
@@ -3613,12 +3621,14 @@ sealed class AvEvent {
     }
     
     data class ParticipantJoined(
-        val `nick`: kotlin.String) : AvEvent() {
+        val `nick`: kotlin.String, 
+        val `instance`: kotlin.String) : AvEvent() {
         companion object
     }
     
     data class ParticipantLeft(
-        val `nick`: kotlin.String) : AvEvent() {
+        val `nick`: kotlin.String, 
+        val `instance`: kotlin.String) : AvEvent() {
         companion object
     }
     
@@ -3704,8 +3714,10 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
                 )
             3 -> AvEvent.ParticipantJoined(
                 FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
                 )
             4 -> AvEvent.ParticipantLeft(
+                FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 )
             5 -> AvEvent.AudioTrackStarted(
@@ -3772,6 +3784,7 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`nick`)
+                + FfiConverterString.allocationSize(value.`instance`)
             )
         }
         is AvEvent.ParticipantLeft -> {
@@ -3779,6 +3792,7 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`nick`)
+                + FfiConverterString.allocationSize(value.`instance`)
             )
         }
         is AvEvent.AudioTrackStarted -> {
@@ -3887,11 +3901,13 @@ public object FfiConverterTypeAvEvent : FfiConverterRustBuffer<AvEvent>{
             is AvEvent.ParticipantJoined -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`nick`, buf)
+                FfiConverterString.write(value.`instance`, buf)
                 Unit
             }
             is AvEvent.ParticipantLeft -> {
                 buf.putInt(4)
                 FfiConverterString.write(value.`nick`, buf)
+                FfiConverterString.write(value.`instance`, buf)
                 Unit
             }
             is AvEvent.AudioTrackStarted -> {
@@ -4133,7 +4149,14 @@ sealed class FreeqEvent {
     
     data class ChatHistoryTarget(
         val `nick`: kotlin.String, 
-        val `timestamp`: kotlin.String?) : FreeqEvent() {
+        val `timestamp`: kotlin.String?, 
+        val `partnerDid`: kotlin.String?) : FreeqEvent() {
+        companion object
+    }
+    
+    data class MemberDid(
+        val `nick`: kotlin.String, 
+        val `did`: kotlin.String) : FreeqEvent() {
         companion object
     }
     
@@ -4237,19 +4260,24 @@ public object FfiConverterTypeFreeqEvent : FfiConverterRustBuffer<FreeqEvent>{
             18 -> FreeqEvent.ChatHistoryTarget(
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
-            19 -> FreeqEvent.ReadMarker(
+            19 -> FreeqEvent.MemberDid(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            20 -> FreeqEvent.ReadMarker(
                 FfiConverterString.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
-            20 -> FreeqEvent.WhoisReply(
+            21 -> FreeqEvent.WhoisReply(
                 FfiConverterString.read(buf),
                 FfiConverterString.read(buf),
                 )
-            21 -> FreeqEvent.Notice(
+            22 -> FreeqEvent.Notice(
                 FfiConverterString.read(buf),
                 )
-            22 -> FreeqEvent.Disconnected(
+            23 -> FreeqEvent.Disconnected(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -4396,6 +4424,15 @@ public object FfiConverterTypeFreeqEvent : FfiConverterRustBuffer<FreeqEvent>{
                 4UL
                 + FfiConverterString.allocationSize(value.`nick`)
                 + FfiConverterOptionalString.allocationSize(value.`timestamp`)
+                + FfiConverterOptionalString.allocationSize(value.`partnerDid`)
+            )
+        }
+        is FreeqEvent.MemberDid -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`nick`)
+                + FfiConverterString.allocationSize(value.`did`)
             )
         }
         is FreeqEvent.ReadMarker -> {
@@ -4535,27 +4572,34 @@ public object FfiConverterTypeFreeqEvent : FfiConverterRustBuffer<FreeqEvent>{
                 buf.putInt(18)
                 FfiConverterString.write(value.`nick`, buf)
                 FfiConverterOptionalString.write(value.`timestamp`, buf)
+                FfiConverterOptionalString.write(value.`partnerDid`, buf)
+                Unit
+            }
+            is FreeqEvent.MemberDid -> {
+                buf.putInt(19)
+                FfiConverterString.write(value.`nick`, buf)
+                FfiConverterString.write(value.`did`, buf)
                 Unit
             }
             is FreeqEvent.ReadMarker -> {
-                buf.putInt(19)
+                buf.putInt(20)
                 FfiConverterString.write(value.`target`, buf)
                 FfiConverterOptionalString.write(value.`timestamp`, buf)
                 Unit
             }
             is FreeqEvent.WhoisReply -> {
-                buf.putInt(20)
+                buf.putInt(21)
                 FfiConverterString.write(value.`nick`, buf)
                 FfiConverterString.write(value.`info`, buf)
                 Unit
             }
             is FreeqEvent.Notice -> {
-                buf.putInt(21)
+                buf.putInt(22)
                 FfiConverterString.write(value.`text`, buf)
                 Unit
             }
             is FreeqEvent.Disconnected -> {
-                buf.putInt(22)
+                buf.putInt(23)
                 FfiConverterString.write(value.`reason`, buf)
                 Unit
             }

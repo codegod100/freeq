@@ -61,6 +61,10 @@ pub struct IrcMessage {
     /// server's `+freeq.at/reactions` tag (CHATHISTORY / JOIN replay).
     /// Live reactions still arrive as separate `TagMsg` events.
     pub reactions: Vec<ReactionTally>,
+    /// For a DM: the canonical conversation key — the peer's DID when known,
+    /// else their nick. `None` for channel messages. Key DM threads by this,
+    /// not by from/target (which flip with message direction).
+    pub dm_key: Option<String>,
 }
 
 pub struct ReactionTally {
@@ -105,6 +109,7 @@ pub struct TagMessage {
     pub from: String,
     pub target: String,
     pub tags: Vec<TagEntry>,
+    pub dm_key: Option<String>,
 }
 
 pub struct IrcMember {
@@ -188,6 +193,14 @@ pub enum FreeqEvent {
     ChatHistoryTarget {
         nick: String,
         timestamp: Option<String>,
+        /// The conversation's stable identity (`freeq.at/partner-did` tag).
+        partner_did: Option<String>,
+    },
+    /// A nick↔DID binding was learned; merge any nick-keyed DM thread for
+    /// `nick` into the DID-keyed one. Emitted only for new/changed bindings.
+    MemberDid {
+        nick: String,
+        did: String,
     },
     ReadMarker {
         target: String,
@@ -459,9 +472,10 @@ impl FreeqClient {
 fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
     use freeq_sdk::event::Event;
     Some(match event {
-        // Not in the UDL yet — exposed in the FFI-surface change alongside
-        // dm_key/partner_did; consumers get it once bindings regenerate.
-        Event::MemberDid { .. } => return None,
+        Event::MemberDid { nick, did } => FreeqEvent::MemberDid {
+            nick: nick.clone(),
+            did: did.clone(),
+        },
         Event::Connected => FreeqEvent::Connected,
         Event::Registered { nick } => FreeqEvent::Registered { nick: nick.clone() },
         Event::Authenticated { did } => FreeqEvent::Authenticated { did: did.clone() },
@@ -481,7 +495,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
             target,
             text,
             tags,
-            ..
+            dm_key,
         } => {
             let msgid = tags.get("msgid").cloned();
             let reply_to = tags.get("+reply").cloned();
@@ -525,10 +539,11 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
                     account: tags.get("account").cloned(),
                     origin: tags.get("+freeq.at/origin").cloned(),
                     reactions,
+                    dm_key: dm_key.clone(),
                 },
             }
         }
-        Event::TagMsg { from, target, tags, .. } => {
+        Event::TagMsg { from, target, tags, dm_key } => {
             let tag_entries = tags
                 .iter()
                 .map(|(k, v)| TagEntry {
@@ -541,6 +556,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
                     from: from.clone(),
                     target: target.clone(),
                     tags: tag_entries,
+                    dm_key: dm_key.clone(),
                 },
             }
         }
@@ -634,9 +650,10 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
             target: target.clone(),
         },
         Event::BatchEnd { id } => FreeqEvent::BatchEnd { id: id.clone() },
-        Event::ChatHistoryTarget { nick, timestamp, .. } => FreeqEvent::ChatHistoryTarget {
+        Event::ChatHistoryTarget { nick, timestamp, partner_did } => FreeqEvent::ChatHistoryTarget {
             nick: nick.clone(),
             timestamp: timestamp.clone(),
+            partner_did: partner_did.clone(),
         },
         Event::Disconnected { reason } => FreeqEvent::Disconnected {
             reason: reason.clone(),
