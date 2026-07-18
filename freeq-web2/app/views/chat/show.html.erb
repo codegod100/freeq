@@ -61,7 +61,7 @@
             </form>
           </div>
         <% else %>
-          <div class="user-handle guest">👤 guest</div>
+          <div class="user-handle guest">👤 <%= @session.current_nick || "guest" %></div>
           <div class="user-actions">
             <a href="/login" class="btn-link">Sign in</a>
           </div>
