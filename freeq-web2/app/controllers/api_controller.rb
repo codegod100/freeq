@@ -1,3 +1,5 @@
+require "net/http"
+
 # frozen_string_literal: true
 
 # API endpoints for client-side interactions.
@@ -52,10 +54,17 @@ class ApiController < ApplicationController
 
     # Slow path: WHOIS the nick and wait for the account numeric.
     did = resolve_did_via_whois(session, nick)
+
+    # Fallback: REST API /api/v1/users/:nick/whois (works for offline users too).
+    if did.nil?
+      did = fetch_did_via_rest(nick)
+      session.record_nick_did(nick, did) if did
+    end
+
     if did
       render json: { did: did, cached: false }
     else
-      render json: { did: nil, error: "Could not resolve DID for #{nick}" }, status: :not_found
+      render json: { did: nil, error: "Could not resolve DID for #{nick}. The recipient may be offline, a guest, or you may need to share a channel first." }, status: :not_found
     end
   end
 
@@ -63,11 +72,13 @@ class ApiController < ApplicationController
 
   # which carries the account/DID. Gap-based timeout like fetch_policy_notices.
   def resolve_did_via_whois(session, nick)
-    session.enqueue_outbound("WHOIS #{nick}\r\n")
     deadline = Time.now + 3.0
     did = nil
     queue = Queue.new
+    # Set the queue BEFORE sending WHOIS — the response can arrive
+    # before we reach the read loop otherwise.
     session.whois_response_queue = queue
+    session.enqueue_outbound("WHOIS #{nick}\r\n")
     begin
       while Time.now < deadline
         begin
@@ -91,6 +102,25 @@ class ApiController < ApplicationController
     end
     session.record_nick_did(nick, did) if did
     did
+  end
+
+  # Query the upstream REST API /api/v1/users/:nick/whois for the DID.
+  # This works even for offline users (via nick_owners).
+  def fetch_did_via_rest(nick)
+    base = SessionRegistry.instance.rest_base
+    uri = URI("#{base}/api/v1/users/#{URI.encode_www_form_component(nick)}/whois")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == "https")
+    http.read_timeout = 3
+    http.open_timeout = 3
+    begin
+      resp = http.get(uri.request_uri)
+      return nil unless resp.code == "200"
+      data = JSON.parse(resp.body)
+      data["did"]&.to_s&.presence
+    rescue StandardError
+      nil
+    end
   end
 
   # ── Policy NOTICE collection ──────────────────────────────────────────

@@ -421,7 +421,7 @@ class SessionState
     @known_nicks << nick
     driver.text("NICK #{nick}\r\n")
     driver.text("USER web2 0 * :freeq-web2\r\n")
-    driver.text("CAP REQ :sasl account-notify message-tags batch server-time echo-message draft/chathistory\r\n")
+    driver.text("CAP REQ :sasl account-notify extended-join account-tag message-tags batch server-time echo-message draft/chathistory\r\n")
     @reg_phase = :wait_cap_ack
   end
 
@@ -446,6 +446,7 @@ class SessionState
     case @reg_phase
     when :wait_cap_ack
       if (caps = parse_cap_ack(line))
+        Rails.logger.info("CAP ACK: #{caps.inspect}")
         if caps.any? { |c| c.casecmp?("sasl") } && authenticated?
           # Start SASL ATPROTO-CHALLENGE.
           driver.text("AUTHENTICATE ATPROTO-CHALLENGE\r\n")
