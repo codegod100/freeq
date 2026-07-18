@@ -1,32 +1,40 @@
-<div class="flex h-dvh flex-col" data-controller="chat">
-  <header class="flex items-center justify-between border-b border-[#232932] px-4 py-3">
-    <div class="flex items-center gap-3">
-      <span class="text-lg font-bold">freeq</span>
-      <span class="text-sm text-zinc-500">channels</span>
+<div id="freeq-chat" data-controller="chat" style="display:flex;flex-direction:column;height:100dvh;overflow:hidden">
+  <header style="display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--border);padding:12px 16px">
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="font-size:1.125rem;font-weight:700">freeq</span>
+      <span style="font-size:.875rem;color:var(--muted)">channels</span>
     </div>
-    <div class="flex items-center gap-3 text-sm">
-      <a href="/login" class="text-[#7ab7ff] hover:underline">Sign in</a>
+    <div style="display:flex;align-items:center;gap:12px;font-size:.875rem">
+      <% if @session.authenticated? %>
+        <span style="color:var(--nick-5)">🔒 <%= @session.auth_handle %></span>
+        <form method="POST" action="/logout" style="display:inline">
+          <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+          <button type="submit" style="border:0;background:transparent;color:var(--muted);cursor:pointer">Sign out</button>
+        </form>
+      <% else %>
+        <a href="/login" style="color:#7ab7ff;text-decoration:none">Sign in</a>
+      <% end %>
     </div>
   </header>
-  <main class="flex-1 overflow-y-auto p-4">
-    <form id="join-form" class="mb-4 flex gap-2" data-reflex-permanent>
+  <main style="flex:1;overflow-y:auto;padding:16px">
+    <form id="join-form" style="margin-bottom:16px;display:flex;gap:8px"
+          data-reflex="submit->ChatReflex#join" data-reflex-serialize-form="true">
       <input
-        class="flex-1 rounded-lg border border-[#232932] bg-[#151a22] px-3 py-2 text-sm"
+        style="flex:1;border:1px solid var(--border);background:#151a22;border-radius:8px;padding:8px 12px;font-size:.875rem;color:var(--fg)"
         type="text"
         name="channel"
         placeholder="join #channel"
-        autocomplete="off"
-        data-reflex="submit->ChatReflex#join">
-      <button type="submit" class="rounded-lg bg-[#7ab7ff] px-3 py-2 text-sm font-semibold text-[#0e1116]">Join</button>
+        autocomplete="off">
+      <button type="submit" style="border:0;border-radius:8px;background:#7ab7ff;padding:8px 12px;font-size:.875rem;font-weight:600;color:#0e1116;cursor:pointer">Join</button>
     </form>
-    <ul class="space-y-1">
+    <ul style="list-style:none;margin:0;padding:0">
       <% @channels.each do |ch| %>
         <% bare = ch["name"].to_s.delete("#") %>
         <% href = "/chat/#{bare}" %>
         <li>
-          <a href="<%= href %>" class="flex items-center justify-between rounded-lg px-3 py-2 text-sm hover:bg-[#151a22]">
-            <span class="text-zinc-300"><%= ch["name"] %></span>
-            <span class="text-xs text-zinc-500"><%= ch["members"] %></span>
+          <a href="<%= href %>" style="display:flex;align-items:center;justify-content:space-between;border-radius:8px;padding:8px 12px;font-size:.875rem;text-decoration:none;color:var(--fg)">
+            <span><%= ch["name"] %></span>
+            <span style="font-size:.75rem;color:var(--muted)"><%= ch["members"] %></span>
           </a>
         </li>
       <% end %>

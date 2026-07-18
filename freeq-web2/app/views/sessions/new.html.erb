@@ -1,0 +1,40 @@
+<div id="freeq-login" style="min-height:100dvh;display:flex;align-items:center;justify-content:center;padding:1rem">
+  <div style="width:100%;max-width:28rem;border:1px solid var(--border);background:#151a22;border-radius:12px;padding:24px;box-shadow:0 4px 24px rgba(0,0,0,.3)">
+    <h1 style="font-size:1.25rem;font-weight:600;letter-spacing:-.02em">Sign in to freeq</h1>
+    <p style="margin:8px 0 0;font-size:.875rem;color:var(--muted)">
+      Use your Bluesky / AT Protocol handle. Private keys never leave your PDS.
+    </p>
+
+    <% if flash[:alert] %>
+      <div style="margin:16px 0;padding:8px 12px;border-radius:8px;background:rgba(239,71,111,.1);border:1px solid #ef476f;color:#ef476f;font-size:.875rem">
+        <%= flash[:alert] %>
+      </div>
+    <% end %>
+    <% if flash[:notice] %>
+      <div style="margin:16px 0;padding:8px 12px;border-radius:8px;background:rgba(6,214,160,.1);border:1px solid var(--nick-5);color:var(--nick-5);font-size:.875rem">
+        <%= flash[:notice] %>
+      </div>
+    <% end %>
+
+    <form method="POST" action="/login" style="margin-top:24px;display:flex;flex-direction:column;gap:12px">
+      <%= hidden_field_tag :authenticity_token, form_authenticity_token %>
+      <label style="font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Handle</label>
+      <input
+        style="border-radius:8px;border:1px solid var(--border);background:var(--bg);padding:8px 12px;font-size:.875rem;outline:none;color:var(--fg)"
+        type="text"
+        name="identifier"
+        placeholder="you.bsky.social"
+        required
+        autofocus
+        autocomplete="username">
+      <button type="submit"
+              style="margin-top:8px;border:0;border-radius:8px;background:#7ab7ff;padding:8px 12px;font-size:.875rem;font-weight:600;color:#0e1116;cursor:pointer">
+        Continue with AT Protocol
+      </button>
+    </form>
+
+    <p style="margin-top:16px;text-align:center;font-size:.875rem;color:var(--muted)">
+      <a href="/chat" style="color:#7ab7ff;text-decoration:none">Continue as guest</a>
+    </p>
+  </div>
+</div>

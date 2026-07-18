@@ -9,6 +9,15 @@
     <span style="font-size:.875rem;color:#7ab7ff"><%= @channel %></span>
     <span id="channel-topic" style="margin-left:.5rem;font-size:.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%"><%= @topic %></span>
     <div style="margin-left:auto;display:flex;align-items:center;gap:.5rem;font-size:.75rem">
+      <% if @session.authenticated? %>
+        <span style="color:var(--nick-5)">🔒 <%= @session.auth_handle %></span>
+        <form method="POST" action="/logout" style="display:inline">
+          <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+          <button type="submit" style="border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:.75rem">Sign out</button>
+        </form>
+      <% else %>
+        <a href="/login" style="color:#7ab7ff;text-decoration:none">Sign in</a>
+      <% end %>
       <span id="status"><span class="dot"></span> <span>connecting…</span></span>
     </div>
   </nav>

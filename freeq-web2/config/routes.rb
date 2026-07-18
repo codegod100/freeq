@@ -7,7 +7,13 @@ Rails.application.routes.draw do
   get "chat/:channel", to: "chat#show", as: :chat_channel
 
   # Mutations used by the JS reaction picker (and available as plain POST APIs).
-  # Send/join/part also go through StimulusReflex; these routes mirror freeq-webui.
   post "chat/:channel/react", to: "chat#react"
   post "chat/:channel/unreact", to: "chat#unreact"
+
+  # AT Protocol OAuth.
+  get "login", to: "sessions#new"
+  post "login", to: "sessions#create"
+  get "auth/callback", to: "sessions#callback"
+  post "logout", to: "sessions#destroy"
+  get ".well-known/oauth-client-metadata", to: "sessions#client_metadata"
 end

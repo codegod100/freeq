@@ -5,44 +5,69 @@ require "monitor"
 require "socket"
 require "openssl"
 require "uri"
+require "base64"
+require "json"
 require "websocket/driver"
 
-# In-memory per-session state, the analog of freeq-webui's SessionHandle.
-# One upstream WebSocket connection per browser session; incoming IRC lines
-# are buffered and drained by the ChatChannel (StimulusReflex → CableReady).
+require_relative "atproto/sasl"
+
+# In-memory per-session state. One upstream WebSocket per browser session.
+# When authenticated (OAuth), the WS task performs SASL ATPROTO-CHALLENGE;
+# otherwise it registers as a guest.
 class SessionState
   include MonitorMixin
 
-  attr_reader :session_id, :joined, :channel_members, :irc_out, :irc_in, :parent_lookup
-  attr_accessor :auth   # :guest or { did:, nick:, handle:, oauth: ... } (OAuth port = TODO)
+  attr_reader :session_id, :joined, :channel_members, :irc_out, :irc_in,
+              :parent_lookup, :suppress_history_batches, :reaction_cache
+  attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
 
   def initialize(session_id)
     super()
     @session_id = session_id
     @joined = Set.new
-    @channel_members = {} # channel => { nick => {op:, halfop:, voiced:, nick:} }
-    @irc_out = Queue.new    # outbound IRC lines (PRIVMSG/JOIN/…)
-    @irc_in  = Queue.new    # inbound IRC lines, drained by the broadcaster
+    @channel_members = {}
+    @irc_out = Queue.new
+    @irc_in  = Queue.new
     @auth = :guest
     @ws_state = :disconnected
     @seen_msgids = Set.new
-    # Open IRCv3 BATCH ids of type chathistory — suppress message-pane emit
-    # (scrollback already loaded via REST).
     @suppress_history_batches = Set.new
-    # msgid → { nick:, text: } for reply badge context.
     @parent_lookup = {}
-    # msgid → { emoji => Set<nick> } — cached reactions so chips survive refresh.
     @reaction_cache = {}
     @task = nil
     @broadcaster = nil
+    @reg_phase = :wait_cap_ack  # :wait_cap_ack, :sasl_challenge, :sasl_result
     @task_mutex = Mutex.new
   end
 
-  attr_reader :suppress_history_batches, :reaction_cache
+  # ── Auth helpers ──────────────────────────────────────────────────────
 
-  # Record a reaction event (from IrcBroadcaster) so chips persist across
-  # page refreshes within the same session.
+  def authenticated?
+    @auth.is_a?(Atproto::OAuthSession)
+  end
+
+  def auth_nick
+    authenticated? ? @auth.nick : nil
+  end
+
+  def auth_handle
+    authenticated? ? @auth.handle : nil
+  end
+
+  # Force the WS task to reconnect so it picks up the new auth state.
+  def request_reconnect
+    @task_mutex.synchronize do
+      if @task && @task.alive?
+        @task.kill
+        @task = nil
+      end
+      @ws_state = :disconnected
+    end
+  end
+
+  # ── Reaction cache ────────────────────────────────────────────────────
+
   def apply_reaction(msgid, emoji, nick, added)
     return if msgid.to_s.empty? || emoji.to_s.empty?
     synchronize do
@@ -58,7 +83,6 @@ class SessionState
     end
   end
 
-  # Merge cached reactions into a history message's reactions hash.
   def merged_reactions(msgid, rest_reactions)
     cached = @reaction_cache[msgid]
     merged = {}
@@ -71,11 +95,12 @@ class SessionState
     merged
   end
 
+  # ── Message + msgid tracking ──────────────────────────────────────────
+
   def remember_message(msgid, nick, text)
     return if msgid.to_s.empty?
     synchronize do
       @parent_lookup[msgid] = { nick: nick.to_s, text: text.to_s }
-      # Bound memory.
       if @parent_lookup.size > 2000
         @parent_lookup = @parent_lookup.to_a.last(1000).to_h
       end
@@ -89,7 +114,6 @@ class SessionState
     end
   end
 
-  # Returns true if already shown (skip). Marks new ids as seen.
   def check_and_mark_msgid(msgid)
     return false if msgid.to_s.empty?
     synchronize do
@@ -104,6 +128,8 @@ class SessionState
     @irc_out << line
   end
 
+  # ── Upstream WS ───────────────────────────────────────────────────────
+
   def spawn_upstream_if_needed(upstream_url, channel)
     target = IrcRender.canonical_channel(channel)
     synchronize { @joined << target }
@@ -111,7 +137,6 @@ class SessionState
 
     @task_mutex.synchronize do
       if @task && @task.alive?
-        # Already connected — just JOIN the new channel.
         enqueue_outbound("JOIN #{target}\r\n")
         return
       end
@@ -122,7 +147,6 @@ class SessionState
     end
   end
 
-  # Drain irc_in and push CableReady ops. One thread per session.
   def ensure_broadcaster!
     @task_mutex.synchronize do
       return if @broadcaster && @broadcaster.alive?
@@ -137,7 +161,7 @@ class SessionState
     end
   end
 
-  # websocket-driver client I/O callbacks. The driver calls #url and #write.
+  # websocket-driver client I/O callbacks.
   attr_reader :url
 
   def write(data)
@@ -145,7 +169,8 @@ class SessionState
   end
 
   # The upstream WS connection task. Mirrors run_upstream_ws in upstream.rs.
-  # Supports both ws:// (plaintext) and wss:// (TLS via OpenSSL).
+  # Supports ws:// and wss://. When authenticated, performs SASL
+  # ATPROTO-CHALLENGE before completing IRC registration.
   def run_upstream(upstream_url, channel)
     uri = URI(upstream_url)
     tls = uri.scheme == "wss"
@@ -158,7 +183,7 @@ class SessionState
         ctx = OpenSSL::SSL::SSLContext.new
         ctx.set_params(verify_mode: OpenSSL::SSL::VERIFY_PEER)
         ssl = OpenSSL::SSL::SSLSocket.new(tcp, ctx)
-        ssl.hostname = uri.host # SNI
+        ssl.hostname = uri.host
         ssl.sync_close = true
         ssl.connect
         ssl
@@ -183,13 +208,9 @@ class SessionState
       Rails.logger.warn("upstream WS driver error: #{event.message}")
     end
 
-    # Emit the HTTP upgrade handshake.
     driver.start
-
     self.ws_state = :connecting
 
-    # Read loop: forward bytes from the socket into the driver parser, and
-    # also drain the outbound queue when registered.
     loop do
       chunk =
         begin
@@ -202,7 +223,6 @@ class SessionState
       if chunk
         driver.parse(chunk)
       elsif ws_state == :ready
-        # Drain outbound when upstream is quiet.
         begin
           line = irc_out.pop(true)
           driver.text(line)
@@ -224,41 +244,119 @@ class SessionState
 
   def send_registration(driver, channel)
     driver.text("CAP LS 302\r\n")
-    driver.text("NICK #{guest_nick}\r\n")
+    nick = authenticated? ? auth_nick : guest_nick
+    driver.text("NICK #{nick}\r\n")
     driver.text("USER web2 0 * :freeq-web2\r\n")
     driver.text("CAP REQ :sasl account-notify message-tags batch server-time echo-message\r\n")
+    @reg_phase = :wait_cap_ack
   end
 
   def handle_upstream_line(line, driver, channel)
+    # PING/PONG keepalive.
     if (token = ping_token(line))
       driver.text("PONG :#{token}\r\n")
       return
     end
 
+    # 433 nick in use → retry.
     if line.include?(" 433 ")
       driver.text("NICK #{guest_nick}\r\n")
       return
     end
 
-    case ws_state
-    when :registering
+    case @reg_phase
+    when :wait_cap_ack
       if (caps = parse_cap_ack(line))
-        # Guest mode in core port (no OAuth creds). Finish registration.
-        driver.text("CAP END\r\n")
-        driver.text("JOIN #{channel}\r\n")
-        self.ws_state = :ready
-        flush_outbound(driver)
+        if caps.any? { |c| c.casecmp?("sasl") } && authenticated?
+          # Start SASL ATPROTO-CHALLENGE.
+          driver.text("AUTHENTICATE ATPROTO-CHALLENGE\r\n")
+          @reg_phase = :sasl_challenge
+          Rails.logger.info("Starting SASL ATPROTO-CHALLENGE for #{auth_handle}")
+        else
+          # No SASL or not authenticated — guest mode.
+          finish_registration(driver, channel)
+        end
         return
       end
-      if line =~ / 00[1-4] / # numeric registration without CAP
-        driver.text("CAP END\r\n")
-        driver.text("JOIN #{channel}\r\n")
-        self.ws_state = :ready
-        flush_outbound(driver)
+
+      # Server sent numeric registration without CAP → proceed as guest.
+      if line =~ / 00[1-4] /
+        finish_registration(driver, channel)
       end
-    when :ready
+
+    when :sasl_challenge
+      # Check for DPOP_NONCE notice and update the OAuth session.
+      if (nonce = parse_dpop_nonce_notice(line))
+        Rails.logger.debug("DPoP nonce rotated during SASL: #{nonce}")
+        @auth.dpop_nonce = nonce if authenticated?
+        return
+      end
+
+      # AUTHENTICATE <challenge> from server.
+      if (challenge_b64 = parse_authenticate_challenge(line))
+        begin
+          challenge = Atproto::Sasl.parse_challenge(challenge_b64)
+          response = Atproto::Sasl.build_response(challenge[:nonce], @auth)
+          driver.text("AUTHENTICATE #{response}\r\n")
+          @reg_phase = :sasl_result
+          Rails.logger.info("SASL challenge response sent for #{auth_handle}")
+        rescue => e
+          Rails.logger.warn("SASL challenge response failed: #{e.class}: #{e.message}")
+          # Fall back to guest.
+          finish_registration(driver, channel)
+        end
+        return
+      end
+
+    when :sasl_result
+      # 903 = SASL success.
+      if line.include?(" 903 ")
+        Rails.logger.info("SASL authentication successful for #{auth_handle}")
+        finish_registration(driver, channel)
+        return
+      end
+
+      # 904 = SASL failure — fall back to guest.
+      if line.include?(" 904 ")
+        Rails.logger.warn("SASL authentication failed; proceeding as guest")
+        @reg_phase = :wait_cap_ack
+        finish_registration(driver, channel)
+        return
+      end
+
+      # DPoP nonce rotation during SASL result.
+      if (nonce = parse_dpop_nonce_notice(line))
+        @auth.dpop_nonce = nonce if authenticated?
+        return
+      end
+
+      # Server may re-issue a challenge (DPoP retry).
+      if (challenge_b64 = parse_authenticate_challenge(line))
+        begin
+          challenge = Atproto::Sasl.parse_challenge(challenge_b64)
+          response = Atproto::Sasl.build_response(challenge[:nonce], @auth)
+          driver.text("AUTHENTICATE #{response}\r\n")
+        rescue => e
+          Rails.logger.warn("SASL retry failed: #{e.class}: #{e.message}")
+          finish_registration(driver, channel)
+        end
+        return
+      end
+
+    end
+
+    # Once registered, forward all lines to the broadcaster.
+    if ws_state == :ready
       irc_in << line
     end
+  end
+
+  def finish_registration(driver, channel)
+    driver.text("CAP END\r\n")
+    driver.text("JOIN #{channel}\r\n")
+    self.ws_state = :ready
+    @reg_phase = :ready
+    flush_outbound(driver)
   end
 
   def flush_outbound(driver)
@@ -283,6 +381,20 @@ class SessionState
     parts = line.split
     return nil unless parts[1] == "CAP" && parts[3] == "ACK"
     parts[5..].map { |c| c.delete_prefix(":") }
+  end
+
+  def parse_authenticate_challenge(line)
+    return nil unless line.start_with?("AUTHENTICATE ")
+    challenge = line.sub("AUTHENTICATE ", "").strip
+    challenge unless challenge.empty? || challenge == "+"
+  end
+
+  def parse_dpop_nonce_notice(line)
+    return nil unless line.include?("NOTICE") && line.include?("DPOP_NONCE")
+    # :server NOTICE target :DPOP_NONCE <nonce>
+    if (m = line.match(/DPOP_NONCE\s+(\S+)/))
+      m[1]
+    end
   end
 
   def guest_nick
