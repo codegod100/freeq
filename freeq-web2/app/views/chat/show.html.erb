@@ -7,7 +7,18 @@
   <nav>
     <span class="brand">freeq</span>
     <span style="font-size:.875rem;color:#7ab7ff"><%= @channel %></span>
-    <span id="channel-topic" style="margin-left:.5rem;font-size:.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%"><%= @topic %></span>
+    <span id="channel-topic" title="Click to edit topic"
+          style="margin-left:.5rem;font-size:.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%;min-width:4rem;cursor:pointer"><%= @topic.presence || "add topic" %></span>
+    <form id="topic-form"
+          data-reflex="submit->ChatReflex#set_topic"
+          data-reflex-serialize-form="true"
+          data-channel="<%= @bare %>"
+          style="display:none;margin-left:.5rem;flex:0 1 40%;min-width:0">
+      <input id="topic-input" type="text" name="topic"
+             placeholder="Set topic… (Enter to save, Esc to cancel)"
+             autocomplete="off"
+             style="width:100%;font-size:.7rem;padding:2px 6px;border:1px solid var(--border);border-radius:4px;background:#151a22;color:var(--fg)">
+    </form>
     <div class="nav-right">
       <% if @session.authenticated? %>
         <span class="auth-badge">🔒 <%= @session.auth_handle %></span>

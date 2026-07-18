@@ -11,6 +11,7 @@ export default class ChatController extends Controller {
     this.setupReactions();
     this.setupReplies();
     this.setupSidebar();
+    this.setupTopicEdit();
     this.setupTabComplete();
     this.hydrateReplyBadges();
     this.scrollToBottom();
@@ -297,6 +298,41 @@ export default class ChatController extends Controller {
         el.classList.toggle("collapsed", !hidden);
       });
     });
+  }
+
+  // ── Topic editing ─────────────────────────────────────────────────
+
+  // Click the topic to edit it inline. Enter submits (ChatReflex#set_topic
+  // sends TOPIC upstream; the echo updates #channel-topic). Esc/blur cancels.
+  setupTopicEdit() {
+    const span = document.getElementById("channel-topic");
+    const form = document.getElementById("topic-form");
+    const input = document.getElementById("topic-input");
+    if (!span || !form || !input) return;
+
+    const open = () => {
+      const current = span.textContent.trim();
+      // "add topic" is the empty-state placeholder, not a real topic.
+      input.value = current === "add topic" ? "" : current;
+      span.style.display = "none";
+      form.style.display = "";
+      input.focus();
+      input.select();
+    };
+    const close = () => {
+      form.style.display = "none";
+      span.style.display = "";
+    };
+
+    span.addEventListener("click", open);
+    form.addEventListener("submit", () => close());
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        close();
+      }
+    });
+    input.addEventListener("blur", () => close());
   }
 
   // ── Tab completion ───────────────────────────────────────────────────

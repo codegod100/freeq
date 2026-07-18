@@ -76,8 +76,12 @@ class ChatReflex < ApplicationReflex
 
   def set_topic
     channel = canonical_channel(element.dataset[:channel])
-    topic = params[:topic].to_s
+    topic = params[:topic].to_s.strip
+    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
     session.enqueue_outbound("TOPIC #{channel} :#{topic}\r\n")
+    # Skip the page re-render — the upstream TOPIC echo updates
+    # #channel-topic via the broadcaster; a 482 shows if we're not op.
+    morph :nothing
   end
 
   def react
