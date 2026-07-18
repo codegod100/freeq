@@ -43,7 +43,6 @@ class ChatController < ApplicationController
       msg[:reactions] = @session.merged_reactions(msg[:msgid], msg[:reactions])
     end
     @parent_lookup = IrcRender.parent_lookup_from_history(@history)
-    @session.note_seen_msgids(@history.filter_map { |m| m[:msgid] })
     # Keep a per-session lookup so live-rendered replies can show parent context.
     @session.parent_lookup.merge!(@parent_lookup)
 

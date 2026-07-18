@@ -119,9 +119,10 @@ module IrcBroadcaster
 
       next unless IrcRender.should_emit?(line, ch)
 
-      if (mid = line_msgid(line)) && session.check_and_mark_msgid(mid)
-        next
-      end
+      # No msgid seen-set: this is IRC, not email. Replay-vs-REST overlap
+      # is handled by batch suppression, and DOM-level dups by the client's
+      # filterDupes. Requested history (CHATHISTORY) must re-render on
+      # every page load.
       # Remember for future reply badges.
       tags, rest = IrcRender.parse_irc_tags(line)
       if (mid = tags["msgid"]).present?
@@ -156,11 +157,6 @@ module IrcBroadcaster
   rescue => e
     # Fallback: just log; chips will catch up on next history load.
     Rails.logger.warn("broadcast_reaction failed: #{e.class}: #{e.message}")
-  end
-
-  def line_msgid(line)
-    tags, _ = IrcRender.parse_irc_tags(line)
-    tags["msgid"]
   end
 
   # When a policy capture is active, capture ALL nick-directed NOTICEs.

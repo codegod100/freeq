@@ -34,7 +34,6 @@ class SessionState
     @irc_in  = Queue.new
     @auth = :guest
     @ws_state = :disconnected
-    @seen_msgids = Set.new
     @suppress_history_batches = Set.new
     @replay_channels = Set.new  # REST scrollback failed — let JOIN replay render
     @replay_batches = Set.new   # batch ids we're rendering (not suppressing)
@@ -235,23 +234,6 @@ class SessionState
       if @parent_lookup.size > 2000
         @parent_lookup = @parent_lookup.to_a.last(1000).to_h
       end
-    end
-  end
-
-  def note_seen_msgids(ids)
-    synchronize do
-      ids.each { |id| @seen_msgids << id unless id.to_s.empty? }
-      trim_seen
-    end
-  end
-
-  def check_and_mark_msgid(msgid)
-    return false if msgid.to_s.empty?
-    synchronize do
-      return true if @seen_msgids.include?(msgid)
-      @seen_msgids << msgid
-      trim_seen
-      false
     end
   end
 
@@ -571,10 +553,5 @@ class SessionState
 
   def guest_nick
     "web" + rand(0xffffffff).to_s(16)
-  end
-
-  def trim_seen
-    return if @seen_msgids.size <= 1000
-    @seen_msgids = Set.new(@seen_msgids.to_a.drop(@seen_msgids.size / 2))
   end
 end
