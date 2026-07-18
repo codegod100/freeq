@@ -35,13 +35,13 @@
           autocomplete="off">
         <button type="submit">+</button>
       </form>
-      <p class="sidebar-toggle" data-target="my-channels">MY CHANNELS</p>
+      <p class="sidebar-toggle" data-target="my-channels"><span class="arrow">▾</span> MY CHANNELS</p>
       <ul id="my-channels">
         <% @my_channels.each do |ch| %>
           <%= render "chat/channel_link", ch: ch, active: @channel %>
         <% end %>
       </ul>
-      <p class="sidebar-toggle collapsed" data-target="all-channels">ALL CHANNELS</p>
+      <p class="sidebar-toggle collapsed" data-target="all-channels"><span class="arrow">▾</span> ALL CHANNELS</p>
       <ul id="all-channels" style="display:none">
         <% @all_channels.each do |ch| %>
           <%= render "chat/channel_link", ch: ch, active: @channel %>
