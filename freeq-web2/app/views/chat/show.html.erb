@@ -57,27 +57,27 @@
         <% end %>
       </div>
       <div id="reply-banner" class="reply-banner" data-reflex-permanent></div>
-      <form id="send-form"
-            data-reflex-permanent
-            data-reflex="submit->ChatReflex#send_message"
-            data-reflex-serialize-form="true"
-            data-channel="<%= @bare %>">
-        <input type="hidden" name="reply_to" id="reply-to-input" value="">
-        <input
-          id="message-input"
-          style="min-width:0;flex:1;border:1px solid var(--border);background:#151a22;border-radius:8px;padding:8px 12px;color:var(--fg);font-size:.875rem;outline:none"
-          type="text"
-          name="msg"
-          placeholder="Send to <%= @channel %>…"
-          autocomplete="off"
-          autofocus>
-        <button type="submit" style="border:0;border-radius:8px;background:#7ab7ff;color:#0e1116;font-weight:600;padding:8px 12px;font-size:.875rem;cursor:pointer">Send</button>
+      <div id="send-bar">
+        <form id="send-form"
+              data-reflex-permanent
+              data-reflex="submit->ChatReflex#send_message"
+              data-reflex-serialize-form="true"
+              data-channel="<%= @bare %>">
+          <input type="hidden" name="reply_to" id="reply-to-input" value="">
+          <input
+            id="message-input"
+            type="text"
+            name="msg"
+            placeholder="Send to <%= @channel %>…"
+            autocomplete="off"
+            autofocus>
+          <button type="submit">Send</button>
+        </form>
         <button id="part-btn"
                 type="button"
-                style="border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--muted);padding:8px 12px;font-size:.875rem;cursor:pointer"
                 data-channel="<%= @bare %>"
                 data-reflex="click->ChatReflex#part">×</button>
-      </form>
+      </div>
     </section>
 
     <%# Members %>
