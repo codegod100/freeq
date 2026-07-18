@@ -1323,7 +1323,11 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             }
         }
         Event::ServerNotice { text } => {
-            app.status_msg(&text);
+            // Show in the buffer the user is actually looking at — a FAIL (or
+            // any server notice) responding to a command run from a channel/DM
+            // was invisible when it only ever landed in the status buffer.
+            let active = app.active_buffer.clone();
+            app.buffer_mut(&active).push_system(&text);
             // Detect URLs in server notices and offer to open them
             if let Some(url) = extract_url(&text) {
                 app.pending_url = Some(url.to_string());
@@ -2294,11 +2298,28 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     // contains the arg (DID-keyed DMs match by nick).
                     let target = arg.to_lowercase();
                     let names = app.buffer_names();
-                    if let Some(name) = names.iter().find(|n| {
-                        n.to_lowercase().contains(&target)
-                            || app.display_name(n).to_lowercase().contains(&target)
-                    }) {
-                        let name = name.clone();
+                    // Rank matches so an intent-revealing hit wins over
+                    // BTreeMap order: a display-name/key that *starts with*
+                    // the fragment beats one that merely contains it. Fixes
+                    // `/sw didtest` landing on `#didtest` instead of the
+                    // didtestbot DM.
+                    let best = names
+                        .iter()
+                        .filter_map(|n| {
+                            let key = n.to_lowercase();
+                            let disp = app.display_name(n).to_lowercase();
+                            let rank = if disp.starts_with(&target) || key.starts_with(&target) {
+                                0
+                            } else if disp.contains(&target) || key.contains(&target) {
+                                1
+                            } else {
+                                return None;
+                            };
+                            Some((rank, n.clone()))
+                        })
+                        .min_by_key(|(rank, _)| *rank)
+                        .map(|(_, n)| n);
+                    if let Some(name) = best {
                         app.switch_to(&name);
                     } else {
                         app.status_msg(&format!("No buffer matching '{arg}'"));
