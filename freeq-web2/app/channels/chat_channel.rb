@@ -25,10 +25,25 @@ class ChatChannel < ApplicationCable::Channel
       else "disconnected"
       end
     cr.text_content(selector: "#status", text: status_text)
+    # Replay cached message rows (one-shot). Broadcasts that fired before
+    # this subscription confirmed (page-load race, chathistory replay)
+    # are otherwise dropped by the pubsub. Client-side filterDupes strips
+    # any overlap with REST scrollback by data-msgid.
+    rows = session.take_recent_rows(canonical)
+    rows.each do |row|
+      cr.append(selector: "#messages", html: row)
+    end
 
-    transmit("cableReady" => true, "operations" => cr.operations_payload, "version" => CableReady::VERSION)
+    # Bypass Channel#transmit — its logger.debug path raises ArgumentError
+    # in this environment (actioncable 8.1.3), which has silently killed
+    # the roster replay since it was written. connection.transmit takes
+    # the same payload without the logging wrapper.
+    connection.transmit(
+      identifier: @identifier,
+      message: { "cableReady" => true, "operations" => cr.operations_payload, "version" => CableReady::VERSION }
+    )
   rescue => e
-    Rails.logger.warn("ChatChannel#subscribed replay failed: #{e.class}: #{e.message}")
+    Rails.logger.warn("ChatChannel#subscribed replay failed: #{e.class}: #{e.message}\n#{e.backtrace&.first(4)&.join("\n")}")
   end
 
   def unsubscribed; end

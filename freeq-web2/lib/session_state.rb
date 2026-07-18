@@ -41,6 +41,7 @@ class SessionState
     @parent_lookup = {}
     @reaction_cache = {}
     @policy_response_queue = nil  # Set to a Queue when capturing policy NOTICEs
+    @recent_rows = {}             # channel => [html rows] for subscribe replay
     @task = nil
     @broadcaster = nil
     @reg_phase = :wait_cap_ack  # :wait_cap_ack, :sasl_challenge, :sasl_result
@@ -143,6 +144,33 @@ class SessionState
     return unless @ws_state == :ready
 
     enqueue_outbound("CHATHISTORY LATEST #{IrcRender.canonical_channel(channel)} * #{limit}\r\n")
+  end
+
+  # ── Recent message rows ──────────────────────────────────────────────
+  #
+  # The broadcaster caches the last N rendered message rows per channel.
+  # ChatChannel#subscribed replays them so broadcasts that raced the
+  # subscription (page-load JOIN replay, CHATHISTORY, live messages
+  # during navigation) aren't lost.
+
+  RECENT_ROWS_PER_CHANNEL = 50
+
+  def cache_row(channel, html)
+    c = IrcRender.canonical_channel(channel)
+    synchronize do
+      rows = (@recent_rows[c] ||= [])
+      rows << html
+      rows.shift while rows.size > RECENT_ROWS_PER_CHANNEL
+    end
+  end
+
+  def recent_rows(channel)
+    synchronize { (@recent_rows[IrcRender.canonical_channel(channel)] || []).dup }
+  end
+
+  # Drain the cache for a channel (one-shot subscribe replay).
+  def take_recent_rows(channel)
+    synchronize { @recent_rows.delete(IrcRender.canonical_channel(channel)) || [] }
   end
 
   # Force the WS task to reconnect so it picks up the new auth state.

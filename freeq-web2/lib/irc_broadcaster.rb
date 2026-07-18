@@ -113,6 +113,7 @@ module IrcBroadcaster
       if (err = IrcRender.parse_channel_error(line, ch))
         ts = Time.now.utc.strftime("%H:%M:%S")
         html = %(<div class="notice"><span class="ts">#{ts}</span><span class="body">#{IrcRender.html_escape(err)}</span></div>)
+        session.cache_row(ch, html)
         cable_for(ch).append(selector: "#messages", html: html).broadcast
       end
 
@@ -132,6 +133,7 @@ module IrcBroadcaster
       html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup)
       next if html.empty?
 
+      session.cache_row(ch, html)
       cable_for(ch).append(selector: "#messages", html: html).broadcast
     end
   rescue => e
