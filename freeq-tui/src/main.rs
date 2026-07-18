@@ -735,6 +735,12 @@ async fn run_app(
             }
         }
 
+        // Backfill: when a DM buffer is the active one and we haven't yet
+        // pulled its history this session, request it once. Channels get
+        // history pushed on JOIN; DMs have no JOIN, so opening one would
+        // otherwise show only messages that arrive live.
+        maybe_fetch_dm_history(app, handle).await;
+
         // Drain background task results
         if let Some(mut bg_rx) = app.bg_result_rx.take() {
             while let Ok(result) = bg_rx.try_recv() {
@@ -2636,6 +2642,25 @@ fn parse_timestamp_ms(tags: &std::collections::HashMap<String, String>) -> i64 {
         return dt.timestamp_millis();
     }
     chrono::Local::now().timestamp_millis()
+}
+
+/// If the active buffer is a DM we haven't fetched history for yet, request
+/// `CHATHISTORY LATEST` once. No-op for channels (history arrives on JOIN),
+/// the status/P2P buffers, and DMs already requested this session. The wire
+/// target is the buffer key (a DID for a DID-keyed DM); the server resolves
+/// it to the canonical conversation.
+async fn maybe_fetch_dm_history(app: &mut crate::app::App, handle: &client::ClientHandle) {
+    let key = app.active_buffer.clone();
+    let is_dm = key != "status"
+        && !key.starts_with('#')
+        && !key.starts_with('&')
+        && !key.starts_with("p2p:")
+        && app.buffers.contains_key(&key);
+    if !is_dm || app.dm_history_requested.contains(&key) {
+        return;
+    }
+    app.dm_history_requested.insert(key.clone());
+    let _ = handle.raw(&format!("CHATHISTORY LATEST {key} * 50")).await;
 }
 
 fn push_line_to_buffer(

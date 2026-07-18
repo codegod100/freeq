@@ -567,6 +567,10 @@ pub struct App {
     /// `Event::MemberDid` and the conversation list's partner DIDs.
     /// Display-grade only — never used to address outgoing messages.
     pub did_names: HashMap<String, String>,
+    /// DM buffer keys we've already requested history for this session, so
+    /// activating a DM fetches its backlog exactly once (channels get theirs
+    /// pushed on JOIN; DMs have no JOIN).
+    pub dm_history_requested: HashSet<String>,
 }
 
 /// Canonical buffer-map key for a name. Nicks and channels are
@@ -653,6 +657,7 @@ impl App {
             pending_url: None,
             nick_hosts: HashMap::new(),
             did_names: HashMap::new(),
+            dm_history_requested: HashSet::new(),
         }
     }
 
@@ -851,8 +856,21 @@ impl App {
             batch.lines.sort_by_key(|a| a.0);
             let was_empty = batch.lines.is_empty();
             let was_chathistory = batch.batch_type.eq_ignore_ascii_case("chathistory");
+            // Skip lines already in the buffer by msgid. A CHATHISTORY LATEST
+            // fetch (used to backfill a DM on open) overlaps messages that
+            // arrived live, which would otherwise double them.
+            let present: HashSet<String> = buf
+                .messages
+                .iter()
+                .filter_map(|l| l.msgid.clone())
+                .collect();
             // Prepend in order (oldest first)
             for (_, line) in batch.lines.into_iter().rev() {
+                if let Some(ref id) = line.msgid
+                    && present.contains(id)
+                {
+                    continue;
+                }
                 buf.messages.push_front(line);
                 if buf.messages.len() > MAX_MESSAGES {
                     buf.messages.pop_back();
@@ -1316,6 +1334,7 @@ mod tests {
             pending_url: None,
             nick_hosts: HashMap::new(),
             did_names: HashMap::new(),
+            dm_history_requested: HashSet::new(),
         };
         app.start_batch("b1", "#test");
         app.end_batch("b1");
@@ -1880,6 +1899,26 @@ mod tests {
         // A non-DID never becomes a thread key.
         app.record_member_did("alice", "not-a-did");
         assert!(!app.did_names.contains_key("not-a-did"));
+    }
+
+    #[test]
+    fn end_batch_dedups_by_msgid_against_existing() {
+        // A DM's CHATHISTORY LATEST backfill overlaps messages already shown
+        // live; the flush must not double them.
+        let mut app = App::new("me", false);
+        app.buffer_mut("bob").push(line("live", "bob", Some("01LIVE")));
+
+        app.start_batch("h1", "bob");
+        // History returns an older message plus the one already present.
+        app.add_batch_line("h1", 1, line("older", "bob", Some("01OLD")));
+        app.add_batch_line("h1", 2, line("live", "bob", Some("01LIVE")));
+        app.end_batch("h1");
+
+        let buf = app.buffers.get("bob").unwrap();
+        assert_eq!(buf.messages.len(), 2, "duplicate msgid must be skipped");
+        // Older prepended, the live one kept its single copy.
+        assert_eq!(buf.messages.front().unwrap().msgid.as_deref(), Some("01OLD"));
+        assert_eq!(buf.messages.back().unwrap().msgid.as_deref(), Some("01LIVE"));
     }
 
     #[test]
