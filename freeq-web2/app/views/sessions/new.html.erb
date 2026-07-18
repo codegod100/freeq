@@ -16,7 +16,7 @@
       </div>
     <% end %>
 
-    <form method="POST" action="/login" style="margin-top:24px;display:flex;flex-direction:column;gap:12px">
+    <form method="POST" action="/login" data-turbo="false" style="margin-top:24px;display:flex;flex-direction:column;gap:12px">
       <%= hidden_field_tag :authenticity_token, form_authenticity_token %>
       <label style="font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Handle</label>
       <input
