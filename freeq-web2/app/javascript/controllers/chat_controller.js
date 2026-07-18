@@ -15,6 +15,12 @@ export default class ChatController extends Controller {
     this.hydrateReplyBadges();
     this.scrollToBottom();
 
+    // Focus the composer — safer than the autofocus attribute, which the
+    // browser blocks when another element already has focus (Turbo keeps
+    // focus across navigations).
+    const input = document.getElementById("message-input");
+    if (input && !/Mobi|Android/i.test(navigator.userAgent)) input.focus();
+
     this._onReaction = (ev) => {
       const d = ev.detail || {};
       this.applyReaction(d.msgid, d.emoji, d.nick, !!d.added);

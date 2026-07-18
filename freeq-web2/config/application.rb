@@ -36,6 +36,11 @@ module FreeqWeb2
     # config.time_zone = "Central Time (US & Canada)"
     # config.eager_load_paths << Rails.root.join("extras")
 
+    # Don't emit Link: rel=preload headers for stylesheet/script tags.
+    # With Turbo navigations the preloaded asset is served from cache and
+    # never "used" by a load event, spamming console warnings.
+    config.action_view.preload_links_header = false
+
     # Don't generate system test files.
     config.generators.system_tests = nil
   end
