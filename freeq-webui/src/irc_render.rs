@@ -1,8 +1,7 @@
 //! IRC line → HTML rendering and parse helpers.
-use chrono::Utc;
 use crate::state::MemberEntry;
 use crate::upstream::UpstreamHistoryMessage;
-
+use chrono::Utc;
 
 pub fn canonical_channel(s: &str) -> String {
     if s.starts_with('#') {
@@ -20,20 +19,29 @@ pub fn should_emit(line: &str, current_channel: &str) -> bool {
     // Strip IRCv3 message tags (`@key=value ...`) before parsing the prefix.
     let after_tags = parse_irc_tags(line).1;
     let Some(rest) = after_tags.strip_prefix(':') else {
-        return true;
+        // Client→server style without prefix: ignore.
+        return false;
     };
     let Some(sp) = rest.find(' ') else {
-        return true;
+        return false;
     };
     let after_prefix = &rest[sp + 1..];
-    let bytes = after_prefix.as_bytes();
-    if bytes.len() >= 3
-        && bytes[0].is_ascii_digit()
-        && bytes[1].is_ascii_digit()
-        && bytes[2].is_ascii_digit()
-    {
+    let cmd = after_prefix.split_whitespace().next().unwrap_or("");
+
+    // Numerics (001 welcome, 353 names, …) are handled elsewhere or noise.
+    if cmd.len() == 3 && cmd.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
+
+    // Registration / protocol control — never show in the message pane.
+    match cmd {
+        "CAP" | "AUTHENTICATE" | "BATCH" | "PING" | "PONG" | "ERROR" | "TAGMSG" => {
+            return false;
+        }
+        "PRIVMSG" | "NOTICE" | "JOIN" | "PART" | "QUIT" | "TOPIC" | "KICK" | "NICK" | "MODE" => {}
+        _ => return false,
+    }
+
     // Channel-scoped messages: only emit if the target matches the
     // channel this SSE subscriber is viewing.
     if let Some(target) = extract_irc_target(after_prefix) {
@@ -43,6 +51,40 @@ pub fn should_emit(line: &str, current_channel: &str) -> bool {
         }
     }
     true
+}
+
+/// Parse `BATCH +id type [args…]` / `BATCH -id`. Returns `(id, open, batch_type)`.
+/// `open` is true for `+`, false for `-`. `batch_type` is only set when opening.
+pub fn parse_batch_line(line: &str) -> Option<(String, bool, Option<String>)> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let after_tags = parse_irc_tags(line).1;
+    let rest = after_tags.strip_prefix(':')?;
+    let sp = rest.find(' ')?;
+    let after_prefix = &rest[sp + 1..];
+    let mut parts = after_prefix.split_whitespace();
+    if parts.next()? != "BATCH" {
+        return None;
+    }
+    let ref_tok = parts.next()?;
+    let (open, id) = if let Some(id) = ref_tok.strip_prefix('+') {
+        (true, id.to_string())
+    } else if let Some(id) = ref_tok.strip_prefix('-') {
+        (false, id.to_string())
+    } else {
+        return None;
+    };
+    let batch_type = if open {
+        parts.next().map(|s| s.to_string())
+    } else {
+        None
+    };
+    Some((id, open, batch_type))
+}
+
+/// Extract `msgid` tag from an IRCv3-tagged line, if present.
+pub fn line_msgid(line: &str) -> Option<String> {
+    let (tags, _) = parse_irc_tags(line);
+    tags.get("msgid").cloned()
 }
 
 pub fn extract_irc_target(after_prefix: &str) -> Option<&str> {
@@ -82,7 +124,10 @@ pub fn unescape_tag_value(s: &str) -> String {
                 Some('\\') => out.push('\\'),
                 Some('r') => out.push('\r'),
                 Some('n') => out.push('\n'),
-                Some(other) => { out.push('\\'); out.push(other); }
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
                 None => out.push('\\'),
             }
         } else {
@@ -164,32 +209,43 @@ pub fn render_reaction_chips(
     chips
 }
 
-pub fn parse_tagmsg_reaction(line: &str) -> Option<(String, String, String, bool)> {
+/// Returns `(target_msgid, emoji, reactor_nick, added, channel)`.
+/// `added` is true for `+react`, false for `+freeq.at/unreact`.
+pub fn parse_tagmsg_reaction(line: &str) -> Option<(String, String, String, bool, String)> {
     let (tags, after) = parse_irc_tags(line);
     let (emoji, added) = if let Some(e) = tags.get("+react") {
-        (e, true)
+        (e.clone(), true)
     } else if let Some(e) = tags.get("+freeq.at/unreact") {
-        (e, false)
+        (e.clone(), false)
     } else {
         return None;
     };
-    let msgid = tags.get("+reply")?;
-    // Confirm it's a TAGMSG for a channel (we only support channel reactions).
-    if !after
-        .split_whitespace()
-        .nth(1)?
-        .eq_ignore_ascii_case("TAGMSG")
-    {
+    let msgid = tags.get("+reply")?.clone();
+    // `:nick!user@host TAGMSG #channel`
+    let rest = after.strip_prefix(':')?;
+    let mut parts = rest.split_whitespace();
+    let nick = parts.next()?.split('!').next()?.to_string();
+    if !parts.next()?.eq_ignore_ascii_case("TAGMSG") {
         return None;
     }
-    // Extract the reactor's nick from the prefix `:nick!user@host ...`
-    let nick = after
-        .strip_prefix(':')?
-        .split('!')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    Some((msgid.clone(), emoji.clone(), nick, added))
+    let channel = parts.next()?.trim_start_matches(':').to_string();
+    Some((msgid, emoji, nick, added, channel))
+}
+
+/// Escape a value for an IRCv3 message-tag (escaping rules for `;` space `\` CRLF).
+pub fn escape_tag_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ';' => out.push_str("\\:"),
+            ' ' => out.push_str("\\s"),
+            '\\' => out.push_str("\\\\"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 pub fn render_irc_line(line: &str) -> String {

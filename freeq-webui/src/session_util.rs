@@ -1,8 +1,8 @@
 //! Browser session cookie helpers (stable sid across restarts).
 
+use rand::Rng;
 use topcoat::context::Cx;
 use topcoat::cookie::{Cookie, Cookies, cookies};
-use rand::Rng;
 
 const COOKIE_NAME: &str = "session_id";
 

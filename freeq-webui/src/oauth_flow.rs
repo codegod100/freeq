@@ -3,9 +3,9 @@
 //! main's freeq-sdk exposes `OAuthSession` + `DpopKey` but not `PreparedLogin`.
 //! This module reimplements the PAR / code-exchange dance for multi-user web UI.
 
-use anyhow::{bail, Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use anyhow::{Context, Result, bail};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use freeq_sdk::did::DidResolver;
 use freeq_sdk::oauth::{DpopKey, OAuthSession};
 use freeq_sdk::pds;
@@ -180,7 +180,10 @@ impl PreparedLogin {
         if let Some(ref token_did) = token_did
             && token_did != &self.did
         {
-            bail!("DID mismatch: resolved {} but token is for {token_did}", self.did);
+            bail!(
+                "DID mismatch: resolved {} but token is for {token_did}",
+                self.did
+            );
         }
         let dpop_nonce = probe_dpop_nonce(&self.pds_url, &access_token, &self.dpop_key).await;
         Ok(OAuthSession {
@@ -352,7 +355,8 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
             if state.as_deref() == Some(expected_state)
                 && let Some(code) = code
             {
-                let body = "<html><body><h1>Signed in</h1><p>You can close this window.</p></body></html>";
+                let body =
+                    "<html><body><h1>Signed in</h1><p>You can close this window.</p></body></html>";
                 let resp = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()

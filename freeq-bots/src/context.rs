@@ -393,8 +393,8 @@ impl AgentContext {
                 Ok(Some(_)) => {
                     // Ignore other events during batch collection
                 }
-                Ok(None) => break,       // channel closed
-                Err(_) => break,          // timeout
+                Ok(None) => break, // channel closed
+                Err(_) => break,   // timeout
             }
         }
 
@@ -489,10 +489,7 @@ impl AgentContext {
         self.memory.log(
             proj,
             "summary_log",
-            &format!(
-                "[{}] {summary}",
-                Utc::now().format("%Y-%m-%d %H:%M")
-            ),
+            &format!("[{}] {summary}", Utc::now().format("%Y-%m-%d %H:%M")),
         )?;
 
         // Reset counter
@@ -571,11 +568,7 @@ impl AgentContext {
         }
 
         if !stored.is_empty() {
-            tracing::info!(
-                channel,
-                "Extracted {} facts from exchange",
-                stored.len()
-            );
+            tracing::info!(channel, "Extracted {} facts from exchange", stored.len());
         }
 
         Ok(stored)
@@ -606,13 +599,7 @@ impl AgentContext {
     // ── Convenience: store a fact directly ────────────────────────────
 
     /// Store a fact, decision, preference, etc. directly.
-    pub fn store(
-        &self,
-        project: &str,
-        kind: &str,
-        key: &str,
-        value: &str,
-    ) -> Result<()> {
+    pub fn store(&self, project: &str, kind: &str, key: &str, value: &str) -> Result<()> {
         self.memory.set(project, kind, key, value)
     }
 
@@ -624,10 +611,7 @@ impl AgentContext {
     /// Get recent message count for a channel.
     pub async fn message_count(&self, channel: &str) -> usize {
         let channels = self.channels.lock().await;
-        channels
-            .get(channel)
-            .map(|c| c.recent.len())
-            .unwrap_or(0)
+        channels.get(channel).map(|c| c.recent.len()).unwrap_or(0)
     }
 }
 
@@ -716,8 +700,10 @@ mod tests {
     #[tokio::test]
     async fn test_facts_in_context() {
         let mem = Arc::new(Memory::in_memory().unwrap());
-        mem.set("test", "decision", "framework", "Use React").unwrap();
-        mem.set("test", "fact", "deployment", "Hosted on Miren").unwrap();
+        mem.set("test", "decision", "framework", "Use React")
+            .unwrap();
+        mem.set("test", "fact", "deployment", "Hosted on Miren")
+            .unwrap();
 
         let ctx = AgentContext::new(test_identity(), mem, ContextConfig::default());
         let assembled = ctx.assemble("#test", None).await;
@@ -730,8 +716,13 @@ mod tests {
     #[tokio::test]
     async fn test_summary_in_context() {
         let mem = Arc::new(Memory::in_memory().unwrap());
-        mem.set("test", "summary", "latest", "We discussed the architecture and decided on React + Rust.")
-            .unwrap();
+        mem.set(
+            "test",
+            "summary",
+            "latest",
+            "We discussed the architecture and decided on React + Rust.",
+        )
+        .unwrap();
 
         let ctx = AgentContext::new(test_identity(), mem, ContextConfig::default());
         let assembled = ctx.assemble("#test", None).await;
@@ -742,7 +733,8 @@ mod tests {
     #[tokio::test]
     async fn test_export_context_file() {
         let mem = Arc::new(Memory::in_memory().unwrap());
-        mem.set("test", "decision", "stack", "Rust + React").unwrap();
+        mem.set("test", "decision", "stack", "Rust + React")
+            .unwrap();
 
         let ctx = AgentContext::new(test_identity(), mem, ContextConfig::default());
         ctx.ingest_history(

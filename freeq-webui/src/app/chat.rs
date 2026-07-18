@@ -2,10 +2,10 @@
 
 mod channel;
 
+use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::page;
 use topcoat::view::view;
-use topcoat::Result;
 
 use crate::app::state;
 use crate::irc_render::canonical_channel;
@@ -19,12 +19,9 @@ async fn channels_page(cx: &Cx) -> Result {
     let sid = ensure_session_id(cx);
     let session = app.session(&sid);
     let mut channels = fetch_channels(&app).await.unwrap_or_default();
-    let joined: std::collections::HashSet<String> =
-        session.joined.lock().iter().cloned().collect();
-    let existing: std::collections::HashSet<String> = channels
-        .iter()
-        .map(|c| c.name.to_lowercase())
-        .collect();
+    let joined: std::collections::HashSet<String> = session.joined.lock().iter().cloned().collect();
+    let existing: std::collections::HashSet<String> =
+        channels.iter().map(|c| c.name.to_lowercase()).collect();
     for ch in &joined {
         let c = canonical_channel(ch);
         if !existing.contains(&c.to_lowercase()) {

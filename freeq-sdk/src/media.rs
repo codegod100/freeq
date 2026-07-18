@@ -179,11 +179,10 @@ impl Reaction {
 pub async fn fetch_link_preview(url: &str) -> Result<LinkPreview> {
     // SSRF protection: resolve hostname and reject private IPs
     let parsed = url::Url::parse(url).context("Invalid URL for link preview")?;
-    let host = parsed
-        .host_str()
-        .context("URL has no host")?
-        .to_string();
-    let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let host = parsed.host_str().context("URL has no host")?.to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
     let addrs = crate::ssrf::resolve_and_check(&host, port)
         .await
         .context("Link preview SSRF check failed")?;

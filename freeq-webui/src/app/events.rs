@@ -5,18 +5,16 @@ use chrono::Utc;
 use futures_util::StreamExt;
 use http_body::Frame;
 use http_body_util::StreamBody;
-use topcoat::context::Cx;
-use topcoat::router::{
-    Body, IntoResponse, Response, path_param, route,
-};
 use topcoat::Result;
+use topcoat::context::Cx;
+use topcoat::router::{Body, IntoResponse, Response, path_param, route};
 use tracing::debug;
 
 use crate::app::state;
 use crate::irc_render::{
-    canonical_channel, is_353, parse_333_did, parse_account_did, parse_channel_error,
-    parse_member_change, parse_tagmsg_reaction, parse_topic_change, parse_whois_line,
-    render_irc_line, render_member_list, should_emit, MemberChange,
+    MemberChange, canonical_channel, is_353, line_msgid, parse_333_did, parse_account_did,
+    parse_batch_line, parse_channel_error, parse_member_change, parse_tagmsg_reaction,
+    parse_topic_change, parse_whois_line, render_irc_line, render_member_list, should_emit,
 };
 use crate::session_util::ensure_session_id;
 use crate::state::{AuthState, MemberEntry};
@@ -58,10 +56,30 @@ async fn channel_events(cx: &Cx) -> Result<SseResponse> {
             r#""connected""#,
         )));
 
+        // Open chathistory batch ids — suppress message pane for those
+        // (scrollback already came from REST on page load).
+        let mut suppress_history_batches: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
         loop {
             match lines_rx.recv().await {
                 Ok(line) => {
                     let canon = channel.clone();
+
+                    // Track IRCv3 BATCH so JOIN history is not re-appended.
+                    if let Some((batch_id, open, batch_type)) = parse_batch_line(&line) {
+                        if open {
+                            let is_hist = batch_type
+                                .as_deref()
+                                .is_some_and(|t| t.eq_ignore_ascii_case("chathistory"));
+                            if is_hist {
+                                suppress_history_batches.insert(batch_id);
+                            }
+                        } else {
+                            suppress_history_batches.remove(&batch_id);
+                        }
+                        continue;
+                    }
 
                     if is_353(&line) {
                         let entries = crate::irc_render::parse_353_members(&line);
@@ -164,11 +182,40 @@ async fn channel_events(cx: &Cx) -> Result<SseResponse> {
                         }
                     }
 
-                    // Live reaction updates: re-render chip row would need msgid DOM;
-                    // for now ignore tagmsg reactions (chips still from history).
-                    let _ = parse_tagmsg_reaction(&line);
+                    // Live reactions (TAGMSG +react) — update chips via SSE.
+                    if let Some((msgid, emoji, nick, added, ch)) = parse_tagmsg_reaction(&line) {
+                        if ch.eq_ignore_ascii_case(&canon) {
+                            let payload = serde_json::json!({
+                                "msgid": msgid,
+                                "emoji": emoji,
+                                "nick": nick,
+                                "added": added,
+                            });
+                            yield Ok(Frame::data(sse_frame(
+                                "reaction",
+                                &payload.to_string(),
+                            )));
+                        }
+                        continue;
+                    }
+
+                    // While a chathistory batch is open, skip message pane updates.
+                    // NAMES / members / topic still handled above.
+                    if !suppress_history_batches.is_empty() {
+                        // Also mark msgids so late unbatched dupes are skipped.
+                        if let Some(mid) = line_msgid(&line) {
+                            let _ = session.check_and_mark_msgid(&mid);
+                        }
+                        continue;
+                    }
 
                     if should_emit(&line, &canon) {
+                        // Dedup SSR history vs JOIN replay by msgid when present.
+                        if let Some(mid) = line_msgid(&line) {
+                            if session.check_and_mark_msgid(&mid) {
+                                continue;
+                            }
+                        }
                         let html = render_irc_line(&line);
                         if !html.is_empty() {
                             yield Ok(Frame::data(sse_frame("message", &html)));

@@ -5638,14 +5638,23 @@ async fn single_server_edge2_nick_change_to_registered_nick_blocked() {
     wait_joined(&mut rx_intruder, &ch).await;
 
     let names = request_names(&h_owner, &mut rx_owner, &ch).await;
-    let bare_names: Vec<String> = names.iter().map(|n: &String| n.trim_start_matches(['@', '+']).to_lowercase()).collect();
+    let bare_names: Vec<String> = names
+        .iter()
+        .map(|n: &String| n.trim_start_matches(['@', '+']).to_lowercase())
+        .collect();
     assert!(
         bare_names.contains(&owner_nick.to_lowercase()),
         "Owner nick should be in NAMES"
     );
     // Intruder should NOT have the owner's exact nick
-    let intruder_count = bare_names.iter().filter(|n| **n == owner_nick.to_lowercase()).count();
-    assert_eq!(intruder_count, 1, "Only one user should have the owner's nick");
+    let intruder_count = bare_names
+        .iter()
+        .filter(|n| **n == owner_nick.to_lowercase())
+        .count();
+    assert_eq!(
+        intruder_count, 1,
+        "Only one user should have the owner's nick"
+    );
     eprintln!("  ✓ NICK change to in-use nick blocked (intruder got variant)");
 
     let _ = h_owner.quit(Some("done")).await;
@@ -6263,7 +6272,11 @@ async fn single_server_hist1_chathistory_chronological_order() {
     }
 
     // Verify chronological order
-    assert!(msgs.len() >= 5, "Expected 5 history messages, got {}: {msgs:?}", msgs.len());
+    assert!(
+        msgs.len() >= 5,
+        "Expected 5 history messages, got {}: {msgs:?}",
+        msgs.len()
+    );
     for i in 0..msgs.len() - 1 {
         assert!(
             msgs[i] < msgs[i + 1],
@@ -6333,9 +6346,7 @@ async fn single_server_hist2_deleted_messages_excluded() {
     // Delete the message
     let mut del_tags = std::collections::HashMap::new();
     del_tags.insert("+draft/delete".to_string(), delete_msgid.clone());
-    ha.send_tagmsg(&ch, del_tags)
-        .await
-        .unwrap();
+    ha.send_tagmsg(&ch, del_tags).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain(&mut ea).await;
 
@@ -6426,9 +6437,7 @@ async fn single_server_hist3_edited_messages_in_history() {
     // Edit the message
     let mut edit_tags = std::collections::HashMap::new();
     edit_tags.insert("+draft/edit".to_string(), orig_msgid.clone());
-    ha.send_tagged(&ch, "edited-text", edit_tags)
-        .await
-        .unwrap();
+    ha.send_tagged(&ch, "edited-text", edit_tags).await.unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     drain(&mut ea).await;
 
@@ -6650,7 +6659,9 @@ async fn single_server_reconn1_rejoin_sees_recent_messages() {
         )
         .await
         {
-            Some(Event::Message { text, .. }) if text.starts_with("before-") || text == "while-gone" => {
+            Some(Event::Message { text, .. })
+                if text.starts_with("before-") || text == "while-gone" =>
+            {
                 seen.push(text);
             }
             Some(Event::BatchEnd { .. }) => break,
@@ -6782,8 +6793,7 @@ async fn single_server_edge14_rapid_messages_unique_msgids() {
     );
 
     // All msgids should be unique
-    let unique: std::collections::HashSet<&str> =
-        msgids.iter().map(|s| s.as_str()).collect();
+    let unique: std::collections::HashSet<&str> = msgids.iter().map(|s| s.as_str()).collect();
     assert_eq!(
         unique.len(),
         msgids.len(),
@@ -6903,7 +6913,9 @@ async fn single_server_edge17_part_rejoin_preserves_topic() {
     drain(&mut ea).await;
 
     // Set topic
-    ha.raw(&format!("TOPIC {ch} :persistent topic")).await.unwrap();
+    ha.raw(&format!("TOPIC {ch} :persistent topic"))
+        .await
+        .unwrap();
     wait_topic(&mut ea, &ch).await;
     drain(&mut ea).await;
 
@@ -6922,7 +6934,10 @@ async fn single_server_edge17_part_rejoin_preserves_topic() {
         Duration::from_secs(3),
     )
     .await;
-    assert!(topic_found.is_some(), "Topic should persist through part/rejoin");
+    assert!(
+        topic_found.is_some(),
+        "Topic should persist through part/rejoin"
+    );
     eprintln!("  ✓ Topic persists through part/rejoin");
 
     let _ = ha.quit(Some("done")).await;
@@ -7023,13 +7038,11 @@ async fn single_server_edge19_empty_message() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     // We're still connected if we can receive events
-    let alive = maybe_wait(
-        &mut ea,
-        |_e| true,
-        Duration::from_secs(2),
-    )
-    .await;
-    assert!(alive.is_some(), "Server should still be responsive after empty message");
+    let alive = maybe_wait(&mut ea, |_e| true, Duration::from_secs(2)).await;
+    assert!(
+        alive.is_some(),
+        "Server should still be responsive after empty message"
+    );
     eprintln!("  ✓ Empty message handled gracefully, server still responsive");
 
     let _ = ha.quit(Some("done")).await;
@@ -7109,7 +7122,10 @@ async fn single_server_edge21_chathistory_request_for_empty_channel() {
         alive.is_some(),
         "Connection should survive CHATHISTORY on empty channel"
     );
-    eprintln!("  ✓ CHATHISTORY on empty channel doesn't crash (batch_start={:?})", batch_start.is_some());
+    eprintln!(
+        "  ✓ CHATHISTORY on empty channel doesn't crash (batch_start={:?})",
+        batch_start.is_some()
+    );
 
     let _ = ha.quit(Some("done")).await;
 }
@@ -7189,7 +7205,7 @@ async fn single_server_edge23_special_characters_in_message() {
         "hello 🔥 world 🌍",
         "line with unicode: café résumé naïve",
         "symbols: @#$%^&*()[]{}|\\",
-        "empty-looking:   ",  // spaces only
+        "empty-looking:   ", // spaces only
         "https://example.com/path?a=1&b=2#frag",
     ];
 
@@ -7201,7 +7217,10 @@ async fn single_server_edge23_special_characters_in_message() {
             Duration::from_secs(3),
         )
         .await;
-        assert!(result.is_some(), "Message with special chars should be delivered: {msg}");
+        assert!(
+            result.is_some(),
+            "Message with special chars should be delivered: {msg}"
+        );
         if let Some(Event::Message { text, .. }) = result {
             assert_eq!(&text, msg, "Message text should be preserved exactly");
         }
@@ -7237,8 +7256,14 @@ async fn single_server_edge24_mode_reflected_in_names() {
 
     // A is op (creator), B is not
     let nicks_before = request_names(&ha, &mut ea, &ch).await;
-    assert!(nick_is_op(&nicks_before, &nick_a), "A should be op: {nicks_before:?}");
-    assert!(!nick_is_op(&nicks_before, &nick_b), "B should not be op: {nicks_before:?}");
+    assert!(
+        nick_is_op(&nicks_before, &nick_a),
+        "A should be op: {nicks_before:?}"
+    );
+    assert!(
+        !nick_is_op(&nicks_before, &nick_b),
+        "B should not be op: {nicks_before:?}"
+    );
 
     // A grants op to B
     ha.raw(&format!("MODE {ch} +o {nick_b}")).await.unwrap();
@@ -7299,7 +7324,10 @@ async fn single_server_edge25_clear_topic() {
         Duration::from_secs(3),
     )
     .await;
-    assert!(cleared.is_some(), "Topic should be clearable with empty string");
+    assert!(
+        cleared.is_some(),
+        "Topic should be clearable with empty string"
+    );
     eprintln!("  ✓ Topic can be cleared with empty string");
 
     let _ = ha.quit(Some("done")).await;
@@ -7363,10 +7391,7 @@ async fn single_server_dm1_edit_and_delete() {
     )
     .await;
 
-    assert!(
-        edit_received.is_some(),
-        "B should receive the edited DM"
-    );
+    assert!(edit_received.is_some(), "B should receive the edited DM");
     eprintln!("  ✓ DM edit delivered to recipient");
 
     // A deletes the DM

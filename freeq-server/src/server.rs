@@ -379,8 +379,7 @@ impl NickMap {
                     .iter()
                     .find(|(_, n)| n.to_lowercase() == lower)
                 {
-                    self.nick_to_sid
-                        .insert(lower, other_sid.clone());
+                    self.nick_to_sid.insert(lower, other_sid.clone());
                 }
             }
             Some(nick)
@@ -1619,7 +1618,12 @@ pub(crate) async fn process_s2s_message(
     // ── C-1 fix: Reject messages from unauthenticated peers ──
     // Hello and HelloAck are the handshake itself, so they must pass through.
     if !matches!(&msg, S2sMessage::Hello { .. } | S2sMessage::HelloAck { .. }) {
-        if !manager.authenticated_peers.lock().await.contains(authenticated_peer_id) {
+        if !manager
+            .authenticated_peers
+            .lock()
+            .await
+            .contains(authenticated_peer_id)
+        {
             tracing::warn!(
                 peer = %authenticated_peer_id,
                 "S2S: dropping message from unauthenticated peer"
@@ -1777,9 +1781,7 @@ pub(crate) async fn process_s2s_message(
         | S2sMessage::Signed { .. }
         | S2sMessage::KeyRotation { .. }
         | S2sMessage::SyncRequest
-        | S2sMessage::SyncResponse { .. } => {
-            (String::new(), String::new())
-        }
+        | S2sMessage::SyncResponse { .. } => (String::new(), String::new()),
     };
 
     // Skip our own messages
@@ -1797,17 +1799,20 @@ pub(crate) async fn process_s2s_message(
     let peer_trust = manager.get_trust(authenticated_peer_id).await;
     match (&msg, peer_trust) {
         // Readonly peers cannot originate any events
-        (S2sMessage::Privmsg { .. }
-        | S2sMessage::Join { .. }
-        | S2sMessage::Part { .. }
-        | S2sMessage::Quit { .. }
-        | S2sMessage::NickChange { .. }
-        | S2sMessage::Topic { .. }
-        | S2sMessage::Mode { .. }
-        | S2sMessage::Kick { .. }
-        | S2sMessage::Ban { .. }
-        | S2sMessage::Invite { .. }
-        | S2sMessage::ChannelCreated { .. }, crate::s2s::TrustLevel::Readonly) => {
+        (
+            S2sMessage::Privmsg { .. }
+            | S2sMessage::Join { .. }
+            | S2sMessage::Part { .. }
+            | S2sMessage::Quit { .. }
+            | S2sMessage::NickChange { .. }
+            | S2sMessage::Topic { .. }
+            | S2sMessage::Mode { .. }
+            | S2sMessage::Kick { .. }
+            | S2sMessage::Ban { .. }
+            | S2sMessage::Invite { .. }
+            | S2sMessage::ChannelCreated { .. },
+            crate::s2s::TrustLevel::Readonly,
+        ) => {
             tracing::warn!(
                 peer = %authenticated_peer_id,
                 trust = "readonly",
@@ -1816,10 +1821,13 @@ pub(crate) async fn process_s2s_message(
             return;
         }
         // Relay peers cannot perform admin operations
-        (S2sMessage::Mode { .. }
-        | S2sMessage::Kick { .. }
-        | S2sMessage::Ban { .. }
-        | S2sMessage::ChannelCreated { .. }, crate::s2s::TrustLevel::Relay) => {
+        (
+            S2sMessage::Mode { .. }
+            | S2sMessage::Kick { .. }
+            | S2sMessage::Ban { .. }
+            | S2sMessage::ChannelCreated { .. },
+            crate::s2s::TrustLevel::Relay,
+        ) => {
             tracing::warn!(
                 peer = %authenticated_peer_id,
                 trust = "relay",
@@ -1882,7 +1890,11 @@ pub(crate) async fn process_s2s_message(
             }
 
             // Phase 1: Mark peer as authenticated
-            manager.authenticated_peers.lock().await.insert(authenticated_peer_id.to_string());
+            manager
+                .authenticated_peers
+                .lock()
+                .await
+                .insert(authenticated_peer_id.to_string());
         }
 
         S2sMessage::HelloAck {
@@ -1905,7 +1917,11 @@ pub(crate) async fn process_s2s_message(
                 trust = ?trust_level,
                 "S2S HelloAck: mutual authentication confirmed"
             );
-            manager.authenticated_peers.lock().await.insert(authenticated_peer_id.to_string());
+            manager
+                .authenticated_peers
+                .lock()
+                .await
+                .insert(authenticated_peer_id.to_string());
         }
 
         S2sMessage::KeyRotation {
@@ -1914,13 +1930,23 @@ pub(crate) async fn process_s2s_message(
             timestamp,
             signature,
         } => {
-            if manager.verify_rotation(&old_id, &new_id, timestamp, &signature, authenticated_peer_id) {
+            if manager.verify_rotation(
+                &old_id,
+                &new_id,
+                timestamp,
+                &signature,
+                authenticated_peer_id,
+            ) {
                 tracing::info!(
                     old = %old_id,
                     new = %new_id,
                     "S2S key rotation verified — recording pending rotation"
                 );
-                manager.pending_rotations.lock().await.insert(old_id, new_id);
+                manager
+                    .pending_rotations
+                    .lock()
+                    .await
+                    .insert(old_id, new_id);
             } else {
                 tracing::warn!(
                     old = %old_id,
@@ -2080,7 +2106,9 @@ pub(crate) async fn process_s2s_message(
                 let sender_nick = from.split('!').next().unwrap_or(&from);
                 let sender_did = state.nick_owners.lock().get(sender_nick).cloned();
                 let recipient_did = state.nick_owners.lock().get(&target).cloned();
-                if let (Some(s_did), Some(r_did)) = (sender_did.as_deref(), recipient_did.as_deref()) {
+                if let (Some(s_did), Some(r_did)) =
+                    (sender_did.as_deref(), recipient_did.as_deref())
+                {
                     let dm_key = crate::db::canonical_dm_key(s_did, r_did);
                     let timestamp = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -2092,7 +2120,15 @@ pub(crate) async fn process_s2s_message(
                         tags.insert("+freeq.at/sig".to_string(), sig.clone());
                     }
                     state.with_db(|db| {
-                        db.insert_message(&dm_key, &from, &text, timestamp, &tags, Some(&msgid), sender_did.as_deref())
+                        db.insert_message(
+                            &dm_key,
+                            &from,
+                            &text,
+                            timestamp,
+                            &tags,
+                            Some(&msgid),
+                            sender_did.as_deref(),
+                        )
                     });
                 }
             }
@@ -3253,7 +3289,7 @@ async fn reconcile_crdt_to_local(state: &Arc<SharedState>) {
 #[cfg(test)]
 mod s2s_adversarial_tests {
     use super::*;
-    use crate::s2s::{S2sMessage, S2sManager, DedupSet, TrustLevel};
+    use crate::s2s::{DedupSet, S2sManager, S2sMessage, TrustLevel};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
     use tokio::sync::mpsc;
@@ -3354,8 +3390,16 @@ mod s2s_adversarial_tests {
     const PEER: &str = "fake-peer-id-for-testing";
 
     async fn setup_authenticated_peer(state: &SharedState, manager: &Arc<S2sManager>) {
-        manager.authenticated_peers.lock().await.insert(PEER.to_string());
-        manager.peer_trust.lock().await.insert(PEER.to_string(), TrustLevel::Full);
+        manager
+            .authenticated_peers
+            .lock()
+            .await
+            .insert(PEER.to_string());
+        manager
+            .peer_trust
+            .lock()
+            .await
+            .insert(PEER.to_string(), TrustLevel::Full);
         *state.s2s_manager.lock() = Some(manager.clone());
     }
 
@@ -3366,12 +3410,15 @@ mod s2s_adversarial_tests {
     fn add_remote_member(state: &SharedState, channel: &str, nick: &str, is_op: bool) {
         let mut channels = state.channels.lock();
         if let Some(ch) = channels.get_mut(channel) {
-            ch.remote_members.insert(nick.to_string(), crate::server::RemoteMember {
-                origin: PEER.to_string(),
-                did: None,
-                handle: None,
-                is_op,
-            });
+            ch.remote_members.insert(
+                nick.to_string(),
+                crate::server::RemoteMember {
+                    origin: PEER.to_string(),
+                    did: None,
+                    handle: None,
+                    is_op,
+                },
+            );
         }
     }
 
@@ -3387,15 +3434,21 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#test");
 
         // Peer sends Join with is_op: true
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Join {
-            event_id: format!("{PEER}:1"),
-            nick: "evil_op".to_string(),
-            channel: "#test".to_string(),
-            did: None,
-            handle: None,
-            is_op: true,
-            origin: PEER.to_string(),
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Join {
+                event_id: format!("{PEER}:1"),
+                nick: "evil_op".to_string(),
+                channel: "#test".to_string(),
+                did: None,
+                handle: None,
+                is_op: true,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
 
         // Check: was the remote member added with is_op?
         let channels = state.channels.lock();
@@ -3424,14 +3477,20 @@ mod s2s_adversarial_tests {
         add_remote_member(&state, "#secure", "faker", true);
 
         // Peer sends Mode +o granting ops to another user
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Mode {
-            event_id: format!("{PEER}:2"),
-            channel: "#secure".to_string(),
-            mode: "+o".to_string(),
-            arg: Some("target_user".to_string()),
-            set_by: "faker".to_string(),
-            origin: PEER.to_string(),
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Mode {
+                event_id: format!("{PEER}:2"),
+                channel: "#secure".to_string(),
+                mode: "+o".to_string(),
+                arg: Some("target_user".to_string()),
+                set_by: "faker".to_string(),
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
 
         // Check: was the mode applied?
         let channels = state.channels.lock();
@@ -3457,22 +3516,36 @@ mod s2s_adversarial_tests {
         // Add a local user "alice" to the channel
         {
             let (tx, _rx) = mpsc::channel(16);
-            state.connections.lock().insert("local-sess".to_string(), tx);
+            state
+                .connections
+                .lock()
+                .insert("local-sess".to_string(), tx);
             state.nick_to_session.lock().insert("alice", "local-sess");
-            state.channels.lock().get_mut("#chat").unwrap()
-                .members.insert("local-sess".to_string());
+            state
+                .channels
+                .lock()
+                .get_mut("#chat")
+                .unwrap()
+                .members
+                .insert("local-sess".to_string());
         }
 
         // Peer sends PRIVMSG claiming to be from "alice"
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Privmsg {
-            event_id: format!("{PEER}:3"),
-            from: "alice!u@s2s".to_string(),
-            target: "#chat".to_string(),
-            text: "I am the real alice".to_string(),
-            origin: PEER.to_string(),
-            msgid: None,
-            sig: None,
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:3"),
+                from: "alice!u@s2s".to_string(),
+                target: "#chat".to_string(),
+                text: "I am the real alice".to_string(),
+                origin: PEER.to_string(),
+                msgid: None,
+                sig: None,
+            },
+        )
+        .await;
 
         // The message should have been delivered to local alice.
         // The key question: can the local user distinguish the real alice
@@ -3495,29 +3568,44 @@ mod s2s_adversarial_tests {
         {
             let (tx, mut rx) = mpsc::channel(16);
             state.connections.lock().insert("recv-sess".to_string(), tx);
-            state.channels.lock().get_mut("#inject").unwrap()
-                .members.insert("recv-sess".to_string());
-            state.cap_message_tags.lock().insert("recv-sess".to_string());
+            state
+                .channels
+                .lock()
+                .get_mut("#inject")
+                .unwrap()
+                .members
+                .insert("recv-sess".to_string());
+            state
+                .cap_message_tags
+                .lock()
+                .insert("recv-sess".to_string());
 
             // Peer sends PRIVMSG with CRLF in text
-            process_s2s_message(&state, &mgr, PEER, S2sMessage::Privmsg {
-                event_id: format!("{PEER}:4"),
-                from: "attacker!u@s2s".to_string(),
-                target: "#inject".to_string(),
-                text: "hello\r\nQUIT :pwned".to_string(),
-                origin: PEER.to_string(),
-                msgid: None,
-                sig: None,
-            }).await;
+            process_s2s_message(
+                &state,
+                &mgr,
+                PEER,
+                S2sMessage::Privmsg {
+                    event_id: format!("{PEER}:4"),
+                    from: "attacker!u@s2s".to_string(),
+                    target: "#inject".to_string(),
+                    text: "hello\r\nQUIT :pwned".to_string(),
+                    origin: PEER.to_string(),
+                    msgid: None,
+                    sig: None,
+                },
+            )
+            .await;
 
             // Check what the local member received
-            if let Ok(line) = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                rx.recv(),
-            ).await {
+            if let Ok(line) =
+                tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await
+            {
                 if let Some(line) = line {
-                    assert!(!line.contains("\r\nQUIT"),
-                        "BUG: CRLF injection in S2S privmsg text: {line}");
+                    assert!(
+                        !line.contains("\r\nQUIT"),
+                        "BUG: CRLF injection in S2S privmsg text: {line}"
+                    );
                 }
             }
         }
@@ -3535,7 +3623,12 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#locked");
 
         // Set +t on channel
-        state.channels.lock().get_mut("#locked").unwrap().topic_locked = true;
+        state
+            .channels
+            .lock()
+            .get_mut("#locked")
+            .unwrap()
+            .topic_locked = true;
 
         // Add non-op remote member
         add_remote_member(&state, "#locked", "nonop", false);
@@ -3548,19 +3641,27 @@ mod s2s_adversarial_tests {
         });
 
         // Peer sends topic change from non-op
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Topic {
-            event_id: format!("{PEER}:5"),
-            channel: "#locked".to_string(),
-            topic: "hijacked topic".to_string(),
-            set_by: "nonop".to_string(),
-            origin: PEER.to_string(),
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Topic {
+                event_id: format!("{PEER}:5"),
+                channel: "#locked".to_string(),
+                topic: "hijacked topic".to_string(),
+                set_by: "nonop".to_string(),
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
 
         // Topic should NOT have changed
         let channels = state.channels.lock();
         let topic = channels.get("#locked").unwrap().topic.as_ref().unwrap();
-        assert_eq!(topic.text, "original topic",
-            "BUG: Non-op changed topic on +t channel via S2S");
+        assert_eq!(
+            topic.text, "original topic",
+            "BUG: Non-op changed topic on +t channel via S2S"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -3580,20 +3681,28 @@ mod s2s_adversarial_tests {
         add_remote_member(&state, "#kicktest", "victim", false);
 
         // Peer sends kick from non-op
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Kick {
-            event_id: format!("{PEER}:6"),
-            nick: "victim".to_string(),
-            channel: "#kicktest".to_string(),
-            by: "non_op_kicker".to_string(),
-            reason: "unauthorized kick".to_string(),
-            origin: PEER.to_string(),
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Kick {
+                event_id: format!("{PEER}:6"),
+                nick: "victim".to_string(),
+                channel: "#kicktest".to_string(),
+                by: "non_op_kicker".to_string(),
+                reason: "unauthorized kick".to_string(),
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
 
         // Victim should still be in the channel
         let channels = state.channels.lock();
         let ch = channels.get("#kicktest").unwrap();
-        assert!(ch.remote_members.contains_key("victim"),
-            "BUG: Non-op kicked user via S2S — authorization check failed");
+        assert!(
+            ch.remote_members.contains_key("victim"),
+            "BUG: Non-op kicked user via S2S — authorization check failed"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -3611,20 +3720,29 @@ mod s2s_adversarial_tests {
         add_remote_member(&state, "#bantest", "non_op_banner", false);
 
         // Peer sends ban from non-op
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Ban {
-            event_id: format!("{PEER}:7"),
-            channel: "#bantest".to_string(),
-            mask: "*!*@*".to_string(),
-            set_by: "non_op_banner".to_string(),
-            adding: true,
-            origin: PEER.to_string(),
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Ban {
+                event_id: format!("{PEER}:7"),
+                channel: "#bantest".to_string(),
+                mask: "*!*@*".to_string(),
+                set_by: "non_op_banner".to_string(),
+                adding: true,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
 
         // Ban list should be empty (unauthorized)
         let channels = state.channels.lock();
         let ch = channels.get("#bantest").unwrap();
-        assert!(ch.bans.is_empty(),
-            "BUG: Non-op set ban via S2S — {} bans in list", ch.bans.len());
+        assert!(
+            ch.bans.is_empty(),
+            "BUG: Non-op set ban via S2S — {} bans in list",
+            ch.bans.len()
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -3639,34 +3757,50 @@ mod s2s_adversarial_tests {
         setup_channel(&state, "#dedup");
 
         let (tx, mut rx) = mpsc::channel(16);
-        state.connections.lock().insert("dedup-sess".to_string(), tx);
-        state.channels.lock().get_mut("#dedup").unwrap()
-            .members.insert("dedup-sess".to_string());
+        state
+            .connections
+            .lock()
+            .insert("dedup-sess".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#dedup")
+            .unwrap()
+            .members
+            .insert("dedup-sess".to_string());
 
         let event_id = format!("{PEER}:100");
 
         // Send same message twice
         for _ in 0..2 {
-            process_s2s_message(&state, &mgr, PEER, S2sMessage::Privmsg {
-                event_id: event_id.clone(),
-                from: "bob!u@s2s".to_string(),
-                target: "#dedup".to_string(),
-                text: "should only arrive once".to_string(),
-                origin: PEER.to_string(),
-                msgid: None,
-                sig: None,
-            }).await;
+            process_s2s_message(
+                &state,
+                &mgr,
+                PEER,
+                S2sMessage::Privmsg {
+                    event_id: event_id.clone(),
+                    from: "bob!u@s2s".to_string(),
+                    target: "#dedup".to_string(),
+                    text: "should only arrive once".to_string(),
+                    origin: PEER.to_string(),
+                    msgid: None,
+                    sig: None,
+                },
+            )
+            .await;
         }
 
         // Should receive only ONE message
         let mut count = 0;
-        while let Ok(Some(_)) = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            rx.recv(),
-        ).await {
+        while let Ok(Some(_)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
             count += 1;
         }
-        assert_eq!(count, 1, "BUG: Duplicate S2S event not rejected — received {count} messages");
+        assert_eq!(
+            count, 1,
+            "BUG: Duplicate S2S event not rejected — received {count} messages"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -3681,21 +3815,29 @@ mod s2s_adversarial_tests {
 
         let long_name = "#".to_string() + &"a".repeat(300);
 
-        process_s2s_message(&state, &mgr, PEER, S2sMessage::Join {
-            event_id: format!("{PEER}:8"),
-            nick: "longjoin".to_string(),
-            channel: long_name.clone(),
-            did: None,
-            handle: None,
-            is_op: false,
-            origin: PEER.to_string(),
-        }).await;
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Join {
+                event_id: format!("{PEER}:8"),
+                nick: "longjoin".to_string(),
+                channel: long_name.clone(),
+                did: None,
+                handle: None,
+                is_op: false,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
 
         // Channel name should be truncated by sanitize_s2s_str(200)
         let channels = state.channels.lock();
         // The full 300-char name should NOT exist as-is
-        assert!(!channels.contains_key(&long_name),
-            "S2S channel name should be truncated to max 200 chars");
+        assert!(
+            !channels.contains_key(&long_name),
+            "S2S channel name should be truncated to max 200 chars"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -3711,31 +3853,43 @@ mod s2s_adversarial_tests {
 
         let (tx, mut rx) = mpsc::channel(256);
         state.connections.lock().insert("rl-sess".to_string(), tx);
-        state.channels.lock().get_mut("#ratelimit").unwrap()
-            .members.insert("rl-sess".to_string());
+        state
+            .channels
+            .lock()
+            .get_mut("#ratelimit")
+            .unwrap()
+            .members
+            .insert("rl-sess".to_string());
 
         // Send 101 messages rapidly (limit is 100/sec)
         for i in 0..101u64 {
-            process_s2s_message(&state, &mgr, PEER, S2sMessage::Privmsg {
-                event_id: format!("{PEER}:{}", 200 + i),
-                from: "spammer!u@s2s".to_string(),
-                target: "#ratelimit".to_string(),
-                text: format!("spam {i}"),
-                origin: PEER.to_string(),
-                msgid: None,
-                sig: None,
-            }).await;
+            process_s2s_message(
+                &state,
+                &mgr,
+                PEER,
+                S2sMessage::Privmsg {
+                    event_id: format!("{PEER}:{}", 200 + i),
+                    from: "spammer!u@s2s".to_string(),
+                    target: "#ratelimit".to_string(),
+                    text: format!("spam {i}"),
+                    origin: PEER.to_string(),
+                    msgid: None,
+                    sig: None,
+                },
+            )
+            .await;
         }
 
         // Count received messages
         let mut count = 0;
-        while let Ok(Some(_)) = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            rx.recv(),
-        ).await {
+        while let Ok(Some(_)) =
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await
+        {
             count += 1;
         }
-        assert!(count <= 100,
-            "S2S rate limit breached: received {count} messages (limit 100/sec)");
+        assert!(
+            count <= 100,
+            "S2S rate limit breached: received {count} messages (limit 100/sec)"
+        );
     }
 }

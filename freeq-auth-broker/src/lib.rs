@@ -223,8 +223,7 @@ pub async fn spawn_embedded_broker(
     let base_url = format!("http://{}", addr);
     let config = BrokerConfig {
         public_url: base_url.clone(),
-        freeq_server_url: freeq_server_url
-            .unwrap_or_else(|| "https://irc.freeq.at".to_string()),
+        freeq_server_url: freeq_server_url.unwrap_or_else(|| "https://irc.freeq.at".to_string()),
         shared_secret,
         db_path: ":memory:".to_string(),
     };
@@ -273,7 +272,8 @@ pub async fn run_from_env() -> Result<()> {
 }
 
 fn build_state(config: BrokerConfig) -> Result<Arc<BrokerState>> {
-    if !config.db_path.is_empty() && config.db_path != ":memory:"
+    if !config.db_path.is_empty()
+        && config.db_path != ":memory:"
         && let Some(parent) = std::path::Path::new(&config.db_path).parent()
         && !parent.as_os_str().is_empty()
     {
@@ -659,30 +659,52 @@ async fn auth_callback(
         .map(|s| s.to_string())
         .or(pending.dpop_nonce.clone());
 
-    let token_resp: serde_json::Value = if (status.as_u16() == 400 || status.as_u16() == 401)
-        && dpop_nonce.is_some()
-    {
-        let nonce = dpop_nonce.as_deref().unwrap();
-        tracing::info!(nonce = %nonce, "DPoP nonce retry for token exchange");
-        let dpop_proof2 = dpop_key
-            .proof("POST", &pending.token_endpoint, Some(nonce), None)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DPoP retry failed: {e}"),
-                )
-            })?;
-        let resp2 = client
-            .post(&pending.token_endpoint)
-            .header("DPoP", &dpop_proof2)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token retry failed: {e}")))?;
-        let resp2_status = resp2.status();
-        if !resp2_status.is_success() {
-            let text = resp2.text().await.unwrap_or_default();
-            let err_msg = format!("Token exchange failed: {text}");
+    let token_resp: serde_json::Value =
+        if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
+            let nonce = dpop_nonce.as_deref().unwrap();
+            tracing::info!(nonce = %nonce, "DPoP nonce retry for token exchange");
+            let dpop_proof2 = dpop_key
+                .proof("POST", &pending.token_endpoint, Some(nonce), None)
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("DPoP retry failed: {e}"),
+                    )
+                })?;
+            let resp2 = client
+                .post(&pending.token_endpoint)
+                .header("DPoP", &dpop_proof2)
+                .form(&params)
+                .send()
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token retry failed: {e}")))?;
+            let resp2_status = resp2.status();
+            if !resp2_status.is_success() {
+                let text = resp2.text().await.unwrap_or_default();
+                let err_msg = format!("Token exchange failed: {text}");
+                if let Some(session_id) = pending.session_id.as_deref() {
+                    state.completed.lock().await.insert(
+                        session_id.to_string(),
+                        serde_json::json!({ "error": err_msg }),
+                    );
+                }
+                if pending.mobile {
+                    let redirect = format!("freeq://auth?error={}", urlencod(&err_msg));
+                    return Ok(axum::response::Redirect::to(&redirect).into_response());
+                }
+                return Ok(Html(oauth_result_page(&err_msg, None)).into_response());
+            }
+            resp2
+                .json()
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
+        } else if status.is_success() {
+            resp.json()
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            let err_msg = format!("Token exchange failed ({status}): {text}");
             if let Some(session_id) = pending.session_id.as_deref() {
                 state.completed.lock().await.insert(
                     session_id.to_string(),
@@ -694,30 +716,7 @@ async fn auth_callback(
                 return Ok(axum::response::Redirect::to(&redirect).into_response());
             }
             return Ok(Html(oauth_result_page(&err_msg, None)).into_response());
-        }
-        resp2
-            .json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-    } else if status.is_success() {
-        resp.json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-    } else {
-        let text = resp.text().await.unwrap_or_default();
-        let err_msg = format!("Token exchange failed ({status}): {text}");
-        if let Some(session_id) = pending.session_id.as_deref() {
-            state.completed.lock().await.insert(
-                session_id.to_string(),
-                serde_json::json!({ "error": err_msg }),
-            );
-        }
-        if pending.mobile {
-            let redirect = format!("freeq://auth?error={}", urlencod(&err_msg));
-            return Ok(axum::response::Redirect::to(&redirect).into_response());
-        }
-        return Ok(Html(oauth_result_page(&err_msg, None)).into_response());
-    };
+        };
 
     let refresh_token = token_resp["refresh_token"]
         .as_str()
@@ -775,10 +774,11 @@ async fn auth_callback(
             .lock()
             .await
             .insert(session_id.to_string(), result.clone());
-        return Ok(
-            Html(oauth_result_page("Authentication complete. Return to freeq.", Some(&result)))
-                .into_response(),
-        );
+        return Ok(Html(oauth_result_page(
+            "Authentication complete. Return to freeq.",
+            Some(&result),
+        ))
+        .into_response());
     }
 
     if pending.mobile {
@@ -952,7 +952,11 @@ async fn refresh_access_token(
     Ok((access_token, refresh_token, dpop_nonce))
 }
 
-async fn mint_web_token(config: &BrokerConfig, did: &str, handle: &str) -> Result<(String, String)> {
+async fn mint_web_token(
+    config: &BrokerConfig,
+    did: &str,
+    handle: &str,
+) -> Result<(String, String)> {
     let body = serde_json::json!({"did": did, "handle": handle});
     let sig = sign_body(&config.shared_secret, &body)?;
     let url = format!(
@@ -1101,7 +1105,12 @@ fn init_db(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
 
 fn oauth_result_page(message: &str, result: Option<&serde_json::Value>) -> String {
     let detail = result
-        .map(|value| format!("<pre>{}</pre>", serde_json::to_string_pretty(value).unwrap_or_default()))
+        .map(|value| {
+            format!(
+                "<pre>{}</pre>",
+                serde_json::to_string_pretty(value).unwrap_or_default()
+            )
+        })
         .unwrap_or_default();
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>freeq auth</title>

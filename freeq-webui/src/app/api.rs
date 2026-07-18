@@ -1,10 +1,10 @@
+use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::{Json, path_param, route};
-use topcoat::Result;
 
 use crate::app::state;
 use crate::irc_render::canonical_channel;
-use crate::upstream::{fetch_channels, UpstreamChannel};
+use crate::upstream::{UpstreamChannel, fetch_channels};
 
 #[path_param]
 struct Channel(str);

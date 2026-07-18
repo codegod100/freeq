@@ -194,8 +194,14 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/api/v1/signing-keys/{did}", get(api_did_signing_key))
         .route("/api/v1/verify/{msgid}", get(api_verify_message))
         .route("/api/v1/actors/{did}", get(api_actor_identity))
-        .route("/api/v1/channels/{name}/agent-capabilities", get(api_agent_capabilities))
-        .route("/api/v1/channels/{name}/approvals", get(api_pending_approvals))
+        .route(
+            "/api/v1/channels/{name}/agent-capabilities",
+            get(api_agent_capabilities),
+        )
+        .route(
+            "/api/v1/channels/{name}/approvals",
+            get(api_pending_approvals),
+        )
         .route("/api/v1/channels/{name}/events", get(api_channel_events))
         .route("/api/v1/channels/{name}/audit", get(api_channel_audit))
         .route("/api/v1/tasks/{task_id}", get(api_task))
@@ -442,13 +448,17 @@ async fn api_agent_capabilities(
             // Get all agents in the channel
             let members: Vec<String> = {
                 let channels = state.channels.lock();
-                channels.get(&channel.to_lowercase())
+                channels
+                    .get(&channel.to_lowercase())
                     .map(|ch| ch.members.iter().cloned().collect())
                     .unwrap_or_default()
             };
             let dids: Vec<String> = {
                 let sd = state.session_dids.lock();
-                members.iter().filter_map(|sid| sd.get(sid).cloned()).collect()
+                members
+                    .iter()
+                    .filter_map(|sid| sd.get(sid).cloned())
+                    .collect()
             };
             let mut all = Vec::new();
             for did in &dids {
@@ -481,7 +491,8 @@ async fn api_pending_approvals(
     let channel = format!("#{name}");
     let approvals: Vec<serde_json::Value> = state
         .with_db(|db| {
-            Ok(db.get_pending_approvals(&channel.to_lowercase())
+            Ok(db
+                .get_pending_approvals(&channel.to_lowercase())
                 .into_iter()
                 .map(|a| {
                     serde_json::json!({
@@ -510,10 +521,15 @@ async fn api_channel_events(
     let ref_id = params.get("ref_id").map(|s| s.as_str());
     let actor = params.get("actor").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp())
             .or_else(|| s.parse::<i64>().ok())
     });
-    let limit = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100usize);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100usize);
 
     let events: Vec<serde_json::Value> = state
         .with_db(|db| {
@@ -548,7 +564,9 @@ async fn api_task(
 
     match result {
         Some((Some(task), events)) => {
-            let status = events.iter().rev()
+            let status = events
+                .iter()
+                .rev()
                 .find(|e| e.event_type == "task_complete" || e.event_type == "task_failed")
                 .map(|e| e.event_type.clone())
                 .unwrap_or_else(|| "in_progress".to_string());
@@ -596,10 +614,15 @@ async fn api_channel_audit(
     let channel = format!("#{name}");
     let actor = params.get("actor").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp())
             .or_else(|| s.parse::<i64>().ok())
     });
-    let limit = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(200usize);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200usize);
 
     let mut timeline: Vec<serde_json::Value> = Vec::new();
 
@@ -622,18 +645,21 @@ async fn api_channel_audit(
 
     // 2. Governance log
     if let Some(entries) = state.with_db(|db| {
-        Ok(db.query_governance_log(Some(&channel), limit)
+        Ok(db
+            .query_governance_log(Some(&channel), limit)
             .into_iter()
-            .map(|e| serde_json::json!({
-                "timestamp": e.timestamp,
-                "category": "governance",
-                "event": e.action,
-                "actor_did": e.target_did,
-                "details": {
-                    "issued_by": e.issued_by,
-                    "reason": e.reason,
-                },
-            }))
+            .map(|e| {
+                serde_json::json!({
+                    "timestamp": e.timestamp,
+                    "category": "governance",
+                    "event": e.action,
+                    "actor_did": e.target_did,
+                    "details": {
+                        "issued_by": e.issued_by,
+                        "reason": e.reason,
+                    },
+                })
+            })
             .collect::<Vec<_>>())
     }) {
         timeline.extend(entries);
@@ -653,20 +679,22 @@ async fn api_channel_audit(
 }
 
 /// GET /api/v1/agents/manifests — list all registered manifests.
-async fn api_list_manifests(
-    State(state): State<Arc<SharedState>>,
-) -> Json<serde_json::Value> {
+async fn api_list_manifests(State(state): State<Arc<SharedState>>) -> Json<serde_json::Value> {
     let manifests: Vec<serde_json::Value> = state
         .with_db(|db| {
-            Ok(db.list_manifests().into_iter().map(|(did, json, ts)| {
-                let parsed = serde_json::from_str::<serde_json::Value>(&json)
-                    .unwrap_or(serde_json::json!({}));
-                serde_json::json!({
-                    "agent_did": did,
-                    "manifest": parsed,
-                    "registered_at": ts,
+            Ok(db
+                .list_manifests()
+                .into_iter()
+                .map(|(did, json, ts)| {
+                    let parsed = serde_json::from_str::<serde_json::Value>(&json)
+                        .unwrap_or(serde_json::json!({}));
+                    serde_json::json!({
+                        "agent_did": did,
+                        "manifest": parsed,
+                        "registered_at": ts,
+                    })
                 })
-            }).collect::<Vec<_>>())
+                .collect::<Vec<_>>())
         })
         .unwrap_or_default();
     Json(serde_json::json!({ "manifests": manifests }))
@@ -680,8 +708,8 @@ async fn api_get_manifest(
     let did_decoded = did.replace("%3A", ":").replace("%3a", ":");
     match state.with_db(|db| Ok(db.get_manifest(&did_decoded))) {
         Some(Some(json)) => {
-            let parsed = serde_json::from_str::<serde_json::Value>(&json)
-                .unwrap_or(serde_json::json!({}));
+            let parsed =
+                serde_json::from_str::<serde_json::Value>(&json).unwrap_or(serde_json::json!({}));
             Json(serde_json::json!({ "agent_did": did_decoded, "manifest": parsed }))
         }
         _ => Json(serde_json::json!({ "error": "Manifest not found" })),
@@ -689,21 +717,23 @@ async fn api_get_manifest(
 }
 
 /// GET /api/v1/agents/spawned — list all active spawned agents.
-async fn api_spawned_agents(
-    State(state): State<Arc<SharedState>>,
-) -> Json<serde_json::Value> {
-    let agents: Vec<serde_json::Value> = state.spawned_agents.lock()
+async fn api_spawned_agents(State(state): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let agents: Vec<serde_json::Value> = state
+        .spawned_agents
+        .lock()
         .values()
-        .map(|sa| serde_json::json!({
-            "child_did": sa.child_did,
-            "parent_did": sa.parent_did,
-            "nick": sa.nick,
-            "channel": sa.channel,
-            "capabilities": sa.capabilities,
-            "ttl": sa.ttl,
-            "task_ref": sa.task_ref,
-            "spawned_at": sa.spawned_at,
-        }))
+        .map(|sa| {
+            serde_json::json!({
+                "child_did": sa.child_did,
+                "parent_did": sa.parent_did,
+                "nick": sa.nick,
+                "channel": sa.channel,
+                "capabilities": sa.capabilities,
+                "ttl": sa.ttl,
+                "task_ref": sa.task_ref,
+                "spawned_at": sa.spawned_at,
+            })
+        })
         .collect();
     Json(serde_json::json!({ "spawned_agents": agents }))
 }
@@ -714,25 +744,39 @@ async fn api_channel_budget(
     axum::extract::Path(name): axum::extract::Path<String>,
 ) -> Json<serde_json::Value> {
     let channel = format!("#{name}");
-    let budget_json = state.with_db(|db| Ok(db.get_budget(&channel.to_lowercase(), None))).flatten();
+    let budget_json = state
+        .with_db(|db| Ok(db.get_budget(&channel.to_lowercase(), None)))
+        .flatten();
     match budget_json {
         Some(bj) => {
             if let Ok(budget) = serde_json::from_str::<crate::policy::types::BudgetPolicy>(&bj) {
                 let period_start = crate::connection::budget_period_start(&budget.period);
-                let total_spent = state.with_db(|db| Ok(db.sum_spend(&channel.to_lowercase(), None, &budget.unit, period_start)))
+                let total_spent = state
+                    .with_db(|db| {
+                        Ok(db.sum_spend(&channel.to_lowercase(), None, &budget.unit, period_start))
+                    })
                     .unwrap_or(0.0);
-                let by_agent: Vec<serde_json::Value> = state.with_db(|db| {
-                    Ok(db.spend_by_agent(&channel.to_lowercase(), &budget.unit, period_start)
-                        .into_iter()
-                        .map(|(did, spent, count)| serde_json::json!({
-                            "agent_did": did,
-                            "spent": spent,
-                            "items": count,
-                        }))
-                        .collect::<Vec<_>>())
-                }).unwrap_or_default();
+                let by_agent: Vec<serde_json::Value> = state
+                    .with_db(|db| {
+                        Ok(db
+                            .spend_by_agent(&channel.to_lowercase(), &budget.unit, period_start)
+                            .into_iter()
+                            .map(|(did, spent, count)| {
+                                serde_json::json!({
+                                    "agent_did": did,
+                                    "spent": spent,
+                                    "items": count,
+                                })
+                            })
+                            .collect::<Vec<_>>())
+                    })
+                    .unwrap_or_default();
                 let remaining = budget.max_amount - total_spent;
-                let pct = if budget.max_amount > 0.0 { total_spent / budget.max_amount * 100.0 } else { 0.0 };
+                let pct = if budget.max_amount > 0.0 {
+                    total_spent / budget.max_amount * 100.0
+                } else {
+                    0.0
+                };
                 Json(serde_json::json!({
                     "channel": channel,
                     "policy": serde_json::from_str::<serde_json::Value>(&bj).unwrap_or_default(),
@@ -760,25 +804,35 @@ async fn api_channel_spend(
     let channel = format!("#{name}");
     let agent = params.get("agent").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.timestamp())
+        chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|dt| dt.timestamp())
             .or_else(|| s.parse::<i64>().ok())
     });
-    let limit = params.get("limit").and_then(|s| s.parse().ok()).unwrap_or(100usize);
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100usize);
 
-    let records: Vec<serde_json::Value> = state.with_db(|db| {
-        Ok(db.query_spend(&channel.to_lowercase(), agent, since, limit)
-            .into_iter()
-            .map(|r| serde_json::json!({
-                "id": r.id,
-                "agent_did": r.agent_did,
-                "amount": r.amount,
-                "unit": r.unit,
-                "description": r.description,
-                "task_ref": r.task_ref,
-                "timestamp": r.timestamp,
-            }))
-            .collect::<Vec<_>>())
-    }).unwrap_or_default();
+    let records: Vec<serde_json::Value> = state
+        .with_db(|db| {
+            Ok(db
+                .query_spend(&channel.to_lowercase(), agent, since, limit)
+                .into_iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "id": r.id,
+                        "agent_did": r.agent_did,
+                        "amount": r.amount,
+                        "unit": r.unit,
+                        "description": r.description,
+                        "task_ref": r.task_ref,
+                        "timestamp": r.timestamp,
+                    })
+                })
+                .collect::<Vec<_>>())
+        })
+        .unwrap_or_default();
     Json(serde_json::json!({ "channel": channel, "spend": records }))
 }
 
@@ -788,7 +842,9 @@ async fn api_actor_identity(
     axum::extract::Path(did): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
     // URL-decode the DID (colons may be encoded)
-    let did = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did)).to_string();
+    let did = urlencoding::decode(&did)
+        .unwrap_or(std::borrow::Cow::Borrowed(&did))
+        .to_string();
 
     // Find session(s) for this DID
     let sessions: Vec<String> = state
@@ -852,7 +908,10 @@ async fn api_actor_identity(
     });
 
     // Check if this is a spawned agent (by DID or nick)
-    let spawned = state.spawned_agents.lock().values()
+    let spawned = state
+        .spawned_agents
+        .lock()
+        .values()
         .find(|sa| sa.child_did == did || sa.nick.eq_ignore_ascii_case(&did))
         .cloned();
 
@@ -862,7 +921,11 @@ async fn api_actor_identity(
             let nts = state.nick_to_session.lock();
             nts.get_nick(&sa.parent_session).map(|n| n.to_string())
         };
-        let parent_provenance = state.provenance_declarations.lock().get(&sa.parent_did).cloned();
+        let parent_provenance = state
+            .provenance_declarations
+            .lock()
+            .get(&sa.parent_did)
+            .cloned();
         let result = serde_json::json!({
             "did": sa.child_did,
             "actor_class": "agent",
@@ -901,7 +964,10 @@ async fn api_actor_identity(
         obj.insert("provenance".into(), prov);
     }
     if let Some(pres) = presence {
-        obj.insert("presence".into(), serde_json::to_value(&pres).unwrap_or_default());
+        obj.insert(
+            "presence".into(),
+            serde_json::to_value(&pres).unwrap_or_default(),
+        );
     }
     if let Some(hb) = heartbeat {
         obj.insert("heartbeat".into(), hb);
@@ -934,7 +1000,10 @@ async fn api_verify_message(
 
     // Fall back to database if not in memory
     if found.is_none() {
-        if let Some(row) = state.with_db(|db| db.find_message_by_msgid(&msgid)).flatten() {
+        if let Some(row) = state
+            .with_db(|db| db.find_message_by_msgid(&msgid))
+            .flatten()
+        {
             found = Some(crate::server::HistoryMessage {
                 from: row.sender,
                 text: row.text,
@@ -1122,15 +1191,27 @@ async fn api_channel_history(
 
     match messages {
         Some(rows) => {
+            let msgids: Vec<&str> = rows.iter().filter_map(|r| r.msgid.as_deref()).collect();
+            let reactions = state
+                .with_db(|db| db.get_reactions_for_messages(&msgids))
+                .unwrap_or_default();
             let resp: Vec<MessageResponse> = rows
                 .into_iter()
-                .map(|r| MessageResponse {
-                    id: r.id,
-                    sender: r.sender,
-                    text: r.text,
-                    timestamp: r.timestamp,
-                    msgid: r.msgid,
-                    tags: r.tags,
+                .map(|mut r| {
+                    if let Some(ref mid) = r.msgid
+                        && let Some(rows) = reactions.get(mid)
+                        && let Some(encoded) = crate::db::encode_reactions_tag(rows)
+                    {
+                        r.tags.insert("+freeq.at/reactions".to_string(), encoded);
+                    }
+                    MessageResponse {
+                        id: r.id,
+                        sender: r.sender,
+                        text: r.text,
+                        timestamp: r.timestamp,
+                        msgid: r.msgid,
+                        tags: r.tags,
+                    }
                 })
                 .collect();
             Ok(Json(resp))
@@ -1206,7 +1287,10 @@ async fn api_channel_pins(
                 .iter()
                 .filter_map(|p| {
                     // Look up current message content from history
-                    let msg = ch.history.iter().find(|m| m.msgid.as_deref() == Some(&p.msgid))?;
+                    let msg = ch
+                        .history
+                        .iter()
+                        .find(|m| m.msgid.as_deref() == Some(&p.msgid))?;
                     Some(serde_json::json!({
                         "msgid": p.msgid,
                         "from": msg.from,
@@ -2060,7 +2144,10 @@ p {{ color: #a0a0b0; margin: 8px 0; }}
             return Ok((
                 [
                     ("content-type", "text/html; charset=utf-8"),
-                    ("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'"),
+                    (
+                        "content-security-policy",
+                        "default-src 'none'; style-src 'unsafe-inline'",
+                    ),
                 ],
                 html,
             ));
@@ -2234,7 +2321,10 @@ async fn api_upload(
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if !state.rest_rate_limiter.check(addr.ip()) {
-        return Err((StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string()));
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit exceeded".to_string(),
+        ));
     }
     let mut file_data: Option<Vec<u8>> = None;
     let mut content_type = String::from("application/octet-stream");
@@ -2650,7 +2740,9 @@ async fn api_og_preview(
                 .into_response();
         }
     };
-    let port = url.port().unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
+    let port = url
+        .port()
+        .unwrap_or(if url.scheme() == "https" { 443 } else { 80 });
     let addrs = match freeq_sdk::ssrf::resolve_and_check(&host, port).await {
         Ok(a) => a,
         Err(e) => {

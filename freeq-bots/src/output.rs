@@ -3,10 +3,10 @@
 //! Agents produce structured artifacts (code diffs, diagrams, status updates).
 //! This module formats them for readable IRC output.
 
+use crate::llm::StreamDelta;
 use freeq_sdk::client::ClientHandle;
 use freeq_sdk::streaming::StreamingMessage;
 use tokio::sync::mpsc;
-use crate::llm::StreamDelta;
 
 /// An agent identity for channel messages.
 #[derive(Debug, Clone)]

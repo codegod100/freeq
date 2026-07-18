@@ -42,7 +42,9 @@ fn decrypt_at_rest(key: &[u8; 32], stored: &str) -> String {
         // Legacy plaintext data — return as-is but log so operators can identify
         // unencrypted records during migration.
         if !stored.is_empty() {
-            tracing::debug!("Returning unencrypted legacy message — consider re-encrypting historical data");
+            tracing::debug!(
+                "Returning unencrypted legacy message — consider re-encrypting historical data"
+            );
         }
         return stored.to_string();
     }
@@ -108,6 +110,41 @@ pub struct MessageRow {
     pub deleted_at: Option<u64>,
     /// DID of the sender (if authenticated at send time).
     pub sender_did: Option<String>,
+}
+
+/// A persisted reaction on a message (`+react` / unreact).
+#[derive(Debug, Clone)]
+pub struct ReactionRow {
+    pub target_msgid: String,
+    pub channel: String,
+    pub reactor_nick: String,
+    pub reactor_did: Option<String>,
+    pub emoji: String,
+    pub timestamp: u64,
+}
+
+/// Encode reaction rows as IRCv3 `+freeq.at/reactions` value:
+/// `emoji1:nick1,nick2;emoji2:nick3`.
+pub fn encode_reactions_tag(rows: &[ReactionRow]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let mut by_emoji: HashMap<&str, Vec<&str>> = HashMap::new();
+    for r in rows {
+        by_emoji
+            .entry(r.emoji.as_str())
+            .or_default()
+            .push(r.reactor_nick.as_str());
+    }
+    let encoded: Vec<String> = by_emoji
+        .iter()
+        .map(|(emoji, nicks)| format!("{}:{}", emoji, nicks.join(",")))
+        .collect();
+    if encoded.is_empty() {
+        None
+    } else {
+        Some(encoded.join(";"))
+    }
 }
 
 /// A persisted identity (DID-nick binding).
@@ -349,6 +386,22 @@ impl Db {
             CREATE INDEX IF NOT EXISTS idx_coord_channel ON coordination_events(channel, timestamp);
             CREATE INDEX IF NOT EXISTS idx_coord_ref ON coordination_events(ref_id);
             CREATE INDEX IF NOT EXISTS idx_coord_actor ON coordination_events(actor_did, timestamp);
+            ",
+        )?;
+
+        // Message reactions (+react TAGMSG with +reply=msgid)
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS reactions (
+                target_msgid TEXT NOT NULL,
+                channel      TEXT NOT NULL,
+                reactor_nick TEXT NOT NULL,
+                reactor_did  TEXT,
+                emoji        TEXT NOT NULL,
+                timestamp    INTEGER NOT NULL,
+                UNIQUE(target_msgid, reactor_nick, emoji)
+            );
+            CREATE INDEX IF NOT EXISTS idx_reactions_msgid ON reactions(target_msgid);
+            CREATE INDEX IF NOT EXISTS idx_reactions_channel ON reactions(channel);
             ",
         )?;
 
@@ -709,6 +762,86 @@ impl Db {
         Ok(changed)
     }
 
+    // ── Reactions ──────────────────────────────────────────────────────
+
+    /// Store a reaction. Duplicate (msgid, nick, emoji) is ignored.
+    pub fn store_reaction(
+        &self,
+        target_msgid: &str,
+        channel: &str,
+        reactor_nick: &str,
+        reactor_did: Option<&str>,
+        emoji: &str,
+        timestamp: u64,
+    ) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO reactions (target_msgid, channel, reactor_nick, reactor_did, emoji, timestamp)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                target_msgid,
+                channel,
+                reactor_nick,
+                reactor_did,
+                emoji,
+                timestamp as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Remove a reaction for (msgid, nick, emoji).
+    pub fn remove_reaction(
+        &self,
+        target_msgid: &str,
+        reactor_nick: &str,
+        emoji: &str,
+    ) -> SqlResult<usize> {
+        let changed = self.conn.execute(
+            "DELETE FROM reactions WHERE target_msgid = ?1 AND reactor_nick = ?2 AND emoji = ?3",
+            params![target_msgid, reactor_nick, emoji],
+        )?;
+        Ok(changed)
+    }
+
+    /// Get reactions for message IDs, grouped by target_msgid.
+    pub fn get_reactions_for_messages(
+        &self,
+        msgids: &[&str],
+    ) -> SqlResult<HashMap<String, Vec<ReactionRow>>> {
+        if msgids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders: Vec<String> = (1..=msgids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT target_msgid, channel, reactor_nick, reactor_did, emoji, timestamp
+             FROM reactions WHERE target_msgid IN ({})
+             ORDER BY timestamp ASC",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            msgids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            Ok(ReactionRow {
+                target_msgid: row.get(0)?,
+                channel: row.get(1)?,
+                reactor_nick: row.get(2)?,
+                reactor_did: row.get(3)?,
+                emoji: row.get(4)?,
+                timestamp: row.get::<_, i64>(5)? as u64,
+            })
+        })?;
+        let mut result: HashMap<String, Vec<ReactionRow>> = HashMap::new();
+        for row in rows {
+            let row = row?;
+            result
+                .entry(row.target_msgid.clone())
+                .or_default()
+                .push(row);
+        }
+        Ok(result)
+    }
+
     /// Store an edit (a new message that replaces an old one).
     pub fn insert_edit(
         &self,
@@ -747,11 +880,7 @@ impl Db {
 
     /// List DM conversations for a given DID, ordered by most recent message.
     /// Returns (canonical_dm_key, last_message_timestamp) pairs.
-    pub fn dm_conversations(
-        &self,
-        did: &str,
-        limit: usize,
-    ) -> SqlResult<Vec<(String, u64)>> {
+    pub fn dm_conversations(&self, did: &str, limit: usize) -> SqlResult<Vec<(String, u64)>> {
         let pattern = format!("%{did}%");
         let mut stmt = self.conn.prepare(
             "SELECT channel, MAX(timestamp) AS last_ts
@@ -1352,7 +1481,12 @@ impl Db {
         Ok(count > 0)
     }
 
-    pub fn deny_approval(&self, id: &str, denied_by: &str, reason: Option<&str>) -> SqlResult<bool> {
+    pub fn deny_approval(
+        &self,
+        id: &str,
+        denied_by: &str,
+        reason: Option<&str>,
+    ) -> SqlResult<bool> {
         let now = chrono::Utc::now().timestamp();
         let count = self.conn.execute(
             "UPDATE pending_approvals SET denied_by = ?1, denied_at = ?2, deny_reason = ?3
@@ -1363,14 +1497,15 @@ impl Db {
     }
 
     pub fn get_pending_approvals(&self, channel: &str) -> Vec<PendingApprovalRow> {
-        let mut stmt = self.conn
+        let mut stmt = self
+            .conn
             .prepare(
                 "SELECT id, channel, agent_did, capability, resource, requested_at,
                         granted_by, granted_at, denied_by, denied_at, deny_reason, expires_at
                  FROM pending_approvals
                  WHERE channel = ?1 AND granted_by IS NULL AND denied_by IS NULL
                    AND (expires_at IS NULL OR expires_at > ?2)
-                 ORDER BY requested_at ASC"
+                 ORDER BY requested_at ASC",
             )
             .unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -1484,7 +1619,8 @@ impl Db {
              FROM coordination_events WHERE channel = ?1"
         );
         let mut param_idx = 2;
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(channel.to_string())];
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(channel.to_string())];
 
         if let Some(et) = event_type {
             sql.push_str(&format!(" AND event_type = ?{param_idx}"));
@@ -1509,7 +1645,8 @@ impl Db {
         let _ = param_idx; // suppress unused warning
         sql.push_str(&format!(" ORDER BY timestamp ASC LIMIT {limit}"));
 
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
@@ -1551,7 +1688,8 @@ impl Db {
                 signature: row.get(6)?,
                 timestamp: row.get(7)?,
             })
-        }).ok()
+        })
+        .ok()
     }
 
     /// Get all events referencing a task ID.
@@ -1746,17 +1884,31 @@ impl Db {
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match agent_did {
             Some(did) => (
                 "SELECT COALESCE(SUM(amount), 0.0) FROM agent_spend
-                 WHERE channel = ?1 AND agent_did = ?2 AND unit = ?3 AND timestamp >= ?4".to_string(),
-                vec![Box::new(channel.to_string()), Box::new(did.to_string()), Box::new(unit.to_string()), Box::new(since)],
+                 WHERE channel = ?1 AND agent_did = ?2 AND unit = ?3 AND timestamp >= ?4"
+                    .to_string(),
+                vec![
+                    Box::new(channel.to_string()),
+                    Box::new(did.to_string()),
+                    Box::new(unit.to_string()),
+                    Box::new(since),
+                ],
             ),
             None => (
                 "SELECT COALESCE(SUM(amount), 0.0) FROM agent_spend
-                 WHERE channel = ?1 AND unit = ?2 AND timestamp >= ?3".to_string(),
-                vec![Box::new(channel.to_string()), Box::new(unit.to_string()), Box::new(since)],
+                 WHERE channel = ?1 AND unit = ?2 AND timestamp >= ?3"
+                    .to_string(),
+                vec![
+                    Box::new(channel.to_string()),
+                    Box::new(unit.to_string()),
+                    Box::new(since),
+                ],
             ),
         };
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
-        self.conn.query_row(&sql, refs.as_slice(), |row| row.get(0)).unwrap_or(0.0)
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
+        self.conn
+            .query_row(&sql, refs.as_slice(), |row| row.get(0))
+            .unwrap_or(0.0)
     }
 
     /// Query spend records with optional filters.
@@ -1769,9 +1921,10 @@ impl Db {
     ) -> Vec<SpendRecord> {
         let mut sql = String::from(
             "SELECT id, channel, agent_did, amount, unit, description, task_ref, timestamp
-             FROM agent_spend WHERE channel = ?1"
+             FROM agent_spend WHERE channel = ?1",
         );
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(channel.to_string())];
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(channel.to_string())];
         let mut idx = 2;
         if let Some(did) = agent_did {
             sql.push_str(&format!(" AND agent_did = ?{idx}"));
@@ -1785,7 +1938,8 @@ impl Db {
         }
         let _ = idx;
         sql.push_str(&format!(" ORDER BY timestamp DESC LIMIT {limit}"));
-        let refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
@@ -1812,13 +1966,17 @@ impl Db {
         let mut stmt = match self.conn.prepare(
             "SELECT agent_did, SUM(amount), COUNT(*) FROM agent_spend
              WHERE channel = ?1 AND unit = ?2 AND timestamp >= ?3
-             GROUP BY agent_did ORDER BY SUM(amount) DESC"
+             GROUP BY agent_did ORDER BY SUM(amount) DESC",
         ) {
             Ok(s) => s,
             Err(_) => return Vec::new(),
         };
         match stmt.query_map(params![channel, unit, since], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         }) {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
@@ -1865,20 +2023,27 @@ impl Db {
     }
 
     /// Query governance log entries for a channel.
-    pub fn query_governance_log(&self, channel: Option<&str>, limit: usize) -> Vec<GovernanceLogEntry> {
+    pub fn query_governance_log(
+        &self,
+        channel: Option<&str>,
+        limit: usize,
+    ) -> Vec<GovernanceLogEntry> {
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match channel {
             Some(ch) => (
                 "SELECT id, channel, target_did, action, issued_by, reason, timestamp
-                 FROM governance_log WHERE channel = ?1 ORDER BY timestamp ASC LIMIT ?2".to_string(),
+                 FROM governance_log WHERE channel = ?1 ORDER BY timestamp ASC LIMIT ?2"
+                    .to_string(),
                 vec![Box::new(ch.to_string()), Box::new(limit as i64)],
             ),
             None => (
                 "SELECT id, channel, target_did, action, issued_by, reason, timestamp
-                 FROM governance_log ORDER BY timestamp ASC LIMIT ?1".to_string(),
+                 FROM governance_log ORDER BY timestamp ASC LIMIT ?1"
+                    .to_string(),
                 vec![Box::new(limit as i64)],
             ),
         };
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|b| b.as_ref()).collect();
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Vec::new(),

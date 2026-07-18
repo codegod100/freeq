@@ -1,10 +1,10 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::{Form, SeeOther, page, route, see_other};
 use topcoat::view::view;
-use topcoat::Result;
 use tracing::{debug, info, warn};
 
 use crate::app::state;

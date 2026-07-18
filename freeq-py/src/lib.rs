@@ -308,8 +308,8 @@ impl FreeqClient {
                     _ => {}
                 }
                 serde_json::to_string(&event_to_json(event))
-                .map(Some)
-                .map_err(|err| runtime_err(err.to_string()))
+                    .map(Some)
+                    .map_err(|err| runtime_err(err.to_string()))
             }
             None => Ok(None),
         }
@@ -370,7 +370,9 @@ impl FreeqAuthBroker {
             .runtime
             .block_on(self.broker.poll_auth_result(session_id));
         value
-            .map(|payload| serde_json::to_string(&payload).map_err(|err| runtime_err(err.to_string())))
+            .map(|payload| {
+                serde_json::to_string(&payload).map_err(|err| runtime_err(err.to_string()))
+            })
             .transpose()
     }
 }

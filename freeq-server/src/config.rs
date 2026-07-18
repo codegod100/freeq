@@ -211,9 +211,7 @@ impl ServerConfig {
         #[cfg(target_os = "macos")]
         {
             if let Some(home) = std::env::var_os("HOME") {
-                return Some(
-                    std::path::PathBuf::from(home).join("Library/Application Support"),
-                );
+                return Some(std::path::PathBuf::from(home).join("Library/Application Support"));
             }
         }
         #[cfg(not(target_os = "macos"))]

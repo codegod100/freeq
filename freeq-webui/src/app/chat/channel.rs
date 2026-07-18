@@ -1,7 +1,7 @@
+use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::{page, path_param};
 use topcoat::view::{Unescaped, component, view};
-use topcoat::Result;
 
 use crate::app::state;
 use crate::irc_render::{canonical_channel, render_history_row};
@@ -23,12 +23,9 @@ async fn chat_channel(cx: &Cx) -> Result {
     let session = app.session(&sid);
 
     let mut channels = fetch_channels(&app).await.unwrap_or_default();
-    let joined: std::collections::HashSet<String> =
-        session.joined.lock().iter().cloned().collect();
-    let existing: std::collections::HashSet<String> = channels
-        .iter()
-        .map(|c| c.name.to_lowercase())
-        .collect();
+    let joined: std::collections::HashSet<String> = session.joined.lock().iter().cloned().collect();
+    let existing: std::collections::HashSet<String> =
+        channels.iter().map(|c| c.name.to_lowercase()).collect();
     for ch in &joined {
         let c = canonical_channel(ch);
         if !existing.contains(&c.to_lowercase()) {
@@ -48,15 +45,20 @@ async fn chat_channel(cx: &Cx) -> Result {
         .map(|c| c.topic.clone())
         .unwrap_or_default();
 
-    let history = fetch_history(&app, &channel, 25)
-        .await
-        .unwrap_or_default();
+    let history = fetch_history(&app, &channel, 25).await.unwrap_or_default();
+    // Seed dedup so JOIN chathistory replay over SSE is not appended again.
+    session.note_seen_msgids(
+        history
+            .iter()
+            .filter_map(|m| m.msgid.clone())
+            .filter(|id| !id.is_empty()),
+    );
     let initial_messages_html = history.iter().map(render_history_row).collect::<String>();
 
     let auth = session.auth.lock().clone();
-    let (login_handle, is_auth) = match &auth {
-        AuthState::Authenticated { handle, .. } => (handle.clone(), true),
-        AuthState::Guest => (String::new(), false),
+    let (login_handle, auth_nick, is_auth) = match &auth {
+        AuthState::Authenticated { handle, nick, .. } => (handle.clone(), nick.clone(), true),
+        AuthState::Guest => (String::new(), String::new(), false),
     };
 
     let placeholder = format!("Send to {channel}…");
@@ -80,6 +82,7 @@ async fn chat_channel(cx: &Cx) -> Result {
             id="freeq-chat"
             class="flex h-dvh flex-col"
             data-channel=(bare.clone())
+            data-auth-handle=(auth_nick.clone())
         >
             <nav class="flex shrink-0 items-center gap-2 border-b border-[#232932] px-2 py-2">
                 <button

@@ -3058,10 +3058,7 @@ async fn dm_history_authenticated() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Alice requests DM history with Bob
-    handle_alice
-        .history_latest("dmbob", 50)
-        .await
-        .unwrap();
+    handle_alice.history_latest("dmbob", 50).await.unwrap();
 
     // Alice should receive a batch with the DM
     expect_event(
@@ -3080,7 +3077,10 @@ async fn dm_history_authenticated() {
     )
     .await;
     if let Event::Message { tags, .. } = &hist_msg {
-        assert!(tags.contains_key("batch"), "History message should have batch tag");
+        assert!(
+            tags.contains_key("batch"),
+            "History message should have batch tag"
+        );
     }
 
     expect_event(

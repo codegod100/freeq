@@ -43,7 +43,8 @@ use crate::irc::Message;
 /// Registry for pending echo-message callbacks.
 /// When a client sends a PRIVMSG with a `+freeq.at/echo-nonce` tag, the nonce
 /// is registered here. When the echo comes back, the msgid is sent via the oneshot.
-type EchoRegistry = std::sync::Arc<parking_lot::Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>;
+type EchoRegistry =
+    std::sync::Arc<parking_lot::Mutex<HashMap<String, tokio::sync::oneshot::Sender<String>>>>;
 
 /// Configuration for connecting to an IRC server.
 #[derive(Debug, Clone)]
@@ -378,9 +379,13 @@ impl ClientHandle {
         capability: &str,
         resource: Option<&str>,
     ) -> Result<()> {
-        let resource_part = resource.map(|r| format!(";resource={r}")).unwrap_or_default();
-        self.raw(&format!("APPROVAL_REQUEST {channel} :{capability}{resource_part}"))
-            .await
+        let resource_part = resource
+            .map(|r| format!(";resource={r}"))
+            .unwrap_or_default();
+        self.raw(&format!(
+            "APPROVAL_REQUEST {channel} :{capability}{resource_part}"
+        ))
+        .await
     }
 
     /// Pause an agent (must be op in shared channel).
@@ -406,13 +411,22 @@ impl ClientHandle {
 
     /// Approve an agent's pending capability request.
     pub async fn approve_agent(&self, nick: &str, capability: &str) -> Result<()> {
-        self.raw(&format!("AGENT APPROVE {nick} {capability}")).await
+        self.raw(&format!("AGENT APPROVE {nick} {capability}"))
+            .await
     }
 
     /// Deny an agent's pending capability request.
-    pub async fn deny_agent(&self, nick: &str, capability: &str, reason: Option<&str>) -> Result<()> {
+    pub async fn deny_agent(
+        &self,
+        nick: &str,
+        capability: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
         match reason {
-            Some(r) => self.raw(&format!("AGENT DENY {nick} {capability} :{r}")).await,
+            Some(r) => {
+                self.raw(&format!("AGENT DENY {nick} {capability} :{r}"))
+                    .await
+            }
             None => self.raw(&format!("AGENT DENY {nick} {capability}")).await,
         }
     }
@@ -429,8 +443,12 @@ impl ClientHandle {
         ref_id: Option<&str>,
         human_text: &str,
     ) -> Result<String> {
-        let event_id = format!("{:016x}{:016x}",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        let event_id = format!(
+            "{:016x}{:016x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             rand::random::<u64>(),
         );
         let mut tags = format!(
@@ -443,7 +461,8 @@ impl ClientHandle {
         // Send structured TAGMSG
         self.raw(&format!("@{tags} TAGMSG {channel}")).await?;
         // Send human-readable PRIVMSG with the same event tags (for rich client rendering)
-        self.raw(&format!("@{tags} PRIVMSG {channel} :{human_text}")).await?;
+        self.raw(&format!("@{tags} PRIVMSG {channel} :{human_text}"))
+            .await?;
         Ok(event_id)
     }
 
@@ -456,7 +475,8 @@ impl ClientHandle {
             &payload,
             None,
             &format!("📋 New task: {description}"),
-        ).await
+        )
+        .await
     }
 
     /// Update a task's status.
@@ -474,7 +494,8 @@ impl ClientHandle {
             &payload,
             Some(task_id),
             &format!("🔄 [{phase}] {summary}"),
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
@@ -497,17 +518,13 @@ impl ClientHandle {
             &payload.to_string(),
             Some(task_id),
             &format!("🎉 Task complete: {summary}{url_str}"),
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Fail a task.
-    pub async fn fail_task(
-        &self,
-        channel: &str,
-        task_id: &str,
-        error: &str,
-    ) -> Result<()> {
+    pub async fn fail_task(&self, channel: &str, task_id: &str, error: &str) -> Result<()> {
         let payload = serde_json::json!({"error": error}).to_string();
         self.emit_event(
             channel,
@@ -515,7 +532,8 @@ impl ClientHandle {
             &payload,
             Some(task_id),
             &format!("❌ Task failed: {error}"),
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
@@ -542,7 +560,8 @@ impl ClientHandle {
             &payload.to_string(),
             Some(task_id),
             &format!("📎 Evidence ({evidence_type}): {summary}{url_str}"),
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
@@ -584,7 +603,8 @@ impl ClientHandle {
 
     /// Send a message as a spawned child agent.
     pub async fn send_as_child(&self, child_nick: &str, channel: &str, text: &str) -> Result<()> {
-        self.raw(&format!("AGENT MSG {child_nick} {channel} :{text}")).await
+        self.raw(&format!("AGENT MSG {child_nick} {channel} :{text}"))
+            .await
     }
 
     // ── Phase 5: Economic Controls ─────────────────────────────────
@@ -616,7 +636,8 @@ impl ClientHandle {
     ) -> Result<()> {
         self.raw(&format!(
             "BUDGET {channel} :max={max_amount};unit={unit};period={period};sponsor={sponsor_did}"
-        )).await
+        ))
+        .await
     }
 
     /// Query channel budget status.
@@ -626,10 +647,7 @@ impl ClientHandle {
 
     /// Start automatic heartbeat in a background task.
     /// Returns a handle that stops the heartbeat when dropped.
-    pub fn start_heartbeat(
-        &self,
-        interval: std::time::Duration,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn start_heartbeat(&self, interval: std::time::Duration) -> tokio::task::JoinHandle<()> {
         let handle = self.clone();
         let ttl = interval.as_secs() * 2;
         tokio::spawn(async move {
@@ -1979,9 +1997,12 @@ mod tests {
         let replay_messages: Vec<_> = events
             .iter()
             .filter_map(|event| match event {
-                Event::Message { from, target, text, tags }
-                    if tags.get("batch").map(String::as_str) == Some("hist456") =>
-                {
+                Event::Message {
+                    from,
+                    target,
+                    text,
+                    tags,
+                } if tags.get("batch").map(String::as_str) == Some("hist456") => {
                     Some((from.as_str(), target.as_str(), text.as_str()))
                 }
                 _ => None,
@@ -1990,10 +2011,7 @@ mod tests {
 
         assert_eq!(
             replay_messages,
-            vec![
-                ("bob", "#python", "first"),
-                ("carol", "#python", "second"),
-            ]
+            vec![("bob", "#python", "first"), ("carol", "#python", "second"),]
         );
     }
 }

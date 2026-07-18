@@ -350,7 +350,9 @@ async fn main() -> Result<()> {
         }
 
         // Send the message
-        handle.send_tagged(&target_channel, msg, std::collections::HashMap::new()).await?;
+        handle
+            .send_tagged(&target_channel, msg, std::collections::HashMap::new())
+            .await?;
         eprintln!("  sent to {target_channel}: {msg}");
 
         // Brief pause to let the server process and broadcast
@@ -1858,7 +1860,9 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
             "/msgs" => {
                 let limit = if arg.is_empty() { "50" } else { arg };
                 app.status_msg("── DM conversations ────────────────────");
-                handle.chathistory_targets(limit.parse().unwrap_or(50)).await?;
+                handle
+                    .chathistory_targets(limit.parse().unwrap_or(50))
+                    .await?;
             }
             "/config" | "/settings" => {
                 let cfg = config::Config::load();

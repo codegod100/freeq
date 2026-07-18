@@ -319,7 +319,10 @@ pub(super) async fn handle_authenticate(
                                 let fail = Message::from_server(
                                     server_name,
                                     irc::ERR_SASLFAIL,
-                                    vec![conn.nick_or_star(), "SASL authentication failed (DPoP nonce retry limit exceeded)"],
+                                    vec![
+                                        conn.nick_or_star(),
+                                        "SASL authentication failed (DPoP nonce retry limit exceeded)",
+                                    ],
                                 );
                                 send(state, session_id, format!("{fail}\r\n"));
                                 if conn.sasl_failures >= 3 {

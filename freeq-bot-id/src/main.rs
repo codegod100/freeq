@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "freeq-bot-id", about = "Generate and manage bot identities for freeq")]
+#[command(
+    name = "freeq-bot-id",
+    about = "Generate and manage bot identities for freeq"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -115,7 +118,13 @@ fn main() -> Result<()> {
             creator_did,
             creator_key,
             output,
-        } => create(&name, domain.as_deref(), creator_did.as_deref(), creator_key.as_ref(), output.as_ref()),
+        } => create(
+            &name,
+            domain.as_deref(),
+            creator_did.as_deref(),
+            creator_key.as_ref(),
+            output.as_ref(),
+        ),
         Command::Info { name } => info(&name),
         Command::DidKey { name } => did_key(&name),
     }
@@ -179,8 +188,8 @@ fn create(
 
         // Sign with creator's key if provided
         if let Some(creator_key_path) = creator_key {
-            let creator_key_bytes = std::fs::read(creator_key_path)
-                .context("Failed to read creator key file")?;
+            let creator_key_bytes =
+                std::fs::read(creator_key_path).context("Failed to read creator key file")?;
             let creator_private = PrivateKey::ed25519_from_bytes(&creator_key_bytes)
                 .context("Failed to parse creator key (expected 32-byte ed25519)")?;
 
@@ -232,10 +241,7 @@ fn create(
             .unwrap_or_else(|| PathBuf::from(name));
         std::fs::create_dir_all(&doc_dir)?;
         let doc_path = doc_dir.join("did.json");
-        std::fs::write(
-            &doc_path,
-            serde_json::to_string_pretty(&did_doc)?,
-        )?;
+        std::fs::write(&doc_path, serde_json::to_string_pretty(&did_doc)?)?;
         eprintln!("✅ DID document: {}", doc_path.display());
 
         let domain = domain.unwrap();
@@ -283,11 +289,13 @@ fn info(name: &str) -> Result<()> {
     let identity_path = key_dir.join("identity.json");
 
     if !identity_path.exists() {
-        bail!("No bot identity found at {}. Run 'freeq-bot-id create --name {name}' first.", key_dir.display());
+        bail!(
+            "No bot identity found at {}. Run 'freeq-bot-id create --name {name}' first.",
+            key_dir.display()
+        );
     }
 
-    let identity: BotIdentity =
-        serde_json::from_str(&std::fs::read_to_string(&identity_path)?)?;
+    let identity: BotIdentity = serde_json::from_str(&std::fs::read_to_string(&identity_path)?)?;
 
     println!("Bot: {}", identity.name);
     println!("DID: {}", identity.did);

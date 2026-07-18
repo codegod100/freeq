@@ -214,44 +214,31 @@ pub fn spawn_upstream_if_needed(
     channel: &str,
 ) {
     let target = crate::irc_render::canonical_channel(channel);
-    let was_ready = session.get_ws_state() == WsState::Ready;
     let mut task_guard = session.ws_task.lock();
 
-    if let Some(handle) = task_guard.take() {
+    // Live connection: never tear it down for send/join/SSE. Only JOIN if needed.
+    if let Some(handle) = task_guard.as_ref() {
         if !handle.is_finished() {
-            if was_ready {
-                info!(session = %sid, "aborting upstream WS task for reconnect");
+            drop(task_guard);
+            let already = session.joined.lock().contains(&target);
+            if !already {
+                session.joined.lock().insert(target.clone());
+                let tx = session.irc_tx.lock().clone();
+                let _ = tx.try_send(format!("JOIN {target}\r\n"));
+                debug!(session = %sid, channel = %target, "JOINing new channel on live WS");
             }
-            handle.abort();
+            // Already in channel: leave the socket alone (send path queues PRIVMSG).
+            return;
         }
+        // Task finished (disconnect) — drop the stale handle and respawn below.
+        let _ = task_guard.take();
     }
 
-    if !was_ready {
-        if let Some(handle) = &*task_guard {
-            if !handle.is_finished() {
-                debug!(session = %sid, channel = %target, "WS task already running");
-                drop(task_guard);
-                let already = session.joined.lock().contains(&target);
-                if !already {
-                    session.joined.lock().insert(target.clone());
-                    let tx = session.irc_tx.lock().clone();
-                    let _ = tx.try_send(format!("JOIN {target}\r\n"));
-                    debug!(session = %sid, channel = %target, "JOINing new channel");
-                } else {
-                    let tx = session.irc_tx.lock().clone();
-                    let _ = tx.try_send(format!("NAMES {target}\r\n"));
-                    debug!(session = %sid, channel = %target, "requesting NAMES");
-                }
-                return;
-            }
-        }
-    }
-
+    // Need a fresh mpsc pair for the new WS task.
     let irc_rx = session.irc_rx_slot.lock().take();
     let irc_rx = match irc_rx {
         Some(rx) => rx,
         None => {
-            drop(irc_rx); // release the lock guard
             let (tx, rx) = tokio::sync::mpsc::channel(256);
             *session.irc_tx.lock() = tx;
             *session.irc_rx_slot.lock() = Some(rx);
@@ -260,21 +247,6 @@ pub fn spawn_upstream_if_needed(
     };
 
     session.joined.lock().insert(target.clone());
-
-    let rejoin: Vec<String> = session
-        .joined
-        .lock()
-        .iter()
-        .filter(|c| *c != &target)
-        .cloned()
-        .collect();
-    if !rejoin.is_empty() {
-        let tx = session.irc_tx.lock().clone();
-        for ch in &rejoin {
-            let _ = tx.try_send(format!("JOIN {ch}\r\n"));
-        }
-        debug!(session = %sid, count = rejoin.len(), "re-JOINing channels");
-    }
 
     // Snapshot the user's OAuth session. The DPoP proof for SASL is built
     // inside the WS task so this function stays synchronous and no
@@ -304,6 +276,22 @@ pub fn spawn_upstream_if_needed(
     let target_for_task = target.clone();
     let session_for_task = Arc::clone(&session);
 
+    // Queue JOINs for other channels; flushed after CAP END / Ready.
+    let rejoin: Vec<String> = session
+        .joined
+        .lock()
+        .iter()
+        .filter(|c| *c != &target)
+        .cloned()
+        .collect();
+    if !rejoin.is_empty() {
+        let tx = session.irc_tx.lock().clone();
+        for ch in &rejoin {
+            let _ = tx.try_send(format!("JOIN {ch}\r\n"));
+        }
+        debug!(session = %sid, count = rejoin.len(), "queued re-JOIN for other channels");
+    }
+
     *task_guard = Some(tokio::spawn(async move {
         session_for_task.set_ws_state(WsState::Connecting);
         debug!(session = %session_id, "ws_state → Connecting");
@@ -323,6 +311,8 @@ pub fn spawn_upstream_if_needed(
         } else {
             info!(session = %session_id, "upstream WS closed cleanly");
         }
+        // Mark disconnected so the next spawn_upstream_if_needed recreates the task.
+        // (task handle stays until replaced; is_finished() covers that.)
     }));
 }
 
@@ -365,9 +355,6 @@ pub async fn run_upstream_ws(
         .await?;
     ws.send(WsMessage::Text("USER webui 0 * :freeq-webui\r\n".into()))
         .await?;
-    ws.send(WsMessage::Text("CAP REQ :sasl account-notify\r\n".into()))
-        .await?;
-
     let (mut write, mut read): (
         futures_util::stream::SplitSink<_, WsMessage>,
         SplitStream<_>,
@@ -375,10 +362,14 @@ pub async fn run_upstream_ws(
 
     // Registration state machine. We hold CAP END until SASL completes (or is
     // skipped) so the server doesn't finalize registration mid-handshake.
-    write.send(WsMessage::Text(
-        "CAP REQ :sasl account-notify message-tags\r\n".into(),
-    ))
-    .await?;
+    // `echo-message` — server echoes our PRIVMSG back (required for chat UI).
+    // `batch` — suppress JOIN chathistory (already loaded via REST).
+    // `message-tags` — msgid for dedup when batch is unavailable.
+    write
+        .send(WsMessage::Text(
+            "CAP REQ :sasl account-notify message-tags batch server-time echo-message\r\n".into(),
+        ))
+        .await?;
     *session.reg_phase.lock() = "WaitCapAck".to_string();
     let mut phase = RegPhase::WaitCapAck;
     let mut auth_creds = auth;

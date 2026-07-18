@@ -1,6 +1,6 @@
-use topcoat::context::Cx;
-use topcoat::router::{Json, query_params, route, see_other, SeeOther};
 use topcoat::Result;
+use topcoat::context::Cx;
+use topcoat::router::{Json, SeeOther, query_params, route, see_other};
 use tracing::{error, info, warn};
 
 use crate::app::state;

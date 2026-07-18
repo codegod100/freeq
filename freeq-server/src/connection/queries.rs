@@ -121,12 +121,17 @@ pub(super) fn handle_whois(
             send(state, session_id, format!("{end}\r\n"));
         } else {
             // Check if this is a spawned (virtual) agent
-            let spawned = state.spawned_agents.lock().values()
+            let spawned = state
+                .spawned_agents
+                .lock()
+                .values()
                 .find(|sa| sa.nick.eq_ignore_ascii_case(target_nick))
                 .cloned();
 
             if let Some(sa) = spawned {
-                let parent_nick = state.nick_to_session.lock()
+                let parent_nick = state
+                    .nick_to_session
+                    .lock()
                     .get_nick(&sa.parent_session)
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| sa.parent_did.clone());
@@ -163,8 +168,15 @@ pub(super) fn handle_whois(
                 send(state, session_id, format!("{class_line}\r\n"));
 
                 // Show spawn info
-                let caps_str = if sa.capabilities.is_empty() { "none".to_string() } else { sa.capabilities.join(", ") };
-                let spawn_info = format!("parent={parent_nick}, capabilities={caps_str}, task={}", sa.task_ref.as_deref().unwrap_or("-"));
+                let caps_str = if sa.capabilities.is_empty() {
+                    "none".to_string()
+                } else {
+                    sa.capabilities.join(", ")
+                };
+                let spawn_info = format!(
+                    "parent={parent_nick}, capabilities={caps_str}, task={}",
+                    sa.task_ref.as_deref().unwrap_or("-")
+                );
                 let spawn_line = Message::from_server(
                     server_name,
                     "NOTICE",

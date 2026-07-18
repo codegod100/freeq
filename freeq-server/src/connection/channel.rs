@@ -328,13 +328,8 @@ pub(super) fn handle_join(
     let std_join = make_standard_join(&hostmask, channel);
     let realname = conn.realname.as_deref().unwrap_or(nick);
     let ext_join = make_extended_join(&hostmask, channel, did, realname);
-    let ext_join_class = make_extended_join_with_class(
-        &hostmask,
-        channel,
-        did,
-        realname,
-        conn.actor_class,
-    );
+    let ext_join_class =
+        make_extended_join_with_class(&hostmask, channel, did, realname, conn.actor_class);
 
     let members: Vec<String> = state
         .channels
@@ -455,10 +450,14 @@ pub(super) fn handle_join(
         let has_tags_cap = state.cap_message_tags.lock().contains(session_id);
         let has_time_cap = state.cap_server_time.lock().contains(session_id);
         let has_batch_cap = state.cap_batch.lock().contains(session_id);
-        let channels = state.channels.lock();
-        if let Some(ch) = channels.get(channel)
-            && !ch.history.is_empty()
-        {
+        let history: Vec<_> = {
+            let channels = state.channels.lock();
+            channels
+                .get(channel)
+                .map(|ch| ch.history.iter().cloned().collect())
+                .unwrap_or_default()
+        };
+        if !history.is_empty() {
             // Start batch if client supports it
             let batch_id = format!("hist{}", crate::msgid::generate());
             if has_batch_cap {
@@ -467,7 +466,12 @@ pub(super) fn handle_join(
                 send(state, session_id, batch_start);
             }
 
-            for hist in &ch.history {
+            let msgids: Vec<&str> = history.iter().filter_map(|h| h.msgid.as_deref()).collect();
+            let reactions = state
+                .with_db(|db| db.get_reactions_for_messages(&msgids))
+                .unwrap_or_default();
+
+            for hist in &history {
                 let mut msg_tags = if has_tags_cap {
                     hist.tags.clone()
                 } else {
@@ -477,6 +481,11 @@ pub(super) fn handle_join(
                 // Add msgid tag if available
                 if has_tags_cap && let Some(ref mid) = hist.msgid {
                     msg_tags.insert("msgid".to_string(), mid.clone());
+                    if let Some(rows) = reactions.get(mid)
+                        && let Some(encoded) = crate::db::encode_reactions_tag(rows)
+                    {
+                        msg_tags.insert("+freeq.at/reactions".to_string(), encoded);
+                    }
                 }
 
                 // Add server-time tag
@@ -1352,7 +1361,9 @@ pub(super) fn handle_invite(
                     }
                     ch.invites.insert(format!("nick:{target_nick}"));
                 }
-                rm.did.clone().unwrap_or_else(|| format!("nick:{target_nick}"))
+                rm.did
+                    .clone()
+                    .unwrap_or_else(|| format!("nick:{target_nick}"))
             };
 
             // Notify inviter (remote target can't be notified directly)

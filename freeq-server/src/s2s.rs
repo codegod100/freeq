@@ -583,11 +583,10 @@ impl S2sManager {
     /// Sign an S2S message and wrap it in a Signed envelope.
     pub fn sign_message(&self, msg: &S2sMessage) -> S2sMessage {
         let payload_json = serde_json::to_string(msg).unwrap_or_default();
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(payload_json.as_bytes());
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let sig = self.signing_key.sign(payload_json.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(sig.to_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
         S2sMessage::Signed {
             payload: payload_b64,
             signature: sig_b64,
@@ -614,9 +613,11 @@ impl S2sManager {
         }
 
         let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload_b64).ok()?;
+            .decode(payload_b64)
+            .ok()?;
         let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(signature_b64).ok()?;
+            .decode(signature_b64)
+            .ok()?;
 
         if sig_bytes.len() != 64 {
             tracing::warn!("Signed message: invalid signature length");
@@ -646,12 +647,18 @@ impl S2sManager {
         if let Some(level) = self.peer_trust.lock().await.get(peer_id) {
             return *level;
         }
-        self.trust_config.get(peer_id).copied().unwrap_or(TrustLevel::Full)
+        self.trust_config
+            .get(peer_id)
+            .copied()
+            .unwrap_or(TrustLevel::Full)
     }
 
     /// Set the runtime trust level for a peer (from HelloAck negotiation).
     pub async fn set_trust(&self, peer_id: &str, level: TrustLevel) {
-        self.peer_trust.lock().await.insert(peer_id.to_string(), level);
+        self.peer_trust
+            .lock()
+            .await
+            .insert(peer_id.to_string(), level);
     }
 
     // ── Phase 4: Key rotation ───────────────────────────────────
@@ -664,8 +671,7 @@ impl S2sManager {
             .as_secs();
         let msg = format!("rotate:{}:{}:{}", self.server_id, new_id, timestamp);
         let sig = self.signing_key.sign(msg.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(sig.to_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
         S2sMessage::KeyRotation {
             old_id: self.server_id.clone(),
             new_id: new_id.to_string(),
@@ -699,12 +705,14 @@ impl S2sManager {
         }
 
         let msg = format!("rotate:{old_id}:{new_id}:{timestamp}");
-        let sig_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(signature_b64) {
+        let sig_bytes = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(signature_b64)
+        {
             Ok(b) => b,
             Err(_) => return false,
         };
-        if sig_bytes.len() != 64 { return false; }
+        if sig_bytes.len() != 64 {
+            return false;
+        }
 
         let pub_key: iroh::PublicKey = match old_id.parse() {
             Ok(k) => k,
@@ -1023,8 +1031,17 @@ async fn handle_s2s_connection(
                         // C-7 fix: Reject unsigned operational messages.
                         // Only Hello/HelloAck/KeyRotation are exempt (handshake/key mgmt).
                         let msg = match msg {
-                            S2sMessage::Signed { ref payload, ref signature, ref signer } => {
-                                match read_manager.verify_signed(payload, signature, signer, &authenticated_peer_id) {
+                            S2sMessage::Signed {
+                                ref payload,
+                                ref signature,
+                                ref signer,
+                            } => {
+                                match read_manager.verify_signed(
+                                    payload,
+                                    signature,
+                                    signer,
+                                    &authenticated_peer_id,
+                                ) {
                                     Some(inner) => inner,
                                     None => {
                                         tracing::warn!(peer = %read_peer, "S2S: dropped message with invalid signature");
@@ -1260,7 +1277,11 @@ mod tests {
 
         let signed = manager.sign_message(&msg);
         match &signed {
-            S2sMessage::Signed { payload, signature, signer } => {
+            S2sMessage::Signed {
+                payload,
+                signature,
+                signer,
+            } => {
                 assert_eq!(signer, &server_id);
                 // Verify
                 let inner = manager.verify_signed(payload, signature, signer, &server_id);
@@ -1305,7 +1326,11 @@ mod tests {
         let signed = manager.sign_message(&msg);
 
         match &signed {
-            S2sMessage::Signed { payload, signature, signer } => {
+            S2sMessage::Signed {
+                payload,
+                signature,
+                signer,
+            } => {
                 // Verify with wrong authenticated peer ID — should reject
                 let result = manager.verify_signed(payload, signature, signer, &other_id);
                 assert!(result.is_none(), "Should reject signer mismatch");
@@ -1351,7 +1376,11 @@ mod tests {
 
         let signed = manager.sign_message(&msg);
         match signed {
-            S2sMessage::Signed { payload: _, signature, signer } => {
+            S2sMessage::Signed {
+                payload: _,
+                signature,
+                signer,
+            } => {
                 // Tamper: encode a different payload
                 let tampered = S2sMessage::Privmsg {
                     event_id: "test:1".to_string(),
@@ -1402,7 +1431,12 @@ mod tests {
 
         let rotation = manager.announce_rotation(&new_id);
         match rotation {
-            S2sMessage::KeyRotation { ref old_id, ref new_id, timestamp, ref signature } => {
+            S2sMessage::KeyRotation {
+                ref old_id,
+                ref new_id,
+                timestamp,
+                ref signature,
+            } => {
                 assert!(manager.verify_rotation(old_id, new_id, timestamp, signature, &server_id));
             }
             _ => panic!("Expected KeyRotation"),
@@ -1440,7 +1474,12 @@ mod tests {
 
         let rotation = manager.announce_rotation(&new_id);
         match rotation {
-            S2sMessage::KeyRotation { ref old_id, ref new_id, timestamp, ref signature } => {
+            S2sMessage::KeyRotation {
+                ref old_id,
+                ref new_id,
+                timestamp,
+                ref signature,
+            } => {
                 // Verify with wrong authenticated peer — should reject
                 assert!(!manager.verify_rotation(old_id, new_id, timestamp, signature, &other_id));
             }
@@ -1479,8 +1518,7 @@ mod tests {
         let old_timestamp = 1000; // way in the past
         let msg = format!("rotate:{}:{}:{}", server_id, new_id, old_timestamp);
         let sig = secret.sign(msg.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(sig.to_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
 
         assert!(!manager.verify_rotation(&server_id, &new_id, old_timestamp, &sig_b64, &server_id));
     }
@@ -1501,7 +1539,11 @@ mod tests {
         let old_json = r#"{"type":"hello","peer_id":"abc","server_name":"old"}"#;
         let parsed: S2sMessage = serde_json::from_str(old_json).unwrap();
         match parsed {
-            S2sMessage::Hello { protocol_version, trust_level, .. } => {
+            S2sMessage::Hello {
+                protocol_version,
+                trust_level,
+                ..
+            } => {
                 assert_eq!(protocol_version, 0); // default
                 assert!(trust_level.is_none()); // default
             }
@@ -1519,7 +1561,11 @@ mod tests {
         let json = serde_json::to_string(&ack).unwrap();
         let parsed: S2sMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            S2sMessage::HelloAck { accepted, trust_level, .. } => {
+            S2sMessage::HelloAck {
+                accepted,
+                trust_level,
+                ..
+            } => {
                 assert!(accepted);
                 assert_eq!(trust_level.as_deref(), Some("relay"));
             }
@@ -1550,9 +1596,9 @@ mod tests {
             let dedup = DedupSet::new();
             assert!(dedup.check_and_insert("peer1", "peer1:100").await);
             assert!(!dedup.check_and_insert("peer1", "peer1:100").await); // duplicate
-            assert!(!dedup.check_and_insert("peer1", "peer1:50").await);  // below high water
-            assert!(dedup.check_and_insert("peer1", "peer1:200").await);  // new
-            assert!(dedup.check_and_insert("peer2", "peer2:50").await);   // different peer
+            assert!(!dedup.check_and_insert("peer1", "peer1:50").await); // below high water
+            assert!(dedup.check_and_insert("peer1", "peer1:200").await); // new
+            assert!(dedup.check_and_insert("peer2", "peer2:50").await); // different peer
         });
     }
 }

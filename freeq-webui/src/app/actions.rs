@@ -1,9 +1,9 @@
 //! Mutation routes: send, join, part, topic, react, upload.
 
 use serde::Deserialize;
+use topcoat::Result;
 use topcoat::context::Cx;
 use topcoat::router::{Json, Multipart, path_param, route};
-use topcoat::Result;
 use tracing::info;
 
 use crate::app::state;
@@ -59,20 +59,12 @@ fn err(msg: impl Into<String>) -> Json<OkResp> {
 
 fn parse_nick_command(msg: &str) -> Option<&str> {
     let rest = msg.strip_prefix("/nick ")?.trim();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
-    }
+    if rest.is_empty() { None } else { Some(rest) }
 }
 
 fn parse_whois_command(msg: &str) -> Option<&str> {
     let rest = msg.strip_prefix("/whois ")?.trim();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(rest)
-    }
+    if rest.is_empty() { None } else { Some(rest) }
 }
 
 #[route(POST "/chat/{channel}/send")]
@@ -157,12 +149,12 @@ async fn react(cx: &Cx, Json(body): Json<ReactBody>) -> Result<Json<OkResp>> {
     let app = state(cx);
     let sid = ensure_session_id(cx);
     let session = app.session(&sid);
+    spawn_upstream_if_needed(&app, &sid, &session, app.upstream.clone(), &channel);
     let tx = session.irc_tx.lock().clone();
-    // IRCv3 TAGMSG reaction
-    let line = format!(
-        "@+react={};+reply={} TAGMSG {channel}\r\n",
-        body.emoji, body.msgid
-    );
+    // IRCv3 TAGMSG reaction (+react targets message via +reply)
+    let emoji = crate::irc_render::escape_tag_value(&body.emoji);
+    let msgid = crate::irc_render::escape_tag_value(&body.msgid);
+    let line = format!("@+react={emoji};+reply={msgid} TAGMSG {channel}\r\n");
     if tx.try_send(line).is_err() {
         return Ok(err("upstream not ready"));
     }
@@ -176,11 +168,12 @@ async fn unreact(cx: &Cx, Json(body): Json<ReactBody>) -> Result<Json<OkResp>> {
     let app = state(cx);
     let sid = ensure_session_id(cx);
     let session = app.session(&sid);
+    spawn_upstream_if_needed(&app, &sid, &session, app.upstream.clone(), &channel);
     let tx = session.irc_tx.lock().clone();
-    let line = format!(
-        "@+freeq.at/unreact={};+reply={} TAGMSG {channel}\r\n",
-        body.emoji, body.msgid
-    );
+    // Best-effort; freeq-server may only relay +react. Client still updates UI.
+    let emoji = crate::irc_render::escape_tag_value(&body.emoji);
+    let msgid = crate::irc_render::escape_tag_value(&body.msgid);
+    let line = format!("@+freeq.at/unreact={emoji};+reply={msgid} TAGMSG {channel}\r\n");
     if tx.try_send(line).is_err() {
         return Ok(err("upstream not ready"));
     }
@@ -251,13 +244,11 @@ async fn upload(cx: &Cx, mut multipart: Multipart) -> Result<Json<serde_json::Va
     match app.http.post(upstream_url).multipart(form).send().await {
         Ok(r) => {
             let status = r.status().as_u16();
-            let body: serde_json::Value = r.json().await.unwrap_or_else(|_| {
-                serde_json::json!({"error": "invalid upstream response", "status": status})
-            });
+            let body: serde_json::Value = r.json().await.unwrap_or_else(
+                |_| serde_json::json!({"error": "invalid upstream response", "status": status}),
+            );
             Ok(Json(body))
         }
         Err(e) => Ok(Json(serde_json::json!({"error": format!("upstream: {e}")}))),
     }
 }
-
-

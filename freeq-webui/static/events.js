@@ -8,6 +8,13 @@
 
   const channel = root.dataset.channel;
   if (!channel) return;
+  // Prefer explicit handle for reaction "mine" highlighting.
+  if (root.dataset.authHandle) {
+    document.body.setAttribute("data-auth-handle", root.dataset.authHandle);
+  }
+
+  const channelKey = "#" + channel;
+  const REACT_CACHE_KEY = "freeq-reactions-v1";
 
   const statusEl = document.getElementById("status");
   const messagesEl = document.getElementById("messages");
@@ -59,6 +66,15 @@
         topicEl.textContent = JSON.parse(ev.data);
       } catch {
         topicEl.textContent = ev.data;
+      }
+    });
+
+    es.addEventListener("reaction", (ev) => {
+      try {
+        const d = JSON.parse(ev.data);
+        window.updateReactionChipFromServer(d.msgid, d.emoji, d.nick, !!d.added);
+      } catch (e) {
+        console.error("reaction event", e);
       }
     });
 
@@ -142,35 +158,254 @@
     window.location.href = "/chat";
   });
 
-  // Reactions
+  // Reactions — optimistic UI + live updates from SSE `reaction` events.
+  // Also cached in localStorage so chips survive refresh when the upstream
+  // has not (or not yet) persisted +freeq.at/reactions on history.
   window.myReactions = window.myReactions || {};
+
+  function loadReactCache() {
+    try {
+      return JSON.parse(localStorage.getItem(REACT_CACHE_KEY) || "{}");
+    } catch {
+      return {};
+    }
+  }
+  function saveReactCache(cache) {
+    try {
+      localStorage.setItem(REACT_CACHE_KEY, JSON.stringify(cache));
+    } catch {
+      /* quota */
+    }
+  }
+  function cacheGet(mid, emoji) {
+    const c = loadReactCache();
+    const ch = c[channelKey] || {};
+    const m = ch[mid] || {};
+    return m[emoji] ? m[emoji].slice() : [];
+  }
+  function cacheSetNicks(mid, emoji, nicks) {
+    const c = loadReactCache();
+    if (!c[channelKey]) c[channelKey] = {};
+    if (!c[channelKey][mid]) c[channelKey][mid] = {};
+    if (!nicks || nicks.length === 0) {
+      delete c[channelKey][mid][emoji];
+      if (Object.keys(c[channelKey][mid]).length === 0) delete c[channelKey][mid];
+    } else {
+      c[channelKey][mid][emoji] = nicks;
+    }
+    saveReactCache(c);
+  }
+  function cacheApplyNick(mid, emoji, nick, added) {
+    let nicks = cacheGet(mid, emoji).filter(function (n) {
+      return n !== nick;
+    });
+    if (added) nicks.push(nick);
+    cacheSetNicks(mid, emoji, nicks);
+    return nicks;
+  }
+
+  /** Re-apply cached chips onto SSR history after DOM is ready. */
+  function hydrateReactionsFromCache() {
+    const c = loadReactCache();
+    const ch = c[channelKey];
+    if (!ch) return;
+    Object.keys(ch).forEach(function (mid) {
+      const emojis = ch[mid];
+      Object.keys(emojis).forEach(function (emoji) {
+        const nicks = emojis[emoji] || [];
+        nicks.forEach(function (nick) {
+          window.updateReactionChipFromServer(mid, emoji, nick, true);
+        });
+      });
+    });
+  }
+
+  function ensureReactionsContainer(row) {
+    let container = row.querySelector(".reactions");
+    if (container) return container;
+    const body = row.querySelector(".body") || row;
+    container = document.createElement("span");
+    container.className = "reactions";
+    const mid = row.getAttribute("data-msgid") || "";
+    if (mid) {
+      const plus = document.createElement("button");
+      plus.type = "button";
+      plus.className = "react-btn";
+      plus.title = "React";
+      plus.textContent = "+";
+      plus.onclick = function () {
+        window.openReactPicker(mid);
+      };
+      container.appendChild(plus);
+    }
+    body.appendChild(container);
+    return container;
+  }
+
+  function updateReactionChip(mid, emoji, mine) {
+    mid = String(mid || "");
+    emoji = String(emoji || "");
+    if (!mid || !emoji) return;
+    const row = document.querySelector(
+      '.msg[data-msgid="' + mid.replace(/"/g, '\\"') + '"]'
+    );
+    if (!row) return;
+    const container = ensureReactionsContainer(row);
+    let chip = container.querySelector(
+      '.reaction-chip[data-emoji="' + emoji.replace(/"/g, '\\"') + '"]'
+    );
+    const me =
+      document.body.getAttribute("data-auth-handle") ||
+      document.documentElement.getAttribute("data-auth-handle") ||
+      "you";
+    if (chip) {
+      let title = (chip.getAttribute("title") || "")
+        .split(", ")
+        .filter(function (n) {
+          return n && n !== me;
+        });
+      if (mine) title.push(me);
+      else if (title.length === 0) {
+        chip.remove();
+        return;
+      }
+      chip.setAttribute("title", title.join(", "));
+      chip.textContent = title.length <= 1 ? emoji : emoji + " " + title.length;
+      chip.classList.toggle("mine", mine);
+    } else if (mine) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "reaction-chip mine";
+      b.setAttribute("data-emoji", emoji);
+      b.setAttribute("data-msgid", mid);
+      b.setAttribute("title", me);
+      b.textContent = emoji;
+      b.onclick = function () {
+        window.toggleReaction(mid, emoji);
+      };
+      const plus = container.querySelector(".react-btn");
+      if (plus) container.insertBefore(b, plus);
+      else container.appendChild(b);
+    }
+  }
+
+  window.updateReactionChipFromServer = function (mid, emoji, nick, added) {
+    mid = String(mid || "");
+    emoji = String(emoji || "");
+    nick = String(nick || "");
+    if (!mid || !emoji || !nick) return;
+    const nicks = cacheApplyNick(mid, emoji, nick, added);
+    const row = document.querySelector(
+      '.msg[data-msgid="' + mid.replace(/"/g, '\\"') + '"]'
+    );
+    if (!row) return;
+    const container = ensureReactionsContainer(row);
+    let chip = container.querySelector(
+      '.reaction-chip[data-emoji="' + emoji.replace(/"/g, '\\"') + '"]'
+    );
+    if (nicks.length === 0) {
+      if (chip) chip.remove();
+      return;
+    }
+    const title = nicks.join(", ");
+    if (chip) {
+      chip.setAttribute("title", title);
+      chip.textContent = nicks.length <= 1 ? emoji : emoji + " " + nicks.length;
+    } else {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "reaction-chip";
+      b.setAttribute("data-emoji", emoji);
+      b.setAttribute("data-msgid", mid);
+      b.setAttribute("title", title);
+      b.textContent = nicks.length <= 1 ? emoji : emoji + " " + nicks.length;
+      b.onclick = function () {
+        window.toggleReaction(mid, emoji);
+      };
+      const plus = container.querySelector(".react-btn");
+      if (plus) container.insertBefore(b, plus);
+      else container.appendChild(b);
+      chip = b;
+    }
+    // Track own reactions for toggle state when echo arrives.
+    const me =
+      document.body.getAttribute("data-auth-handle") ||
+      document.documentElement.getAttribute("data-auth-handle") ||
+      "";
+    if (me && nick === me) {
+      if (!window.myReactions[mid]) window.myReactions[mid] = {};
+      if (added) window.myReactions[mid][emoji] = true;
+      else delete window.myReactions[mid][emoji];
+    }
+    if (chip && me) {
+      chip.classList.toggle("mine", nicks.indexOf(me) >= 0);
+    }
+  };
+
   window.isReacted = function (msgid, emoji) {
     return !!(window.myReactions[msgid] && window.myReactions[msgid][emoji]);
   };
+
+  window._reactInFlight = window._reactInFlight || {};
+
   window.toggleReaction = async function (msgid, emoji) {
+    msgid = String(msgid || "");
+    emoji = String(emoji || "");
+    if (!msgid || !emoji) return;
+    const key = msgid + "\u0000" + emoji;
+    if (window._reactInFlight[key]) return;
+    window._reactInFlight[key] = true;
     const mine = window.isReacted(msgid, emoji);
     const path = mine ? "unreact" : "react";
     if (!window.myReactions[msgid]) window.myReactions[msgid] = {};
     if (mine) delete window.myReactions[msgid][emoji];
     else window.myReactions[msgid][emoji] = true;
-    await fetch("/chat/" + encodeURIComponent(channel) + "/" + path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ msgid, emoji }),
-    });
+    try {
+      const r = await fetch(
+        "/chat/" + encodeURIComponent(channel) + "/" + path,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ msgid, emoji }),
+          credentials: "same-origin",
+        }
+      );
+      if (!r.ok) {
+        if (mine) window.myReactions[msgid][emoji] = true;
+        else delete window.myReactions[msgid][emoji];
+        console.error(path + " failed", r.status);
+      }
+    } catch (e) {
+      console.error("toggleReaction", e);
+    } finally {
+      delete window._reactInFlight[key];
+    }
   };
+
   window.openReactPicker = function (msgid) {
     const picker = document.getElementById("react-picker");
     if (!picker) return;
     const emojis = ["👍", "❤️", "😂", "🎉", "🔥", "👀", "💯", "✨"];
+    const mid = String(msgid || "").replace(/'/g, "\\'");
     picker.innerHTML = emojis
-      .map(
-        (e) =>
-          `<button type="button" onclick="window.toggleReaction('${msgid}','${e}');document.getElementById('react-picker').classList.remove('open')">${e}</button>`
-      )
+      .map(function (e) {
+        const es = e.replace(/'/g, "\\'");
+        return (
+          "<button type=\"button\" onclick=\"window.toggleReaction('" +
+          mid +
+          "','" +
+          es +
+          "');document.getElementById('react-picker').classList.remove('open')\">" +
+          e +
+          "</button>"
+        );
+      })
       .join("");
     picker.classList.add("open");
   };
+
+  // After helpers exist and history SSR is in the DOM, re-apply cached chips.
+  hydrateReactionsFromCache();
 
   // Policy modal
   window.showPolicy = async function (ch) {

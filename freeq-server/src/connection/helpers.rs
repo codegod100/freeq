@@ -6,15 +6,16 @@ use std::sync::Arc;
 
 /// Generate a cloaked hostname from an optional DID.
 /// Send a message to a client session. Logs a warning if the send buffer is full (message dropped).
-pub(crate) fn send_to_client(
-    state: &SharedState,
-    session_id: &str,
-    line: String,
-) {
+pub(crate) fn send_to_client(state: &SharedState, session_id: &str, line: String) {
     let conns = state.connections.lock();
     if let Some(tx) = conns.get(session_id) {
         if let Err(e) = tx.try_send(line) {
-            let nick = state.nick_to_session.lock().get_nick(session_id).map(|s| s.to_string()).unwrap_or_default();
+            let nick = state
+                .nick_to_session
+                .lock()
+                .get_nick(session_id)
+                .map(|s| s.to_string())
+                .unwrap_or_default();
             tracing::warn!(session = %session_id, nick = %nick, "Send buffer full, message dropped: {e}");
         }
     }
@@ -197,7 +198,12 @@ pub(super) fn broadcast_to_channel(state: &Arc<SharedState>, channel: &str, msg:
     for member_session in &members {
         if let Some(tx) = conns.get(member_session) {
             if let Err(_e) = tx.try_send(msg.to_string()) {
-                let nick = state.nick_to_session.lock().get_nick(member_session).map(|s| s.to_string()).unwrap_or_default();
+                let nick = state
+                    .nick_to_session
+                    .lock()
+                    .get_nick(member_session)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
                 tracing::warn!(session = %member_session, nick = %nick, channel = %channel, "Broadcast: send buffer full, message dropped");
             }
         }
@@ -260,7 +266,9 @@ pub(crate) fn make_extended_join_with_class(
 ) -> String {
     let account = did.unwrap_or("*");
     if actor_class != super::ActorClass::Human {
-        format!("@+freeq.at/actor-class={actor_class} :{hostmask} JOIN {channel} {account} :{realname}\r\n")
+        format!(
+            "@+freeq.at/actor-class={actor_class} :{hostmask} JOIN {channel} {account} :{realname}\r\n"
+        )
     } else {
         format!(":{hostmask} JOIN {channel} {account} :{realname}\r\n")
     }

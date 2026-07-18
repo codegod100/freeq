@@ -1,6 +1,6 @@
-use topcoat::router::{Body, IntoResponse, Response, route};
 use topcoat::Result;
 use topcoat::context::Cx;
+use topcoat::router::{Body, IntoResponse, Response, route};
 
 struct StaticFile {
     content_type: &'static str,

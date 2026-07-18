@@ -2,13 +2,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use freeq_sdk::oauth::{derive_session_key, OAuthSession};
 use crate::oauth_flow::PreparedLogin;
+use anyhow::{Context, Result};
+use freeq_sdk::oauth::{OAuthSession, derive_session_key};
 use parking_lot::Mutex;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use topcoat::asset::asset;
@@ -313,9 +313,14 @@ pub struct SessionHandle {
     /// Disconnected → Connecting (on spawn) → Registering (on TCP connect)
     /// → Ready (on CAP END/JOIN) → Disconnected (on WS close/error).
     pub ws_state: AtomicU8,
+    /// Message ids already shown (SSR history or live SSE). Prevents JOIN
+    /// chathistory replay from duplicating REST-loaded scrollback.
+    pub seen_msgids: Mutex<HashSet<String>>,
 }
 
 impl SessionHandle {
+    const SEEN_MSGID_CAP: usize = 1000;
+
     pub fn new() -> Self {
         let (irc_tx, irc_rx) = mpsc::channel::<String>(256);
         let (lines_tx, _) = broadcast::channel::<String>(4096);
@@ -330,6 +335,45 @@ impl SessionHandle {
             extracted_did: Mutex::new(None),
             reg_phase: Mutex::new(String::new()),
             ws_state: AtomicU8::new(WsState::Disconnected as u8),
+            seen_msgids: Mutex::new(HashSet::new()),
+        }
+    }
+
+    /// Record msgids already rendered (e.g. SSR history) so SSE skips them.
+    pub fn note_seen_msgids(&self, ids: impl IntoIterator<Item = String>) {
+        let mut set = self.seen_msgids.lock();
+        for id in ids {
+            if !id.is_empty() {
+                set.insert(id);
+            }
+        }
+        Self::trim_seen(&mut set);
+    }
+
+    /// Returns true if this msgid was already shown (and should be skipped).
+    /// Marks the id as seen when it is new.
+    pub fn check_and_mark_msgid(&self, msgid: &str) -> bool {
+        if msgid.is_empty() {
+            return false;
+        }
+        let mut set = self.seen_msgids.lock();
+        if set.contains(msgid) {
+            return true;
+        }
+        set.insert(msgid.to_string());
+        Self::trim_seen(&mut set);
+        false
+    }
+
+    fn trim_seen(set: &mut HashSet<String>) {
+        if set.len() <= Self::SEEN_MSGID_CAP {
+            return;
+        }
+        // HashSet has no order; drop an arbitrary half to stay bounded.
+        let drop_n = set.len() / 2;
+        let victims: Vec<String> = set.iter().take(drop_n).cloned().collect();
+        for v in victims {
+            set.remove(&v);
         }
     }
 
