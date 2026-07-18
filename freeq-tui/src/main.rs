@@ -1483,7 +1483,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     let needle = arg.trim().to_lowercase();
                     let matches: Vec<(String, String, String)> = app
                         .buffers
-                        .get(&target.to_lowercase())
+                        .get(&crate::app::buffer_key(&target))
                         .map(|buf| {
                             buf.messages
                                 .iter()
@@ -1526,7 +1526,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     app.status_msg("/pin only works in channels");
                 } else {
                     let target_msgid = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let trimmed = arg.trim();
                         if !trimmed.is_empty()
                             && buf.is_some_and(|b| b.find_by_msgid(trimmed).is_some())
@@ -1578,7 +1578,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     // Disambiguate "<msgid> <text>" vs "<text>" by checking
                     // whether the first token matches a known msgid.
                     let (target_msgid, reply_text) = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
                         let first = parts[0];
                         let rest = parts.get(1).copied().unwrap_or("");
@@ -1612,7 +1612,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     // a known msgid in the active buffer; if not, treat the
                     // whole arg as the new text targeting our most recent.
                     let (target_msgid, new_text) = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
                         let first = parts[0];
                         let rest = parts.get(1).copied().unwrap_or("");
@@ -1644,7 +1644,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     app.status_msg("Not in a channel or DM");
                 } else {
                     let target_msgid = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let trimmed = arg.trim();
                         if !trimmed.is_empty()
                             && buf.is_some_and(|b| b.find_by_msgid(trimmed).is_some())
@@ -1679,7 +1679,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     if target != "status" {
                         let target_msgid = app
                             .buffers
-                            .get(&target.to_lowercase())
+                            .get(&crate::app::buffer_key(&target))
                             .and_then(|b| b.recent_msgid())
                             .map(|s| s.to_string());
                         if target_msgid.is_none() {
