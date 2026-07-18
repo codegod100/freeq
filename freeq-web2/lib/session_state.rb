@@ -330,7 +330,7 @@ class SessionState
       # Check for DPOP_NONCE notice and update the OAuth session.
       if (nonce = parse_dpop_nonce_notice(line))
         Rails.logger.debug("DPoP nonce rotated during SASL: #{nonce}")
-        @auth.dpop_nonce = nonce if authenticated?
+        update_dpop_nonce!(nonce)
         consumed = true
       elsif (challenge_b64 = parse_authenticate_challenge(line))
         begin
@@ -357,7 +357,7 @@ class SessionState
         finish_registration(driver, channel)
         consumed = true
       elsif (nonce = parse_dpop_nonce_notice(line))
-        @auth.dpop_nonce = nonce if authenticated?
+        update_dpop_nonce!(nonce)
         consumed = true
       elsif (challenge_b64 = parse_authenticate_challenge(line))
         # Server re-issues a challenge (DPoP retry).
@@ -425,6 +425,19 @@ class SessionState
     # :server NOTICE target :DPOP_NONCE <nonce>
     if (m = line.match(/DPOP_NONCE\s+(\S+)/))
       m[1]
+    end
+  end
+
+  # Keep the rotated DPoP nonce on disk so a restart doesn't re-auth
+  # with a stale nonce (matches freeq-webui apply_dpop_nonce intent).
+  def update_dpop_nonce!(nonce)
+    return unless authenticated?
+
+    @auth.dpop_nonce = nonce
+    begin
+      SessionRegistry.instance.persist_auth(@session_id, @auth)
+    rescue StandardError => e
+      Rails.logger.warn("persist dpop_nonce failed: #{e.class}: #{e.message}") if defined?(Rails)
     end
   end
 

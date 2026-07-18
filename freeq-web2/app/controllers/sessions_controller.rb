@@ -80,20 +80,20 @@ class SessionsController < ApplicationController
       )
       oauth_session = prepared.complete(code)
 
-      # Store in the server-side session state.
+      # Store in the server-side session state + encrypted disk store.
       session = current_session
       session.auth = oauth_session
+      SessionRegistry.instance.persist_auth(session_id, oauth_session)
       session.request_reconnect(SessionRegistry.instance.upstream_url)
 
-      # Persist in encrypted cookie so auth survives server restarts.
-      cookies.encrypted[:oauth_session] = JSON.generate(
-        did: oauth_session.did,
-        handle: oauth_session.handle,
-        access_token: oauth_session.access_token,
-        pds_url: oauth_session.pds_url,
-        dpop_key: oauth_session.dpop_key.serialize,
-        dpop_nonce: oauth_session.dpop_nonce
-      )
+      # Also keep an encrypted cookie as a secondary restore path
+      # (covers deploys that wipe the sessions dir).
+      cookies.encrypted[:oauth_session] = {
+        value: JSON.generate(oauth_session.to_h),
+        httponly: true,
+        same_site: :lax,
+        expires: 30.days.from_now
+      }
 
       cookies.encrypted[:pending_oauth] = nil
       redirect_to "/chat", notice: "Signed in as #{oauth_session.handle}"
@@ -107,6 +107,7 @@ class SessionsController < ApplicationController
   def destroy
     session = current_session
     session.auth = :guest
+    SessionRegistry.instance.clear_auth(session_id)
     session.request_reconnect(SessionRegistry.instance.upstream_url)
     cookies.encrypted[:pending_oauth] = nil
     cookies.encrypted[:oauth_session] = nil

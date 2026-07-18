@@ -21,23 +21,35 @@ module Atproto
 
     def to_h
       {
-        did: @did,
-        handle: @handle,
-        access_token: @access_token,
-        pds_url: @pds_url,
-        dpop_key_serialized: @dpop_key.serialize,
-        dpop_nonce: @dpop_nonce
+        "did" => @did,
+        "handle" => @handle,
+        "access_token" => @access_token,
+        "pds_url" => @pds_url,
+        "dpop_key" => @dpop_key.serialize,
+        "dpop_nonce" => @dpop_nonce
       }
     end
 
+    # Accepts string/symbol keys and either a serialized dpop_key string
+    # (`dpop_key` / `dpop_key_serialized`) or a live DpopKey instance.
     def self.from_h(h)
+      h = h.transform_keys(&:to_s)
+      key =
+        if h["dpop_key"].is_a?(DpopKey)
+          h["dpop_key"]
+        else
+          raw = h["dpop_key"] || h["dpop_key_serialized"]
+          raise ArgumentError, "missing dpop_key" if raw.to_s.empty?
+
+          DpopKey.deserialize(raw)
+        end
       new(
-        did: h[:did],
-        handle: h[:handle],
-        access_token: h[:access_token],
-        pds_url: h[:pds_url],
-        dpop_key: DpopKey.deserialize(h[:dpop_key_serialized]),
-        dpop_nonce: h[:dpop_nonce]
+        did: h["did"],
+        handle: h["handle"],
+        access_token: h["access_token"],
+        pds_url: h["pds_url"],
+        dpop_key: key,
+        dpop_nonce: h["dpop_nonce"]
       )
     end
   end

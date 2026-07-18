@@ -3,10 +3,14 @@
 require "monitor"
 
 require_relative "session_state"
+require_relative "session_store"
 require_relative "irc_render"
 
 # Global registry of browser sessions → upstream IRC connections.
 # One SessionState per session_id (a signed cookie set on first request).
+#
+# Authenticated OAuth sessions are also mirrored to an encrypted on-disk
+# SessionStore (see freeq-webui) so identity survives process restarts.
 class SessionRegistry
   include MonitorMixin
 
@@ -16,9 +20,12 @@ class SessionRegistry
     end
   end
 
-  def initialize
+  attr_reader :session_store
+
+  def initialize(session_store: SessionStore.open)
     super()
     @states = {} # session_id => SessionState
+    @session_store = session_store
   end
 
   def upstream_url
@@ -29,8 +36,39 @@ class SessionRegistry
     ENV.fetch("FREEQ_UPSTREAM_REST", "https://irc.freeq.at")
   end
 
+  # Return the live SessionState for `session_id`, creating it on first
+  # touch. On create, try restoring an authenticated OAuth session from
+  # the encrypted disk store so the user stays signed in across restarts.
   def get(session_id)
-    synchronize { @states[session_id] ||= SessionState.new(session_id) }
+    synchronize do
+      existing = @states[session_id]
+      return existing if existing
+
+      state = SessionState.new(session_id)
+      if (oauth = @session_store&.load(session_id))
+        state.auth = oauth
+        Rails.logger.info(
+          "restored authenticated session from disk " \
+          "session=#{session_id[0, 8]}… did=#{oauth.did}"
+        ) if defined?(Rails)
+      end
+      @states[session_id] = state
+      state
+    end
+  end
+
+  # Persist (or refresh) an authenticated OAuth session to disk.
+  def persist_auth(session_id, oauth)
+    @session_store&.save(session_id, oauth)
+  rescue StandardError => e
+    Rails.logger.warn("persist_auth failed: #{e.class}: #{e.message}") if defined?(Rails)
+  end
+
+  # Drop a persisted session (logout).
+  def clear_auth(session_id)
+    @session_store&.remove(session_id)
+  rescue StandardError => e
+    Rails.logger.warn("clear_auth failed: #{e.class}: #{e.message}") if defined?(Rails)
   end
 
   # Fetch channels from the upstream REST API.

@@ -35,9 +35,9 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
 | `app/reflexes/chat_reflex.rb` | StimulusReflex: send/join/part/topic/react/unreact |
 | `app/channels/chat_channel.rb` | ActionCable channel the browser subscribes to for CableReady broadcasts |
 | `app/channels/application_cable/connection.rb` | Identifies connections by `freeq_session` cookie |
-| `lib/session_registry.rb` | Global per-session state registry + REST client helpers |
+| `lib/session_registry.rb` | Global per-session state registry + disk-backed auth restore |
+| `lib/session_store.rb` | AES-256-GCM OAuth session files (FREEQ_WEB2_SESSIONS_DIR) |
 | `lib/session_state.rb` | Per-session state: outbound/inbound queues, upstream WS task, member tracking |
-| `lib/irc_render.rb` | Pure IRC line → HTML helpers (port of `irc_render.rs`) |
 | `app/javascript/controllers/chat_controller.js` | Stimulus controller: ChatChannel subscription, reaction picker, sidebar toggles |
 | `app/javascript/config/stimulus_reflex.js` | StimulusReflex JS bootstrap |
 | `app/views/chat/index.html.erb` | Channel list |
@@ -55,9 +55,10 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
 - **`websocket-driver` over raw `TCPSocket` / `OpenSSL::SSL::SSLSocket`** for
   the upstream WS (avoids the native openssl gem that `async-websocket`
   drags in). Supports both `ws://` and `wss://`.
-- **Guest mode only**: no AT Protocol OAuth / SASL `ATPROTO-CHALLENGE`.
-  The upstream IRC connection registers without SASL. OAuth port is the
-  main TODO.
+- **AT Protocol OAuth + disk persistence**: login via `/login`, SASL on the
+  upstream WS when authenticated. OAuth blobs AES-GCM encrypted under
+  `FREEQ_WEB2_SESSIONS_DIR` (default `.dev-data/web2-sessions`) so identity
+  survives process restart; encrypted cookie is a secondary path.
 - **Per-session Thread for upstream WS + per-(session,channel) broadcaster
   Thread**, mirroring `freeq-webui`'s tokio tasks.
 - **Inline CSS in the layout** (ported from `app.rs`), not Tailwind classes,
@@ -66,14 +67,15 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
 
 ## Known limitations (core port scope)
 
-- **No OAuth login** — guest mode only. `ChatReflex`/`SessionState` have the
-  `auth` field stubbed to `:guest`. Porting `oauth_flow.rs` + DPoP SASL is
-  the largest remaining piece.
-- **No DPoP nonce rotation** — the upstream WS task doesn't handle
-  `DPOP_NONCE` notices or re-issue SASL challenges.
-- **No encrypted on-disk session persistence** — sessions are in-memory only;
-  a server restart logs everyone out. `freeq-webui` encrypts OAuth sessions
-  to disk.
+- **Encrypted OAuth session persistence** — ✅ ported. Authenticated
+  sessions are AES-256-GCM encrypted under `FREEQ_WEB2_SESSIONS_DIR`
+  (default `.dev-data/web2-sessions`), keyed by the browser's signed
+  `freeq_session` cookie. Registry `get` restores on first touch after
+  restart; login also writes an encrypted `oauth_session` cookie as a
+  secondary path. Set `FREEQ_WEB2_SESSIONS_DIR=` empty to disable.
+- **No DPoP nonce rotation end-to-end** — nonce is captured + re-persisted
+  during SASL, but a full re-login is still required if the access token
+  itself expires.
 - **No media upload proxy** — `/upload` route not ported.
 - **No channel policy view** — the policy modal + `/api/policy/:channel`
   endpoint not ported.
