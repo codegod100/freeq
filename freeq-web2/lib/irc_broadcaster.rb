@@ -18,6 +18,13 @@ module IrcBroadcaster
   # Process a single inbound IRC line for a known viewing context, or
   # fan-out to every joined channel when the line is not channel-scoped.
   def handle(session, line)
+    # Forward policy NOTICEs to the capture queue if one is active, and
+    # suppress them from the chat output.
+    if session.policy_response_queue && policy_notice?(line)
+      session.policy_response_queue << line
+      return
+    end
+
     # Track IRCv3 BATCH so JOIN chathistory is not re-appended (REST already
     # rendered scrollback on page load).
     if (batch = IrcRender.parse_batch_line(line))
@@ -140,6 +147,23 @@ module IrcBroadcaster
   def line_msgid(line)
     tags, _ = IrcRender.parse_irc_tags(line)
     tags["msgid"]
+  end
+
+  # When a policy capture is active, capture ALL nick-directed NOTICEs.
+  # The server sends rules text as individual NOTICE lines — the body lines
+  # have no policy keywords, so keyword matching would miss them.
+  # The parser in ApiController sorts out which lines are relevant.
+  def policy_notice?(line)
+    return false unless line.include?("NOTICE")
+    rest = line.to_s.sub(/\A@\S+\s+/, "") # strip tags
+    return false unless rest.start_with?(":")
+    after_prefix = rest[1..]
+    sp = after_prefix.index(" ") or return false
+    cmd_and_args = after_prefix[(sp + 1)..]
+    return false unless cmd_and_args.start_with?("NOTICE ")
+    # Only capture nick-directed (not channel-directed) NOTICEs.
+    target = cmd_and_args.split(" ", 3)[1].to_s
+    !target.start_with?("#", "&")
   end
 
   def channel_from_353(line)

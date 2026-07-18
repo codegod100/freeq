@@ -5,18 +5,18 @@
      data-channel="<%= @bare %>"
      data-auth-handle="<%= @session.auth.is_a?(Hash) ? @session.auth[:nick] : "" %>">
   <nav>
-    <span style="font-size:.875rem;font-weight:700">freeq</span>
+    <span class="brand">freeq</span>
     <span style="font-size:.875rem;color:#7ab7ff"><%= @channel %></span>
     <span id="channel-topic" style="margin-left:.5rem;font-size:.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%"><%= @topic %></span>
-    <div style="margin-left:auto;display:flex;align-items:center;gap:.5rem;font-size:.75rem">
+    <div class="nav-right">
       <% if @session.authenticated? %>
-        <span style="color:var(--nick-5)">🔒 <%= @session.auth_handle %></span>
+        <span class="auth-badge">🔒 <%= @session.auth_handle %></span>
         <form method="POST" action="/logout" style="display:inline">
           <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
-          <button type="submit" style="border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:.75rem">Sign out</button>
+          <button type="submit" class="btn-link">Sign out</button>
         </form>
       <% else %>
-        <a href="/login" style="color:#7ab7ff;text-decoration:none">Sign in</a>
+        <a href="/login" class="btn-link">Sign in</a>
       <% end %>
       <span id="status"><span class="dot"></span> <span>connecting…</span></span>
     </div>
@@ -26,25 +26,23 @@
     <%# Sidebar %>
     <aside id="sidebar" data-reflex-permanent>
       <form id="join-form"
-            style="display:flex;gap:4px;margin-bottom:.5rem"
             data-reflex="submit->ChatReflex#join"
             data-reflex-serialize-form="true">
         <input
-          style="min-width:0;flex:1;border:1px solid var(--border);background:#151a22;border-radius:4px;padding:2px 6px;color:var(--fg)"
           type="text"
           name="channel"
           placeholder="join #…"
           autocomplete="off">
-        <button type="submit" style="border:0;border-radius:4px;background:#7ab7ff;color:#0e1116;font-weight:600;padding:2px 8px;cursor:pointer">+</button>
+        <button type="submit">+</button>
       </form>
-      <p class="sidebar-toggle" style="margin:0 0 4px;padding:0 4px;font-size:.65rem;letter-spacing:.04em;color:var(--muted);cursor:pointer">MY CHANNELS</p>
-      <ul id="my-channels" style="list-style:none;margin:0 0 12px;padding:0">
+      <p class="sidebar-toggle">MY CHANNELS</p>
+      <ul id="my-channels">
         <% @my_channels.each do |ch| %>
           <%= render "chat/channel_link", ch: ch, active: @channel %>
         <% end %>
       </ul>
-      <p class="sidebar-toggle collapsed" style="margin:0 0 4px;padding:0 4px;font-size:.65rem;letter-spacing:.04em;color:var(--muted);cursor:pointer">ALL CHANNELS</p>
-      <ul id="all-channels" style="list-style:none;margin:0;padding:0;display:none">
+      <p class="sidebar-toggle collapsed">ALL CHANNELS</p>
+      <ul id="all-channels" style="display:none">
         <% @all_channels.each do |ch| %>
           <%= render "chat/channel_link", ch: ch, active: @channel %>
         <% end %>
@@ -93,4 +91,18 @@
   </div>
 
   <div id="react-picker" role="menu" aria-label="React with emoji"></div>
+
+  <div id="policy-modal" onclick="if(event.target===this)window.closePolicy()">
+    <div class="policy-dialog">
+      <div class="policy-header">
+        <span class="policy-icon">🛡️</span>
+        <span class="policy-title">Channel policy</span>
+        <span id="policy-channel-name" class="policy-channel-name"></span>
+        <button type="button" class="policy-close" onclick="window.closePolicy()" aria-label="Close">×</button>
+      </div>
+      <div id="policy-body" class="policy-content">
+        <p class="policy-empty">Loading…</p>
+      </div>
+    </div>
+  </div>
 </div>

@@ -1,8 +1,8 @@
 <% bare = ch["name"].to_s.delete("#") %>
 <% href = "/chat/#{bare}" %>
 <% is_active = ch["name"].to_s.casecmp?(active) %>
-<% cls = is_active ? "block rounded px-2 py-1 bg-[#7ab7ff] text-[#0e1116] font-medium" : "block rounded px-2 py-1 text-zinc-300 hover:bg-[#151a22]" %>
-<li class="flex items-center gap-1">
-  <a href="<%= href %>" class="<%= cls %>" style="flex:1;min-width:0;overflow-wrap:anywhere"><%= ch["name"] %></a>
-  <span class="rounded bg-[#1a1f28] px-1.5 py-0.5 text-[0.65rem] text-zinc-400"><%= ch["members"] %></span>
+<li class="sidebar-channel<%= " active" if is_active %>">
+  <a href="<%= href %>" class="sidebar-channel-link"><%= ch["name"] %></a>
+  <button type="button" class="sidebar-channel-count" title="Channel policy"
+          onclick="event.stopPropagation();window.showPolicy('<%= bare %>')"><%= ch["members"] %></button>
 </li>

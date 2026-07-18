@@ -79,7 +79,7 @@ class SessionsController < ApplicationController
       # Store in the server-side session state.
       session = current_session
       session.auth = oauth_session
-      session.request_reconnect
+      session.request_reconnect(SessionRegistry.instance.upstream_url)
 
       cookies.encrypted[:pending_oauth] = nil
       redirect_to "/chat", notice: "Signed in as #{oauth_session.handle}"
@@ -93,7 +93,7 @@ class SessionsController < ApplicationController
   def destroy
     session = current_session
     session.auth = :guest
-    session.request_reconnect
+    session.request_reconnect(SessionRegistry.instance.upstream_url)
     cookies.encrypted[:pending_oauth] = nil
     redirect_to "/chat", notice: "Signed out"
   end

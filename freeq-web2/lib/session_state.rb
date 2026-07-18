@@ -18,7 +18,8 @@ class SessionState
   include MonitorMixin
 
   attr_reader :session_id, :joined, :channel_members, :irc_out, :irc_in,
-              :parent_lookup, :suppress_history_batches, :reaction_cache
+              :parent_lookup, :suppress_history_batches, :reaction_cache,
+              :policy_response_queue
   attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
 
@@ -35,6 +36,7 @@ class SessionState
     @suppress_history_batches = Set.new
     @parent_lookup = {}
     @reaction_cache = {}
+    @policy_response_queue = nil  # Set to a Queue when capturing policy NOTICEs
     @task = nil
     @broadcaster = nil
     @reg_phase = :wait_cap_ack  # :wait_cap_ack, :sasl_challenge, :sasl_result
@@ -56,13 +58,23 @@ class SessionState
   end
 
   # Force the WS task to reconnect so it picks up the new auth state.
-  def request_reconnect
+  # If any channels were previously joined, immediately respawn with the
+  # first one so the caller doesn't need to navigate to a channel page.
+  def request_reconnect(upstream_url = nil)
     @task_mutex.synchronize do
       if @task && @task.alive?
         @task.kill
+        @task.join(2) # give it a moment to die
         @task = nil
       end
       @ws_state = :disconnected
+      @reg_phase = :wait_cap_ack
+    end
+
+    # Respawn outside the mutex — spawn_upstream_if_needed acquires @task_mutex.
+    if upstream_url && !@joined.empty?
+      first_channel = @joined.first
+      spawn_upstream_if_needed(upstream_url, first_channel)
     end
   end
 
@@ -128,6 +140,20 @@ class SessionState
     @irc_out << line
   end
 
+  # Start capturing policy NOTICEs into a dedicated queue.
+  # The broadcaster will forward policy-related NOTICEs to this queue.
+  # Stops any previous capture first.
+  def start_policy_capture
+    @policy_response_queue = Queue.new
+  end
+
+  # Stop capturing and return the queue (may still have pending items).
+  def stop_policy_capture
+    q = @policy_response_queue
+    @policy_response_queue = nil
+    q
+  end
+
   # ── Upstream WS ───────────────────────────────────────────────────────
 
   def spawn_upstream_if_needed(upstream_url, channel)
@@ -136,13 +162,21 @@ class SessionState
     ensure_broadcaster!
 
     @task_mutex.synchronize do
+      # Clean up dead thread handles so we can respawn.
+      if @task && !@task.alive?
+        @task = nil
+        @ws_state = :disconnected
+      end
+
       if @task && @task.alive?
+        # Already connected — just JOIN the new channel.
         enqueue_outbound("JOIN #{target}\r\n")
         return
       end
 
+      # Re-JOIN all previously joined channels except the target —
+      # finish_registration will JOIN the target directly.
       (@joined - [target]).each { |c| enqueue_outbound("JOIN #{c}\r\n") }
-      enqueue_outbound("JOIN #{target}\r\n")
       @task = Thread.new { run_upstream(upstream_url.to_s, target) }
     end
   end
@@ -176,6 +210,7 @@ class SessionState
     tls = uri.scheme == "wss"
     port = uri.port || (tls ? 443 : 80)
     @url = upstream_url.to_s
+    @reg_phase = :wait_cap_ack
 
     tcp = TCPSocket.new(uri.host, port)
     @socket =
@@ -222,15 +257,17 @@ class SessionState
         end
       if chunk
         driver.parse(chunk)
-      elsif ws_state == :ready
+      else
+        # Always try to drain the outbound queue, regardless of ws_state.
+        # Messages enqueued before :ready (e.g. JOINs) will be sent once
+        # the registration handshake completes via flush_outbound.
         begin
           line = irc_out.pop(true)
-          driver.text(line)
+          driver.text(line) if ws_state == :ready
         rescue ThreadError
           sleep 0.01
         end
-      else
-        sleep 0.01
+        sleep 0.005 if ws_state != :ready
       end
     end
   rescue => e
@@ -252,17 +289,22 @@ class SessionState
   end
 
   def handle_upstream_line(line, driver, channel)
-    # PING/PONG keepalive.
+    # PING/PONG keepalive — don't forward.
     if (token = ping_token(line))
       driver.text("PONG :#{token}\r\n")
       return
     end
 
-    # 433 nick in use → retry.
+    # 433 nick in use → retry, but still forward so user sees the error.
     if line.include?(" 433 ")
+      irc_in << line
       driver.text("NICK #{guest_nick}\r\n")
       return
     end
+
+    # Registration state machine — each phase may consume the line or
+    # fall through to forward it to the broadcaster.
+    consumed = false
 
     case @reg_phase
     when :wait_cap_ack
@@ -276,12 +318,11 @@ class SessionState
           # No SASL or not authenticated — guest mode.
           finish_registration(driver, channel)
         end
-        return
-      end
-
-      # Server sent numeric registration without CAP → proceed as guest.
-      if line =~ / 00[1-4] /
+        consumed = true
+      elsif line =~ / 00[1-4] /
+        # Server sent numeric registration without CAP → proceed as guest.
         finish_registration(driver, channel)
+        # Don't consume — let user see the welcome numeric.
       end
 
     when :sasl_challenge
@@ -289,11 +330,8 @@ class SessionState
       if (nonce = parse_dpop_nonce_notice(line))
         Rails.logger.debug("DPoP nonce rotated during SASL: #{nonce}")
         @auth.dpop_nonce = nonce if authenticated?
-        return
-      end
-
-      # AUTHENTICATE <challenge> from server.
-      if (challenge_b64 = parse_authenticate_challenge(line))
+        consumed = true
+      elsif (challenge_b64 = parse_authenticate_challenge(line))
         begin
           challenge = Atproto::Sasl.parse_challenge(challenge_b64)
           response = Atproto::Sasl.build_response(challenge[:nonce], @auth)
@@ -302,36 +340,26 @@ class SessionState
           Rails.logger.info("SASL challenge response sent for #{auth_handle}")
         rescue => e
           Rails.logger.warn("SASL challenge response failed: #{e.class}: #{e.message}")
-          # Fall back to guest.
           finish_registration(driver, channel)
         end
-        return
+        consumed = true
       end
 
     when :sasl_result
-      # 903 = SASL success.
       if line.include?(" 903 ")
         Rails.logger.info("SASL authentication successful for #{auth_handle}")
         finish_registration(driver, channel)
-        return
-      end
-
-      # 904 = SASL failure — fall back to guest.
-      if line.include?(" 904 ")
+        consumed = true
+      elsif line.include?(" 904 ")
         Rails.logger.warn("SASL authentication failed; proceeding as guest")
         @reg_phase = :wait_cap_ack
         finish_registration(driver, channel)
-        return
-      end
-
-      # DPoP nonce rotation during SASL result.
-      if (nonce = parse_dpop_nonce_notice(line))
+        consumed = true
+      elsif (nonce = parse_dpop_nonce_notice(line))
         @auth.dpop_nonce = nonce if authenticated?
-        return
-      end
-
-      # Server may re-issue a challenge (DPoP retry).
-      if (challenge_b64 = parse_authenticate_challenge(line))
+        consumed = true
+      elsif (challenge_b64 = parse_authenticate_challenge(line))
+        # Server re-issues a challenge (DPoP retry).
         begin
           challenge = Atproto::Sasl.parse_challenge(challenge_b64)
           response = Atproto::Sasl.build_response(challenge[:nonce], @auth)
@@ -340,15 +368,13 @@ class SessionState
           Rails.logger.warn("SASL retry failed: #{e.class}: #{e.message}")
           finish_registration(driver, channel)
         end
-        return
+        consumed = true
       end
-
     end
 
-    # Once registered, forward all lines to the broadcaster.
-    if ws_state == :ready
-      irc_in << line
-    end
+    # Forward all non-consumed lines to the broadcaster so the user sees
+    # server notices, welcome messages, etc.
+    irc_in << line unless consumed
   end
 
   def finish_registration(driver, channel)
@@ -377,10 +403,14 @@ class SessionState
     nil
   end
 
+  # Parse `:server CAP * ACK :sasl account-notify` into the list of caps.
   def parse_cap_ack(line)
     parts = line.split
-    return nil unless parts[1] == "CAP" && parts[3] == "ACK"
-    parts[5..].map { |c| c.delete_prefix(":") }
+    return nil unless parts.length >= 4
+    return nil unless parts[1]&.casecmp?("CAP") && parts[3]&.casecmp?("ACK")
+    caps = parts[4..]
+    return nil if caps.nil? || caps.empty?
+    caps.map { |c| c.delete_prefix(":") }
   end
 
   def parse_authenticate_challenge(line)
