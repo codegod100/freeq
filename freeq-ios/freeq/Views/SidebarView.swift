@@ -36,19 +36,25 @@ struct SidebarView: View {
             // Content
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
-                    // Channels
-                    sectionHeader("CHANNELS", count: appState.channels.count)
+                    // Channels — alphabetical, case-insensitive. Matches
+                    // ChatsTab so the same room is always in the same place
+                    // regardless of which view the user is in.
+                    let sortedChannels = appState.channels.sorted {
+                        $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+                    }
+                    sectionHeader("CHANNELS", count: sortedChannels.count)
 
-                    ForEach(appState.channels) { channel in
+                    ForEach(sortedChannels) { channel in
                         channelRow(channel)
                     }
 
-                    // DMs
+                    // DMs — most recently active first. Mirrors ChatsTab.
                     if !appState.dmBuffers.isEmpty {
-                        sectionHeader("DIRECT MESSAGES", count: appState.dmBuffers.count)
+                        let sortedDMs = appState.dmBuffers.sorted { $0.lastActivity > $1.lastActivity }
+                        sectionHeader("DIRECT MESSAGES", count: sortedDMs.count)
                             .padding(.top, 12)
 
-                        ForEach(appState.dmBuffers) { dm in
+                        ForEach(sortedDMs) { dm in
                             dmRow(dm)
                         }
                     }
@@ -68,14 +74,14 @@ struct SidebarView: View {
                         .fill(Theme.nickColor(for: appState.nick).opacity(0.2))
                         .frame(width: 36, height: 36)
                     Text(String(appState.nick.prefix(1)).uppercased())
-                        .font(.system(size: 14, weight: .bold))
+                        .font(.fqFootnote.weight(.bold))
                         .foregroundColor(Theme.nickColor(for: appState.nick))
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Text(appState.nick)
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(.fqFootnote.weight(.semibold))
                             .foregroundColor(Theme.textPrimary)
                             .lineLimit(1)
 
@@ -87,7 +93,7 @@ struct SidebarView: View {
                     }
 
                     Text(appState.authenticatedDID ?? "Guest")
-                        .font(.system(size: 11))
+                        .font(.fqCaption2)
                         .foregroundColor(Theme.textMuted)
                         .lineLimit(1)
                 }
@@ -127,12 +133,12 @@ struct SidebarView: View {
     private func sectionHeader(_ title: String, count: Int) -> some View {
         HStack {
             Text(title)
-                .font(.system(size: 11, weight: .bold))
+                .font(.fqCaption2.weight(.bold))
                 .foregroundColor(Theme.textMuted)
                 .kerning(0.8)
             Spacer()
             Text("\(count)")
-                .font(.system(size: 11, weight: .medium))
+                .font(.fqCaption2.weight(.medium))
                 .foregroundColor(Theme.textMuted)
         }
         .padding(.horizontal, 16)
@@ -149,12 +155,12 @@ struct SidebarView: View {
         }) {
             HStack(spacing: 8) {
                 Text("#")
-                    .font(.system(size: 16, weight: .medium, design: .monospaced))
+                    .font(.fqMono.weight(.medium))
                     .foregroundColor(isActive ? Theme.accent : Theme.textMuted)
                     .frame(width: 20)
 
                 Text(String(channel.name.dropFirst()))
-                    .font(.system(size: 15, weight: isActive ? .semibold : .regular))
+                    .font(.fqSubheadline.weight(isActive ? .semibold : .regular))
                     .foregroundColor(isActive ? Theme.textPrimary : Theme.textSecondary)
                     .lineLimit(1)
 
@@ -163,15 +169,15 @@ struct SidebarView: View {
                 let unread = appState.unreadCounts[channel.name] ?? 0
                 if unread > 0 {
                     Text("\(unread)")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.fqCaption2.weight(.bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Theme.accent)
                         .cornerRadius(10)
                 } else if !channel.members.isEmpty {
-                    Text("\(channel.members.count)")
-                        .font(.system(size: 11))
+                    Text("\(channel.uniqueMemberCount)")
+                        .font(.fqCaption2)
                         .foregroundColor(Theme.textMuted)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -213,12 +219,12 @@ struct SidebarView: View {
                         .fill(Theme.nickColor(for: dm.name).opacity(0.2))
                         .frame(width: 28, height: 28)
                     Text(String(dm.name.prefix(1)).uppercased())
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.fqCaption2.weight(.bold))
                         .foregroundColor(Theme.nickColor(for: dm.name))
                 }
 
                 Text(dm.name)
-                    .font(.system(size: 15, weight: isActive ? .semibold : .regular))
+                    .font(.fqSubheadline.weight(isActive ? .semibold : .regular))
                     .foregroundColor(isActive ? Theme.textPrimary : Theme.textSecondary)
                     .lineLimit(1)
 
@@ -227,7 +233,7 @@ struct SidebarView: View {
                 let unread = appState.unreadCounts[dm.name] ?? 0
                 if unread > 0 {
                     Text("\(unread)")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.fqCaption2.weight(.bold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
@@ -249,7 +255,7 @@ struct SidebarView: View {
                 Label("Mark as Read", systemImage: "checkmark.circle")
             }
             Button(role: .destructive) {
-                appState.dmBuffers.removeAll { $0.name == dm.name }
+                appState.closeDM(dm.name)
                 if appState.activeChannel == dm.name {
                     appState.activeChannel = appState.channels.first?.name
                 }

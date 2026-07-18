@@ -193,8 +193,13 @@ fn create(
             let creator_private = PrivateKey::ed25519_from_bytes(&creator_key_bytes)
                 .context("Failed to parse creator key (expected 32-byte ed25519)")?;
 
-            // Canonical JSON for signing (without the signature field)
-            let canonical = serde_json::to_string(&deleg)?;
+            // Canonical JSON for signing (without the signature field).
+            // Use JCS (RFC 8785) so a verifying server can reproduce the exact
+            // bytes regardless of struct field declaration order. The signature
+            // field is `skip_serializing_if = "Option::is_none"`, and at this
+            // point it's still None, so it's omitted from the canonical form.
+            let canonical = freeq_sdk::canonical::canonicalize(&deleg)
+                .context("Failed to canonicalize delegation")?;
             let sig = creator_private.sign(canonical.as_bytes());
             deleg.signature = Some(URL_SAFE_NO_PAD.encode(&sig));
 
@@ -210,7 +215,7 @@ fn create(
     };
 
     // Build DID document for did:web
-    if domain.is_some() {
+    if let Some(domain) = domain {
         let mut did_doc = serde_json::json!({
             "@context": [
                 "https://www.w3.org/ns/did/v1",
@@ -244,7 +249,6 @@ fn create(
         std::fs::write(&doc_path, serde_json::to_string_pretty(&did_doc)?)?;
         eprintln!("✅ DID document: {}", doc_path.display());
 
-        let domain = domain.unwrap();
         eprintln!("   Serve at: https://{domain}/bots/{name}/did.json");
     } else {
         // For did:key, save delegation as separate file

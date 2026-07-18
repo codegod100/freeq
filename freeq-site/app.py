@@ -1,9 +1,10 @@
 """freeq.at — static site with markdown docs rendering."""
 
 import os
+import subprocess
 from pathlib import Path
 
-from flask import Flask, render_template, abort, send_from_directory
+from flask import Flask, render_template, abort, send_from_directory, jsonify
 import markdown
 from markdown.extensions.codehilite import CodeHiliteExtension
 from markdown.extensions.fenced_code import FencedCodeExtension
@@ -11,6 +12,19 @@ from markdown.extensions.tables import TableExtension
 from markdown.extensions.toc import TocExtension
 
 app = Flask(__name__)
+
+# Resolve git commit at startup (written by deploy.sh or read from git)
+_commit_file = Path(__file__).parent / ".git_commit"
+if _commit_file.exists():
+    GIT_COMMIT = _commit_file.read_text().strip()
+else:
+    try:
+        GIT_COMMIT = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=Path(__file__).parent
+        ).stdout.strip() or "unknown"
+    except Exception:
+        GIT_COMMIT = "unknown"
 
 # Docs directory — site docs/ and repo docs/
 SITE_DOCS_DIR = Path(__file__).parent / "docs"
@@ -73,6 +87,16 @@ SLUG_MAP = {
     "policy-system": ("site", "POLICY.md"),
     "agents": ("site", "agents.md"),
     "security": ("site", "SECURITY.md"),
+    "typescript-sdk": ("site", "typescript-sdk.md"),
+    "agent-assistance": ("site", "agent-assistance.md"),
+    "av-agents": ("site", "av-agents.md"),
+    "av-protocol": ("site", "av-protocol.md"),
+    "well-known-agent": ("site", "skills/well-known-agent.md"),
+    "av-quic-migration": ("site", "AV-QUIC-MIGRATION.md"),
+    # Company privacy / E2E encrypted channels
+    "company-encrypted-channels": ("site", "COMPANY-ENCRYPTED-CHANNELS.md"),
+    "vc-e2e-channels": ("site", "VC-BOOTSTRAPPED-CHANNEL-E2EE.md"),
+    "self-hosting-e2e": ("site", "SELF-HOSTING-END-TO-END.md"),
 }
 
 
@@ -97,6 +121,11 @@ def sdk():
 @app.route("/about/")
 def about():
     return render_template("about.html")
+
+
+@app.route("/version")
+def version():
+    return jsonify({"service": "freeq-site", "git_commit": GIT_COMMIT})
 
 
 @app.route("/docs/")

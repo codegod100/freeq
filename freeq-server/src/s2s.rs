@@ -106,6 +106,74 @@ pub fn parse_trust_config(entries: &[String]) -> HashMap<String, TrustLevel> {
     map
 }
 
+/// Select the application coordination tags that should ride along with a
+/// PRIVMSG when it is relayed to S2S peers.
+///
+/// These (`+freeq.at/event`, `+freeq.at/payload`, `+freeq.at/task-id`,
+/// `+freeq.at/evidence-type`, and any future `+freeq.at/*`) are message
+/// content — relayed on the same peer-trust basis as the message text, so a
+/// federated client can render the same coordination card the origin server
+/// shows. Server-controlled tags are deliberately NOT relayed here and stay
+/// handled out-of-band: `+freeq.at/sig` (carried in its own field and
+/// re-attested on receipt), and `account`/`time`/`msgid` (regenerated
+/// locally; not `+freeq.at/`-prefixed so excluded anyway).
+pub fn relay_coordination_tags(full: &HashMap<String, String>) -> HashMap<String, String> {
+    full.iter()
+        .filter(|(k, _)| k.starts_with("+freeq.at/") && k.as_str() != "+freeq.at/sig")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Encode a PRIVMSG body for the S2S `text` field so that ANY peer
+/// can relay it safely to its local clients, regardless of whether
+/// that peer understands `multiline_lines`. If the body contains `\n`
+/// (i.e., the message is multi-line), `\n` is escaped to the two
+/// literal chars `\\n` and the `+freeq.at/multiline` tag is added —
+/// the freeq inline encoding that's been understood by freeq clients
+/// since before the `draft/multiline` track existed.
+///
+/// **Why:** the S2S wire field is a JSON String and tolerates real
+/// `\n` bytes during transport. But when a peer that doesn't process
+/// `multiline_lines` constructs a PRIVMSG from `text` and writes it
+/// to its local clients' TCP/WS connections, an embedded `\n` ends
+/// the IRC line mid-body and everything after is lost (parsed as
+/// unknown commands). Pre-escaping keeps the wire safe everywhere.
+///
+/// New peers prefer `multiline_lines` for proper BATCH emission and
+/// the escaped `text` is ignored. Old peers ignore `multiline_lines`
+/// and use the escaped `text` — their local freeq clients decode the
+/// tag back to real `\n` on render.
+///
+/// Returns `(text_for_wire, tags_with_multiline_tag_if_set)`.
+pub fn encode_privmsg_text_for_s2s(
+    text: &str,
+    mut tags: HashMap<String, String>,
+) -> (String, HashMap<String, String>) {
+    if text.contains('\n') {
+        tags.insert("+freeq.at/multiline".to_string(), String::new());
+        (text.replace('\n', "\\n"), tags)
+    } else {
+        (text.to_string(), tags)
+    }
+}
+
+/// One line of a draft/multiline batch, serialized for S2S relay.
+/// Kept minimal so the wire size doesn't balloon for typical agent
+/// turns: just the body and the concat flag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MultilineLine {
+    pub body: String,
+    /// True if this line carried `draft/multiline-concat` (join to
+    /// previous with no separator). Serialized only when non-default
+    /// to keep typical-case wire small.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub concat: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Messages exchanged between servers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -184,6 +252,101 @@ pub enum S2sMessage {
         /// Server-attested message signature (`+freeq.at/sig`).
         #[serde(default)]
         sig: Option<String>,
+        /// Sender's DID — the value of the IRCv3 `account` tag. Carried
+        /// so the receiving server can stamp `account` for a remote
+        /// sender it has no local session for; without it the receiver
+        /// has no DID and federated clients show no identity. Always
+        /// origin-stamped from the authenticated session, never
+        /// client-set (preserves the anti-spoof rule across S2S).
+        /// `serde(default)` → older peers omit it (wire back-compat).
+        #[serde(default)]
+        account: Option<String>,
+        /// Recipient's DID for a directed (DM) message — resolved ONCE at the
+        /// origin (the authoritative point for the target nick) and stamped
+        /// here so a receiver keys durable DM history off the DID instead of
+        /// re-resolving the nick to whoever *it* thinks it is. Origin-asserted
+        /// and unauthenticated: receivers cross-check when they can and fall
+        /// back rather than persist on mismatch. `None` for channel messages
+        /// and when the origin couldn't resolve the recipient. `serde(default)`
+        /// → older peers omit it (wire back-compat).
+        #[serde(default)]
+        recipient_did: Option<String>,
+        /// Application coordination tags (`+freeq.at/event` etc.) that ride
+        /// with the message so federated clients render the same card the
+        /// origin shows. `serde(default)` → older peers omit it, deserialize
+        /// to empty (wire back-compat). See `relay_coordination_tags`.
+        #[serde(default)]
+        tags: HashMap<String, String>,
+        /// When the relayed message originated as a `draft/multiline`
+        /// batch, the per-line breakdown so the receiving peer can
+        /// re-emit BATCH-wrapped frames to its own multiline-capable
+        /// clients (and N PRIVMSGs to fallback clients) instead of a
+        /// single PRIVMSG with `\n` in the body. Absent for normal
+        /// single-PRIVMSG sends; `text` always carries the assembled
+        /// body so peers without multiline-aware fan-out still get
+        /// the content (even if wire-broken on their own clients).
+        ///
+        /// # Why one event with a per-line breakdown, not N events
+        ///
+        /// An alternative shape would have been to ship a multiline
+        /// message as a sequence of N `S2sMessage::Privmsg` events,
+        /// mirroring the local wire shape (N PRIVMSGs grouped by
+        /// BATCH). That was rejected because:
+        ///
+        /// - **Atomicity**: a logical message is a single delivery
+        ///   unit; receiving peers shouldn't have to wait for N events
+        ///   to arrive (in order, with no drops) before they can fan
+        ///   out to their local channel members.
+        /// - **Dedup**: each event carries an `event_id`. Splitting
+        ///   into N events means N dedup entries and a separate
+        ///   grouping mechanism so a partial re-sync doesn't
+        ///   half-deliver.
+        /// - **Signatures**: `+freeq.at/sig` is signed over the
+        ///   assembled body. One sig per logical message keeps the
+        ///   verification cheap and unambiguous; N separately-signed
+        ///   chunks would either expensive (N sigs) or leak unverified
+        ///   payload (sig on first chunk only).
+        /// - **msgid placement**: a multiline message has one msgid
+        ///   per the IRCv3 spec. Bundling keeps "one event = one
+        ///   msgid" intact; splitting forces a non-obvious choice
+        ///   about which event owns the msgid.
+        ///
+        /// This bundling pattern is consistent with how the rest of
+        /// freeq's S2S layer transmits atomic-application units:
+        /// `SyncResponse` carries `Vec<ChannelInfo>` (the cluster's
+        /// channel view as of now, not N per-channel events);
+        /// `PolicySync` ships the full PolicyDocument JSON in one
+        /// event; `CrdtSync` bundles many CRDT ops into one payload.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        multiline_lines: Option<Vec<MultilineLine>>,
+    },
+
+    /// A PIN/UNPIN relayed between servers.
+    #[serde(rename = "pin")]
+    Pin {
+        #[serde(default)]
+        event_id: String,
+        channel: String,
+        /// The ULID msgid of the pinned/unpinned message.
+        msgid: String,
+        /// Who pinned/unpinned it.
+        pinned_by: String,
+        /// true = pin added, false = pin removed.
+        #[serde(default)]
+        adding: bool,
+        origin: String,
+    },
+
+    /// A TAGMSG relayed between servers (reactions, typing, etc.).
+    #[serde(rename = "tagmsg")]
+    Tagmsg {
+        #[serde(default)]
+        event_id: String,
+        from: String,
+        target: String,
+        /// IRCv3 tags (e.g. +react, +reply, +typing).
+        tags: HashMap<String, String>,
+        origin: String,
     },
 
     /// A user joined a channel.
@@ -200,6 +363,9 @@ pub enum S2sMessage {
         /// Whether this user is an operator on their home server.
         #[serde(default)]
         is_op: bool,
+        /// Actor class: "human", "agent", or "external_agent".
+        #[serde(default)]
+        actor_class: Option<String>,
         origin: String,
     },
 
@@ -322,6 +488,21 @@ pub enum S2sMessage {
         origin: String,
     },
 
+    /// An invite-exception (+I) entry was set or removed on a channel.
+    #[serde(rename = "invite_exception")]
+    InviteException {
+        #[serde(default)]
+        event_id: String,
+        channel: String,
+        /// The mask (nick!user@host or DID).
+        mask: String,
+        /// Who set/removed the entry.
+        set_by: String,
+        /// true = entry added, false = entry removed.
+        adding: bool,
+        origin: String,
+    },
+
     /// Policy sync — share a channel's policy document with peers.
     /// Sent when a policy is created/updated/cleared.
     #[serde(rename = "policy_sync")]
@@ -349,6 +530,52 @@ pub enum S2sMessage {
         origin: String,
     },
 
+    // ── AV session federation ───────────────────────────────────────
+    /// An AV session was created (voice/video call started).
+    #[serde(rename = "av_session_created")]
+    AvSessionCreated {
+        #[serde(default)]
+        event_id: String,
+        session_id: String,
+        channel: String,
+        created_by_did: String,
+        created_by_nick: String,
+        title: Option<String>,
+        iroh_ticket: Option<String>,
+        origin: String,
+    },
+
+    /// A user joined an AV session.
+    #[serde(rename = "av_session_joined")]
+    AvSessionJoined {
+        #[serde(default)]
+        event_id: String,
+        session_id: String,
+        did: String,
+        nick: String,
+        origin: String,
+    },
+
+    /// A user left an AV session.
+    #[serde(rename = "av_session_left")]
+    AvSessionLeft {
+        #[serde(default)]
+        event_id: String,
+        session_id: String,
+        did: String,
+        origin: String,
+    },
+
+    /// An AV session ended.
+    #[serde(rename = "av_session_ended")]
+    AvSessionEnded {
+        #[serde(default)]
+        event_id: String,
+        session_id: String,
+        ended_by: Option<String>,
+        origin: String,
+    },
+
     /// Internal event: a peer's S2S link has disconnected.
     /// Not sent over the wire — synthesized locally so the event processor
     /// can clean up remote_members for that peer's origin.
@@ -366,6 +593,9 @@ pub struct SyncNick {
     #[serde(default)]
     pub is_op: bool,
     pub did: Option<String>,
+    /// Actor class: "human", "agent", or "external_agent".
+    #[serde(default)]
+    pub actor_class: Option<String>,
 }
 
 /// Channel info for sync.
@@ -402,6 +632,9 @@ pub struct ChannelInfo {
     /// Active invites (DIDs, nick:XXX tokens).
     #[serde(default)]
     pub invites: Vec<String>,
+    /// Active +I invite-exception entries (mask strings, hostmask or DID).
+    #[serde(default)]
+    pub invite_exceptions: Vec<String>,
 }
 
 /// Bounded set for event dedup. Uses two layers:
@@ -787,6 +1020,29 @@ pub async fn start(
     Ok((manager, event_rx))
 }
 
+/// `ProtocolHandler` that dispatches accepted S2S connections.
+#[derive(Clone)]
+pub struct S2sProtocol {
+    pub state: Arc<SharedState>,
+}
+
+impl std::fmt::Debug for S2sProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S2sProtocol").finish()
+    }
+}
+
+impl iroh::protocol::ProtocolHandler for S2sProtocol {
+    async fn accept(
+        &self,
+        conn: iroh::endpoint::Connection,
+    ) -> std::result::Result<(), iroh::protocol::AcceptError> {
+        tracing::info!("Incoming S2S connection from {}", conn.remote_id());
+        handle_incoming_s2s(conn, Arc::clone(&self.state)).await;
+        Ok(())
+    }
+}
+
 /// Handle an incoming S2S connection (called from iroh accept loop).
 pub async fn handle_incoming_s2s(conn: iroh::endpoint::Connection, state: Arc<SharedState>) {
     let manager = state.s2s_manager.lock().clone();
@@ -814,16 +1070,40 @@ pub async fn handle_incoming_s2s(conn: iroh::endpoint::Connection, state: Arc<Sh
     handle_s2s_connection_from_manager(conn, &manager, true).await;
 }
 
-/// Connect to a peer server by iroh endpoint ID.
+/// Parse an S2S peer spec into a dial target. Two forms:
+///
+/// - `<endpoint-id>` — resolve the peer via discovery (production default).
+/// - `<endpoint-id>@<host:port>` — dial a direct socket address, bypassing
+///   discovery. Used for LAN/static deployments and the federation test harness
+///   (hermetic localhost peering).
+///
+/// Returns the bare endpoint ID (used as the peer-map key / log label, matching
+/// what an incoming connection registers) alongside the `EndpointAddr` to dial.
+pub(crate) fn parse_peer_spec(spec: &str) -> Result<(iroh::EndpointId, iroh::EndpointAddr)> {
+    let (id_str, direct) = match spec.split_once('@') {
+        Some((id, addr)) => (id, Some(addr)),
+        None => (spec, None),
+    };
+    let endpoint_id: iroh::EndpointId = id_str
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid peer endpoint ID '{id_str}': {e}"))?;
+    let mut addr = iroh::EndpointAddr::new(endpoint_id);
+    if let Some(direct) = direct {
+        let sock: std::net::SocketAddr = direct
+            .parse()
+            .map_err(|e| anyhow::anyhow!("Invalid peer direct address '{direct}': {e}"))?;
+        addr = addr.with_ip_addr(sock);
+    }
+    Ok((endpoint_id, addr))
+}
+
+/// Connect to a peer server by iroh endpoint ID (optionally `id@host:port`).
 pub async fn connect_peer(
     endpoint: &iroh::Endpoint,
     peer_id: &str,
     manager: &Arc<S2sManager>,
 ) -> Result<()> {
-    let endpoint_id: iroh::EndpointId = peer_id
-        .parse()
-        .map_err(|e| anyhow::anyhow!("Invalid peer endpoint ID: {e}"))?;
-    let addr = iroh::EndpointAddr::new(endpoint_id);
+    let (_id, addr) = parse_peer_spec(peer_id)?;
 
     tracing::info!(peer = %peer_id, "Connecting to S2S peer");
     let conn = endpoint.connect(addr, S2S_ALPN).await?;
@@ -843,21 +1123,24 @@ pub fn connect_peer_with_retry(
     manager: Arc<S2sManager>,
 ) {
     tokio::spawn(async move {
+        // Parse once — a malformed spec never becomes valid, so don't retry it.
+        let (endpoint_id, addr) = match parse_peer_spec(&peer_id) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(peer = %peer_id, "Invalid peer spec (not retrying): {e}");
+                return;
+            }
+        };
+        // The peer map is keyed by the bare endpoint ID (what an incoming
+        // connection registers), not the full spec, so `id@host:port` still
+        // dedups against an inbound link from the same peer.
+        let bare_id = endpoint_id.to_string();
         let mut backoff = std::time::Duration::from_secs(1);
         let max_backoff = std::time::Duration::from_secs(60);
 
         loop {
-            let endpoint_id: iroh::EndpointId = match peer_id.parse() {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::error!(peer = %peer_id, "Invalid peer endpoint ID (not retrying): {e}");
-                    return;
-                }
-            };
-            let addr = iroh::EndpointAddr::new(endpoint_id);
-
             // Skip reconnect if we already have a live connection (e.g. incoming replaced ours)
-            if manager.peers.lock().await.contains_key(&peer_id) {
+            if manager.peers.lock().await.contains_key(&bare_id) {
                 tracing::info!(peer = %peer_id, "S2S peer already connected (via incoming), skipping outgoing attempt");
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(max_backoff);
@@ -865,7 +1148,7 @@ pub fn connect_peer_with_retry(
             }
 
             tracing::info!(peer = %peer_id, "Connecting to S2S peer");
-            match endpoint.connect(addr, S2S_ALPN).await {
+            match endpoint.connect(addr.clone(), S2S_ALPN).await {
                 Ok(conn) => {
                     backoff = std::time::Duration::from_secs(1);
                     tracing::info!(peer = %peer_id, "S2S peer connected, entering link handler");
@@ -1196,6 +1479,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_peer_spec_bare_and_direct() {
+        // A real endpoint ID string, derived so we don't hardcode the encoding.
+        let id = iroh::SecretKey::from_bytes(&[7u8; 32]).public();
+        let id_str = id.to_string();
+
+        // Bare id → no direct address, id round-trips.
+        let (got_id, addr) = parse_peer_spec(&id_str).expect("bare id parses");
+        assert_eq!(got_id, id);
+        assert_eq!(addr.ip_addrs().count(), 0, "bare spec has no direct addr");
+
+        // id@host:port → same id, one direct address attached.
+        let (got_id, addr) =
+            parse_peer_spec(&format!("{id_str}@127.0.0.1:9999")).expect("direct spec parses");
+        assert_eq!(got_id, id);
+        let ips: Vec<_> = addr.ip_addrs().copied().collect();
+        assert_eq!(ips, vec!["127.0.0.1:9999".parse().unwrap()]);
+
+        // Malformed pieces are rejected, not silently accepted.
+        assert!(parse_peer_spec("not-an-endpoint-id").is_err());
+        assert!(parse_peer_spec(&format!("{id_str}@not-a-socket")).is_err());
+    }
+
+    #[test]
     fn trust_level_parse() {
         assert_eq!(TrustLevel::parse_level("full"), TrustLevel::Full);
         assert_eq!(TrustLevel::parse_level("relay"), TrustLevel::Relay);
@@ -1273,6 +1579,10 @@ mod tests {
             origin: server_id.clone(),
             msgid: Some("MSG123".to_string()),
             sig: None,
+            account: None,
+            recipient_did: None,
+            tags: HashMap::new(),
+            multiline_lines: None,
         };
 
         let signed = manager.sign_message(&msg);
@@ -1372,6 +1682,10 @@ mod tests {
             origin: server_id.clone(),
             msgid: None,
             sig: None,
+            account: None,
+            recipient_did: None,
+            tags: HashMap::new(),
+            multiline_lines: None,
         };
 
         let signed = manager.sign_message(&msg);
@@ -1390,6 +1704,10 @@ mod tests {
                     origin: server_id.clone(),
                     msgid: None,
                     sig: None,
+                    account: None,
+                    recipient_did: None,
+                    tags: HashMap::new(),
+                    multiline_lines: None,
                 };
                 let tampered_json = serde_json::to_string(&tampered).unwrap();
                 let tampered_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -1600,5 +1918,167 @@ mod tests {
             assert!(dedup.check_and_insert("peer1", "peer1:200").await); // new
             assert!(dedup.check_and_insert("peer2", "peer2:50").await); // different peer
         });
+    }
+
+    #[test]
+    fn encode_privmsg_text_for_s2s_passes_single_line_through() {
+        let (text, tags) = encode_privmsg_text_for_s2s("hello world", HashMap::new());
+        assert_eq!(text, "hello world");
+        assert!(!tags.contains_key("+freeq.at/multiline"));
+    }
+
+    #[test]
+    fn encode_privmsg_text_for_s2s_escapes_multiline_and_sets_tag() {
+        let (text, tags) =
+            encode_privmsg_text_for_s2s("line one\nline two\nline three", HashMap::new());
+        // Wire-safe: no literal `\n` after escape
+        assert!(
+            !text.contains('\n'),
+            "escaped text must not contain literal \\n"
+        );
+        assert_eq!(text, "line one\\nline two\\nline three");
+        // Tag set so receivers can decode on render
+        assert!(tags.contains_key("+freeq.at/multiline"));
+    }
+
+    #[test]
+    fn encode_privmsg_text_for_s2s_preserves_existing_coordination_tags() {
+        let mut existing = HashMap::new();
+        existing.insert("+freeq.at/event".to_string(), "reveal".to_string());
+        existing.insert("+freeq.at/payload".to_string(), "%7B%7D".to_string());
+        let (_text, tags) = encode_privmsg_text_for_s2s("a\nb", existing);
+        assert_eq!(
+            tags.get("+freeq.at/event").map(String::as_str),
+            Some("reveal")
+        );
+        assert_eq!(
+            tags.get("+freeq.at/payload").map(String::as_str),
+            Some("%7B%7D")
+        );
+        assert!(tags.contains_key("+freeq.at/multiline"));
+    }
+
+    /// The federation skew invariant: a peer that DOESN'T understand
+    /// `multiline_lines` (e.g. pre-Phase-4c) still receives a wire-safe
+    /// `text` field — relaying it to its local clients produces ONE
+    /// PRIVMSG with literal `\\n` and a tag, NOT a broken multi-line
+    /// PRIVMSG that splits across IRC line framing.
+    #[test]
+    fn encode_privmsg_text_for_s2s_keeps_old_peer_safe() {
+        let body = "a\nb\nc";
+        let (text, tags) = encode_privmsg_text_for_s2s(body, HashMap::new());
+        // Simulate the old peer's relay: it ignores any unknown fields,
+        // builds a PRIVMSG with `text`, writes to a TCP socket. The bytes
+        // it writes must NOT contain `\n` mid-body or the IRC parser at
+        // the recipient breaks framing.
+        let bytes = format!(":sender PRIVMSG #room :{text}\r\n");
+        let body_bytes = bytes
+            .strip_prefix(":sender PRIVMSG #room :")
+            .unwrap()
+            .strip_suffix("\r\n")
+            .unwrap();
+        assert!(
+            !body_bytes.contains('\n'),
+            "old peer's wire bytes would contain literal \\n — wire is broken!"
+        );
+        // And the tag is there so the old peer's freeq-aware clients
+        // know to decode on render.
+        assert!(tags.contains_key("+freeq.at/multiline"));
+    }
+
+    #[test]
+    fn relay_coordination_tags_keeps_app_drops_server_controlled() {
+        let mut full = HashMap::new();
+        full.insert("+freeq.at/event".to_string(), "task_request".to_string());
+        full.insert("+freeq.at/payload".to_string(), "%7B%7D".to_string());
+        full.insert("+freeq.at/task-id".to_string(), "01HZ".to_string());
+        full.insert(
+            "+freeq.at/evidence-type".to_string(),
+            "code_review".to_string(),
+        );
+        // server-controlled / non-app — must NOT cross via the tags field:
+        full.insert("+freeq.at/sig".to_string(), "deadbeef".to_string());
+        full.insert("account".to_string(), "did:plc:x".to_string());
+        full.insert("time".to_string(), "2026-05-15T00:00:00Z".to_string());
+        full.insert("msgid".to_string(), "01HZMSGID".to_string());
+
+        let relayed = relay_coordination_tags(&full);
+
+        assert_eq!(
+            relayed.get("+freeq.at/event").map(String::as_str),
+            Some("task_request")
+        );
+        assert_eq!(
+            relayed.get("+freeq.at/payload").map(String::as_str),
+            Some("%7B%7D")
+        );
+        assert_eq!(
+            relayed.get("+freeq.at/task-id").map(String::as_str),
+            Some("01HZ")
+        );
+        assert_eq!(
+            relayed.get("+freeq.at/evidence-type").map(String::as_str),
+            Some("code_review")
+        );
+        assert!(
+            !relayed.contains_key("+freeq.at/sig"),
+            "sig is re-attested out-of-band"
+        );
+        assert!(
+            !relayed.contains_key("account"),
+            "account injected per-recipient locally"
+        );
+        assert!(!relayed.contains_key("time"));
+        assert!(
+            !relayed.contains_key("msgid"),
+            "msgid carried in its own field"
+        );
+        assert_eq!(relayed.len(), 4);
+    }
+
+    #[test]
+    fn privmsg_tags_serde_roundtrip_and_backcompat() {
+        // Round-trip: tags survive serialize → deserialize.
+        let mut tags = HashMap::new();
+        tags.insert("+freeq.at/event".to_string(), "task_complete".to_string());
+        let msg = S2sMessage::Privmsg {
+            event_id: "p:1".to_string(),
+            from: "swarm!u@h".to_string(),
+            target: "#swarm".to_string(),
+            text: "done".to_string(),
+            origin: "peerA".to_string(),
+            msgid: Some("01HZ".to_string()),
+            sig: None,
+            account: None,
+            recipient_did: None,
+            tags: tags.clone(),
+            multiline_lines: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        match serde_json::from_str::<S2sMessage>(&json).unwrap() {
+            S2sMessage::Privmsg { tags: rt, .. } => assert_eq!(rt, tags),
+            _ => panic!("expected Privmsg"),
+        }
+
+        // Back-compat: a peer on the old wire format omits `tags` entirely.
+        let old = r##"{"type":"privmsg","event_id":"p:2","from":"a!u@h","target":"#c","text":"hi","origin":"peerB"}"##;
+        match serde_json::from_str::<S2sMessage>(old).unwrap() {
+            S2sMessage::Privmsg {
+                tags,
+                msgid,
+                sig,
+                account,
+                ..
+            } => {
+                assert!(tags.is_empty(), "missing tags → empty via serde default");
+                assert!(msgid.is_none());
+                assert!(sig.is_none());
+                assert!(
+                    account.is_none(),
+                    "missing account → None via serde default"
+                );
+            }
+            _ => panic!("expected Privmsg"),
+        }
     }
 }

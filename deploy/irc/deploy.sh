@@ -16,10 +16,16 @@ cp "$REPO_ROOT/Cargo.lock" "$TMPDIR/"
 cp -r "$REPO_ROOT/freeq-sdk" "$TMPDIR/"
 cp -r "$REPO_ROOT/freeq-server" "$TMPDIR/"
 
-# Create minimal freeq-tui stub (needed for workspace but not built)
-mkdir -p "$TMPDIR/freeq-tui/src"
-cp "$REPO_ROOT/freeq-tui/Cargo.toml" "$TMPDIR/freeq-tui/"
-echo "fn main() {}" > "$TMPDIR/freeq-tui/src/main.rs"
+# Cargo needs every workspace member referenced by Cargo.toml to exist on
+# disk, even if cargo-build only compiles freeq-server. Derive the member
+# list from Cargo.toml itself so this can never go stale again (nested
+# members like freeq-agent-kit/examples/* are covered by copying the top-
+# level directory).
+for dir in $(sed -n '/^members = \[/,/^\]/p' "$REPO_ROOT/Cargo.toml" | grep -o '"[^"]*"' | tr -d '"' | cut -d/ -f1 | sort -u); do
+    if [ -d "$REPO_ROOT/$dir" ] && [ ! -d "$TMPDIR/$dir" ]; then
+        cp -r "$REPO_ROOT/$dir" "$TMPDIR/"
+    fi
+done
 
 # Miren app config
 mkdir -p "$TMPDIR/.miren"
@@ -30,13 +36,20 @@ env = []
 include = []
 EOF
 
-# Procfile — Miren sets $PORT
+# Procfile — Miren sets $PORT. Binary lives at /app/freeq-server because
+# our custom Dockerfile copies it there from the builder stage (the
+# target/release/ path only exists during the Cargo build, not in the
+# slim runtime image).
 cat > "$TMPDIR/Procfile" << 'EOF'
-web: ./target/release/freeq-server --listen-addr 127.0.0.1:16667 --web-addr 0.0.0.0:${PORT:-8080} --server-name irc.freeq.at --db-path /app/data/freeq.db --data-dir /app/data --motd "Welcome to freeq — IRC with AT Protocol identity. https://freeq.at"
+web: /app/freeq-server --listen-addr 127.0.0.1:16667 --web-addr 0.0.0.0:${PORT:-8080} --server-name irc.freeq.at --db-path /app/data/freeq.db --data-dir /app/data --motd "Welcome to freeq — IRC with AT Protocol identity. https://freeq.at"
 EOF
 
 # Remove any nested .miren dirs
 rm -rf "$TMPDIR/freeq-server/.miren"
+
+# Copy the local Dockerfile so Miren uses it instead of falling back to a
+# cargo buildpack that expects a binary named after the app (freeq-irc).
+cp "$SCRIPT_DIR/Dockerfile" "$TMPDIR/Dockerfile.miren"
 
 cd "$TMPDIR"
 echo "Deploying from $TMPDIR..."

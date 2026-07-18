@@ -422,4 +422,72 @@ describe('reactions', () => {
     const m = ch.messages.find(m => m.id === 'rmsg')!;
     expect(m.reactions?.size).toBe(2);
   });
+
+  it('self-reaction shows immediately (own nick appears in reaction)', () => {
+    // Simulate: user "me" is logged in and reacts to a message.
+    // The reaction should appear in the store immediately, not only after
+    // the server echoes it back.
+    useStore.getState().addReaction('#react', 'rmsg', '🎉', 'me');
+    const ch = useStore.getState().channels.get('#react')!;
+    const m = ch.messages.find(m => m.id === 'rmsg')!;
+    expect(m.reactions?.get('🎉')?.has('me')).toBe(true);
+  });
+
+  it('duplicate self-reaction does not double-count', () => {
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'me');
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'me');
+    const ch = useStore.getState().channels.get('#react')!;
+    const m = ch.messages.find(m => m.id === 'rmsg')!;
+    expect(m.reactions?.get('👍')?.size).toBe(1);
+  });
+
+  it('removes my own reaction (last reactor → emoji entry deleted)', () => {
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'me');
+    useStore.getState().removeReaction('#react', 'rmsg', '👍', 'me');
+    const m = useStore.getState().channels.get('#react')!.messages.find(m => m.id === 'rmsg')!;
+    expect(m.reactions?.has('👍')).toBe(false);
+  });
+
+  it('removes one reactor while preserving others on the same emoji', () => {
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'bob');
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'carol');
+    useStore.getState().removeReaction('#react', 'rmsg', '👍', 'bob');
+    const m = useStore.getState().channels.get('#react')!.messages.find(m => m.id === 'rmsg')!;
+    expect(m.reactions?.get('👍')?.has('bob')).toBe(false);
+    expect(m.reactions?.get('👍')?.has('carol')).toBe(true);
+    expect(m.reactions?.get('👍')?.size).toBe(1);
+  });
+
+  it('does not affect a different emoji on the same message', () => {
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'me');
+    useStore.getState().addReaction('#react', 'rmsg', '❤️', 'me');
+    useStore.getState().removeReaction('#react', 'rmsg', '👍', 'me');
+    const m = useStore.getState().channels.get('#react')!.messages.find(m => m.id === 'rmsg')!;
+    expect(m.reactions?.has('👍')).toBe(false);
+    expect(m.reactions?.get('❤️')?.has('me')).toBe(true);
+  });
+
+  it('removeReaction is a no-op when the reactor never reacted', () => {
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'bob');
+    const before = useStore.getState().channels.get('#react');
+    useStore.getState().removeReaction('#react', 'rmsg', '👍', 'me'); // 'me' never reacted
+    const after = useStore.getState().channels.get('#react');
+    // Reference-equal: zustand bail-out (we returned the message unchanged from .map)
+    expect(after?.messages.find(m => m.id === 'rmsg')?.reactions?.get('👍')?.size).toBe(1);
+    expect(before?.messages.find(m => m.id === 'rmsg')?.reactions?.get('👍')?.has('bob')).toBe(true);
+  });
+
+  it('removeReaction is a no-op for an emoji that was never used', () => {
+    useStore.getState().addReaction('#react', 'rmsg', '👍', 'me');
+    useStore.getState().removeReaction('#react', 'rmsg', '🚀', 'me');
+    const m = useStore.getState().channels.get('#react')!.messages.find(m => m.id === 'rmsg')!;
+    expect(m.reactions?.get('👍')?.has('me')).toBe(true);
+  });
+
+  it('removeReaction tolerates missing channel / message', () => {
+    expect(() => {
+      useStore.getState().removeReaction('#never', 'nope', '👍', 'me');
+      useStore.getState().removeReaction('#react', 'no-such-msg', '👍', 'me');
+    }).not.toThrow();
+  });
 });

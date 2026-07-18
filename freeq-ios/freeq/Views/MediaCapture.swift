@@ -15,14 +15,23 @@ struct MediaAttachmentButton: View {
     @State private var showingCamera = false
     @State private var selectedItems: [PhotosPickerItem] = []
     @State private var stagedMedia: StagedMedia? = nil
+    /// Snapshotted when the menu opens — a screenshot copied to the clipboard
+    /// (never saved to Photos) is otherwise unreachable from the picker.
+    @State private var clipboardHasImage = false
 
     var body: some View {
-        Button(action: { showingActionSheet = true }) {
+        Button(action: {
+            clipboardHasImage = UIPasteboard.general.hasImages
+            showingActionSheet = true
+        }) {
             Image(systemName: "plus.circle.fill")
                 .font(.system(size: 24))
                 .foregroundColor(Theme.accent)
         }
         .confirmationDialog("Attach Media", isPresented: $showingActionSheet) {
+            if clipboardHasImage {
+                Button("Paste Image") { pasteImage() }
+            }
             Button("Photo Library") { showingPhotoPicker = true }
             Button("Take Photo or Video") { showingCamera = true }
             Button("Cancel", role: .cancel) { }
@@ -45,6 +54,20 @@ struct MediaAttachmentButton: View {
         }
         .sheet(item: $stagedMedia) { media in
             MediaPreviewSheet(media: media, channel: channel)
+        }
+    }
+
+    /// Stage the image currently on the clipboard (e.g. a screenshot) for the
+    /// same caption + preview + upload flow as a picked photo. Prefers PNG so
+    /// text in screenshots stays crisp.
+    private func pasteImage() {
+        guard let image = UIPasteboard.general.image else { return }
+        if let png = image.pngData() {
+            stagedMedia = StagedMedia(data: png, contentType: "image/png",
+                                      thumbnail: image, filename: "pasted.png", duration: nil)
+        } else if let jpg = image.jpegData(compressionQuality: 0.9) {
+            stagedMedia = StagedMedia(data: jpg, contentType: "image/jpeg",
+                                      thumbnail: image, filename: "pasted.jpg", duration: nil)
         }
     }
 
@@ -230,7 +253,7 @@ struct AudioRecorderSheet: View {
     @State private var permissionDenied = false
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -255,19 +278,19 @@ struct AudioRecorderSheet: View {
 
                     // Timer
                     Text(formatDuration(recordingTime))
-                        .font(.system(size: 48, weight: .light, design: .monospaced))
+                        .font(.fqMono.weight(.light))
                         .foregroundColor(isRecording ? Theme.danger : Theme.textPrimary)
 
                     if permissionDenied {
                         Text("Microphone access required.\nGo to Settings → freeq → Microphone")
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.danger)
                             .multilineTextAlignment(.center)
                     }
 
                     if let error = error {
                         Text(error)
-                            .font(.system(size: 13))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.danger)
                     }
 
@@ -286,7 +309,7 @@ struct AudioRecorderSheet: View {
                                         .background(Theme.bgTertiary)
                                         .clipShape(Circle())
                                     Text("Discard")
-                                        .font(.system(size: 12))
+                                        .font(.fqCaption)
                                 }
                                 .foregroundColor(Theme.textMuted)
                             }
@@ -307,7 +330,7 @@ struct AudioRecorderSheet: View {
                                         }
                                     }
                                     Text("Send")
-                                        .font(.system(size: 12))
+                                        .font(.fqCaption)
                                         .foregroundColor(Theme.accent)
                                 }
                             }
@@ -335,7 +358,7 @@ struct AudioRecorderSheet: View {
                         .disabled(permissionDenied)
 
                         Text(isRecording ? "Tap to stop" : "Tap to record")
-                            .font(.system(size: 13))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                     }
 
@@ -353,7 +376,7 @@ struct AudioRecorderSheet: View {
                     .foregroundColor(Theme.accent)
                 }
             }
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
@@ -475,28 +498,35 @@ struct AudioRecorderSheet: View {
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
 
-            do {
-                let (responseData, response) = try await URLSession.shared.data(for: request)
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 200,
-                   let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                   let url = json["url"] as? String {
-                    await MainActor.run {
-                        let durationStr = formatDuration(recordingTime)
-                        appState.sendMessage(target: channel, text: "🎤 Voice message (\(durationStr)) \(url)")
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        dismiss()
-                    }
-                } else {
-                    await MainActor.run {
-                        uploading = false
-                        self.error = "Upload failed"
-                    }
-                }
-            } catch {
+            let result = await StepUpAuth.uploadWithStepUp(
+                request: request, did: did, appState: appState
+            )
+            guard let (responseData, response) = result else {
                 await MainActor.run {
                     uploading = false
-                    self.error = error.localizedDescription
+                    self.error = "Upload failed"
+                }
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 200,
+               let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+               let url = json["url"] as? String {
+                await MainActor.run {
+                    let durationStr = formatDuration(recordingTime)
+                    appState.sendMessage(target: channel, text: "🎤 Voice message (\(durationStr)) \(url)")
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    dismiss()
+                }
+            } else if StepUpAuth.detectStepUpRequired(status: status, body: responseData) != nil {
+                await MainActor.run {
+                    uploading = false
+                    self.error = "Permission needed for upload"
+                }
+            } else {
+                await MainActor.run {
+                    uploading = false
+                    self.error = "Upload failed"
                 }
             }
         }
@@ -518,13 +548,16 @@ struct MediaPreviewSheet: View {
     let channel: String
 
     @State private var caption: String = ""
-    @State private var crossPost = false
+    // Private to the channel/DM by default. Two opt-in toggles are the only
+    // way bytes leave freeq. Posting to the feed implies the PDS copy.
+    @State private var sharePds = false
+    @State private var shareBluesky = false
     @State private var uploading = false
     @State private var uploadError: String? = nil
     @FocusState private var captionFocused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -556,7 +589,7 @@ struct MediaPreviewSheet: View {
                                         HStack {
                                             Spacer()
                                             Text(dur)
-                                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                                .font(.fqMonoCaption.weight(.medium))
                                                 .foregroundColor(.white)
                                                 .padding(.horizontal, 8)
                                                 .padding(.vertical, 4)
@@ -576,7 +609,7 @@ struct MediaPreviewSheet: View {
                                 .font(.system(size: 48))
                                 .foregroundColor(Theme.textMuted)
                             Text(media.sizeString)
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textMuted)
                         }
                         .frame(height: 200)
@@ -589,30 +622,55 @@ struct MediaPreviewSheet: View {
                             .font(.system(size: 12))
                             .foregroundColor(Theme.textMuted)
                         Text(media.sizeString)
-                            .font(.system(size: 12))
+                            .font(.fqCaption)
                             .foregroundColor(Theme.textMuted)
                         if let dur = media.durationString {
                             Text(dur)
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                                 .foregroundColor(Theme.textMuted)
                         }
                         Spacer()
                     }
                     .padding(.horizontal, 20)
 
-                    // Cross-post toggle
+                    // Sharing toggles — private to the channel by default.
                     if appState.authenticatedDID != nil {
-                        Toggle(isOn: $crossPost) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.up.right.circle.fill")
-                                    .font(.system(size: 16))
-                                    .foregroundColor(Color(hex: "0085ff"))
-                                Text("Also post to Bluesky")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(Theme.textPrimary)
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Theme.textMuted)
+                                Text("Private to \(channel) by default")
+                                    .font(.fqCaption)
+                                    .foregroundColor(Theme.textMuted)
                             }
+                            Toggle(isOn: Binding(
+                                get: { sharePds || shareBluesky },
+                                set: { sharePds = $0 }
+                            )) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "icloud.and.arrow.up.fill")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(Color(hex: "0085ff"))
+                                    Text("Save a public copy to my PDS")
+                                        .font(.fqFootnote.weight(.medium))
+                                        .foregroundColor(Theme.textPrimary)
+                                }
+                            }
+                            .tint(Color(hex: "0085ff"))
+                            .disabled(shareBluesky)
+                            Toggle(isOn: $shareBluesky) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "arrow.up.right.circle.fill")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(Color(hex: "0085ff"))
+                                    Text("Also post to Bluesky feed")
+                                        .font(.fqFootnote.weight(.medium))
+                                        .foregroundColor(Theme.textPrimary)
+                                }
+                            }
+                            .tint(Color(hex: "0085ff"))
                         }
-                        .tint(Color(hex: "0085ff"))
                         .padding(.horizontal, 20)
                         .padding(.vertical, 8)
                     }
@@ -629,7 +687,7 @@ struct MediaPreviewSheet: View {
                                     .font(.system(size: 12))
                                     .foregroundColor(Theme.danger)
                                 Text(error)
-                                    .font(.system(size: 13))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.danger)
                                     .lineLimit(2)
                                 Spacer()
@@ -637,7 +695,7 @@ struct MediaPreviewSheet: View {
                                     uploadError = nil
                                     upload()
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.accent)
                             }
                             .padding(.horizontal, 16)
@@ -649,7 +707,7 @@ struct MediaPreviewSheet: View {
                             HStack(spacing: 12) {
                                 ProgressView().tint(Theme.accent)
                                 Text("Uploading \(media.sizeString)...")
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                                 Spacer()
                             }
@@ -660,7 +718,7 @@ struct MediaPreviewSheet: View {
                             HStack(alignment: .bottom, spacing: 10) {
                                 TextField("Add a caption...", text: $caption, axis: .vertical)
                                     .foregroundColor(Theme.textPrimary)
-                                    .font(.system(size: 16))
+                                    .font(.fqCallout)
                                     .lineLimit(1...4)
                                     .focused($captionFocused)
                                     .tint(Theme.accent)
@@ -685,7 +743,7 @@ struct MediaPreviewSheet: View {
             }
             .navigationTitle(media.isVideo ? "Send Video" : "Send Photo")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -723,9 +781,14 @@ struct MediaPreviewSheet: View {
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"channel\"\r\n\r\n\(channel)\r\n".data(using: .utf8)!)
 
-            if crossPost {
+            // share_bluesky implies share_pds (the feed embed references the blob).
+            if sharePds || shareBluesky {
                 body.append("--\(boundary)\r\n".data(using: .utf8)!)
-                body.append("Content-Disposition: form-data; name=\"cross_post\"\r\n\r\ntrue\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"share_pds\"\r\n\r\ntrue\r\n".data(using: .utf8)!)
+            }
+            if shareBluesky {
+                body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"share_bluesky\"\r\n\r\ntrue\r\n".data(using: .utf8)!)
             }
 
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -739,33 +802,40 @@ struct MediaPreviewSheet: View {
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
 
-            do {
-                let (responseData, response) = try await URLSession.shared.data(for: request)
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 200,
-                   let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                   let url = json["url"] as? String {
-                    await MainActor.run {
-                        let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if text.isEmpty {
-                            appState.sendMessage(target: channel, text: url)
-                        } else {
-                            appState.sendMessage(target: channel, text: "\(url) \(text)")
-                        }
-                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                        dismiss()
-                    }
-                } else {
-                    let responseText = String(data: responseData, encoding: .utf8) ?? ""
-                    await MainActor.run {
-                        uploading = false
-                        uploadError = "Upload failed: \(responseText.prefix(80))"
-                    }
-                }
-            } catch {
+            let result = await StepUpAuth.uploadWithStepUp(
+                request: request, did: did, appState: appState
+            )
+            guard let (responseData, response) = result else {
                 await MainActor.run {
                     uploading = false
-                    uploadError = error.localizedDescription
+                    uploadError = "Upload failed"
+                }
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 200,
+               let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+               let url = json["url"] as? String {
+                await MainActor.run {
+                    let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.isEmpty {
+                        appState.sendMessage(target: channel, text: url)
+                    } else {
+                        appState.sendMessage(target: channel, text: "\(url) \(text)")
+                    }
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    dismiss()
+                }
+            } else if StepUpAuth.detectStepUpRequired(status: status, body: responseData) != nil {
+                await MainActor.run {
+                    uploading = false
+                    uploadError = "Image upload needs Bluesky permission. Tap Send to retry."
+                }
+            } else {
+                let responseText = String(data: responseData, encoding: .utf8) ?? ""
+                await MainActor.run {
+                    uploading = false
+                    uploadError = "Upload failed: \(responseText.prefix(80))"
                 }
             }
         }

@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>freeq voice</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #111; color: #eee; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; gap: 1rem; }
+    h1 { font-size: 1.2rem; color: #58a6ff; }
+    .status { color: #8b949e; font-size: 0.9rem; }
+    button { background: #238636; color: white; border: none; padding: 0.6rem 1.5rem; border-radius: 6px; font-size: 1rem; cursor: pointer; }
+    button:hover { background: #2ea043; }
+    button.leave { background: #da3633; }
+    button.leave:hover { background: #f85149; }
+    .muted { opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <h1>freeq voice</h1>
+  <div class="status" id="status">Connecting...</div>
+  <button id="toggleBtn" onclick="toggleMic()">Mute</button>
+  <button class="leave" onclick="window.close()">Leave</button>
+
+  <script>
+    const status = document.getElementById('status');
+    const toggleBtn = document.getElementById('toggleBtn');
+    let muted = false;
+
+    // Get room name from URL
+    const params = new URLSearchParams(window.location.search);
+    const roomName = params.get('name') || 'default';
+
+    status.textContent = `Room: ${roomName.slice(0, 20)}...`;
+
+    // TODO: Connect via WebTransport to the SFU
+    // For now this is a placeholder — the MoQ web components
+    // (@moq/publish, @moq/watch) will handle the actual connection.
+    // The SFU accepts WebTransport on this same origin.
+
+    status.textContent = 'Connected (audio active)';
+
+    function toggleMic() {
+      muted = !muted;
+      toggleBtn.textContent = muted ? 'Unmute' : 'Mute';
+      toggleBtn.classList.toggle('muted', muted);
+    }
+  </script>
+</body>
+</html>

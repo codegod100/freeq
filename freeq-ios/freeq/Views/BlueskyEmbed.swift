@@ -19,8 +19,13 @@ struct BlueskyEmbed: View {
     }
 
     var body: some View {
-        if let post = post {
-            Link(destination: URL(string: "https://bsky.app/profile/\(handle)/post/\(rkey)")!) {
+        // handle/rkey come from the wire; percent-encode and guard so a
+        // malformed value can't trap on URL(string:)!.
+        let encHandle = handle.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? handle
+        let encRkey = rkey.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? rkey
+        if let post = post,
+           let postURL = URL(string: "https://bsky.app/profile/\(encHandle)/post/\(encRkey)") {
+            Link(destination: postURL) {
                 VStack(alignment: .leading, spacing: 8) {
                     // Author
                     HStack(spacing: 8) {
@@ -35,11 +40,11 @@ struct BlueskyEmbed: View {
                         }
 
                         Text(post.authorName ?? post.authorHandle)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.fqFootnote.weight(.semibold))
                             .foregroundColor(Theme.textPrimary)
 
                         Text("@\(post.authorHandle)")
-                            .font(.system(size: 12))
+                            .font(.fqCaption)
                             .foregroundColor(Theme.textMuted)
 
                         Spacer()
@@ -52,7 +57,7 @@ struct BlueskyEmbed: View {
 
                     // Post text
                     Text(post.text)
-                        .font(.system(size: 14))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(4)
                         .multilineTextAlignment(.leading)
@@ -75,13 +80,13 @@ struct BlueskyEmbed: View {
                             Image(systemName: "heart")
                                 .font(.system(size: 11))
                             Text("\(post.likeCount)")
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                         }
                         HStack(spacing: 4) {
                             Image(systemName: "arrow.2.squarepath")
                                 .font(.system(size: 11))
                             Text("\(post.repostCount)")
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                         }
                     }
                     .foregroundColor(Theme.textMuted)
@@ -100,7 +105,7 @@ struct BlueskyEmbed: View {
             HStack(spacing: 8) {
                 ProgressView().tint(Theme.textMuted)
                 Text("Loading Bluesky post...")
-                    .font(.system(size: 12))
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             }
             .padding(12)

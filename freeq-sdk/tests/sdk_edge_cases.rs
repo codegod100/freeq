@@ -1,9 +1,6 @@
 //! 200 adversarial edge-case tests for the freeq SDK.
 //! Targets: IRC parser, crypto, auth, bot framework, rate limiter, e2ee, SSRF.
 
-use freeq_sdk::irc::Message;
-use std::collections::HashMap;
-
 // ═══════════════════════════════════════════════════════════════
 // IRC MESSAGE PARSER (55 tests)
 // ═══════════════════════════════════════════════════════════════

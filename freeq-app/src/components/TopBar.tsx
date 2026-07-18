@@ -1,40 +1,59 @@
 import { useState, useEffect } from 'react';
-import { useStore } from '../store';
-import { setTopic as sendTopic } from '../irc/client';
+import type { AvParticipant } from '../store';
+import { useStore, uniqueMemberCount } from '../store';
+import { setTopic as sendTopic, startAvSession, getClient } from '../irc/client';
+import { SpeakerIcon } from './SessionIndicator';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
+import { isDid, resolveIdentityName } from '../lib/identity';
+import { UserPopover } from './UserPopover';
 
 interface TopBarProps {
   onToggleSidebar?: () => void;
   onToggleMembers?: () => void;
+  sidebarOpen?: boolean;
   membersOpen?: boolean;
 }
 
-export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBarProps) {
+export function TopBar({ onToggleSidebar, onToggleMembers, sidebarOpen, membersOpen }: TopBarProps) {
   const activeChannel = useStore((s) => s.activeChannel);
   const channels = useStore((s) => s.channels);
   const connectionState = useStore((s) => s.connectionState);
   const [editing, setEditing] = useState(false);
   const [topicDraft, setTopicDraft] = useState('');
+  const [peerCard, setPeerCard] = useState<{ x: number; y: number } | null>(null);
 
   const ch = channels.get(activeChannel.toLowerCase());
   const whoisCache = useStore((s) => s.whoisCache);
   const topic = ch?.topic || '';
-  const memberCount = ch?.members.size || 0;
+  const memberCount = ch ? uniqueMemberCount(ch.members) : 0;
   const isChannel = activeChannel !== 'server' && activeChannel.startsWith('#');
   const isDM = activeChannel !== 'server' && !activeChannel.startsWith('#');
   const setChannelSettings = useStore((s) => s.setChannelSettingsOpen);
 
-  // For DMs, resolve partner profile
+  // For DMs, resolve partner profile. A DID-keyed DM (the thread name IS the
+  // peer's DID) is its own partner DID even before we have a member row.
   const partnerWhois = isDM ? whoisCache.get(activeChannel.toLowerCase()) : undefined;
-  const partnerDid = isDM ? (ch?.members.values().next().value?.did || partnerWhois?.did) : undefined;
-  const [partnerProfile, setPartnerProfile] = useState<ATProfile | null>(null);
+  const partnerDid = isDM
+    ? (isDid(activeChannel) ? activeChannel : (ch?.members.values().next().value?.did || partnerWhois?.did))
+    : undefined;
+  const [partnerProfileState, setPartnerProfileState] = useState<{ did: string; profile: ATProfile | null } | null>(null);
   useEffect(() => {
-    if (isDM && partnerDid) {
-      fetchProfile(partnerDid).then((p) => p && setPartnerProfile(p));
-    } else {
-      setPartnerProfile(null);
-    }
+    if (!isDM || !partnerDid) return;
+    let cancelled = false;
+    fetchProfile(partnerDid).then((profile) => {
+      if (!cancelled) setPartnerProfileState({ did: partnerDid, profile });
+    });
+    return () => { cancelled = true; };
   }, [isDM, partnerDid]);
+  const partnerProfile = partnerProfileState && partnerProfileState.did === partnerDid ? partnerProfileState.profile : null;
+
+  // DM title: a DID-keyed thread resolves to a human name — the nick the SDK
+  // learned for the DID, then the AT profile, then a compact DID as last
+  // resort. A nick-keyed DM renders unchanged.
+  const dmTitle = resolveIdentityName(activeChannel, {
+    nickForDid: (did) => getClient()?.getNickForDid(did),
+    nameForDid: () => partnerProfile?.handle || partnerProfile?.displayName,
+  });
 
   const startEdit = () => {
     setTopicDraft(topic);
@@ -49,13 +68,20 @@ export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBar
   return (
     <>
     <header className="h-14 bg-bg-secondary border-b border-border flex items-center gap-3 px-4 shrink-0">
-      {/* Mobile menu button */}
+      {/* Sidebar toggle */}
       <button
         onClick={onToggleSidebar}
-        className="md:hidden text-fg-dim hover:text-fg-muted p-1 -ml-1 mr-1"
+        className={`text-fg-dim hover:text-fg-muted p-1.5 -ml-1 rounded-lg hover:bg-bg-tertiary shrink-0 transition-colors ${
+          sidebarOpen ? 'text-fg-muted' : 'text-fg-dim'
+        }`}
+        title={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+        aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
+        aria-pressed={sidebarOpen}
       >
-        <svg className="w-5 h-5" viewBox="0 0 16 16" fill="currentColor">
-          <path fillRule="evenodd" d="M2.5 12a.5.5 0 01.5-.5h10a.5.5 0 010 1H3a.5.5 0 01-.5-.5zm0-4a.5.5 0 01.5-.5h10a.5.5 0 010 1H3a.5.5 0 01-.5-.5zm0-4a.5.5 0 01.5-.5h10a.5.5 0 010 1H3a.5.5 0 01-.5-.5z"/>
+        <svg className="w-5 h-5" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="4" width="14" height="12" rx="2" />
+          <path d="M8 4v12" />
+          <path d={sidebarOpen ? 'M12.5 8l-2 2 2 2' : 'M10.5 8l2 2-2 2'} />
         </svg>
       </button>
 
@@ -69,23 +95,44 @@ export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBar
         />
       )}
 
-      {/* Channel / DM name */}
+      {/* Channel / DM name + voice icon */}
       <div className="flex items-center gap-2 min-w-0 shrink">
         {isChannel && <span className="text-accent text-base font-bold shrink-0">#</span>}
         {isDM && <span className="text-fg-dim text-base shrink-0">💬</span>}
-        <span className="font-bold text-base text-fg truncate">
-          {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : isDM ? activeChannel : 'Server'}
-        </span>
+        {isDM ? (
+          // The title opens the peer's card. This must not depend on their
+          // messages being visible — after a block those are hidden, and this
+          // is then the only in-thread path to the card (and to unblock).
+          <button
+            className="font-bold text-base text-fg truncate hover:underline text-left"
+            title={isDid(activeChannel) ? activeChannel : undefined}
+            onClick={(e) => setPeerCard({ x: e.clientX, y: e.clientY })}
+          >
+            {dmTitle}
+          </button>
+        ) : (
+          <span className="font-bold text-base text-fg truncate">
+            {isChannel ? (ch?.name || activeChannel).replace(/^#/, '') : 'Server'}
+          </span>
+        )}
+        {peerCard && isDM && (
+          <UserPopover
+            nick={(partnerDid && getClient()?.getNickForDid(partnerDid)) || dmTitle}
+            did={partnerDid}
+            position={peerCard}
+            onClose={() => setPeerCard(null)}
+          />
+        )}
         {ch?.isEncrypted && (
           <span className="text-success text-xs shrink-0" title="End-to-end encrypted channel">🔒</span>
         )}
         {isDM && !ch?.isEncrypted && (() => {
-          // Show lock if DM partner has a DID (E2EE capable)
           const partnerDid = ch?.members.values().next().value?.did;
           return partnerDid ? (
             <span className="text-success text-xs shrink-0" title="End-to-end encrypted DM">🔒</span>
           ) : null;
         })()}
+        {isChannel && <VoiceButton channel={activeChannel} />}
       </div>
 
       {/* Identity stats */}
@@ -150,6 +197,8 @@ export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBar
         )}
       </div>
 
+      {/* AV session — controls moved to CallPanel + Sidebar */}
+
       {/* Settings gear (channels only) */}
       {isChannel && (
         <button
@@ -171,11 +220,13 @@ export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBar
             membersOpen ? 'text-fg-muted' : 'text-fg-dim'
           }`}
           title={membersOpen ? 'Hide members' : 'Show members'}
+          aria-label={membersOpen ? 'Hide members sidebar' : 'Show members sidebar'}
+          aria-pressed={membersOpen}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
             <path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14s-1 0-1-1 1-4 7-4 7 3 7 4-1 1-1 1H2z"/>
           </svg>
-          {memberCount > 0 && <span>{memberCount}</span>}
+          {memberCount > 0 && <span className="hidden sm:inline tabular-nums">{memberCount}</span>}
         </button>
       )}
 
@@ -187,6 +238,8 @@ export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBar
             membersOpen ? 'text-fg-muted' : 'text-fg-dim'
           }`}
           title={membersOpen ? 'Hide profile' : 'Show profile'}
+          aria-label={membersOpen ? 'Hide profile sidebar' : 'Show profile sidebar'}
+          aria-pressed={membersOpen}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 16 16" fill="currentColor">
             <path d="M8 8a3 3 0 100-6 3 3 0 000 6zM2 14s-1 0-1-1 1-4 7-4 7 3 7 4-1 1-1 1H2z"/>
@@ -201,5 +254,67 @@ export function TopBar({ onToggleSidebar, onToggleMembers, membersOpen }: TopBar
       </div>
     )}
     </>
+  );
+}
+
+/** Speaker icon next to channel name — starts/joins voice with one click.
+ *  Glows green when in an active call. */
+function VoiceButton({ channel }: { channel: string }) {
+  const avSessions = useStore((s) => s.avSessions);
+  const activeAvSession = useStore((s) => s.activeAvSession);
+  const avAudioActive = useStore((s) => s.avAudioActive);
+  const authDid = useStore((s) => s.authDid);
+  const connectionState = useStore((s) => s.connectionState);
+
+  // Poll REST API to discover sessions (same logic that was in SessionIndicator)
+  useEffect(() => {
+    if (connectionState !== 'connected' || !channel.startsWith('#')) return;
+    let cancelled = false;
+    async function poll() {
+      try {
+        const resp = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+        if (!resp.ok || cancelled) return;
+        const data = await resp.json();
+        if (cancelled || !data.active) return;
+        const store = useStore.getState();
+        if (!store.avSessions.get(data.active.id)) {
+          const participants = new Map<string, AvParticipant>();
+          for (const p of data.active.participants || []) {
+            participants.set(p.nick, { did: p.did || '', nick: p.nick, role: p.role || 'speaker', joinedAt: new Date(p.joined_at * 1000) });
+          }
+          store.updateAvSession({
+            id: data.active.id, channel: data.active.channel, createdBy: data.active.created_by || '',
+            createdByNick: data.active.created_by_nick || '', title: data.active.title || undefined,
+            participants, state: 'active', startedAt: new Date(data.active.created_at * 1000),
+            irohTicket: data.active.iroh_ticket || undefined,
+          });
+        }
+      } catch { /* ignore */ }
+    }
+    poll();
+    const timer = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [channel, connectionState]);
+
+  if (!authDid || connectionState !== 'connected') return null;
+
+  const session = [...avSessions.values()].find(
+    (s) => s.channel?.toLowerCase() === channel.toLowerCase() && s.state === 'active'
+  );
+
+  const isInCall = session && activeAvSession === session.id && avAudioActive;
+
+  return (
+    <button
+      onClick={() => startAvSession(channel)}
+      className={`shrink-0 p-1 rounded-md transition-all ${
+        isInCall
+          ? 'text-success bg-success/15 shadow-[0_0_8px_rgba(34,197,94,0.3)]'
+          : 'text-fg-dim hover:text-accent hover:bg-bg-tertiary'
+      }`}
+      title={isInCall ? 'In voice call' : session ? 'Join voice call' : 'Start voice call'}
+    >
+      <SpeakerIcon size={14} />
+    </button>
   );
 }

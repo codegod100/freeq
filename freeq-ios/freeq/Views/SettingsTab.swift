@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsTab: View {
     @EnvironmentObject var appState: AppState
+    @State private var showStatusEditor = false
 
     var body: some View {
         NavigationStack {
@@ -17,7 +18,7 @@ struct SettingsTab: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack(spacing: 5) {
                                     Text(appState.nick)
-                                        .font(.system(size: 17, weight: .semibold))
+                                        .font(.fqBody.weight(.semibold))
                                         .foregroundColor(Theme.textPrimary)
 
                                     if appState.authenticatedDID != nil {
@@ -27,14 +28,33 @@ struct SettingsTab: View {
 
                                 if let did = appState.authenticatedDID {
                                     Text(did)
-                                        .font(.system(size: 11, design: .monospaced))
+                                        .font(.fqMonoCaption)
                                         .foregroundColor(Theme.textMuted)
                                         .lineLimit(1)
                                 } else {
                                     Text("Guest")
-                                        .font(.system(size: 13))
+                                        .font(.fqFootnote)
                                         .foregroundColor(Theme.textSecondary)
                                 }
+                            }
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+
+                        // Custom status — freeq-native presence.
+                        Button { showStatusEditor = true } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: appState.selfStatus == nil ? "face.smiling" : "circle.fill")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(appState.selfStatus == nil ? Theme.textMuted : Theme.verify)
+                                    .frame(width: 24)
+                                Text(appState.selfStatus ?? "Set a status")
+                                    .font(.fqSubheadline)
+                                    .foregroundColor(appState.selfStatus == nil ? Theme.textSecondary : Theme.textPrimary)
+                                    .lineLimit(1)
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(Theme.textMuted)
                             }
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -59,6 +79,20 @@ struct SettingsTab: View {
                             .foregroundColor(Theme.textMuted)
                     }
 
+                    // Audio — local speaker + mic test
+                    Section {
+                        NavigationLink {
+                            AudioTestView()
+                        } label: {
+                            Label("Test Speaker & Microphone", systemImage: "waveform.circle")
+                                .foregroundColor(Theme.textPrimary)
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+                    } header: {
+                        Text("Audio")
+                            .foregroundColor(Theme.textMuted)
+                    }
+
                     // Connection
                     Section {
                         HStack {
@@ -66,7 +100,7 @@ struct SettingsTab: View {
                                 .foregroundColor(Theme.textPrimary)
                             Spacer()
                             Text(appState.serverAddress)
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -80,7 +114,7 @@ struct SettingsTab: View {
                                     .fill(statusColor)
                                     .frame(width: 8, height: 8)
                                 Text(statusText)
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                             }
                         }
@@ -91,12 +125,42 @@ struct SettingsTab: View {
                                 .foregroundColor(Theme.textPrimary)
                             Spacer()
                             Text("\(appState.channels.count)")
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .listRowBackground(Theme.bgSecondary)
                     } header: {
                         Text("Connection")
+                            .foregroundColor(Theme.textMuted)
+                    }
+
+                    // Safety
+                    Section {
+                        NavigationLink {
+                            BlockedUsersView()
+                        } label: {
+                            HStack {
+                                Label("Blocked", systemImage: "hand.raised")
+                                    .foregroundColor(Theme.textPrimary)
+                                Spacer()
+                                if !appState.blockedNicks.isEmpty {
+                                    Text("\(appState.blockedNicks.count)")
+                                        .font(.fqFootnote)
+                                        .foregroundColor(Theme.textSecondary)
+                                }
+                            }
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+
+                        NavigationLink {
+                            CommunityGuidelinesView()
+                        } label: {
+                            Label("Community Guidelines", systemImage: "checkmark.shield")
+                                .foregroundColor(Theme.textPrimary)
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+                    } header: {
+                        Text("Safety")
                             .foregroundColor(Theme.textMuted)
                     }
 
@@ -107,7 +171,7 @@ struct SettingsTab: View {
                                 .foregroundColor(Theme.textPrimary)
                             Spacer()
                             Text("1.0.0")
-                                .font(.system(size: 14))
+                                .font(.fqFootnote)
                                 .foregroundColor(Theme.textSecondary)
                         }
                         .listRowBackground(Theme.bgSecondary)
@@ -146,7 +210,7 @@ struct SettingsTab: View {
                             HStack {
                                 Spacer()
                                 Text("Disconnect")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(.fqCallout.weight(.medium))
                                     .foregroundColor(Theme.textSecondary)
                                 Spacer()
                             }
@@ -157,7 +221,7 @@ struct SettingsTab: View {
                             HStack {
                                 Spacer()
                                 Text("Log Out")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(.fqCallout.weight(.medium))
                                     .foregroundColor(Theme.danger)
                                 Spacer()
                             }
@@ -170,8 +234,12 @@ struct SettingsTab: View {
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+        }
+        .sheet(isPresented: $showStatusEditor) {
+            StatusEditorSheet()
+                .presentationDetents([.medium, .large])
         }
     }
 

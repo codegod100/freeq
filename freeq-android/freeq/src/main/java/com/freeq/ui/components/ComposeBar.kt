@@ -19,6 +19,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -26,6 +29,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import android.net.Uri
 import com.freeq.model.AppState
+import com.freeq.model.SlashCommand
+import com.freeq.model.SlashCommandParser
 import com.freeq.ui.theme.FreeqColors
 import com.freeq.ui.theme.Theme
 
@@ -38,14 +43,30 @@ fun ComposeBar(
     var completions by remember { mutableStateOf<List<String>>(emptyList()) }
     var photoUri by remember { mutableStateOf<Uri?>(null) }
     val haptic = LocalHapticFeedback.current
+    val view = LocalView.current
 
     val replyingTo by appState.replyingTo
     val editingMessage by appState.editingMessage
     val activeChannel = appState.activeChannel.value
 
-    // Pre-fill text when entering edit mode
+    // Pre-fill text when entering edit mode; dismiss keyboard when leaving.
+    //
+    // Compose's `LocalSoftwareKeyboardController.hide()` is documented as
+    // best-effort and unreliable when called from a coroutine / state-change
+    // context (the focus token may be stale by the time it dispatches to
+    // InputMethodManager). Going through the view + WindowInsetsController
+    // is the official Android API for IME visibility and works regardless
+    // of who calls it.
+    var wasEditingAState by remember { mutableStateOf(false) }
     LaunchedEffect(editingMessage) {
-        editingMessage?.let { text = it.text }
+        if (editingMessage != null) {
+            text = editingMessage!!.text
+            wasEditingAState = true
+        } else if (wasEditingAState) {
+            wasEditingAState = false
+            view.clearFocus()
+            ViewCompat.getWindowInsetsController(view)?.hide(WindowInsetsCompat.Type.ime())
+        }
     }
 
     val canSend = text.isNotBlank()
@@ -155,7 +176,7 @@ fun ComposeBar(
                     val placeholder = when {
                         replyingTo != null -> "Reply..."
                         editingMessage != null -> "Edit message..."
-                        else -> "Message ${activeChannel ?: ""}"
+                        else -> "Message ${activeChannel?.let { appState.displayNameForKey(it) } ?: ""}"
                     }
                     Text(placeholder, fontSize = 15.sp)
                 },
@@ -335,28 +356,18 @@ private fun send(text: String, appState: AppState, onSent: () -> Unit) {
 }
 
 private fun handleCommand(input: String, appState: AppState) {
-    val parts = input.drop(1).split(" ", limit = 2)
-    val cmd = parts.firstOrNull()?.lowercase() ?: return
-    val arg = parts.getOrNull(1)
-
-    when (cmd) {
-        "join" -> arg?.let { appState.joinChannel(it) }
-        "part", "leave" -> appState.activeChannel.value?.let { appState.partChannel(it) }
-        "nick" -> arg?.let { appState.sendRaw("NICK $it") }
-        "me" -> {
-            val target = appState.activeChannel.value ?: return
-            arg?.let { appState.sendRaw("PRIVMSG $target :\u0001ACTION $it\u0001") }
+    when (val parsed = SlashCommandParser.parse(input)) {
+        is SlashCommand.Join -> appState.joinChannel(parsed.channel)
+        SlashCommand.PartActive -> appState.activeChannel.value?.let { appState.partChannel(it) }
+        is SlashCommand.Nick -> appState.sendRaw("NICK ${parsed.newNick}")
+        is SlashCommand.Me -> appState.activeChannel.value?.let { target ->
+            appState.sendRaw("PRIVMSG $target :\u0001ACTION ${parsed.text}\u0001")
         }
-        "msg" -> {
-            val msgParts = (arg ?: "").split(" ", limit = 2)
-            if (msgParts.size == 2) {
-                appState.sendMessage(msgParts[0], msgParts[1])
-            }
+        is SlashCommand.Msg -> appState.sendMessage(parsed.target, parsed.text)
+        is SlashCommand.Topic -> appState.activeChannel.value?.let { target ->
+            appState.sendRaw("TOPIC $target :${parsed.text}")
         }
-        "topic" -> {
-            val target = appState.activeChannel.value ?: return
-            arg?.let { appState.sendRaw("TOPIC $target :$it") }
-        }
-        else -> appState.sendRaw(input.drop(1))
+        is SlashCommand.Raw -> appState.sendRaw(parsed.line)
+        SlashCommand.Empty -> {} // recognized but missing arg — silent no-op
     }
 }

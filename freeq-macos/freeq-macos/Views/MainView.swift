@@ -6,7 +6,9 @@ struct MainView: View {
 
     var body: some View {
         Group {
-            if appState.connectionState == .disconnected && appState.brokerToken == nil {
+            if appState.connectionState == .disconnected && appState.brokerToken == nil && appState.isLoadingSavedSession {
+                restoringSessionView
+            } else if appState.connectionState == .disconnected && appState.brokerToken == nil {
                 ConnectView()
             } else if appState.connectionState == .connecting {
                 connectingView
@@ -16,44 +18,51 @@ struct MainView: View {
                         SidebarView()
                             .navigationSplitViewColumnWidth(min: 180, ideal: 220, max: 300)
                     } detail: {
-                        if appState.activeChannel != nil {
-                            HStack(spacing: 0) {
-                                ChatView()
-                                if let threadRoot = appState.threadRootMessage,
-                                   let channel = appState.activeChannel {
-                                    Divider()
-                                    ThreadView(rootMessage: threadRoot, channel: channel)
-                                }
-                                if appState.showDetailPanel {
-                                    DetailPanel()
-                                        .frame(width: 260)
-                                }
+                        VStack (spacing: 0) {
+                            // Reconnect banner
+                            if appState.connectionState == .disconnected && appState.hasSavedSession {
+                                ReconnectBanner()
                             }
-                        } else {
-                            emptyState
+
+                            // Guest upgrade banner
+                            if appState.connectionState == .registered && appState.authenticatedDID == nil {
+                                GuestUpgradeBanner()
+                            }
+                            if appState.activeChannel != nil {
+                                HStack(spacing: 0) {
+                                    ChatView()
+                                    if let threadRoot = appState.threadRootMessage,
+                                       let channel = appState.activeChannel {
+                                        Divider().overlay(Theme.borderSoft)
+                                        ThreadView(rootMessage: threadRoot, channel: channel)
+                                    }
+                                    if appState.showDetailPanel {
+                                        Divider().overlay(Theme.borderSoft)
+                                        DetailPanel()
+                                            .frame(width: 260)
+                                    }
+                                }
+                            } else {
+                                emptyState
+                            }
                         }
                     }
                     .toolbar {
                         ToolbarItem(placement: .navigation) {
-                            connectionIndicator
+                            HStack(spacing: 8) {
+                                Image("Logo")
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: 20, height: 20)
+                                    .accessibilityLabel("freeq")
+                                connectionIndicator
+                            }
                         }
                     }
 
-                    // Reconnect banner
-                    if appState.connectionState == .disconnected && appState.hasSavedSession {
-                        ReconnectBanner()
-                    }
 
-                    // MOTD banner
-                    if appState.showMotd && !appState.motd.isEmpty {
-                        MotdBanner()
-                    }
-
-                    // Guest upgrade banner
-                    if appState.connectionState == .registered && appState.authenticatedDID == nil {
-                        GuestUpgradeBanner()
-                    }
                 }
+                .background(Theme.appBackground)
             }
         }
         .sheet(isPresented: Binding(
@@ -77,103 +86,154 @@ struct MainView: View {
         }
     }
 
+    private var restoringSessionView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .scaleEffect(1.5)
+            Text("Restoring your session…")
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(32)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Theme.surface)
+                .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.chatBackground)
+    }
+
     private var connectingView: some View {
         VStack(spacing: 16) {
             ProgressView()
                 .scaleEffect(1.5)
             Text("Connecting to \(appState.serverAddress)…")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.textSecondary)
         }
+        .padding(32)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(Theme.surface)
+                .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.chatBackground)
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 48))
-                .foregroundStyle(.tertiary)
-            Text("Select a channel to start chatting")
-                .foregroundStyle(.secondary)
+        VStack(spacing: 18) {
+            ZStack {
+                Circle()
+                    .fill(Theme.accentSoft)
+                    .frame(width: 76, height: 76)
+                Image(systemName: "bubble.left.and.bubble.right.fill")
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+            }
+            VStack(spacing: 6) {
+                Text("Choose a conversation")
+                    .font(.title2.weight(.semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                Text("Pick a channel or direct message from the sidebar.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 360)
+            }
 
             if appState.channels.isEmpty {
-                Button("Join #freeq") {
+                Button {
                     appState.joinChannel("#freeq")
+                } label: {
+                    Label("Join #freeq", systemImage: "plus.bubble.fill")
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .tint(Theme.accent)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.chatBackground)
     }
 
     @ViewBuilder
     private var connectionIndicator: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-
-            if appState.isP2pActive {
-                Image(systemName: "point.3.connected.trianglepath.dotted")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .help("P2P active via iroh")
+        HStack(spacing: 8) {
+            Label {
+                Text(statusText)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+            } icon: {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
             }
 
-            if appState.transportType == .iroh {
-                Text("iroh")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+            if appState.isP2pActive || appState.transportType == .iroh {
+                Divider()
+                    .frame(height: 12)
+                Label {
+                    Text(p2pStatusText)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.textSecondary)
+                } icon: {
+                    Image(systemName: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textTertiary)
+                }
             }
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(Theme.surfaceSoft))
+        .overlay(Capsule().strokeBorder(Theme.borderSoft, lineWidth: 1))
+        .help(connectionHelp)
     }
 
     private var statusColor: Color {
         switch appState.connectionState {
-        case .registered: .green
-        case .connected: .yellow
-        case .connecting: .orange
-        case .disconnected: .red
+        case .registered: Theme.success
+        case .connected: Theme.warning
+        case .connecting: Theme.warning
+        // Quiet grey, not danger-red: disconnection auto-retries, and the
+        // reconnect banner already says so. Red implies a terminal failure
+        // that needs the user — this state doesn't.
+        case .disconnected: Theme.textTertiary
         }
+    }
+
+    private var statusText: String {
+        switch appState.connectionState {
+        case .registered: "Online"
+        case .connected: "Connected"
+        case .connecting: "Connecting"
+        case .disconnected: "Offline"
+        }
+    }
+
+    private var p2pStatusText: String {
+        let count = appState.p2pConnectedPeers.count
+        if count == 1 { return "P2P 1 peer" }
+        if count > 1 { return "P2P \(count) peers" }
+        return "P2P ready"
+    }
+
+    private var connectionHelp: String {
+        var parts = ["IRC \(statusText.lowercased()) via \(appState.transportType.label)"]
+        if appState.isP2pActive {
+            parts.append("P2P active via iroh")
+        }
+        return parts.joined(separator: " • ")
     }
 }
 
-// MARK: - MOTD Banner
-
-struct MotdBanner: View {
-    @Environment(AppState.self) private var appState
-    @State private var expanded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Image(systemName: "info.circle")
-                    .font(.caption)
-                Text("Message of the Day")
-                    .font(.caption.weight(.semibold))
-                Spacer()
-                Button(expanded ? "Collapse" : "Show") {
-                    withAnimation { expanded.toggle() }
-                }
-                .font(.caption)
-                .buttonStyle(.plain)
-                Button {
-                    appState.showMotd = false
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.caption2)
-                }
-                .buttonStyle(.plain)
-            }
-            if expanded {
-                Text(appState.motd.trimmingCharacters(in: .whitespacesAndNewlines))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
+private extension TransportType {
+    var label: String {
+        switch self {
+        case .tcp: "TCP"
+        case .tls: "TLS"
+        case .iroh: "iroh"
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(.ultraThinMaterial)
     }
 }
 
@@ -209,26 +269,63 @@ struct GuestUpgradeBanner: View {
 
 // MARK: - Reconnect Banner
 
+/// Shown while the connection is down and auto-reconnect is running.
+/// Deliberately calm: reconnection is automatic and usually succeeds in
+/// seconds — the surface communicates *activity* (spinner + quiet text),
+/// not emergency. A red wash here bled through the transparent titlebar
+/// and made a routine blip look like an outage.
 struct ReconnectBanner: View {
     @Environment(AppState.self) private var appState
 
+    /// Repeated broker failures mean waiting won't help (wedged token or
+    /// sign-in service down) — offer a fresh sign-in instead of spinning.
+    private var brokerLooksStuck: Bool { appState.brokerFailureStreak >= 3 }
+
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: "wifi.exclamationmark")
+            if brokerLooksStuck {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Text("Having trouble restoring your session.")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Button("Retry") {
+                    appState.reconnectIfSaved()
+                }
                 .font(.caption)
-            Text("Disconnected — reconnecting…")
-                .font(.caption.weight(.medium))
-            Spacer()
-            Button("Reconnect Now") {
-                appState.reconnectIfSaved()
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Button("Sign In Again…") {
+                    appState.logout()
+                }
+                .font(.caption)
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Reconnecting…")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.textSecondary)
+                Text("You'll catch up automatically.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textTertiary)
+                Spacer()
+                Button("Retry Now") {
+                    appState.reconnectIfSaved()
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
-            .font(.caption)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
         .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.red.opacity(0.15))
-        .foregroundStyle(.red)
+        .padding(.vertical, 7)
+        .background(Theme.surfaceElevated)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
     }
 }

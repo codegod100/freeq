@@ -54,6 +54,10 @@ pub struct ChannelState {
     pub invite_only: bool,
     /// Invite list (session IDs or DIDs that have been invited).
     pub invites: HashSet<String>,
+    /// Invite exception list (+I): hostmasks/DIDs that bypass +i without
+    /// requiring an explicit INVITE. Persistent (unlike `invites`, which
+    /// are consumed on join).
+    pub invite_exceptions: Vec<InviteExceptionEntry>,
     /// Recent message history for replay on join.
     pub history: std::collections::VecDeque<HistoryMessage>,
     /// Channel topic, if set.
@@ -83,7 +87,45 @@ pub struct PinnedMessage {
     pub pinned_at: u64,
 }
 
+/// Pure connect-time allowlist decision (see `SharedState::did_is_allowed`).
+/// Empty allowlists ⇒ open. Matches an exact DID, or a handle whose domain is
+/// (or is a subdomain of) an allowed domain.
+pub(crate) fn did_allowed(
+    allowed_dids: &[String],
+    allowed_domains: &[String],
+    did: &str,
+    handle: Option<&str>,
+) -> bool {
+    if allowed_dids.is_empty() && allowed_domains.is_empty() {
+        return true;
+    }
+    if allowed_dids.iter().any(|d| d == did) {
+        return true;
+    }
+    if let Some(h) = handle {
+        let h = h.trim_start_matches('@').to_lowercase();
+        if allowed_domains.iter().any(|dom| {
+            let dom = dom
+                .trim_start_matches('@')
+                .trim_start_matches('.')
+                .to_lowercase();
+            h == dom || h.ends_with(&format!(".{dom}"))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 impl ChannelState {
+    /// True if the channel restricts *access* via a channel mode — invite-only
+    /// (`+i`), keyed (`+k`), or encrypted-only (`+E`). Used to decide whether it
+    /// may be advertised to non-members. Policy-gating is checked separately
+    /// (it needs the policy engine); see `SharedState::channel_is_discoverable`.
+    pub fn is_mode_restricted(&self) -> bool {
+        self.invite_only || self.key.is_some() || self.encrypted_only
+    }
+
     /// Case-insensitive lookup in remote_members.
     /// IRC nicks are case-insensitive, but HashMap keys preserve original case.
     pub fn remote_member(&self, nick: &str) -> Option<&RemoteMember> {
@@ -139,6 +181,15 @@ pub struct OAuthPending {
     pub mobile: bool,
     /// If set, this login was initiated via IRC `/login` — complete auth on this IRC session.
     pub irc_state: Option<String>,
+    /// Which OAuth purpose this flow is for. `Login` is the default first
+    /// log-in (narrow `atproto` scope); `BlobUpload`/`BlueskyPost` are
+    /// step-ups requested via `/auth/step-up?purpose=…` with broader
+    /// scopes — the callback stores them in their own session slot
+    /// rather than overwriting the primary login.
+    pub purpose: OauthPurpose,
+    /// The scope string we sent in PAR. Used as a fallback for
+    /// `granted_scope` when the token endpoint omits the `scope` field.
+    pub requested_scope: String,
 }
 
 /// Completed OAuth: stored after /auth/callback, consumed by the web client.
@@ -151,6 +202,10 @@ pub struct OAuthResult {
     /// One-time token for SASL web-token auth (consumed on first use).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_token: Option<String>,
+    /// Long-lived broker token for durable `/session` refresh. `Some` only in
+    /// embedded mode where a session was persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub broker_token: Option<String>,
     /// When this result was created (Unix timestamp seconds).
     #[serde(skip)]
     pub created_at: u64,
@@ -165,7 +220,11 @@ pub struct LinkedIdentity {
 }
 
 /// Active web session with credentials for PDS operations (e.g., media upload).
-/// Keyed by DID in SharedState.web_sessions.
+/// Keyed by `(DID, purpose)` in SharedState.web_sessions where `purpose` is
+/// [`OauthPurpose`]. The default `Login` session is the one created at first
+/// login (narrow scope: `atproto`); additional purposes are created by the
+/// step-up flow at `/auth/step-up?purpose=…` with broader scopes layered on
+/// only when the user actually triggers a feature that needs them.
 #[derive(Debug, Clone)]
 pub struct WebSession {
     pub did: String,
@@ -175,6 +234,111 @@ pub struct WebSession {
     pub dpop_key_b64: String,
     pub dpop_nonce: Option<String>,
     pub created_at: std::time::Instant,
+    /// The actual scope string the PDS granted (read from the token-endpoint
+    /// `scope` field). May differ from what we requested — older PDSes may
+    /// downgrade granular requests to `transition:generic`. Used by per-purpose
+    /// scope checks.
+    pub granted_scope: String,
+}
+
+/// Distinguishes which OAuth grant a [`WebSession`] is for. Each purpose has
+/// its own scope set and lives in its own slot, so escalating to a broader
+/// permission (e.g. blob upload) only happens when the user actually triggers
+/// the feature that needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OauthPurpose {
+    /// Identity-only login. Scope: `atproto`. Lets us prove the user owns
+    /// their DID via SASL — that's all most users ever need.
+    Login,
+    /// Image / media upload to the user's PDS. Scope: `atproto blob:image/*`.
+    /// Triggered the first time the user hits the upload button.
+    BlobUpload,
+    /// Cross-posting messages to Bluesky. Scope: adds `repo:app.bsky.feed.post`.
+    /// Triggered the first time a user enables Bluesky mirroring on a channel.
+    BlueskyPost,
+}
+
+impl OauthPurpose {
+    /// Parse the URL-/JSON-friendly form used in `/auth/step-up?purpose=…`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "login" => Some(Self::Login),
+            "blob_upload" => Some(Self::BlobUpload),
+            "bluesky_post" => Some(Self::BlueskyPost),
+            _ => None,
+        }
+    }
+
+    /// Reverse of [`from_str`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Login => "login",
+            Self::BlobUpload => "blob_upload",
+            Self::BlueskyPost => "bluesky_post",
+        }
+    }
+
+    /// The OAuth scope string we *request* for this purpose. The PDS may
+    /// grant a different one — store that in [`WebSession::granted_scope`]
+    /// and check it at use time via [`scope_satisfies_purpose`].
+    pub fn requested_scope(self) -> &'static str {
+        match self {
+            // Identity-only. Same as a vanilla "Login with Bluesky" button.
+            Self::Login => "atproto",
+            // Upload images to the user's repo. Narrow MIME on purpose so
+            // the consent screen says "upload images" instead of "upload
+            // anything". Also requests `repo:blue.irc.media?action=create`
+            // because the server's media upload flow creates a record in
+            // that collection (NSID `blue.irc.media`, no `app.` prefix)
+            // alongside the blob — without this scope the PDS rejects
+            // record creation with ScopeMissingError even though the blob
+            // upload itself succeeds.
+            Self::BlobUpload => "atproto blob:image/* repo:blue.irc.media?action=create",
+            // Cross-post to Bluesky's feed. Repo write narrowed to a single
+            // collection.
+            Self::BlueskyPost => "atproto repo:app.bsky.feed.post",
+        }
+    }
+}
+
+/// True when the session's actually-granted scope satisfies what the
+/// requested purpose needs at runtime.
+///
+/// Tolerant of two real-world cases:
+/// - Older PDSes may grant `transition:generic` instead of the granular
+///   scope we requested (legacy "App Password" semantics that subsumes
+///   everything). Treat that as satisfying any purpose.
+/// - bsky.social granular grants may include extra `blob:` MIME entries
+///   beyond what we asked; we only need one `blob:image/*` (or the
+///   wildcard `blob:*/*`) for upload.
+pub fn scope_satisfies_purpose(granted: &str, purpose: OauthPurpose) -> bool {
+    if granted
+        .split_whitespace()
+        .any(|s| s == "transition:generic")
+    {
+        return true;
+    }
+    match purpose {
+        OauthPurpose::Login => granted.split_whitespace().any(|s| s == "atproto"),
+        OauthPurpose::BlobUpload => {
+            let has_blob = granted
+                .split_whitespace()
+                .any(|s| s == "blob:*/*" || s == "blob:image/*" || s.starts_with("blob:image/"));
+            // The record-creation scope can be granted explicitly, via a
+            // wildcard `repo:*`, or by the legacy `transition:generic`
+            // (which the early-return at the top of this function already
+            // covers). Without it the PDS allows blob upload but rejects
+            // the accompanying blue.irc.media record creation.
+            let has_record = granted.split_whitespace().any(|s| {
+                s == "repo:*" || s == "repo:blue.irc.media" || s.starts_with("repo:blue.irc.media")
+            });
+            has_blob && has_record
+        }
+        OauthPurpose::BlueskyPost => granted
+            .split_whitespace()
+            .any(|s| s == "repo:app.bsky.feed.post" || s == "repo:*"),
+    }
 }
 
 /// Info about a remote user connected via S2S federation.
@@ -188,6 +352,8 @@ pub struct RemoteMember {
     pub handle: Option<String>,
     /// Whether this user is op on their home server.
     pub is_op: bool,
+    /// Actor class: "human", "agent", or "external_agent".
+    pub actor_class: Option<String>,
 }
 
 /// A stored message for channel history replay.
@@ -267,6 +433,48 @@ impl ChannelState {
     /// Check if a user is banned from this channel.
     pub fn is_banned(&self, hostmask: &str, did: Option<&str>) -> bool {
         self.bans.iter().any(|b| b.matches(hostmask, did))
+    }
+
+    /// Check if a user is on the +I invite-exception list — a persistent
+    /// allow-list that bypasses +i without consuming an INVITE.
+    pub fn is_invite_excepted(&self, hostmask: &str, did: Option<&str>) -> bool {
+        self.invite_exceptions
+            .iter()
+            .any(|e| e.matches(hostmask, did))
+    }
+}
+
+/// An entry on the +I (invite-exception) list — same shape as a BanEntry,
+/// but it grants admission instead of denying it. Hostmask or DID.
+#[derive(Debug, Clone)]
+pub struct InviteExceptionEntry {
+    pub mask: String,
+    pub set_by: String,
+    pub set_at: u64,
+}
+
+impl InviteExceptionEntry {
+    pub fn new(mask: String, set_by: String) -> Self {
+        let set_at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            mask,
+            set_by,
+            set_at,
+        }
+    }
+
+    /// Same matching semantics as BanEntry: DID exact-match if mask starts
+    /// with "did:", otherwise case-insensitive wildcard match against the
+    /// nick!user@host string.
+    pub fn matches(&self, hostmask: &str, did: Option<&str>) -> bool {
+        if self.mask.starts_with("did:") {
+            did.is_some_and(|d| d == self.mask)
+        } else {
+            wildcard_match(&self.mask, hostmask)
+        }
     }
 }
 
@@ -359,11 +567,7 @@ impl NickMap {
         let lower = nick.to_lowercase();
         // Remove all sid→nick entries pointing to this nick
         self.sid_to_nick.retain(|_, n| n.to_lowercase() != lower);
-        if let Some(sid) = self.nick_to_sid.remove(&lower) {
-            Some(sid)
-        } else {
-            None
-        }
+        self.nick_to_sid.remove(&lower)
     }
 
     /// Remove by session_id. Returns the display nick if found.
@@ -445,9 +649,36 @@ pub struct SharedState {
     pub cap_server_time: Mutex<HashSet<String>>,
     /// Sessions that have negotiated batch capability.
     pub cap_batch: Mutex<HashSet<String>>,
+    /// Sessions that have negotiated the `draft/multiline` capability —
+    /// they can send and receive logical messages split across multiple
+    /// PRIVMSG/NOTICE lines via BATCH frames. See
+    /// https://ircv3.net/specs/extensions/multiline.
+    pub cap_draft_multiline: Mutex<HashSet<String>>,
+    /// In-flight BATCH frames per session. Keyed by `(session_id,
+    /// batch_id)`. Populated when a client sends `BATCH +<id> <type>
+    /// <target>`, drained when it sends `BATCH -<id>`. PRIVMSG/NOTICE
+    /// lines tagged `batch=<id>` are routed into the matching entry
+    /// instead of being dispatched as standalone messages. Cleaned up
+    /// on disconnect.
+    pub open_batches:
+        Mutex<HashMap<(String, String), crate::connection::draft_multiline::OpenBatch>>,
     pub cap_account_notify: Mutex<HashSet<String>>,
     pub cap_extended_join: Mutex<HashSet<String>>,
     pub cap_away_notify: Mutex<HashSet<String>>,
+    /// Sessions that have negotiated account-tag capability (IRCv3).
+    /// When set, outbound PRIVMSG/NOTICE includes `account=<did>` if sender is authenticated.
+    pub cap_account_tag: Mutex<HashSet<String>>,
+    /// Sessions that have negotiated the `draft/read-marker` capability —
+    /// they can set/query cross-device read markers via MARKREAD and receive
+    /// marker broadcasts from their other connections.
+    /// See https://ircv3.net/specs/extensions/read-marker.
+    pub cap_read_marker: Mutex<HashSet<String>>,
+    /// Session-local read markers for guests (no DID). Keyed by
+    /// `session_id -> (target -> ISO timestamp)`. DID-authenticated users
+    /// persist to the `read_markers` table instead; this map only holds the
+    /// ephemeral markers of unauthenticated connections and is dropped on
+    /// disconnect.
+    pub session_read_markers: Mutex<HashMap<String, HashMap<String, String>>>,
     /// Sessions that have OPER (server operator) status.
     pub server_opers: Mutex<HashSet<String>>,
     /// Actor class per session (default: Human, omitted from map).
@@ -458,6 +689,11 @@ pub struct SharedState {
     pub agent_presence: Mutex<HashMap<String, crate::connection::AgentPresence>>,
     /// Agent heartbeat tracking: session_id → (last_heartbeat_unix, ttl_seconds).
     pub agent_heartbeats: Mutex<HashMap<String, (i64, u64)>>,
+    /// AV instance_ids actively joined per IRC connection.
+    /// session_id → set of instance_ids the client sent on av-join.
+    /// Used on disconnect to clean only this connection's slots (per-instance)
+    /// and on av-join to reap orphan slots whose IRC connection is gone.
+    pub av_instances_per_conn: Mutex<HashMap<String, HashSet<String>>>,
     /// Pending OAuth sessions: state → OAuthPending.
     pub oauth_pending: Mutex<HashMap<String, OAuthPending>>,
     /// Completed OAuth sessions: state → OAuthResult.
@@ -467,7 +703,11 @@ pub struct SharedState {
     pub web_auth_tokens: Mutex<HashMap<String, (String, String, std::time::Instant)>>,
     /// Active web sessions with PDS credentials, keyed by DID.
     /// Used for server-proxied operations like media upload.
-    pub web_sessions: Mutex<HashMap<String, WebSession>>,
+    /// Active web sessions keyed by `(DID, purpose)`. Each entry holds an
+    /// independent OAuth grant: a user with both `Login` and `BlobUpload`
+    /// has two PDS-level tokens, with the upload one only obtained when
+    /// they actually clicked an upload button. See [`OauthPurpose`].
+    pub web_sessions: Mutex<HashMap<(String, OauthPurpose), WebSession>>,
     /// Pending IRC LOGIN commands: oauth_state → session_id.
     /// When the OAuth callback fires, the server completes auth on the IRC connection.
     pub login_pending: Mutex<HashMap<String, String>>,
@@ -485,6 +725,19 @@ pub struct SharedState {
     pub server_iroh_id: Mutex<Option<String>>,
     /// Iroh endpoint handle (kept alive for the server's lifetime).
     pub iroh_endpoint: Mutex<Option<iroh::Endpoint>>,
+    /// Iroh `Router` that owns the endpoint accept loop. Holding this is
+    /// load-bearing — dropping the Router aborts inbound iroh handling.
+    pub iroh_router: Mutex<Option<iroh::protocol::Router>>,
+    /// AV session manager (voice/video/screen sharing).
+    pub av_sessions: Mutex<crate::av::AvSessionManager>,
+    /// AV media backend (iroh-live rooms).
+    pub av_media: Mutex<Option<Arc<crate::av_media::IrohLiveBackend>>>,
+    /// AV SFU state (MoQ cluster for WebSocket + QUIC connections).
+    #[cfg(feature = "av-native")]
+    pub sfu_state: Mutex<Option<Arc<crate::av_sfu::SfuState>>>,
+    /// Active MoQ↔Room bridge handles (one per session).
+    #[cfg(feature = "av-native")]
+    pub av_bridges: Mutex<std::collections::HashMap<String, crate::av_bridge::BridgeHandle>>,
     /// S2S manager (if clustering is active).
     pub s2s_manager: Mutex<Option<Arc<crate::s2s::S2sManager>>>,
     /// CRDT document for cluster state convergence.
@@ -521,6 +774,10 @@ pub struct SharedState {
     pub session_client_info: Mutex<HashMap<String, String>>,
     /// Upload tokens: token → (DID, created_at). Short-lived proof of upload authorization.
     pub upload_tokens: Mutex<HashMap<String, (String, std::time::Instant)>>,
+    /// Embedded broker session store (durable-ish `/session` refresh) — `Some`
+    /// only in embedded mode (no separate broker). Shared by `auth_callback`
+    /// (which persists the session) and the mounted broker `/session` handler.
+    pub embedded_session_store: Option<Arc<dyn freeq_auth_broker::SessionStore>>,
     /// Ghost sessions: DID users who disconnected recently.
     /// If they reconnect within the grace period, suppress QUIT/JOIN churn.
     /// Key: DID, Value: (nick, hostmask, channels_with_modes, disconnect_time, cancel_sender)
@@ -529,6 +786,47 @@ pub struct SharedState {
     pub spawned_agents: Mutex<HashMap<String, SpawnedAgent>>,
     /// Per-IP rate limiter for expensive REST endpoints (OG preview, blob proxy, upload).
     pub rest_rate_limiter: crate::web::IpRateLimiter,
+    /// Private media store: encrypted-at-rest blobs on local disk served via
+    /// signed capability URLs. None only in lightweight test harnesses.
+    pub media_store: Option<crate::media_store::MediaStore>,
+    /// Liveness probes: session_id → when the probe PING was sent. Set when a
+    /// new same-DID session attaches; cleared by the probed session's PONG.
+    /// Sessions still pending after the deadline are evicted — this reaps
+    /// zombie sockets left behind by frozen/resumed agent VMs in seconds
+    /// instead of waiting out the ping timeout.
+    pub liveness_probes: Mutex<HashMap<String, std::time::Instant>>,
+    /// Per-session eviction signal. Notifying it makes the session's read
+    /// loop exit and run its normal disconnect cleanup path.
+    pub session_kill: Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+    /// Process-lifetime counters exposed at /metrics.
+    pub metrics: Metrics,
+}
+
+/// Process-lifetime counters for the Prometheus /metrics endpoint.
+/// Gauges (connections, channels, peers) are computed live; only
+/// monotonic counters live here.
+pub struct Metrics {
+    pub messages_total: std::sync::atomic::AtomicU64,
+    pub sasl_success_total: std::sync::atomic::AtomicU64,
+    pub sasl_failure_total: std::sync::atomic::AtomicU64,
+    pub started_at: std::time::Instant,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self {
+            messages_total: std::sync::atomic::AtomicU64::new(0),
+            sasl_success_total: std::sync::atomic::AtomicU64::new(0),
+            sasl_failure_total: std::sync::atomic::AtomicU64::new(0),
+            started_at: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Metrics {
+    pub fn bump(counter: &std::sync::atomic::AtomicU64) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// A spawned virtual agent (child of a real agent session).
@@ -560,7 +858,48 @@ pub struct GhostSession {
     pub cancel: tokio::sync::oneshot::Sender<()>,
 }
 
+/// Result of [`SharedState::bind_identity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindOutcome {
+    /// Binding applied (in-memory + persisted).
+    Bound,
+    /// Nick is already owned by a different DID; nothing was changed.
+    ConflictOwnedByOther { owner_did: String },
+}
+
 impl SharedState {
+    /// Whether a channel may be advertised to non-members: shown in `LIST` and
+    /// in the unauthenticated `GET /api/v1/channels`. A channel is discoverable
+    /// only if it carries NO access restriction — not invite-only (`+i`), not
+    /// keyed (`+k`), not encrypted-only (`+E`), and not gated by a join policy.
+    /// Any restriction means it is effectively private, and advertising its
+    /// name/topic to strangers or other tenants only leaks it. Members always
+    /// see their own channels regardless (the callers OR-in membership).
+    pub fn channel_is_discoverable(&self, name: &str, ch: &ChannelState) -> bool {
+        if ch.is_mode_restricted() {
+            return false;
+        }
+        if let Some(ref engine) = self.policy_engine
+            && matches!(engine.get_policy(name), Ok(Some(_)))
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Connect-time allowlist (Phase 3.2, opt-in). Returns whether a DID may
+    /// authenticate. Both allowlists empty ⇒ open (the public-instance default).
+    /// `handle` is the user's AT handle, used for domain matching (e.g. an
+    /// `acme.com` domain allows `alice.acme.com`).
+    pub fn did_is_allowed(&self, did: &str, handle: Option<&str>) -> bool {
+        did_allowed(
+            &self.config.allowed_dids,
+            &self.config.allowed_did_domains,
+            did,
+            handle,
+        )
+    }
+
     /// Run a closure with the database, if persistence is enabled.
     /// Logs errors but does not propagate them — persistence failures
     /// should not break the IRC server.
@@ -578,6 +917,146 @@ impl SharedState {
                 }
             }
         })
+    }
+
+    /// Bind a DID to a nick: the single authority for updating the
+    /// in-memory `did_nicks`/`nick_owners` maps AND persisting the
+    /// durable `identities` row. Replaces ad-hoc inserts at SASL
+    /// success / LOGIN / rename so all three stay consistent.
+    ///
+    /// Ownership-preserving: if `nick` is already owned by a *different*
+    /// DID, the bind is refused — neither the in-memory maps nor the DB
+    /// are touched (the caller is expected to force-rename the session,
+    /// as registration already does). This closes the hole where a nick
+    /// claimed during the CAP/SASL negotiation window silently hijacked
+    /// in-memory ownership even though the DB `UNIQUE(nick)` rejected it.
+    pub fn bind_identity(&self, did: &str, nick: &str) -> BindOutcome {
+        let nick_lower = nick.to_lowercase();
+        {
+            let owners = self.nick_owners.lock();
+            if let Some(existing) = owners.get(&nick_lower)
+                && existing != did
+            {
+                return BindOutcome::ConflictOwnedByOther {
+                    owner_did: existing.clone(),
+                };
+            }
+        }
+        // If this DID previously held a different nick, drop the stale
+        // nick_owners entry so it isn't orphaned. (Without this, the old
+        // nick stayed owned in memory and diverged from the durable
+        // table until a restart reloaded it.)
+        let prev_nick = self.did_nicks.lock().get(did).cloned();
+        if let Some(prev) = prev_nick
+            && prev != nick_lower
+        {
+            let mut owners = self.nick_owners.lock();
+            if owners.get(&prev).is_some_and(|d| d == did) {
+                owners.remove(&prev);
+            }
+        }
+        self.did_nicks
+            .lock()
+            .insert(did.to_string(), nick_lower.clone());
+        self.nick_owners
+            .lock()
+            .insert(nick_lower.clone(), did.to_string());
+        // Persist durably. with_db logs on error; we additionally surface
+        // a warning so a swallowed UNIQUE(nick) (shouldn't happen now the
+        // in-memory gate above runs first) is not silent.
+        if self
+            .with_db(|db| db.save_identity(did, &nick_lower))
+            .is_none()
+            && self.db.is_some()
+        {
+            tracing::warn!(%did, nick = %nick_lower, "bind_identity: save_identity did not persist");
+        }
+        BindOutcome::Bound
+    }
+
+    /// Bind `did` to `requested`; if `requested` is owned by a
+    /// *different* DID, bind a deterministic derived nick
+    /// `<base>-<didfrag>` instead and return it. Always returns the nick
+    /// actually bound (lowercased) — total, never fails.
+    ///
+    /// `didfrag` is the DID identifier (after the last `:`), ascii-
+    /// alphanumeric, lowercased. Nicks cap at 64, so `base` is truncated
+    /// to leave room for `-<didfrag>`. Deterministic for a given
+    /// (requested, did): the same identity always lands on the same
+    /// derived nick across reconnects/restarts. If the derived nick is
+    /// itself owned by yet another DID, the fragment is lengthened; a
+    /// random `guest` nick is the absolute last resort.
+    ///
+    /// For authenticated identities only. Unauthenticated nick squatters
+    /// keep the `Guest<rand>` path in registration.
+    pub fn bind_identity_with_fallback(&self, did: &str, requested: &str) -> String {
+        const MAX_NICK: usize = 64;
+        let requested_lower = requested.to_lowercase();
+        if let BindOutcome::Bound = self.bind_identity(did, &requested_lower) {
+            return requested_lower;
+        }
+        let ident: String = did
+            .rsplit(':')
+            .next()
+            .unwrap_or(did)
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .map(|c| c.to_ascii_lowercase())
+            .collect();
+        let mut last = String::new();
+        for raw_len in [8usize, 12, 16, 24, ident.len()] {
+            let frag_len = raw_len.min(ident.len());
+            if frag_len == 0 {
+                break;
+            }
+            let frag = &ident[..frag_len];
+            let base_budget = MAX_NICK.saturating_sub(1 + frag_len);
+            let base: String = requested_lower.chars().take(base_budget).collect();
+            let derived = format!("{base}-{frag}");
+            if derived == last {
+                continue; // ident shorter than this step — no new candidate
+            }
+            last = derived.clone();
+            if let BindOutcome::Bound = self.bind_identity(did, &derived) {
+                return derived;
+            }
+        }
+        let guest = format!("guest{}", rand::random::<u32>() % 100000);
+        let _ = self.bind_identity(did, &guest);
+        guest
+    }
+
+    /// Resolve a DID to a display nick for UI surfaces (CHATHISTORY
+    /// TARGETS, etc.). Chain: in-memory `did_nicks` → live session
+    /// (`session_dids` reverse + `nick_to_session`) → persistent
+    /// `identities` table → message-history sender → raw DID as last resort.
+    pub fn display_nick_for_did(&self, did: &str) -> String {
+        if let Some(n) = self.did_nicks.lock().get(did).cloned() {
+            return n;
+        }
+        // Live session: find a session whose DID matches, then its nick.
+        let sid = self
+            .session_dids
+            .lock()
+            .iter()
+            .find(|(_, d)| d.as_str() == did)
+            .map(|(sid, _)| sid.clone());
+        if let Some(sid) = sid
+            && let Some(n) = self.nick_to_session.lock().get_nick(&sid)
+        {
+            return n.to_string();
+        }
+        if let Some(row) = self.with_db(|db| db.get_identity_by_did(did)).flatten() {
+            return row.nick;
+        }
+        // Last resort before the raw DID: recover the nick the DID last sent
+        // under from stored messages. Covers conversations that predate durable
+        // identity binding and remote DIDs with no local `identities` row.
+        // Display-only — this never registers ownership of the recovered nick.
+        if let Some(nick) = self.with_db(|db| db.recent_nick_for_did(did)).flatten() {
+            return nick;
+        }
+        did.to_string()
     }
 
     // ── CRDT operations ────────────────────────────────────────────
@@ -757,6 +1236,97 @@ fn load_msg_signing_key(data_dir: &str) -> ed25519_dalek::SigningKey {
     key
 }
 
+/// Load or generate the persistent HMAC key that signs membership
+/// attestations (`{data_dir}/attestation-key.secret`, 0600).
+fn load_attestation_key(data_dir: &str) -> [u8; 32] {
+    let key_path = std::path::Path::new(data_dir).join("attestation-key.secret");
+    if key_path.exists() {
+        crate::secrets::tighten_permissions(&key_path);
+        if let Ok(data) = std::fs::read(&key_path)
+            && let Ok(bytes) = <[u8; 32]>::try_from(data.as_slice())
+        {
+            tracing::info!("Loaded attestation key from {}", key_path.display());
+            return bytes;
+        }
+        tracing::warn!(
+            "Corrupt attestation key at {}, regenerating",
+            key_path.display()
+        );
+    }
+    let key: [u8; 32] = rand::random();
+    if let Err(e) = crate::secrets::write_secret(&key_path, &key) {
+        tracing::error!("Failed to persist attestation key: {e}");
+    } else {
+        tracing::info!("Generated attestation signing key at {}", key_path.display());
+    }
+    key
+}
+
+/// Install the agent-assist LLM provider into the process-wide slot
+/// based on `ServerConfig.llm_*` fields. No-op if the provider is
+/// `None` / `"none"` / unset.
+///
+/// Pluggable today: `openai` selects the OpenAI-compatible client,
+/// which works against any /chat/completions endpoint (OpenAI itself,
+/// Together, Fireworks, Groq, vLLM, llama.cpp server, Ollama with
+/// /v1, TGI, LMDeploy, etc — see `agent_assist::llm::openai`).
+/// `mock` selects a deterministic regex matcher used by tests and dev.
+fn install_llm_provider(config: &ServerConfig) {
+    use std::time::Duration;
+    let kind = config
+        .llm_provider
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase);
+    match kind.as_deref() {
+        None | Some("") | Some("none") => {
+            // Intentionally do NOT clear the global here. The global is
+            // initialised to None by LazyLock; this branch is the
+            // "config didn't ask for an LLM" case and a no-op preserves
+            // test isolation when multiple Server instances are spun up
+            // in the same process (some with mock providers, some
+            // without). Production servers boot once, so this is
+            // identical to actively clearing.
+            tracing::info!(
+                "agent-assist LLM provider not configured (preserving any existing global)"
+            );
+        }
+        Some("mock") => {
+            crate::agent_assist::llm::global::set_provider(Arc::new(
+                crate::agent_assist::llm::mock::MockProvider,
+            ));
+            tracing::info!("agent-assist LLM provider: mock");
+        }
+        Some("openai") => {
+            let base = config
+                .llm_base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+            let model = config
+                .llm_model
+                .clone()
+                .unwrap_or_else(|| "gpt-4o-mini".to_string());
+            let display_name = format!("openai-compat:{model}");
+            let provider = crate::agent_assist::llm::openai::OpenAiCompatible::new(
+                display_name.clone(),
+                base.clone(),
+                config.llm_api_key.clone(),
+                model,
+                Duration::from_secs(config.llm_timeout_secs.max(1)),
+            );
+            crate::agent_assist::llm::global::set_provider(Arc::new(provider));
+            tracing::info!("agent-assist LLM provider: {} via {}", display_name, base);
+        }
+        Some(other) => {
+            tracing::warn!(
+                "Unknown agent-assist LLM provider `{other}`; disabling. \
+                 Set FREEQ_LLM_PROVIDER to one of: openai, mock, none."
+            );
+            crate::agent_assist::llm::global::clear_provider();
+        }
+    }
+}
+
 pub struct Server {
     config: ServerConfig,
     resolver: DidResolver,
@@ -764,19 +1334,54 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: ServerConfig) -> Self {
-        Self {
-            resolver: DidResolver::http(),
-            config,
-        }
+        let resolver = resolver_from_config(&config);
+        Self { resolver, config }
     }
 
     /// Create a server with a custom DID resolver (for testing).
     pub fn with_resolver(config: ServerConfig, resolver: DidResolver) -> Self {
         Self { config, resolver }
     }
+}
+
+/// Build the DID resolver the binary runs with: the real network resolver by
+/// default, or a static in-memory map when `--did-resolver-static` is set
+/// (test/dev only — offline authentication for the federation harness).
+fn resolver_from_config(config: &ServerConfig) -> DidResolver {
+    if config.did_resolver_static.is_empty() {
+        return DidResolver::http();
+    }
+    let mut docs = std::collections::HashMap::new();
+    for entry in &config.did_resolver_static {
+        match entry.split_once('=') {
+            Some((did, mb)) if !did.is_empty() && !mb.is_empty() => {
+                docs.insert(
+                    did.to_string(),
+                    freeq_sdk::did::make_test_did_document(did, mb),
+                );
+            }
+            _ => tracing::warn!(
+                entry = %entry,
+                "Ignoring malformed --did-resolver-static entry (expected did=publicKeyMultibase)"
+            ),
+        }
+    }
+    tracing::warn!(
+        count = docs.len(),
+        "Using STATIC DID resolver (test/dev mode) — no network DID resolution"
+    );
+    DidResolver::static_map(docs)
+}
+
+impl Server {
 
     /// Build SharedState, opening the database and loading persisted data.
     fn build_state(&self) -> Result<Arc<SharedState>> {
+        // Install the agent-assist LLM provider (idempotent; no-op if
+        // not configured). Lives in a process-wide slot rather than
+        // SharedState so existing constructors don't need to change.
+        install_llm_provider(&self.config);
+
         // Load message signing key early — it's used to derive DB encryption key
         let msg_signing_key = load_msg_signing_key(self.config.data_dir.as_deref().unwrap_or("."));
 
@@ -823,6 +1428,30 @@ impl Server {
             None => None,
         };
 
+        // Private media store: encrypted blobs on disk under {data_dir}/media.
+        // Metadata lives in the DB, so the store is only meaningful when
+        // persistence is enabled — gate on `db` to avoid creating a stray
+        // ./media dir in ephemeral (in-memory) configurations.
+        let media_store = if db.is_some() {
+            let data_dir = self.config.data_dir.as_deref().unwrap_or(".");
+            let media_dir = std::path::Path::new(data_dir).join("media");
+            let seed = msg_signing_key.to_bytes();
+            let enc_key = crate::media_store::derive_enc_key(&seed);
+            let cap_key = crate::media_store::derive_cap_key(&seed);
+            match crate::media_store::MediaStore::new(media_dir.clone(), enc_key, cap_key) {
+                Ok(store) => {
+                    tracing::info!("Private media store at {}", media_dir.display());
+                    Some(store)
+                }
+                Err(e) => {
+                    tracing::error!("Failed to init media store at {}: {e}", media_dir.display());
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Load persisted state from DB
         let mut channels = HashMap::new();
         let mut did_nicks = HashMap::new();
@@ -841,11 +1470,15 @@ impl Server {
                     .get_messages(name, crate::server::MAX_HISTORY, None)
                     .map_err(|e| anyhow::anyhow!("Failed to load messages for {name}: {e}"))?;
                 for msg in messages {
+                    let mut tags = msg.tags;
+                    if let Some(ref did) = msg.sender_did {
+                        tags.insert("account".to_string(), did.clone());
+                    }
                     ch.history.push_back(HistoryMessage {
                         from: msg.sender,
                         text: msg.text,
                         timestamp: msg.timestamp,
-                        tags: msg.tags,
+                        tags,
                         msgid: msg.msgid,
                     });
                 }
@@ -926,14 +1559,20 @@ impl Server {
             cap_echo_message: Mutex::new(HashSet::new()),
             cap_server_time: Mutex::new(HashSet::new()),
             cap_batch: Mutex::new(HashSet::new()),
+            cap_draft_multiline: Mutex::new(HashSet::new()),
+            open_batches: Mutex::new(HashMap::new()),
             cap_account_notify: Mutex::new(HashSet::new()),
             cap_extended_join: Mutex::new(HashSet::new()),
             cap_away_notify: Mutex::new(HashSet::new()),
+            cap_account_tag: Mutex::new(HashSet::new()),
+            cap_read_marker: Mutex::new(HashSet::new()),
+            session_read_markers: Mutex::new(HashMap::new()),
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
+            av_instances_per_conn: Mutex::new(HashMap::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),
@@ -945,6 +1584,13 @@ impl Server {
             session_away: Mutex::new(HashMap::new()),
             server_iroh_id: Mutex::new(None),
             iroh_endpoint: Mutex::new(None),
+            iroh_router: Mutex::new(None),
+            av_sessions: Mutex::new(crate::av::AvSessionManager::new()),
+            av_media: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            sfu_state: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            av_bridges: Mutex::new(std::collections::HashMap::new()),
             s2s_manager: Mutex::new(None),
             cluster_doc: crate::crdt::ClusterDoc::new(&self.config.server_name),
             db: db.map(Mutex::new),
@@ -961,9 +1607,17 @@ impl Server {
                 match crate::policy::PolicyStore::open(&policy_db_path) {
                     Ok(store) => {
                         let authority_did = format!("did:web:{}", self.config.server_name);
-                        Some(Arc::new(crate::policy::PolicyEngine::new(
+                        // Persistent attestation key: an ephemeral key (the
+                        // old PolicyEngine::new path) invalidated every
+                        // outstanding membership attestation on restart, so
+                        // Continuous-validity channels silently re-gated all
+                        // members after a server bounce.
+                        let attestation_key =
+                            load_attestation_key(self.config.data_dir.as_deref().unwrap_or("."));
+                        Some(Arc::new(crate::policy::PolicyEngine::with_key(
                             store,
                             authority_did,
+                            attestation_key,
                         )))
                     }
                     Err(e) => {
@@ -982,10 +1636,21 @@ impl Server {
             did_msg_keys: Mutex::new(HashMap::new()),
             session_client_info: Mutex::new(HashMap::new()),
             upload_tokens: Mutex::new(HashMap::new()),
+            // Embedded mode (no separate broker) gets an ephemeral in-memory
+            // broker session store so /session refresh works within uptime.
+            embedded_session_store: if self.config.broker_shared_secret.is_none() {
+                Some(Arc::new(freeq_auth_broker::InMemoryStore::new()))
+            } else {
+                None
+            },
             ghost_sessions: Mutex::new(HashMap::new()),
             spawned_agents: Mutex::new(HashMap::new()),
             // 30 requests per 60-second window per IP for expensive REST endpoints
             rest_rate_limiter: crate::web::IpRateLimiter::new(30, 60),
+            media_store,
+            liveness_probes: Mutex::new(HashMap::new()),
+            session_kill: Mutex::new(HashMap::new()),
+            metrics: Metrics::default(),
         }))
     }
 
@@ -1015,7 +1680,54 @@ impl Server {
         let web_addr = self.config.web_addr.clone();
         let state = self.build_state()?;
 
+        // Recover active AV sessions from DB (survive server restarts)
+        {
+            let recovered = state
+                .with_db(|db| db.load_active_av_sessions())
+                .unwrap_or_default();
+            if !recovered.is_empty() {
+                let mut mgr = state.av_sessions.lock();
+                let mut count = 0;
+                for session in recovered {
+                    // Only restore sessions less than 2 hours old
+                    let age = chrono::Utc::now().timestamp() - session.created_at;
+                    if age > 7200 {
+                        // Mark stale sessions as ended in DB
+                        let mut ended = session;
+                        ended.state = crate::av::AvSessionState::Ended {
+                            ended_at: chrono::Utc::now().timestamp(),
+                            ended_by: None,
+                        };
+                        state.with_db(|db| db.save_av_session(&ended));
+                        continue;
+                    }
+                    if let Some(ch) = &session.channel {
+                        mgr.channel_sessions
+                            .insert(ch.to_lowercase(), session.id.clone());
+                    }
+                    mgr.sessions.insert(session.id.clone(), session);
+                    count += 1;
+                }
+                if count > 0 {
+                    tracing::info!("Recovered {count} active AV sessions from database");
+                }
+            }
+        }
+
         // Start plain listener
+        // Warn if the UNENCRYPTED IRC port is exposed on a public interface —
+        // credentials and messages would travel in cleartext. The default binds
+        // to loopback; operators exposing it publicly should front it with TLS.
+        if !self.config.listen_addr.starts_with("127.")
+            && !self.config.listen_addr.starts_with("localhost")
+            && !self.config.listen_addr.starts_with("[::1]")
+        {
+            tracing::warn!(
+                addr = %self.config.listen_addr,
+                "plaintext IRC listener is bound to a NON-loopback address — traffic is unencrypted. \
+                 Prefer the TLS listener (--tls-bind) and keep --bind on 127.0.0.1 behind a proxy."
+            );
+        }
         let plain_listener = TcpListener::bind(&self.config.listen_addr).await?;
         tracing::info!("Plain listener on {}", self.config.listen_addr);
 
@@ -1141,6 +1853,50 @@ impl Server {
             tracing::error!("S2S requires iroh transport (--iroh)");
         }
 
+        // Initialize AV media backend
+        #[cfg(feature = "av-native")]
+        if let Some(ref endpoint) = iroh_endpoint {
+            if let Some(backend) = crate::av_media::init_backend(endpoint.clone()).await {
+                *state.av_media.lock() = Some(backend);
+            }
+            // Initialize SFU (MoQ cluster + QUIC accept + WebSocket support).
+            // QUIC binds to the web server's port (UDP). WebSocket handled via web.rs route.
+            let sfu_port = web_addr
+                .as_ref()
+                .and_then(|a| a.parse::<std::net::SocketAddr>().ok())
+                .map(|a| a.port())
+                .unwrap_or(4443);
+            {
+                let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+                let data_dir = self.config.data_dir.as_deref().unwrap_or(".");
+                match crate::av_sfu::init_sfu(Some(sfu_port), data_dir).await {
+                    Ok(sfu) => *state.sfu_state.lock() = Some(sfu),
+                    Err(e) => tracing::error!("AV SFU init failed: {e}"),
+                }
+            }
+        }
+        #[cfg(not(feature = "av-native"))]
+        {
+            *state.av_media.lock() = Some(crate::av_media::init_backend_stub());
+        }
+
+        // Spawn the iroh Router that owns the endpoint accept loop. Done
+        // AFTER AV init so iroh-live's gossip + MoQ protocols can be
+        // mounted on the same Router as freeq's `freeq/iroh/1` and
+        // `freeq/s2s/1` — preventing iroh-live from spawning its own
+        // Router and overwriting the endpoint's ALPN list.
+        if let Some(ref endpoint) = iroh_endpoint {
+            #[cfg(feature = "av-native")]
+            let router = {
+                let av_backend = state.av_media.lock().clone();
+                let live = av_backend.as_ref().map(|b| b.live());
+                crate::iroh::spawn_router(endpoint.clone(), Arc::clone(&state), live)
+            };
+            #[cfg(not(feature = "av-native"))]
+            let router = crate::iroh::spawn_router(endpoint.clone(), Arc::clone(&state));
+            *state.iroh_router.lock() = Some(router);
+        }
+
         // Store iroh endpoint in shared state to keep it alive
         if let Some(endpoint) = iroh_endpoint {
             *state.iroh_endpoint.lock() = Some(endpoint);
@@ -1216,6 +1972,88 @@ impl Server {
             });
         }
 
+        // Periodic maintenance (opt-in): age-based message retention +
+        // identity re-verification for offboarding. Both default to disabled.
+        {
+            let retention_days = self.config.message_retention_days;
+            let reverify_mins = self.config.reverify_identity_mins;
+            if retention_days > 0 || reverify_mins > 0 {
+                let maint_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    let mut ticks: u64 = 0;
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                    interval.tick().await; // skip immediate tick
+                    loop {
+                        interval.tick().await;
+                        ticks += 1;
+
+                        // Retention: prune messages older than N days, hourly.
+                        if retention_days > 0 && ticks % 60 == 0 {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            let cutoff = now.saturating_sub(retention_days * 86_400);
+                            if let Some(n) =
+                                maint_state.with_db(|db| db.prune_messages_older_than(cutoff))
+                                && n > 0
+                            {
+                                tracing::info!(
+                                    "Retention: pruned {n} messages older than {retention_days}d"
+                                );
+                            }
+                        }
+
+                        // Identity re-verification (offboarding). SAFE: only acts
+                        // when a DID resolves successfully but has NO valid auth
+                        // key; never disconnects on a resolution error (outage).
+                        if reverify_mins > 0 && ticks % reverify_mins == 0 {
+                            let did_sessions: std::collections::HashMap<String, Vec<String>> = {
+                                let sd = maint_state.session_dids.lock();
+                                let mut m: std::collections::HashMap<String, Vec<String>> =
+                                    std::collections::HashMap::new();
+                                for (sid, did) in sd.iter() {
+                                    m.entry(did.clone()).or_default().push(sid.clone());
+                                }
+                                m
+                            };
+                            for (did, sids) in did_sessions {
+                                match maint_state.did_resolver.resolve(&did).await {
+                                    Ok(doc) if doc.authentication_keys().is_empty() => {
+                                        tracing::warn!(
+                                            %did,
+                                            "identity re-verify: DID has no valid auth key — disconnecting sessions"
+                                        );
+                                        for sid in sids {
+                                            if let Some(tx) =
+                                                maint_state.connections.lock().get(&sid)
+                                            {
+                                                let _ = tx.try_send(
+                                                    "ERROR :Identity no longer valid (deactivated or key removed)\r\n"
+                                                        .to_string(),
+                                                );
+                                            }
+                                            if let Some(kill) =
+                                                maint_state.session_kill.lock().get(&sid).cloned()
+                                            {
+                                                kill.notify_one();
+                                            }
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(e) => tracing::debug!(
+                                        %did,
+                                        error = %e,
+                                        "identity re-verify: resolve failed (transient) — keeping session"
+                                    ),
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         // Heartbeat expiry: check agent liveness every 15 seconds.
         // Agents that miss their TTL transition to degraded, then offline, then disconnect.
         {
@@ -1247,24 +2085,23 @@ impl Server {
                         } else if elapsed > ttl * 2 {
                             // Transition to offline
                             let mut presences = hb_state.agent_presence.lock();
-                            if let Some(p) = presences.get_mut(&session_id) {
-                                if p.state != crate::connection::PresenceState::Offline {
-                                    tracing::debug!(session = %session_id, "Heartbeat missed 2x TTL — offline");
-                                    p.state = crate::connection::PresenceState::Offline;
-                                    p.updated_at = now;
-                                }
+                            if let Some(p) = presences.get_mut(&session_id)
+                                && p.state != crate::connection::PresenceState::Offline
+                            {
+                                tracing::debug!(session = %session_id, "Heartbeat missed 2x TTL — offline");
+                                p.state = crate::connection::PresenceState::Offline;
+                                p.updated_at = now;
                             }
                         } else if elapsed > ttl {
                             // Transition to degraded
                             let mut presences = hb_state.agent_presence.lock();
-                            if let Some(p) = presences.get_mut(&session_id) {
-                                if p.state != crate::connection::PresenceState::Degraded
-                                    && p.state != crate::connection::PresenceState::Offline
-                                {
-                                    tracing::debug!(session = %session_id, "Heartbeat missed TTL — degraded");
-                                    p.state = crate::connection::PresenceState::Degraded;
-                                    p.updated_at = now;
-                                }
+                            if let Some(p) = presences.get_mut(&session_id)
+                                && p.state != crate::connection::PresenceState::Degraded
+                                && p.state != crate::connection::PresenceState::Offline
+                            {
+                                tracing::debug!(session = %session_id, "Heartbeat missed TTL — degraded");
+                                p.state = crate::connection::PresenceState::Degraded;
+                                p.updated_at = now;
                             }
                         }
                     }
@@ -1365,6 +2202,74 @@ impl Server {
                             tracing::info!("Pruned {pruned} stale web sessions");
                         }
                     }
+                    // Prune old messages per channel (keep last 50K per channel)
+                    {
+                        const MAX_MESSAGES_PER_CHANNEL: usize = 50_000;
+                        let channel_names: Vec<String> =
+                            cleanup_state.channels.lock().keys().cloned().collect();
+                        for ch in &channel_names {
+                            let ch = ch.clone();
+                            cleanup_state
+                                .with_db(|db| db.prune_messages(&ch, MAX_MESSAGES_PER_CHANNEL));
+                        }
+                    }
+                    // Prune ended AV sessions from memory (keep for 1 hour)
+                    // and auto-end sessions idle for >2 hours with no active participants
+                    {
+                        let mut mgr = cleanup_state.av_sessions.lock();
+                        // Auto-end sessions where all participants have left but session wasn't formally ended
+                        let stale_ids: Vec<String> = mgr
+                            .active_sessions()
+                            .iter()
+                            .filter(|s| {
+                                let active_count = s
+                                    .participants
+                                    .values()
+                                    .filter(|p| p.left_at.is_none())
+                                    .count();
+                                if active_count == 0 {
+                                    return true; // No active participants — end it
+                                }
+                                // Also end sessions older than 2 hours (safety net)
+                                let age = chrono::Utc::now().timestamp() - s.created_at;
+                                age > 7200
+                            })
+                            .map(|s| s.id.clone())
+                            .collect();
+                        for id in &stale_ids {
+                            if let Ok(session) = mgr.end_session(id, None) {
+                                cleanup_state.with_db(|db| db.save_av_session(&session));
+                                if let Some(ch) = &session.channel {
+                                    let ch = ch.clone();
+                                    drop(mgr);
+                                    crate::connection::messaging::broadcast_av_state_pub(
+                                        &cleanup_state,
+                                        &ch,
+                                        id,
+                                        "ended",
+                                        "server",
+                                        "",
+                                        0,
+                                        "",
+                                    );
+                                    mgr = cleanup_state.av_sessions.lock();
+                                }
+                            }
+                        }
+                        if !stale_ids.is_empty() {
+                            tracing::info!("Auto-ended {} stale AV sessions", stale_ids.len());
+                        }
+                        // Prune ended sessions older than 1 hour from memory
+                        mgr.prune_ended(3600);
+                    }
+                    // Prune stale IP rate limiter entries
+                    {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        cleanup_state.rest_rate_limiter.prune(now);
+                    }
                 }
             });
         }
@@ -1395,6 +2300,7 @@ impl Server {
 
         // Accept plain connections
         const MAX_CONNS_PER_IP: u32 = 20;
+        const MAX_GLOBAL_CONNS: u32 = 10_000;
         tokio::select! {
             _ = shutdown => {}
             result = async {
@@ -1402,6 +2308,15 @@ impl Server {
                     let (stream, addr) = plain_listener.accept().await?;
                     let ip = addr.ip();
                     let state = Arc::clone(&state);
+                    // Global connection limit (defense against distributed DoS)
+                    {
+                        let ip_conns = state.ip_connections.lock();
+                        let total: u32 = ip_conns.values().sum();
+                        if total >= MAX_GLOBAL_CONNS {
+                            tracing::warn!(total, "Connection rejected: global limit reached ({MAX_GLOBAL_CONNS})");
+                            continue;
+                        }
+                    }
                     // Per-IP connection limit
                     {
                         let mut ip_conns = state.ip_connections.lock();
@@ -1444,6 +2359,12 @@ impl Server {
 
         let state = self.build_state()?;
 
+        // Periodic phantom-session sweeper. Defense-in-depth: even if
+        // close handlers leak some bookkeeping (the multi-device path used
+        // to do this), this catches it within a minute. No-op when state
+        // is consistent.
+        spawn_phantom_sweeper(Arc::clone(&state));
+
         let handle = tokio::spawn(async move {
             loop {
                 let (stream, _addr) = listener.accept().await?;
@@ -1462,6 +2383,22 @@ impl Server {
     /// Start the server with both IRC and HTTP listeners.
     /// Returns (irc_addr, http_addr, handle).
     pub async fn start_with_web(self) -> Result<(SocketAddr, SocketAddr, JoinHandle<Result<()>>)> {
+        let (irc, web, handle, _state) = self.start_with_web_state().await?;
+        Ok((irc, web, handle))
+    }
+
+    /// Test-helper variant of [`start_with_web`] that also yields the
+    /// `Arc<SharedState>` so integration tests can inject fixture data
+    /// (channels, sessions, messages) before driving the public HTTP
+    /// surface. Production callers should use [`start_with_web`].
+    pub async fn start_with_web_state(
+        self,
+    ) -> Result<(
+        SocketAddr,
+        SocketAddr,
+        JoinHandle<Result<()>>,
+        Arc<SharedState>,
+    )> {
         let listener = TcpListener::bind(&self.config.listen_addr).await?;
         let irc_addr = listener.local_addr()?;
 
@@ -1469,6 +2406,10 @@ impl Server {
         let web_addr = web_listener.local_addr()?;
 
         let state = self.build_state()?;
+        let state_for_caller = Arc::clone(&state);
+
+        // Phantom-session sweeper (defense-in-depth).
+        spawn_phantom_sweeper(Arc::clone(&state));
 
         let web_state = Arc::clone(&state);
         let router = crate::web::router(web_state);
@@ -1495,7 +2436,7 @@ impl Server {
             }
         });
 
-        Ok((irc_addr, web_addr, handle))
+        Ok((irc_addr, web_addr, handle, state_for_caller))
     }
 
     /// Start the server with both plain and TLS listeners for testing.
@@ -1599,6 +2540,80 @@ const S2S_MAX_EVENTS_PER_SEC: u32 = 100;
 
 /// Strip characters that could enable IRC protocol injection (\r, \n, \0) from
 /// S2S-provided strings. Truncates to `max_len` to prevent memory abuse.
+/// Background task: every 60s, look for sessions present in any of the
+/// per-session state maps but missing from `connections` (the WS sender
+/// map). Those are leaked sessions — bookkeeping that the close handler
+/// somehow didn't finish. Removes the stragglers and logs.
+///
+/// Belt-and-suspenders for the "Attaching additional session for DID
+/// existing=N" bug where multi-device close paths used to leave the
+/// closing session_id behind in NickMap and session_dids. The connection
+/// path now removes them on close (mod.rs:2682-ish), but if anything
+/// slips through, this task catches it within a minute.
+fn spawn_phantom_sweeper(state: Arc<SharedState>) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+
+            // Snapshot the live session_ids the WS layer knows about.
+            let live: std::collections::HashSet<String> =
+                { state.connections.lock().keys().cloned().collect() };
+
+            // session_dids: drop entries whose session_id isn't live.
+            let leaked_dids: Vec<String> = {
+                let sd = state.session_dids.lock();
+                sd.iter()
+                    .filter(|(sid, _)| !live.contains(sid.as_str()))
+                    .map(|(sid, _)| sid.clone())
+                    .collect()
+            };
+            if !leaked_dids.is_empty() {
+                let mut sd = state.session_dids.lock();
+                for sid in &leaked_dids {
+                    sd.remove(sid);
+                }
+                tracing::warn!(
+                    count = leaked_dids.len(),
+                    "phantom sweeper: removed leaked session_dids entries"
+                );
+            }
+
+            // NickMap (sid → nick): same treatment. NickMap.remove_by_session
+            // promotes a sibling nick if multiple sessions share it.
+            let leaked_sids_in_nickmap: Vec<String> = {
+                let nts = state.nick_to_session.lock();
+                let mut out = Vec::new();
+                for (sid, _) in nts.iter() {
+                    if !live.contains(sid) {
+                        out.push(sid.to_string());
+                    }
+                }
+                out
+            };
+            if !leaked_sids_in_nickmap.is_empty() {
+                let mut nts = state.nick_to_session.lock();
+                for sid in &leaked_sids_in_nickmap {
+                    nts.remove_by_session(sid);
+                }
+                tracing::warn!(
+                    count = leaked_sids_in_nickmap.len(),
+                    "phantom sweeper: removed leaked NickMap entries"
+                );
+            }
+
+            // agent_heartbeats / agent_presence — best-effort flush. These
+            // can hold stale records past their TTL on their own, but if
+            // the session_id is dead these entries are pure litter.
+            {
+                let mut hb = state.agent_heartbeats.lock();
+                hb.retain(|sid, _| live.contains(sid));
+                let mut pres = state.agent_presence.lock();
+                pres.retain(|sid, _| live.contains(sid));
+            }
+        }
+    });
+}
+
 fn sanitize_s2s_str(s: &str, max_len: usize) -> String {
     s.chars()
         .filter(|c| *c != '\r' && *c != '\n' && *c != '\0')
@@ -1617,19 +2632,18 @@ pub(crate) async fn process_s2s_message(
 
     // ── C-1 fix: Reject messages from unauthenticated peers ──
     // Hello and HelloAck are the handshake itself, so they must pass through.
-    if !matches!(&msg, S2sMessage::Hello { .. } | S2sMessage::HelloAck { .. }) {
-        if !manager
+    if !matches!(&msg, S2sMessage::Hello { .. } | S2sMessage::HelloAck { .. })
+        && !manager
             .authenticated_peers
             .lock()
             .await
             .contains(authenticated_peer_id)
-        {
-            tracing::warn!(
-                peer = %authenticated_peer_id,
-                "S2S: dropping message from unauthenticated peer"
-            );
-            return;
-        }
+    {
+        tracing::warn!(
+            peer = %authenticated_peer_id,
+            "S2S: dropping message from unauthenticated peer"
+        );
+        return;
     }
 
     // ── S2S rate limiting ──
@@ -1674,19 +2688,24 @@ pub(crate) async fn process_s2s_message(
 
     /// Send NAMES update to all local members of a channel (for nick list refresh).
     fn send_names_update(state: &SharedState, channel: &str) {
-        let channels = state.channels.lock();
-        let ch = match channels.get(channel) {
-            Some(ch) => ch,
-            None => return,
-        };
+        // Lock-ordering: take channels → (drop) → nick_to_session → (drop) →
+        // connections, never two at once. Holding channels+nick_to_session+
+        // connections nested here deadlocked against paths that take
+        // nick_to_session before channels (caught in prod 2026-07-09: an S2S
+        // NAMES update vs a reconnect auto-rejoin). Snapshotting under each
+        // lock independently removes this function from any ordering cycle.
 
-        // Build nick list (local + remote)
-        let n2s = state.nick_to_session.lock();
-        let mut nick_list: Vec<String> = ch
-            .members
-            .iter()
-            .filter_map(|s| {
-                n2s.get_nick(s).map(|n| {
+        // 1. Snapshot membership + op prefixes under `channels` only.
+        let (local_members, member_prefix, remote_entries) = {
+            let channels = state.channels.lock();
+            let ch = match channels.get(channel) {
+                Some(ch) => ch,
+                None => return,
+            };
+            let member_prefix: Vec<(String, &'static str)> = ch
+                .members
+                .iter()
+                .map(|s| {
                     let prefix = if ch.ops.contains(s) {
                         "@"
                     } else if ch.halfops.contains(s) {
@@ -1696,28 +2715,44 @@ pub(crate) async fn process_s2s_message(
                     } else {
                         ""
                     };
-                    format!("{prefix}{n}")
+                    (s.clone(), prefix)
                 })
-            })
-            .collect();
-        for (nick, rm) in &ch.remote_members {
-            let is_op = rm.is_op
-                || rm.did.as_ref().is_some_and(|d| {
-                    ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
-                });
-            let prefix = if is_op { "@" } else { "" };
-            nick_list.push(format!("{prefix}{nick}"));
-        }
-        let nick_str = nick_list.join(" ");
+                .collect();
+            let remote_entries: Vec<String> = ch
+                .remote_members
+                .iter()
+                .map(|(nick, rm)| {
+                    let is_op = rm.is_op
+                        || rm.did.as_ref().is_some_and(|d| {
+                            ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
+                        });
+                    let prefix = if is_op { "@" } else { "" };
+                    format!("{prefix}{nick}")
+                })
+                .collect();
+            let local_members: Vec<String> = ch.members.iter().cloned().collect();
+            (local_members, member_prefix, remote_entries)
+        };
 
-        // Send to each local member
-        let local_members: Vec<String> = ch.members.iter().cloned().collect();
-        drop(channels);
+        // 2. Resolve session ids → nicks under `nick_to_session` only.
+        let (nick_str, member_nicks) = {
+            let n2s = state.nick_to_session.lock();
+            let mut nick_list: Vec<String> = member_prefix
+                .iter()
+                .filter_map(|(sid, prefix)| n2s.get_nick(sid).map(|n| format!("{prefix}{n}")))
+                .collect();
+            nick_list.extend(remote_entries);
+            // Each local member's own nick, for the 353/366 reply target.
+            let member_nicks: Vec<(String, String)> = local_members
+                .iter()
+                .map(|sid| (sid.clone(), n2s.get_nick(sid).unwrap_or("*").to_string()))
+                .collect();
+            (nick_list.join(" "), member_nicks)
+        };
 
+        // 3. Send to each local member under `connections` only.
         let conns = state.connections.lock();
-        for session_id in &local_members {
-            // Look up this member's nick for the reply prefix
-            let member_nick = n2s.get_nick(session_id).unwrap_or("*");
+        for (session_id, member_nick) in &member_nicks {
             let names_line = format!(
                 ":{} 353 {} = {} :{}\r\n:{} 366 {} {} :End of /NAMES list\r\n",
                 state.server_name,
@@ -1739,6 +2774,12 @@ pub(crate) async fn process_s2s_message(
     // Messages with empty event_id (legacy peers) skip dedup.
     let (event_id, origin) = match &msg {
         S2sMessage::Privmsg {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
+        S2sMessage::Tagmsg {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
+        S2sMessage::Pin {
             event_id, origin, ..
         } => (event_id.clone(), origin.clone()),
         S2sMessage::Join {
@@ -1768,10 +2809,25 @@ pub(crate) async fn process_s2s_message(
         S2sMessage::Ban {
             event_id, origin, ..
         } => (event_id.clone(), origin.clone()),
+        S2sMessage::InviteException {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
         S2sMessage::Invite {
             event_id, origin, ..
         } => (event_id.clone(), origin.clone()),
         S2sMessage::PolicySync {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
+        S2sMessage::AvSessionCreated {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
+        S2sMessage::AvSessionJoined {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
+        S2sMessage::AvSessionLeft {
+            event_id, origin, ..
+        } => (event_id.clone(), origin.clone()),
+        S2sMessage::AvSessionEnded {
             event_id, origin, ..
         } => (event_id.clone(), origin.clone()),
         S2sMessage::CrdtSync { origin, .. } => (String::new(), origin.clone()),
@@ -1801,6 +2857,8 @@ pub(crate) async fn process_s2s_message(
         // Readonly peers cannot originate any events
         (
             S2sMessage::Privmsg { .. }
+            | S2sMessage::Tagmsg { .. }
+            | S2sMessage::Pin { .. }
             | S2sMessage::Join { .. }
             | S2sMessage::Part { .. }
             | S2sMessage::Quit { .. }
@@ -1809,8 +2867,13 @@ pub(crate) async fn process_s2s_message(
             | S2sMessage::Mode { .. }
             | S2sMessage::Kick { .. }
             | S2sMessage::Ban { .. }
+            | S2sMessage::InviteException { .. }
             | S2sMessage::Invite { .. }
-            | S2sMessage::ChannelCreated { .. },
+            | S2sMessage::ChannelCreated { .. }
+            | S2sMessage::AvSessionCreated { .. }
+            | S2sMessage::AvSessionJoined { .. }
+            | S2sMessage::AvSessionLeft { .. }
+            | S2sMessage::AvSessionEnded { .. },
             crate::s2s::TrustLevel::Readonly,
         ) => {
             tracing::warn!(
@@ -1825,6 +2888,7 @@ pub(crate) async fn process_s2s_message(
             S2sMessage::Mode { .. }
             | S2sMessage::Kick { .. }
             | S2sMessage::Ban { .. }
+            | S2sMessage::InviteException { .. }
             | S2sMessage::ChannelCreated { .. },
             crate::s2s::TrustLevel::Relay,
         ) => {
@@ -1966,26 +3030,65 @@ pub(crate) async fn process_s2s_message(
             from,
             target,
             text,
-            origin: _,
+            origin,
             msgid,
             sig,
+            account,
+            recipient_did: stamped_recipient_did,
+            tags: relayed_tags,
+            multiline_lines,
             ..
         } => {
             // Sanitize all peer-provided strings to prevent IRC protocol injection.
             let from = sanitize_s2s_str(&from, 512);
             let target = sanitize_s2s_str(&target, 200);
-            let text = sanitize_s2s_str(&text, 4096);
+            // Match the local multiline ceiling (MAX_BYTES) so a federated
+            // message isn't truncated in history/CHATHISTORY when it crosses a
+            // server boundary. `\r`/`\n`/`\0` stripping is the injection
+            // defense; the length cap is only a size bound. Tied to the same
+            // constant so the two paths can't drift apart again.
+            let text = sanitize_s2s_str(&text, crate::connection::draft_multiline::MAX_BYTES);
+            // Sender DID carried from the origin (the `account` tag value).
+            // Stamped by the origin from its authenticated session, never
+            // client-set; relayed on the same peer trust as the message body.
+            let account = account.map(|a| sanitize_s2s_str(&a, 512));
 
             // Generate a local msgid if the remote didn't send one
             let msgid = msgid.unwrap_or_else(crate::msgid::generate);
 
-            // Plain line for non-tag clients, tagged line with msgid + sig for tag clients
+            // Peer-provided coordination tags. Re-filter on receipt (never
+            // trust the sending peer to have filtered correctly): keep only
+            // `+freeq.at/*` minus `+freeq.at/sig` (re-attested locally),
+            // sanitize key+value against IRC injection, and cap the count to
+            // bound relay amplification.
+            let mut relay_tags: HashMap<String, String> = relayed_tags
+                .into_iter()
+                .filter(|(k, _)| k.starts_with("+freeq.at/") && k != "+freeq.at/sig")
+                .take(16)
+                .map(|(k, v)| (sanitize_s2s_str(&k, 64), sanitize_s2s_str(&v, 4096)))
+                .collect();
+            // Provenance: every message reaching here is from a remote origin
+            // (self-origin is skipped above), so tag it with the origin
+            // server's name. Lets clients distinguish a peer-vouched federated
+            // message from a locally-verified one, rather than rendering the
+            // (only peer-trusted) `account` as if this server had verified it.
+            let origin_name = sanitize_s2s_str(&manager.peer_display_name(&origin).await, 64);
+            relay_tags.insert("+freeq.at/origin".to_string(), origin_name);
+
+            // Plain line for non-tag clients, tagged line with msgid + sig for
+            // tag clients. `tagged_line_account` additionally carries the
+            // `account` tag and is sent only to clients that negotiated
+            // `account-tag` (per IRCv3, mirroring local delivery).
             let plain_line = format!(":{from} PRIVMSG {target} :{text}\r\n");
-            let tagged_line = {
+            let build_tagged = |with_account: bool| -> String {
                 let mut tags = HashMap::new();
+                tags.extend(relay_tags.iter().map(|(k, v)| (k.clone(), v.clone())));
                 tags.insert("msgid".to_string(), msgid.clone());
                 if let Some(ref sig) = sig {
                     tags.insert("+freeq.at/sig".to_string(), sig.clone());
+                }
+                if with_account && let Some(ref acct) = account {
+                    tags.insert("account".to_string(), acct.clone());
                 }
                 let tag_msg = crate::irc::Message {
                     tags,
@@ -1995,6 +3098,8 @@ pub(crate) async fn process_s2s_message(
                 };
                 format!("{tag_msg}\r\n")
             };
+            let tagged_line = build_tagged(false);
+            let tagged_line_account = account.as_ref().map(|_| build_tagged(true));
 
             if target.starts_with('#') || target.starts_with('&') {
                 // Enforce +n and +m on incoming S2S messages
@@ -2032,9 +3137,13 @@ pub(crate) async fn process_s2s_message(
                         .unwrap_or_default()
                         .as_secs();
                     let mut tags = HashMap::new();
+                    tags.extend(relay_tags.iter().map(|(k, v)| (k.clone(), v.clone())));
                     tags.insert("msgid".to_string(), msgid.clone());
                     if let Some(ref sig) = sig {
                         tags.insert("+freeq.at/sig".to_string(), sig.clone());
+                    }
+                    if let Some(ref acct) = account {
+                        tags.insert("account".to_string(), acct.clone());
                     }
                     let mut channels = state.channels.lock();
                     if let Some(ch) = channels.get_mut(&channel_key) {
@@ -2050,17 +3159,21 @@ pub(crate) async fn process_s2s_message(
                         }
                     }
                     drop(channels);
-                    let empty_tags = HashMap::new();
-                    // S2S messages: look up sender DID from nick_owners if available
+                    // Prefer the DID carried from the origin; fall back to a
+                    // local nick_owners lookup for peers that didn't send one.
                     let sender_nick = from.split('!').next().unwrap_or(&from);
-                    let s2s_sender_did = state.nick_owners.lock().get(sender_nick).cloned();
+                    let s2s_sender_did = account
+                        .clone()
+                        .or_else(|| state.nick_owners.lock().get(sender_nick).cloned());
+                    // Persist the coordination tags (incl. +freeq.at/origin) so
+                    // CHATHISTORY replay carries them, like the DM persist path.
                     state.with_db(|db| {
                         db.insert_message(
                             &target,
                             &from,
                             &text,
                             timestamp,
-                            &empty_tags,
+                            &relay_tags,
                             Some(&msgid),
                             s2s_sender_did.as_deref(),
                         )
@@ -2075,37 +3188,133 @@ pub(crate) async fn process_s2s_message(
                     .map(|ch| ch.members.iter().cloned().collect())
                     .unwrap_or_default();
                 let tag_caps = state.cap_message_tags.lock();
+                let time_caps = state.cap_server_time.lock();
+                let account_caps = state.cap_account_tag.lock();
+                let multiline_caps = state.cap_draft_multiline.lock();
                 let conns = state.connections.lock();
+                // If the peer told us this is a draft/multiline batch,
+                // re-emit per-receiver wire frames (BATCH for capable
+                // receivers, individual PRIVMSGs for fallback) just
+                // like the local-origin channel broadcast does.
+                // Without this branch, a federated multiline message
+                // would arrive at local clients as one PRIVMSG with
+                // `\n` in its body, breaking the IRC wire.
+                let local_lines: Option<Vec<crate::connection::draft_multiline::BatchLine>> =
+                    multiline_lines.as_ref().map(|lines| {
+                        lines
+                            .iter()
+                            .map(|l| crate::connection::draft_multiline::BatchLine {
+                                body: l.body.clone(),
+                                concat_to_previous: l.concat,
+                                command: "PRIVMSG".to_string(),
+                            })
+                            .collect()
+                    });
+                let outbound_batch_id = local_lines
+                    .as_ref()
+                    .map(|_| format!("ml{}", crate::msgid::generate()));
+                let time_tag = chrono::Utc::now()
+                    .format("%Y-%m-%dT%H:%M:%S.000Z")
+                    .to_string();
+                // Inject the `account` tag (sender DID carried from the
+                // origin) for clients that negotiated account-tag, the same
+                // as the single-PRIVMSG path and local delivery.
                 for sid in &members {
                     if let Some(tx) = conns.get(sid) {
-                        let line = if tag_caps.contains(sid) {
-                            &tagged_line
+                        if let (Some(lines), Some(batch_id)) =
+                            (local_lines.as_ref(), outbound_batch_id.as_deref())
+                        {
+                            let caps = crate::connection::draft_multiline::ReceiverCaps {
+                                has_tags: tag_caps.contains(sid),
+                                has_time: time_caps.contains(sid),
+                                has_multiline: multiline_caps.contains(sid),
+                                wants_account: account.is_some() && account_caps.contains(sid),
+                                sender_did: account.as_deref(),
+                            };
+                            // Opener tags here are the relayed
+                            // coordination tags + sig (msgid is
+                            // managed by the builder).
+                            let mut opener_tags: HashMap<String, String> = relay_tags
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            if let Some(ref sig) = sig {
+                                opener_tags.insert("+freeq.at/sig".to_string(), sig.clone());
+                            }
+                            let ctx = crate::connection::draft_multiline::RelayContext {
+                                hostmask: &from,
+                                command: "PRIVMSG",
+                                target: &target,
+                                msgid: &msgid,
+                                time_tag: &time_tag,
+                                opener_tags: &opener_tags,
+                                batch_id,
+                                lines,
+                            };
+                            for frame in
+                                crate::connection::draft_multiline::build_outbound_multiline_frames(
+                                    &ctx, &caps,
+                                )
+                            {
+                                let _ = tx.try_send(frame);
+                            }
                         } else {
-                            &plain_line
-                        };
-                        let _ = tx.try_send(line.clone());
+                            let line = if !tag_caps.contains(sid) {
+                                &plain_line
+                            } else if account.is_some() && account_caps.contains(sid) {
+                                tagged_line_account.as_ref().unwrap_or(&tagged_line)
+                            } else {
+                                &tagged_line
+                            };
+                            let _ = tx.try_send(line.clone());
+                        }
                     }
                 }
             } else {
-                // Case-insensitive nick lookup for PM delivery
-                let sid = state
-                    .nick_to_session
-                    .lock()
-                    .get_session(&target)
-                    .map(|s| s.to_string());
-                if let Some(sid) = sid {
-                    let has_tags = state.cap_message_tags.lock().contains(&sid);
-                    let line = if has_tags { &tagged_line } else { &plain_line };
-                    let conns = state.connections.lock();
-                    if let Some(tx) = conns.get(&sid) {
+                // DM target: a nick or a `did:`. Resolve to every local session
+                // bound to the recipient (DID fan-out) — a federated DID-addressed
+                // DM must reach the same person here, with no per-server nick
+                // interpretation.
+                let sids = crate::connection::routing::local_sessions_for_target(state, &target);
+                let tag_caps = state.cap_message_tags.lock();
+                let acct_caps = state.cap_account_tag.lock();
+                let conns = state.connections.lock();
+                for sid in &sids {
+                    let has_tags = tag_caps.contains(sid);
+                    let wants_account = account.is_some() && acct_caps.contains(sid);
+                    let line = if !has_tags {
+                        &plain_line
+                    } else if wants_account {
+                        tagged_line_account.as_ref().unwrap_or(&tagged_line)
+                    } else {
+                        &tagged_line
+                    };
+                    if let Some(tx) = conns.get(sid) {
                         let _ = tx.try_send(line.clone());
                     }
                 }
+                drop(conns);
+                drop(acct_caps);
+                drop(tag_caps);
 
-                // Persist DM if both sender and recipient have DIDs
+                // Persist DM if both sender and recipient have DIDs. Prefer the
+                // sender DID carried from the origin (a remote sender is not in
+                // our nick_owners); fall back to the local lookup.
                 let sender_nick = from.split('!').next().unwrap_or(&from);
-                let sender_did = state.nick_owners.lock().get(sender_nick).cloned();
-                let recipient_did = state.nick_owners.lock().get(&target).cloned();
+                let sender_did = account
+                    .clone()
+                    .or_else(|| state.nick_owners.lock().get(sender_nick).cloned());
+                // Recipient: honor the origin's stamp, cross-checked against our
+                // own resolution. On a mismatch we fall back (no durable row)
+                // rather than persist under a possibly-wrong identity.
+                let stamped_recipient_did =
+                    stamped_recipient_did.map(|d| sanitize_s2s_str(&d, 512));
+                let local_recipient =
+                    crate::connection::routing::recipient_did_for_target(state, &target);
+                let recipient_did = crate::connection::routing::reconcile_recipient_did(
+                    stamped_recipient_did.as_deref(),
+                    local_recipient.as_deref(),
+                );
                 if let (Some(s_did), Some(r_did)) =
                     (sender_did.as_deref(), recipient_did.as_deref())
                 {
@@ -2115,9 +3324,13 @@ pub(crate) async fn process_s2s_message(
                         .unwrap_or_default()
                         .as_secs();
                     let mut tags = HashMap::new();
+                    tags.extend(relay_tags.iter().map(|(k, v)| (k.clone(), v.clone())));
                     tags.insert("msgid".to_string(), msgid.clone());
                     if let Some(ref sig) = sig {
                         tags.insert("+freeq.at/sig".to_string(), sig.clone());
+                    }
+                    if let Some(ref acct) = account {
+                        tags.insert("account".to_string(), acct.clone());
                     }
                     state.with_db(|db| {
                         db.insert_message(
@@ -2134,12 +3347,147 @@ pub(crate) async fn process_s2s_message(
             }
         }
 
+        S2sMessage::Pin {
+            channel,
+            msgid,
+            pinned_by,
+            adding,
+            ..
+        } => {
+            let channel = sanitize_s2s_str(&channel, 200).to_lowercase();
+            let msgid = sanitize_s2s_str(&msgid, 100);
+            let pinned_by = sanitize_s2s_str(&pinned_by, 64);
+
+            let mut channels = state.channels.lock();
+            if let Some(ch) = channels.get_mut(&channel) {
+                if adding {
+                    if !ch.pins.iter().any(|p| p.msgid == msgid) {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        ch.pins.insert(
+                            0,
+                            crate::server::PinnedMessage {
+                                msgid: msgid.clone(),
+                                pinned_by: pinned_by.clone(),
+                                pinned_at: now,
+                            },
+                        );
+                        ch.pins.truncate(50);
+                        drop(channels);
+                        state.with_db(|db| db.store_pin(&channel, &msgid, &pinned_by, now));
+                    } else {
+                        drop(channels);
+                    }
+                } else {
+                    ch.pins.retain(|p| p.msgid != msgid);
+                    drop(channels);
+                    state.with_db(|db| db.remove_pin(&channel, &msgid));
+                }
+
+                // Notify local members
+                let tag = if adding {
+                    "+freeq.at/pin"
+                } else {
+                    "+freeq.at/unpin"
+                };
+                let action = if adding { "pinned" } else { "unpinned" };
+                let notice = format!(
+                    "@{tag}={} :{pinned_by}!~u@s2s NOTICE {channel} :\x01ACTION {action} a message\x01\r\n",
+                    crate::irc::escape_tag_value(&msgid)
+                );
+                let members: Vec<String> = state
+                    .channels
+                    .lock()
+                    .get(&channel)
+                    .map(|ch| ch.members.iter().cloned().collect())
+                    .unwrap_or_default();
+                let conns = state.connections.lock();
+                for sid in &members {
+                    if let Some(tx) = conns.get(sid) {
+                        let _ = tx.try_send(notice.clone());
+                    }
+                }
+            }
+        }
+
+        S2sMessage::Tagmsg {
+            from, target, tags, ..
+        } => {
+            let from = sanitize_s2s_str(&from, 512);
+            let target = sanitize_s2s_str(&target, 200);
+
+            // Normalize draft tags
+            let mut tags = tags.clone();
+            for (draft, canonical) in [("+draft/react", "+react"), ("+draft/reply", "+reply")] {
+                if let Some(v) = tags.remove(draft) {
+                    tags.entry(canonical.to_string()).or_insert(v);
+                }
+            }
+
+            // Persist reactions
+            if let (Some(emoji), Some(target_msgid)) = (tags.get("+react"), tags.get("+reply")) {
+                let nick = from.split('!').next().unwrap_or(&from).to_string();
+                let did = state.nick_owners.lock().get(&nick.to_lowercase()).cloned();
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let emoji = emoji.clone();
+                let target_msgid = target_msgid.clone();
+                let channel = target.clone();
+                state.with_db(|db| {
+                    db.store_reaction(&target_msgid, &channel, &nick, did.as_deref(), &emoji, ts)
+                });
+            }
+
+            // Wire forms — identical for channel and DM delivery.
+            let tag_msg = crate::irc::Message {
+                tags: tags.clone(),
+                prefix: Some(from.clone()),
+                command: "TAGMSG".to_string(),
+                params: vec![target.clone()],
+            };
+            let tagged_line = format!("{tag_msg}\r\n");
+            let plain_fallback = tags.get("+react").map(|emoji| {
+                format!(":{from} PRIVMSG {target} :\x01ACTION reacted with {emoji}\x01\r\n")
+            });
+
+            // Resolve recipients: channel members, or (for a nick / `did:` DM)
+            // every local session bound to that recipient — a federated action
+            // addressed to a DID reaches the same person here.
+            let recipients: Vec<String> = if target.starts_with('#') || target.starts_with('&') {
+                state
+                    .channels
+                    .lock()
+                    .get(&target.to_lowercase())
+                    .map(|ch| ch.members.iter().cloned().collect())
+                    .unwrap_or_default()
+            } else {
+                crate::connection::routing::local_sessions_for_target(state, &target)
+            };
+
+            let tag_caps = state.cap_message_tags.lock();
+            let conns = state.connections.lock();
+            for sid in &recipients {
+                if let Some(tx) = conns.get(sid) {
+                    if tag_caps.contains(sid) {
+                        let _ = tx.try_send(tagged_line.clone());
+                    } else if let Some(ref fallback) = plain_fallback {
+                        let _ = tx.try_send(fallback.clone());
+                    }
+                }
+            }
+        }
+
         S2sMessage::Join {
             nick,
             channel,
             did,
             handle,
             is_op: _, // Intentionally ignored — op status derived locally (C-2)
+            actor_class,
             origin,
             ..
         } => {
@@ -2176,9 +3524,12 @@ pub(crate) async fn process_s2s_message(
             }
 
             // Validate DID format if provided — reject obviously bogus values
-            // without making outbound HTTP calls.
+            // without making outbound HTTP calls. Accepts did:plc, did:web,
+            // and did:key (the latter used by bot-kit / agent bots).
             if let Some(ref d) = did {
-                let valid = (d.starts_with("did:plc:") || d.starts_with("did:web:"))
+                let valid = (d.starts_with("did:plc:")
+                    || d.starts_with("did:web:")
+                    || d.starts_with("did:key:"))
                     && d.len() >= 12
                     && d.len() <= 256;
                 if !valid {
@@ -2213,11 +3564,17 @@ pub(crate) async fn process_s2s_message(
                         did: did.clone(),
                         handle: handle.clone(),
                         is_op: actual_is_op,
+                        actor_class: actor_class.clone(),
                     },
                 );
             }
 
-            let line = format!(":{nick}!{nick}@s2s JOIN {channel}\r\n");
+            // Include actor_class tag for tag-capable clients
+            let line = if let Some(ref ac) = actor_class {
+                format!("@+freeq.at/actor-class={ac} :{nick}!{nick}@s2s JOIN {channel}\r\n")
+            } else {
+                format!(":{nick}!{nick}@s2s JOIN {channel}\r\n")
+            };
             deliver_to_channel(state, &channel, &line);
             send_names_update(state, &channel);
         }
@@ -2429,6 +3786,7 @@ pub(crate) async fn process_s2s_message(
                 let n2s = state.nick_to_session.lock();
 
                 let dids = state.session_dids.lock();
+                let actor_classes = state.session_actor_class.lock();
                 let channel_info: Vec<crate::s2s::ChannelInfo> = channels
                     .iter()
                     .map(|(name, ch)| {
@@ -2441,10 +3799,14 @@ pub(crate) async fn process_s2s_message(
                             .members
                             .iter()
                             .filter_map(|sid| {
-                                n2s.get_nick(sid).map(|n| crate::s2s::SyncNick {
-                                    nick: n.to_string(),
-                                    is_op: ch.ops.contains(sid),
-                                    did: dids.get(sid).cloned(),
+                                n2s.get_nick(sid).map(|n| {
+                                    let ac = actor_classes.get(sid).map(|c| c.to_string());
+                                    crate::s2s::SyncNick {
+                                        nick: n.to_string(),
+                                        is_op: ch.ops.contains(sid),
+                                        did: dids.get(sid).cloned(),
+                                        actor_class: ac,
+                                    }
                                 })
                             })
                             .collect();
@@ -2463,6 +3825,11 @@ pub(crate) async fn process_s2s_message(
                             key: ch.key.clone(),
                             bans: ch.bans.iter().map(|b| b.mask.clone()).collect(),
                             invites: ch.invites.iter().cloned().collect(),
+                            invite_exceptions: ch
+                                .invite_exceptions
+                                .iter()
+                                .map(|e| e.mask.clone())
+                                .collect(),
                         }
                     })
                     .collect();
@@ -2498,6 +3865,10 @@ pub(crate) async fn process_s2s_message(
                 remote_channels.len()
             );
             let mut updated_channels = Vec::new();
+            // Topics adopted from this snapshot get seeded into the CRDT
+            // (after the lock drops) so topic state has exactly one
+            // authority. (channel, topic, set_by)
+            let mut adopted_topics: Vec<(String, String, String)> = Vec::new();
             {
                 let mut channels = state.channels.lock();
 
@@ -2580,6 +3951,7 @@ pub(crate) async fn process_s2s_message(
                                     did: ni.did.clone(),
                                     handle: None,
                                     is_op: actual_is_op,
+                                    actor_class: ni.actor_class.clone(),
                                 },
                             );
                         }
@@ -2592,6 +3964,7 @@ pub(crate) async fn process_s2s_message(
                                     did: None,
                                     handle: None,
                                     is_op: false,
+                                    actor_class: None,
                                 },
                             );
                         }
@@ -2600,10 +3973,14 @@ pub(crate) async fn process_s2s_message(
                     if ch.topic.is_none()
                         && let Some(ref topic) = info.topic
                     {
-                        ch.topic = Some(TopicInfo::new(
-                            topic.clone(),
-                            info.founder_did.as_deref().unwrap_or("unknown").to_string(),
-                        ));
+                        let set_by = info.founder_did.as_deref().unwrap_or("unknown").to_string();
+                        ch.topic = Some(TopicInfo::new(topic.clone(), set_by.clone()));
+                        // Seed the CRDT too (below, outside the lock). Without
+                        // this, sync-adopted topics live only in local state
+                        // while CRDT reconciliation treats the CRDT as
+                        // authoritative — two merge strategies that disagree
+                        // and flap. CRDT is the single source of truth.
+                        adopted_topics.push((info.name.clone(), topic.clone(), set_by));
                     }
 
                     // Only adopt remote channel modes if channel has no local
@@ -2615,9 +3992,11 @@ pub(crate) async fn process_s2s_message(
                         ch.invite_only = info.invite_only;
                         ch.no_ext_msg = info.no_ext_msg;
                         ch.moderated = info.moderated;
-                        if info.key.is_some() {
-                            ch.key = info.key.clone();
-                        }
+                        // Full snapshot adoption includes key REMOVAL: with no
+                        // local members there is no local authority to protect,
+                        // and refusing None here is what made -k unable to
+                        // propagate between syncs.
+                        ch.key = info.key.clone();
                     } else {
                         // Merge: only adopt modes that are MORE restrictive
                         // (remote turns ON a protection the local doesn't have).
@@ -2653,9 +4032,42 @@ pub(crate) async fn process_s2s_message(
                         }
                     }
 
-                    // Merge invites from remote (additive — don't remove local invites)
-                    for invite in &info.invites {
-                        ch.invites.insert(invite.clone());
+                    // Merge invite exceptions (+I) from remote (additive)
+                    for mask in &info.invite_exceptions {
+                        if !ch.invite_exceptions.iter().any(|e| e.mask == *mask) {
+                            ch.invite_exceptions
+                                .push(crate::server::InviteExceptionEntry {
+                                    mask: mask.clone(),
+                                    set_by: format!("s2s:{}", peer_id),
+                                    set_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs(),
+                                });
+                        }
+                    }
+
+                    // Merge invites from remote (additive — don't remove local
+                    // invites). Only accept when the peer demonstrates authority
+                    // over the channel: its snapshot must name the founder we
+                    // know (or we know none). Without this gate any peer could
+                    // inject invites and walk straight through +i.
+                    // Cap at 500 to prevent resource exhaustion from malicious peers.
+                    let peer_knows_founder =
+                        ch.founder_did.is_none() || info.founder_did == ch.founder_did;
+                    if peer_knows_founder {
+                        for invite in &info.invites {
+                            if ch.invites.len() >= 500 {
+                                break;
+                            }
+                            ch.invites.insert(invite.clone());
+                        }
+                    } else if !info.invites.is_empty() {
+                        tracing::warn!(
+                            channel = %info.name, peer = %peer_id,
+                            "Rejecting {} synced invite(s): peer's founder {:?} does not match local {:?}",
+                            info.invites.len(), info.founder_did, ch.founder_did
+                        );
                     }
 
                     let dids = state.session_dids.lock();
@@ -2700,6 +4112,14 @@ pub(crate) async fn process_s2s_message(
                         ch.did_ops.len(),
                         ch.topic.as_ref().map(|t| &t.text),
                     );
+                }
+            }
+
+            // Seed sync-adopted topics into the CRDT — but never compete with
+            // an existing CRDT topic (reconciliation will adopt that one).
+            for (channel, topic, set_by) in adopted_topics {
+                if state.cluster_doc.channel_topic(&channel).await.is_none() {
+                    state.crdt_set_topic(&channel, &topic, &set_by, None).await;
                 }
             }
 
@@ -2978,6 +4398,62 @@ pub(crate) async fn process_s2s_message(
             deliver_to_channel(state, &channel_key, &mode_line);
         }
 
+        S2sMessage::InviteException {
+            channel,
+            mask,
+            set_by,
+            adding,
+            ..
+        } => {
+            let channel_key = channel.to_lowercase();
+
+            // Authorization: verify set_by is an op (mirror of Ban)
+            {
+                let channels = state.channels.lock();
+                if let Some(ch) = channels.get(&channel_key) {
+                    let is_authorized = ch.remote_member(&set_by).is_some_and(|rm| {
+                        rm.is_op
+                            || rm.did.as_ref().is_some_and(|d| {
+                                ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
+                            })
+                    });
+                    if !is_authorized {
+                        tracing::warn!(
+                            channel = %channel_key, set_by = %set_by,
+                            "S2S InviteException rejected: setter is not an authorized op"
+                        );
+                        return;
+                    }
+                }
+            }
+
+            let mode_char = if adding { "+I" } else { "-I" };
+            let mode_line = format!(":{set_by}!remote@s2s MODE {channel} {mode_char} {mask}\r\n");
+
+            {
+                let mut channels = state.channels.lock();
+                if let Some(ch) = channels.get_mut(&channel_key) {
+                    if adding {
+                        if !ch.invite_exceptions.iter().any(|e| e.mask == mask) {
+                            ch.invite_exceptions
+                                .push(crate::server::InviteExceptionEntry {
+                                    mask: mask.clone(),
+                                    set_by: set_by.clone(),
+                                    set_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs(),
+                                });
+                        }
+                    } else {
+                        ch.invite_exceptions.retain(|e| e.mask != mask);
+                    }
+                }
+            }
+
+            deliver_to_channel(state, &channel_key, &mode_line);
+        }
+
         S2sMessage::Invite {
             channel,
             invitee,
@@ -3118,6 +4594,111 @@ pub(crate) async fn process_s2s_message(
                     tracing::warn!(peer = %authenticated_peer_id, "CRDT sync base64 decode error: {e}");
                 }
             }
+        }
+
+        // ── AV session federation ───────────────────────────────────
+        S2sMessage::AvSessionCreated {
+            session_id,
+            channel,
+            created_by_did,
+            created_by_nick,
+            title,
+            iroh_ticket,
+            ..
+        } => {
+            let ch = if channel.is_empty() {
+                None
+            } else {
+                Some(channel.as_str())
+            };
+            state.av_sessions.lock().apply_remote_session_created(
+                &session_id,
+                ch,
+                &created_by_did,
+                &created_by_nick,
+                title.as_deref(),
+                iroh_ticket.as_deref(),
+                chrono::Utc::now().timestamp(),
+            );
+            // Notify local channel members
+            if !channel.is_empty() {
+                let title_str = title.as_deref().unwrap_or("voice session");
+                let count = state
+                    .av_sessions
+                    .lock()
+                    .active_participant_count(&session_id);
+                crate::connection::messaging::broadcast_av_notice(
+                    state,
+                    &channel,
+                    &format!(
+                        "{created_by_nick} started a voice session: {title_str} ({count} participant(s))"
+                    ),
+                );
+            }
+            tracing::info!(session_id = %session_id, channel = %channel, "S2S: AV session created");
+        }
+
+        S2sMessage::AvSessionJoined {
+            session_id,
+            did,
+            nick,
+            ..
+        } => {
+            state
+                .av_sessions
+                .lock()
+                .apply_remote_session_joined(&session_id, &did, &nick);
+            let mgr = state.av_sessions.lock();
+            if let Some(session) = mgr.get(&session_id)
+                && let Some(ref ch) = session.channel
+            {
+                let count = mgr.active_participant_count(&session_id);
+                let ch = ch.clone();
+                drop(mgr);
+                crate::connection::messaging::broadcast_av_notice(
+                    state,
+                    &ch,
+                    &format!("{nick} joined the voice session ({count} participant(s))"),
+                );
+            }
+        }
+
+        S2sMessage::AvSessionLeft {
+            session_id, did, ..
+        } => {
+            let mgr_ref = &state.av_sessions;
+            let nick = mgr_ref
+                .lock()
+                .get(&session_id)
+                .and_then(|s| s.participants.get(&did).map(|p| p.nick.clone()))
+                .unwrap_or_default();
+            mgr_ref.lock().apply_remote_session_left(&session_id, &did);
+            let mgr = mgr_ref.lock();
+            if let Some(session) = mgr.get(&session_id)
+                && let Some(ref ch) = session.channel
+            {
+                let count = mgr.active_participant_count(&session_id);
+                let ch = ch.clone();
+                drop(mgr);
+                crate::connection::messaging::broadcast_av_notice(
+                    state,
+                    &ch,
+                    &format!("{nick} left the voice session ({count} participant(s))"),
+                );
+            }
+        }
+
+        S2sMessage::AvSessionEnded {
+            session_id,
+            ended_by,
+            ..
+        } => {
+            state
+                .av_sessions
+                .lock()
+                .apply_remote_session_ended(&session_id, ended_by.as_deref());
+            // Notification already sent by the originating server
+            tracing::info!(session_id = %session_id, "S2S: AV session ended");
         }
 
         S2sMessage::PeerDisconnected { peer_id } => {
@@ -3286,6 +4867,57 @@ async fn reconcile_crdt_to_local(state: &Arc<SharedState>) {
     }
 }
 
+/// Shared test-state builder, re-exported so any module's tests can reuse the
+/// single `SharedState` constructor instead of duplicating it.
+#[cfg(test)]
+mod nickmap_tests {
+    use super::NickMap;
+
+    // A multi-device user (same nick on two live sessions): when ONE session
+    // leaves, the OTHER must keep its session→nick reverse mapping — otherwise
+    // it stays in channels' member sets but vanishes from NAMES (can chat,
+    // invisible in the member list). Regression for the disconnect/ghost paths
+    // that called remove_by_nick, which wiped the reverse mapping for EVERY
+    // session sharing the nick.
+    #[test]
+    fn remove_by_session_preserves_a_live_sibling() {
+        let mut m = NickMap::new();
+        m.insert("chadfowler.com", "A"); // A primary
+        m.insert("chadfowler.com", "B"); // B now primary, A still tracked
+        m.remove_by_session("A"); // secondary leaves
+        assert_eq!(m.get_nick("B"), Some("chadfowler.com"), "live sibling lost its nick");
+        assert_eq!(m.get_nick("A"), None);
+        assert_eq!(m.get_session("chadfowler.com"), Some("B"));
+    }
+
+    #[test]
+    fn remove_by_session_promotes_sibling_when_primary_leaves() {
+        let mut m = NickMap::new();
+        m.insert("chadfowler.com", "A");
+        m.insert("chadfowler.com", "B"); // B primary
+        m.remove_by_session("B"); // primary leaves
+        assert_eq!(m.get_nick("A"), Some("chadfowler.com"));
+        assert_eq!(m.get_session("chadfowler.com"), Some("A"), "sibling not promoted");
+        assert_eq!(m.get_nick("B"), None);
+    }
+
+    // Documents the footgun: remove_by_nick wipes the reverse mapping for a
+    // live sibling too, which is why the single-session-leave paths must use
+    // remove_by_session instead.
+    #[test]
+    fn remove_by_nick_wipes_all_siblings() {
+        let mut m = NickMap::new();
+        m.insert("chadfowler.com", "A");
+        m.insert("chadfowler.com", "B");
+        m.remove_by_nick("chadfowler.com");
+        assert_eq!(m.get_nick("A"), None);
+        assert_eq!(m.get_nick("B"), None);
+    }
+}
+
+#[cfg(test)]
+pub(crate) use s2s_adversarial_tests::{test_state, test_state_with_db};
+
 #[cfg(test)]
 mod s2s_adversarial_tests {
     use super::*;
@@ -3295,7 +4927,18 @@ mod s2s_adversarial_tests {
     use tokio::sync::mpsc;
 
     /// Build a minimal SharedState for testing (no DB, no iroh).
-    fn test_state() -> Arc<SharedState> {
+    pub(crate) fn test_state() -> Arc<SharedState> {
+        test_state_inner(None)
+    }
+
+    /// Like `test_state` but with an in-memory SQLite DB attached, so
+    /// persistence paths (`identities`, `messages`, …) are exercised. Shared
+    /// with other modules' tests (e.g. web endpoints) via the re-export below.
+    pub(crate) fn test_state_with_db() -> Arc<SharedState> {
+        test_state_inner(Some(crate::db::Db::open_memory().unwrap()))
+    }
+
+    fn test_state_inner(db: Option<crate::db::Db>) -> Arc<SharedState> {
         let config = crate::config::ServerConfig {
             listen_addr: "127.0.0.1:0".to_string(),
             server_name: "test-s2s".to_string(),
@@ -3303,7 +4946,6 @@ mod s2s_adversarial_tests {
             ..Default::default()
         };
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
-        let db_key = [0u8; 32];
         Arc::new(SharedState {
             server_name: config.server_name.clone(),
             challenge_store: crate::sasl::ChallengeStore::new(60),
@@ -3321,14 +4963,20 @@ mod s2s_adversarial_tests {
             cap_echo_message: Mutex::new(HashSet::new()),
             cap_server_time: Mutex::new(HashSet::new()),
             cap_batch: Mutex::new(HashSet::new()),
+            cap_draft_multiline: Mutex::new(HashSet::new()),
+            open_batches: Mutex::new(HashMap::new()),
             cap_account_notify: Mutex::new(HashSet::new()),
             cap_extended_join: Mutex::new(HashSet::new()),
             cap_away_notify: Mutex::new(HashSet::new()),
+            cap_account_tag: Mutex::new(HashSet::new()),
+            cap_read_marker: Mutex::new(HashSet::new()),
+            session_read_markers: Mutex::new(HashMap::new()),
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
+            av_instances_per_conn: Mutex::new(HashMap::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),
@@ -3340,9 +4988,16 @@ mod s2s_adversarial_tests {
             session_away: Mutex::new(HashMap::new()),
             server_iroh_id: Mutex::new(Some("test-server-id".to_string())),
             iroh_endpoint: Mutex::new(None),
+            iroh_router: Mutex::new(None),
+            av_sessions: Mutex::new(crate::av::AvSessionManager::new()),
+            av_media: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            sfu_state: Mutex::new(None),
+            #[cfg(feature = "av-native")]
+            av_bridges: Mutex::new(std::collections::HashMap::new()),
             s2s_manager: Mutex::new(None),
             cluster_doc: crate::crdt::ClusterDoc::new("test-server-id"),
-            db: None,
+            db: db.map(Mutex::new),
             config,
             plugin_manager: crate::plugin::PluginManager::new(),
             policy_engine: None,
@@ -3356,9 +5011,14 @@ mod s2s_adversarial_tests {
             did_msg_keys: Mutex::new(HashMap::new()),
             session_client_info: Mutex::new(HashMap::new()),
             upload_tokens: Mutex::new(HashMap::new()),
+            embedded_session_store: None,
             ghost_sessions: Mutex::new(HashMap::new()),
             spawned_agents: Mutex::new(HashMap::new()),
             rest_rate_limiter: crate::web::IpRateLimiter::new(30, 60),
+            media_store: None,
+            liveness_probes: Mutex::new(HashMap::new()),
+            session_kill: Mutex::new(HashMap::new()),
+            metrics: Metrics::default(),
         })
     }
 
@@ -3401,6 +5061,10 @@ mod s2s_adversarial_tests {
             .await
             .insert(PEER.to_string(), TrustLevel::Full);
         *state.s2s_manager.lock() = Some(manager.clone());
+        // S2S_RATE_LIMITS is process-static; all tests share PEER, so
+        // parallel-run counters trip the 100/sec cap mid-suite without
+        // this reset.
+        S2S_RATE_LIMITS.lock().remove(PEER);
     }
 
     fn setup_channel(state: &SharedState, name: &str) {
@@ -3417,6 +5081,7 @@ mod s2s_adversarial_tests {
                     did: None,
                     handle: None,
                     is_op,
+                    actor_class: None,
                 },
             );
         }
@@ -3445,6 +5110,7 @@ mod s2s_adversarial_tests {
                 did: None,
                 handle: None,
                 is_op: true,
+                actor_class: None,
                 origin: PEER.to_string(),
             },
         )
@@ -3543,6 +5209,10 @@ mod s2s_adversarial_tests {
                 origin: PEER.to_string(),
                 msgid: None,
                 sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
             },
         )
         .await;
@@ -3593,6 +5263,10 @@ mod s2s_adversarial_tests {
                     origin: PEER.to_string(),
                     msgid: None,
                     sig: None,
+                    account: None,
+                    recipient_did: None,
+                    tags: HashMap::new(),
+                    multiline_lines: None,
                 },
             )
             .await;
@@ -3609,6 +5283,659 @@ mod s2s_adversarial_tests {
                 }
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // S2S PRIVMSG: draft/multiline relay
+    // ═══════════════════════════════════════════════════════════
+
+    fn s2s_multiline_lines(bodies: &[&str]) -> Vec<crate::s2s::MultilineLine> {
+        bodies
+            .iter()
+            .map(|b| crate::s2s::MultilineLine {
+                body: (*b).to_string(),
+                concat: false,
+            })
+            .collect()
+    }
+
+    /// Drain the receiver mailbox after a small wait so all the frames
+    /// the handler tried to send have a chance to land. Returns the
+    /// collected frames in order. The deadline is generous enough that
+    /// we don't false-fail on slow CI but short enough that test
+    /// time stays small.
+    async fn drain_mailbox(rx: &mut mpsc::Receiver<String>) -> Vec<String> {
+        let mut frames = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while std::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await {
+                Ok(Some(line)) => frames.push(line),
+                _ => break,
+            }
+        }
+        frames
+    }
+
+    #[tokio::test]
+    async fn s2s_multiline_capable_local_member_receives_batch_frames() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#mlchan");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state.connections.lock().insert("ml-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#mlchan")
+            .unwrap()
+            .members
+            .insert("ml-recv".to_string());
+        state.cap_message_tags.lock().insert("ml-recv".to_string());
+        state
+            .cap_draft_multiline
+            .lock()
+            .insert("ml-recv".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:ml-cap"),
+                from: "alice!a@remote".to_string(),
+                target: "#mlchan".to_string(),
+                text: "first\nsecond\nthird".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("ML-MSG-1".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: Some(s2s_multiline_lines(&["first", "second", "third"])),
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        // Opener + 3 chunk PRIVMSGs + closer = 5 frames.
+        assert_eq!(frames.len(), 5, "got frames: {frames:#?}");
+        assert!(frames[0].contains("BATCH +ml"));
+        assert!(frames[0].contains("draft/multiline"));
+        assert!(frames[0].contains("#mlchan"));
+        assert!(frames[0].contains("msgid=ML-MSG-1"));
+        assert!(frames[1].contains("batch=ml"));
+        assert!(frames[1].contains("first"));
+        assert!(frames[2].contains("second"));
+        assert!(frames[3].contains("third"));
+        assert!(frames[4].starts_with("BATCH -ml"));
+    }
+
+    #[tokio::test]
+    async fn s2s_privmsg_long_body_is_not_truncated_in_history() {
+        // A federated PRIVMSG longer than the old 4096-char S2S cap used to
+        // be guillotined mid-word before it landed in channel history + DB,
+        // so scrollback/CHATHISTORY and non-multiline clients rendered a
+        // truncated copy. The S2S text cap now matches the local multiline
+        // ceiling (MAX_BYTES), so a message that's legal locally survives
+        // the server boundary.
+        //
+        // 5010-char body with a trailing sentinel past the old 4096 cut.
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#longmsg");
+
+        let body = format!("{}__END_SENTINEL__", "x".repeat(5000));
+        assert!(body.chars().count() > 4096, "test body must exceed the cap");
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:longmsg"),
+                from: "alice!a@remote".to_string(),
+                target: "#longmsg".to_string(),
+                text: body.clone(),
+                origin: PEER.to_string(),
+                msgid: Some("LONG-MSG-1".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let stored = state
+            .channels
+            .lock()
+            .get("#longmsg")
+            .and_then(|ch| ch.history.back().map(|m| m.text.clone()))
+            .expect("message should be stored in history");
+
+        assert!(
+            stored.ends_with("__END_SENTINEL__"),
+            "federated body was truncated: stored {} chars (expected {})",
+            stored.chars().count(),
+            body.chars().count(),
+        );
+        assert_eq!(
+            stored, body,
+            "stored history must match the full federated body"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_privmsg_account_injected_for_account_tag_client() {
+        // A federated PRIVMSG carrying the sender DID (`account`) should be
+        // delivered with `account=<did>` to a local client that negotiated
+        // account-tag — same as a locally-originated message.
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#acct");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state.connections.lock().insert("acct-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#acct")
+            .unwrap()
+            .members
+            .insert("acct-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("acct-recv".to_string());
+        state.cap_account_tag.lock().insert("acct-recv".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:acct"),
+                from: "alice!a@remote".to_string(),
+                target: "#acct".to_string(),
+                text: "hi".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("ACCT-MSG-1".to_string()),
+                sig: None,
+                account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        assert_eq!(frames.len(), 1, "got frames: {frames:#?}");
+        assert!(
+            frames[0].contains("account=did:plc:alice"),
+            "federated message should carry account=<did>: {}",
+            frames[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_privmsg_account_omitted_without_account_tag_cap() {
+        // A tag-capable client that did NOT negotiate account-tag must not
+        // receive the `account` tag (IRCv3 account-tag is opt-in).
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#acct2");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state
+            .connections
+            .lock()
+            .insert("plain-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#acct2")
+            .unwrap()
+            .members
+            .insert("plain-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("plain-recv".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:acct2"),
+                from: "alice!a@remote".to_string(),
+                target: "#acct2".to_string(),
+                text: "hi".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("ACCT-MSG-2".to_string()),
+                sig: None,
+                account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        assert_eq!(frames.len(), 1, "got frames: {frames:#?}");
+        assert!(
+            !frames[0].contains("account="),
+            "client without account-tag must not get account: {}",
+            frames[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_privmsg_carries_origin_provenance_tag() {
+        // A federated message is tagged with the origin server's name so
+        // clients can tell it apart from a locally-verified one. Gated on
+        // message-tags (it's a coordination tag), independent of account-tag.
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#prov");
+        mgr.peer_names
+            .lock()
+            .await
+            .insert(PEER.to_string(), "zerosum".to_string());
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state.connections.lock().insert("prov-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#prov")
+            .unwrap()
+            .members
+            .insert("prov-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("prov-recv".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:prov"),
+                from: "alice!a@remote".to_string(),
+                target: "#prov".to_string(),
+                text: "hi".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("PROV-1".to_string()),
+                sig: None,
+                account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        assert_eq!(frames.len(), 1, "got frames: {frames:#?}");
+        assert!(
+            frames[0].contains("+freeq.at/origin=zerosum"),
+            "federated message should carry origin provenance: {}",
+            frames[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_privmsg_origin_provenance_falls_back_to_peer_id() {
+        // When the origin peer has no recorded name, the provenance tag falls
+        // back to a short form of its id rather than being absent.
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#prov2");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state
+            .connections
+            .lock()
+            .insert("prov2-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#prov2")
+            .unwrap()
+            .members
+            .insert("prov2-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("prov2-recv".to_string());
+
+        // Note: no peer_names entry for PEER.
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:prov2"),
+                from: "alice!a@remote".to_string(),
+                target: "#prov2".to_string(),
+                text: "hi".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("PROV-2".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        assert_eq!(frames.len(), 1, "got frames: {frames:#?}");
+        let expected = &PEER[..8.min(PEER.len())];
+        assert!(
+            frames[0].contains(&format!("+freeq.at/origin={expected}")),
+            "should fall back to short peer id: {}",
+            frames[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_multiline_fallback_local_member_receives_n_privmsgs() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#mlchan2");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state.connections.lock().insert("fb-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#mlchan2")
+            .unwrap()
+            .members
+            .insert("fb-recv".to_string());
+        state.cap_message_tags.lock().insert("fb-recv".to_string());
+        // Deliberately do NOT add to cap_draft_multiline.
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:ml-fb"),
+                from: "alice!a@remote".to_string(),
+                target: "#mlchan2".to_string(),
+                text: "first\nsecond".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("ML-MSG-2".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: Some(s2s_multiline_lines(&["first", "second"])),
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        // Fallback receiver: 2 PRIVMSGs, no BATCH frames.
+        assert_eq!(frames.len(), 2, "got frames: {frames:#?}");
+        for frame in &frames {
+            assert!(
+                !frame.contains("BATCH"),
+                "BATCH leaked to fallback: {frame}"
+            );
+            assert!(
+                !frame.contains("batch="),
+                "batch tag leaked to fallback: {frame}"
+            );
+        }
+        // msgid only on first.
+        assert!(frames[0].contains("msgid=ML-MSG-2"));
+        assert!(!frames[1].contains("msgid"));
+        // The IRC formatter only prefixes `:` on the trailing param when
+        // it contains spaces or starts with `:`; "first" / "second" have
+        // neither, so they land without the colon.
+        assert!(
+            frames[0].ends_with("first\r\n"),
+            "first chunk content not at end: {}",
+            frames[0],
+        );
+        assert!(
+            frames[1].ends_with("second\r\n"),
+            "second chunk content not at end: {}",
+            frames[1],
+        );
+    }
+
+    /// Build a manager with a broadcast channel we can drain, so a
+    /// test can capture what relay_to_nick / s2s_broadcast actually
+    /// emits onto the wire. Distinct from `test_manager()`, which
+    /// drops the receiver — that's fine when the test only cares
+    /// about effects on local state, but we need to inspect the
+    /// broadcasted S2sMessage here.
+    fn test_manager_with_broadcast_rx() -> (Arc<S2sManager>, mpsc::Receiver<S2sMessage>) {
+        let (event_tx, _event_rx) = mpsc::channel(1024);
+        let (broadcast_tx, broadcast_rx) = mpsc::channel(1024);
+        let mut key_bytes = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key_bytes);
+        let secret_key = iroh::SecretKey::from_bytes(&key_bytes);
+        let manager = Arc::new(S2sManager {
+            server_id: "test-local-server".to_string(),
+            server_name: "test-s2s".to_string(),
+            peers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            peer_names: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            event_tx,
+            event_counter: AtomicU64::new(1000),
+            dedup: Arc::new(DedupSet::new()),
+            broadcast_tx,
+            conn_gen: Arc::new(AtomicU64::new(0)),
+            signing_key: Arc::new(secret_key),
+            trust_config: HashMap::new(),
+            peer_trust: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            pending_rotations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            authenticated_peers: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+        });
+        (manager, broadcast_rx)
+    }
+
+    #[tokio::test]
+    async fn dm_to_federated_user_via_relay_to_nick_carries_multiline_lines() {
+        // The narrow real-world case the routing-layer fix targets:
+        // a multiline DM whose target nick has no local session and
+        // gets relayed via S2S. Before the fix, the assembled body
+        // shipped over the wire as-is and the receiving peer had no
+        // way to split it back into BATCH-wrappable chunks. Now the
+        // breakdown rides along on the relayed Privmsg event.
+        use crate::connection::draft_multiline::BatchLine;
+        use crate::connection::routing::{RouteResult, relay_to_nick};
+
+        let state = test_state();
+        let (mgr, mut broadcast_rx) = test_manager_with_broadcast_rx();
+        *state.s2s_manager.lock() = Some(mgr.clone());
+
+        let lines = vec![
+            BatchLine {
+                body: "chunk one".to_string(),
+                concat_to_previous: false,
+                command: "PRIVMSG".to_string(),
+            },
+            BatchLine {
+                body: "chunk two".to_string(),
+                concat_to_previous: false,
+                command: "PRIVMSG".to_string(),
+            },
+            BatchLine {
+                body: "tail".to_string(),
+                concat_to_previous: true,
+                command: "PRIVMSG".to_string(),
+            },
+        ];
+
+        // Target "ghost" has no local session — relay_to_nick will
+        // fall through to the S2S branch since the test manager is
+        // installed.
+        let outcome = relay_to_nick(
+            &state,
+            "sender!u@h",
+            None,
+            "ghost",
+            "chunk one\nchunk twotail",
+            "evt-1".to_string(),
+            Some(&lines),
+        );
+        assert!(matches!(outcome, RouteResult::Relayed));
+
+        // Drain the broadcast channel and assert the Privmsg has the
+        // expected multiline_lines populated.
+        let captured =
+            tokio::time::timeout(std::time::Duration::from_millis(200), broadcast_rx.recv())
+                .await
+                .expect("broadcast deadline")
+                .expect("broadcast channel closed before receive");
+        match captured {
+            S2sMessage::Privmsg {
+                target,
+                text,
+                tags,
+                multiline_lines,
+                ..
+            } => {
+                assert_eq!(target, "ghost");
+                // The S2S `text` field is dual-encoded: `\n` escaped to
+                // `\\n` + `+freeq.at/multiline` tag, so a peer that
+                // doesn't understand `multiline_lines` still relays
+                // wire-safe content. New peers prefer `multiline_lines`
+                // and ignore the escaped `text`.
+                assert_eq!(text, "chunk one\\nchunk twotail");
+                assert!(
+                    tags.contains_key("+freeq.at/multiline"),
+                    "+freeq.at/multiline tag must be set when text is escaped"
+                );
+                let ml = multiline_lines.expect("multiline_lines absent from broadcast");
+                assert_eq!(ml.len(), 3);
+                assert_eq!(ml[0].body, "chunk one");
+                assert!(!ml[0].concat);
+                assert_eq!(ml[1].body, "chunk two");
+                assert!(!ml[1].concat);
+                assert_eq!(ml[2].body, "tail");
+                assert!(ml[2].concat, "third line should carry concat=true");
+            }
+            other => panic!("expected Privmsg variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dm_to_federated_user_without_multiline_lines_relays_none() {
+        // Regression guard: non-multiline DMs (the existing single-
+        // PRIVMSG path) must still relay with multiline_lines = None
+        // so peer servers go through their existing single-PRIVMSG
+        // broadcast (no synthetic chunking).
+        use crate::connection::routing::{RouteResult, relay_to_nick};
+
+        let state = test_state();
+        let (mgr, mut broadcast_rx) = test_manager_with_broadcast_rx();
+        *state.s2s_manager.lock() = Some(mgr.clone());
+
+        let outcome = relay_to_nick(
+            &state,
+            "sender!u@h",
+            None,
+            "ghost",
+            "ordinary text",
+            "evt-2".to_string(),
+            None,
+        );
+        assert!(matches!(outcome, RouteResult::Relayed));
+
+        let captured =
+            tokio::time::timeout(std::time::Duration::from_millis(200), broadcast_rx.recv())
+                .await
+                .expect("broadcast deadline")
+                .expect("broadcast channel closed before receive");
+        match captured {
+            S2sMessage::Privmsg {
+                multiline_lines, ..
+            } => {
+                assert!(
+                    multiline_lines.is_none(),
+                    "non-multiline DM should not carry multiline_lines",
+                );
+            }
+            other => panic!("expected Privmsg variant, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn s2s_privmsg_without_multiline_field_unchanged() {
+        // Belt-and-suspenders: peer servers that don't know about
+        // multiline still relay regular PRIVMSGs; the receive handler
+        // should fall through to the existing single-PRIVMSG path.
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#plain");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state
+            .connections
+            .lock()
+            .insert("plain-recv".to_string(), tx);
+        state
+            .channels
+            .lock()
+            .get_mut("#plain")
+            .unwrap()
+            .members
+            .insert("plain-recv".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("plain-recv".to_string());
+        state
+            .cap_draft_multiline
+            .lock()
+            .insert("plain-recv".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:plain"),
+                from: "alice!a@remote".to_string(),
+                target: "#plain".to_string(),
+                text: "just a normal line".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("PLAIN-MSG".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        assert_eq!(frames.len(), 1, "got frames: {frames:#?}");
+        assert!(!frames[0].contains("BATCH"));
+        assert!(frames[0].contains("msgid=PLAIN-MSG"));
+        assert!(frames[0].contains(":just a normal line"));
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -3785,6 +6112,10 @@ mod s2s_adversarial_tests {
                     origin: PEER.to_string(),
                     msgid: None,
                     sig: None,
+                    account: None,
+                    recipient_did: None,
+                    tags: HashMap::new(),
+                    multiline_lines: None,
                 },
             )
             .await;
@@ -3826,6 +6157,7 @@ mod s2s_adversarial_tests {
                 did: None,
                 handle: None,
                 is_op: false,
+                actor_class: None,
                 origin: PEER.to_string(),
             },
         )
@@ -3846,9 +6178,22 @@ mod s2s_adversarial_tests {
 
     #[tokio::test]
     async fn s2s_rate_limit_at_boundary() {
+        // Isolated peer id: setup_authenticated_peer clears PEER's
+        // rate-limit counter, which races with this test's 101-message
+        // send if other parallel tests re-enter setup mid-way.
+        const RL_PEER: &str = "fake-peer-rate-limit-isolated";
         let state = test_state();
         let mgr = test_manager();
-        setup_authenticated_peer(&state, &mgr).await;
+        mgr.authenticated_peers
+            .lock()
+            .await
+            .insert(RL_PEER.to_string());
+        mgr.peer_trust
+            .lock()
+            .await
+            .insert(RL_PEER.to_string(), TrustLevel::Full);
+        *state.s2s_manager.lock() = Some(mgr.clone());
+        S2S_RATE_LIMITS.lock().remove(RL_PEER);
         setup_channel(&state, "#ratelimit");
 
         let (tx, mut rx) = mpsc::channel(256);
@@ -3861,20 +6206,23 @@ mod s2s_adversarial_tests {
             .members
             .insert("rl-sess".to_string());
 
-        // Send 101 messages rapidly (limit is 100/sec)
         for i in 0..101u64 {
             process_s2s_message(
                 &state,
                 &mgr,
-                PEER,
+                RL_PEER,
                 S2sMessage::Privmsg {
-                    event_id: format!("{PEER}:{}", 200 + i),
+                    event_id: format!("{RL_PEER}:{}", 200 + i),
                     from: "spammer!u@s2s".to_string(),
                     target: "#ratelimit".to_string(),
                     text: format!("spam {i}"),
-                    origin: PEER.to_string(),
+                    origin: RL_PEER.to_string(),
                     msgid: None,
                     sig: None,
+                    account: None,
+                    recipient_did: None,
+                    tags: HashMap::new(),
+                    multiline_lines: None,
                 },
             )
             .await;
@@ -3891,5 +6239,1345 @@ mod s2s_adversarial_tests {
             count <= 100,
             "S2S rate limit breached: received {count} messages (limit 100/sec)"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // S2S JOIN: actor_class propagation
+    // ═══════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn s2s_join_actor_class_stored_on_remote_member() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#agenttest");
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Join {
+                event_id: format!("{PEER}:agent1"),
+                nick: "testbot".to_string(),
+                channel: "#agenttest".to_string(),
+                did: None,
+                handle: None,
+                is_op: false,
+                actor_class: Some("agent".to_string()),
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+
+        let channels = state.channels.lock();
+        let ch = channels.get("#agenttest").unwrap();
+        let rm = ch
+            .remote_members
+            .get("testbot")
+            .expect("remote member should exist");
+        assert_eq!(
+            rm.actor_class.as_deref(),
+            Some("agent"),
+            "Remote member should have actor_class=agent"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_join_actor_class_delivered_to_local_members() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#agentdeliver");
+
+        // Add a local member to receive the JOIN
+        let (tx, mut rx) = mpsc::channel(16);
+        state
+            .connections
+            .lock()
+            .insert("local-sess".to_string(), tx);
+        state
+            .nick_to_session
+            .lock()
+            .insert("localuser", "local-sess");
+        state
+            .channels
+            .lock()
+            .get_mut("#agentdeliver")
+            .unwrap()
+            .members
+            .insert("local-sess".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("local-sess".to_string());
+
+        // Remote agent joins
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Join {
+                event_id: format!("{PEER}:agent2"),
+                nick: "remotebot".to_string(),
+                channel: "#agentdeliver".to_string(),
+                did: None,
+                handle: None,
+                is_op: false,
+                actor_class: Some("agent".to_string()),
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+
+        // Local member should receive JOIN with actor-class tag
+        let mut found_join = false;
+        while let Ok(Some(msg)) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await
+        {
+            if msg.contains("JOIN") && msg.contains("remotebot") {
+                assert!(
+                    msg.contains("+freeq.at/actor-class=agent"),
+                    "JOIN should include actor-class tag, got: {msg}"
+                );
+                found_join = true;
+                break;
+            }
+        }
+        assert!(
+            found_join,
+            "Local member should receive JOIN for remote agent"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // S2S TAGMSG: reaction delivery to local users
+    // ═══════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn s2s_tagmsg_reaction_delivered_to_local_user() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#react-test");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state
+            .connections
+            .lock()
+            .insert("react-sess".to_string(), tx);
+        state.nick_to_session.lock().insert("reactor", "react-sess");
+        state
+            .channels
+            .lock()
+            .get_mut("#react-test")
+            .unwrap()
+            .members
+            .insert("react-sess".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("react-sess".to_string());
+
+        let mut tags = HashMap::new();
+        tags.insert("+react".to_string(), "👍".to_string());
+        tags.insert("+reply".to_string(), "msg001".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:tag1"),
+                from: "alice!a@remote".to_string(),
+                target: "#react-test".to_string(),
+                tags,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert!(msg.contains("TAGMSG"), "Should be TAGMSG, got: {msg}");
+        assert!(
+            msg.contains("+react="),
+            "Should contain reaction, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_tagmsg_draft_tags_normalized() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#draft-test");
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state
+            .connections
+            .lock()
+            .insert("draft-sess".to_string(), tx);
+        state.nick_to_session.lock().insert("drafter", "draft-sess");
+        state
+            .channels
+            .lock()
+            .get_mut("#draft-test")
+            .unwrap()
+            .members
+            .insert("draft-sess".to_string());
+        state
+            .cap_message_tags
+            .lock()
+            .insert("draft-sess".to_string());
+
+        // Send with +draft/ prefixed tags
+        let mut tags = HashMap::new();
+        tags.insert("+draft/react".to_string(), "❤️".to_string());
+        tags.insert("+draft/reply".to_string(), "msg999".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:draft1"),
+                from: "bob!b@remote".to_string(),
+                target: "#draft-test".to_string(),
+                tags,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timeout")
+            .expect("channel closed");
+        assert!(msg.contains("TAGMSG"), "Should be TAGMSG, got: {msg}");
+        // Should be normalized to +react, not +draft/react
+        assert!(
+            msg.contains("+react="),
+            "Should contain normalized +react, got: {msg}"
+        );
+        assert!(
+            !msg.contains("+draft/react"),
+            "Should NOT contain draft prefix, got: {msg}"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // S2S DM: delivery and persistence for local recipients
+    // ═══════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn s2s_dm_delivered_to_local_user() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+
+        // Set up local user "bob" who will receive the DM
+        let (tx, mut rx) = mpsc::channel(16);
+        state.connections.lock().insert("bob-sess".to_string(), tx);
+        state.nick_to_session.lock().insert("bob", "bob-sess");
+        state.cap_message_tags.lock().insert("bob-sess".to_string());
+
+        // Remote user sends DM to local bob
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:dm1"),
+                from: "alice!a@remote".to_string(),
+                target: "bob".to_string(),
+                text: "hey bob, private msg".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("dm-msg-001".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        // Bob should receive the DM
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .expect("timeout waiting for DM")
+            .expect("channel closed");
+        assert!(
+            msg.contains("hey bob, private msg"),
+            "Bob should receive DM text, got: {msg}"
+        );
+        assert!(
+            msg.contains("PRIVMSG bob"),
+            "Should be addressed to bob, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_dm_account_injected_for_account_tag_client() {
+        // A federated DM delivers `account=<did>` to a local recipient that
+        // negotiated account-tag (DM path, distinct from the channel path).
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+
+        let (tx, mut rx) = mpsc::channel(16);
+        state.connections.lock().insert("bob-sess".to_string(), tx);
+        state.nick_to_session.lock().insert("bob", "bob-sess");
+        state.cap_message_tags.lock().insert("bob-sess".to_string());
+        state.cap_account_tag.lock().insert("bob-sess".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:dm-acct"),
+                from: "alice!a@remote".to_string(),
+                target: "bob".to_string(),
+                text: "hey bob".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("DM-ACCT-D1".to_string()),
+                sig: None,
+                account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let frames = drain_mailbox(&mut rx).await;
+        assert_eq!(frames.len(), 1, "got frames: {frames:#?}");
+        assert!(
+            frames[0].contains("account=did:plc:alice"),
+            "federated DM should carry account=<did>: {}",
+            frames[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_dm_from_unknown_remote_sender_persists_via_carried_account() {
+        // Before the account carry, persisting a DM required BOTH DIDs to be
+        // resolvable from local nick_owners. A sender who never authed on this
+        // server isn't there, so a stranger→local DM was dropped from history
+        // (todo #16). The carried `account` now supplies the sender DID, so it
+        // persists.
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+
+        // Recipient is a known local identity; sender is NOT in nick_owners.
+        state
+            .nick_owners
+            .lock()
+            .insert("bob".to_string(), "did:plc:bob".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:dm-persist"),
+                from: "alice!a@remote".to_string(),
+                target: "bob".to_string(),
+                text: "stranger dm".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("DM-ACCT-P1".to_string()),
+                sig: None,
+                account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let key = crate::db::canonical_dm_key("did:plc:alice", "did:plc:bob");
+        let msgs = state
+            .with_db(|db| db.get_messages(&key, 10, None))
+            .expect("get_messages");
+        assert_eq!(msgs.len(), 1, "stranger→local DM should persist");
+        assert_eq!(msgs[0].text, "stranger dm");
+        assert_eq!(msgs[0].sender_did.as_deref(), Some("did:plc:alice"));
+    }
+
+    #[tokio::test]
+    async fn s2s_dm_from_unknown_remote_sender_without_account_not_persisted() {
+        // Same as above but the peer sent no account (older peer): the sender
+        // DID is unresolvable, so the DM still isn't persisted — proving the
+        // carried account is what enables persistence, not something else.
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        state
+            .nick_owners
+            .lock()
+            .insert("bob".to_string(), "did:plc:bob".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:dm-noacct"),
+                from: "alice!a@remote".to_string(),
+                target: "bob".to_string(),
+                text: "stranger dm".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("DM-ACCT-P2".to_string()),
+                sig: None,
+                account: None,
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let key = crate::db::canonical_dm_key("did:plc:alice", "did:plc:bob");
+        let msgs = state
+            .with_db(|db| db.get_messages(&key, 10, None))
+            .expect("get_messages");
+        assert!(
+            msgs.is_empty(),
+            "without a carried account the stranger DM must not persist"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_channel_message_persists_origin_for_history_replay() {
+        // The channel insert must persist coordination tags (incl. origin) so
+        // CHATHISTORY replay carries provenance, the same as the DM path.
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#provhist");
+        mgr.peer_names
+            .lock()
+            .await
+            .insert(PEER.to_string(), "zerosum".to_string());
+
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Privmsg {
+                event_id: format!("{PEER}:provhist"),
+                from: "alice!a@remote".to_string(),
+                target: "#provhist".to_string(),
+                text: "hi".to_string(),
+                origin: PEER.to_string(),
+                msgid: Some("PROVHIST-1".to_string()),
+                sig: None,
+                account: Some("did:plc:alice".to_string()),
+                recipient_did: None,
+                tags: HashMap::new(),
+                multiline_lines: None,
+            },
+        )
+        .await;
+
+        let msgs = state
+            .with_db(|db| db.get_messages("#provhist", 10, None))
+            .expect("get_messages");
+        assert_eq!(msgs.len(), 1, "channel message should persist");
+        assert_eq!(
+            msgs[0].tags.get("+freeq.at/origin").map(String::as_str),
+            Some("zerosum"),
+            "persisted channel row must carry origin for replay: {:?}",
+            msgs[0].tags
+        );
+    }
+
+    #[test]
+    fn bind_identity_binds_then_updates_same_did() {
+        let state = test_state();
+        assert_eq!(
+            state.bind_identity("did:key:A", "Alice"),
+            BindOutcome::Bound
+        );
+        assert_eq!(
+            state.did_nicks.lock().get("did:key:A").map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            state.nick_owners.lock().get("alice").map(String::as_str),
+            Some("did:key:A")
+        );
+        // Same DID renames → updates both maps.
+        assert_eq!(
+            state.bind_identity("did:key:A", "alice2"),
+            BindOutcome::Bound
+        );
+        assert_eq!(
+            state.did_nicks.lock().get("did:key:A").map(String::as_str),
+            Some("alice2")
+        );
+        assert_eq!(
+            state.nick_owners.lock().get("alice2").map(String::as_str),
+            Some("did:key:A")
+        );
+    }
+
+    #[test]
+    fn rename_drops_stale_nick_owners_entry() {
+        let state = test_state();
+        assert_eq!(state.bind_identity("did:key:A", "foo"), BindOutcome::Bound);
+        assert_eq!(state.bind_identity("did:key:A", "bar"), BindOutcome::Bound);
+        // Old nick must not stay owned (it lingered before the fix,
+        // diverging from the durable table until a restart).
+        assert!(state.nick_owners.lock().get("foo").is_none());
+        assert_eq!(
+            state.nick_owners.lock().get("bar").map(String::as_str),
+            Some("did:key:A")
+        );
+        assert_eq!(
+            state.did_nicks.lock().get("did:key:A").map(String::as_str),
+            Some("bar")
+        );
+        // The freed nick is immediately claimable by a different DID.
+        assert_eq!(state.bind_identity("did:key:B", "foo"), BindOutcome::Bound);
+    }
+
+    /// Going-forward contract for the DM partner name resolution bug:
+    /// an authenticated DID colliding on an owned nick gets a
+    /// deterministic, identity-derived nick that is durably persisted
+    /// (so it resolves offline / after a restart, never a raw did:key).
+    #[test]
+    fn collision_yields_deterministic_persisted_derived_nick() {
+        let state = test_state_with_db();
+        let owner = "did:key:zAAAAAAAAAAAAAAAA";
+        let did_b = "did:key:zBBBBBBBBBBBBBBBB";
+
+        assert_eq!(state.bind_identity(owner, "happybot"), BindOutcome::Bound);
+
+        let assigned = state.bind_identity_with_fallback(did_b, "happybot");
+
+        assert_ne!(assigned, "happybot");
+        assert!(assigned.starts_with("happybot-"), "got {assigned}");
+        assert!(!assigned.starts_with("guest"), "got {assigned}");
+        assert!(assigned.len() <= 64, "over nick cap: {assigned}");
+
+        // Deterministic: same DID + same request → same nick.
+        assert_eq!(
+            assigned,
+            state.bind_identity_with_fallback(did_b, "happybot")
+        );
+
+        // The original owner keeps the bare nick.
+        assert_eq!(
+            state.nick_owners.lock().get("happybot").map(String::as_str),
+            Some(owner)
+        );
+
+        // Durable: wipe in-memory maps (simulate restart); the derived
+        // nick still resolves via the identities table.
+        state.did_nicks.lock().clear();
+        state.nick_owners.lock().clear();
+        assert_eq!(state.display_nick_for_did(did_b), assigned);
+    }
+
+    /// LOGIN/OAuth completion now durably persists the binding and, on
+    /// a nick collision, assigns a deterministic derived nick (same as
+    /// the SASL/registration path) instead of an in-memory-only
+    /// overwrite lost on restart.
+    #[test]
+    fn login_completion_persists_and_derives_on_collision() {
+        use crate::connection::login::complete_irc_login;
+        let state = test_state_with_db();
+        let owner = "did:key:zOWNEROWNEROWNER";
+        let did_b = "did:key:zLOGINBBBBBBBBBB";
+
+        assert_eq!(state.bind_identity(owner, "foo"), BindOutcome::Bound);
+        state.nick_to_session.lock().insert("foo", "sess1");
+
+        complete_irc_login(&state, "sess1", did_b, "bob.test");
+
+        let assigned = state
+            .did_nicks
+            .lock()
+            .get(did_b)
+            .cloned()
+            .expect("did_b durably bound");
+        assert_ne!(assigned, "foo");
+        assert!(assigned.starts_with("foo-"), "got {assigned}");
+
+        // Rename propagated to the connection loop.
+        let comp = state
+            .login_completions
+            .lock()
+            .get("sess1")
+            .cloned()
+            .expect("completion stored");
+        assert_eq!(comp.renamed_nick.as_deref(), Some(assigned.as_str()));
+
+        // Both resolve offline (wipe in-memory; identities table answers).
+        state.did_nicks.lock().clear();
+        state.nick_owners.lock().clear();
+        assert_eq!(state.display_nick_for_did(did_b), assigned);
+        assert_eq!(state.display_nick_for_did(owner), "foo");
+    }
+
+    #[test]
+    fn display_nick_falls_back_to_message_history() {
+        let state = test_state_with_db();
+        let did = "did:plc:legacy";
+
+        // No did_nicks entry, no identities row — only message history, as for
+        // a conversation predating durable identity binding or a remote DID.
+        state.with_db(|db| {
+            db.insert_message(
+                "&dmkey",
+                "carol!c@freeq/plc/abcd",
+                "hey",
+                100,
+                &std::collections::HashMap::new(),
+                Some("h1"),
+                Some(did),
+            )
+        });
+
+        assert_eq!(state.display_nick_for_did(did), "carol");
+        // A DID with no history at all still degrades to the raw DID.
+        assert_eq!(
+            state.display_nick_for_did("did:plc:unknown"),
+            "did:plc:unknown"
+        );
+    }
+
+    // === commit-reveal verification ===
+    //
+    // Tests for `connection::messaging::verify_commit_reveal`. Each test
+    // stages a synthetic commit message in the `messages` table (via the
+    // same `insert_message` path commits ride in production), then calls
+    // the verifier with matching/mismatching reveal inputs and asserts
+    // the outcome.
+
+    fn stage_commit(
+        state: &Arc<SharedState>,
+        msgid: &str,
+        commit_did: &str,
+        channel: &str,
+        ref_id: Option<&str>,
+        salt: &[u8],
+        plaintext: &str,
+        alg: &str,
+    ) -> String {
+        use base64::Engine;
+        use sha2::Digest;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(salt);
+        hasher.update(plaintext.as_bytes());
+        let hash_b64 = b64.encode(hasher.finalize());
+
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/event".to_string(), "commit".to_string());
+        let payload = format!(r#"{{"hash":"{}","alg":"{}"}}"#, hash_b64, alg);
+        tags.insert("+freeq.at/payload".to_string(), payload);
+        if let Some(r) = ref_id {
+            tags.insert("+freeq.at/ref".to_string(), r.to_string());
+        }
+
+        state
+            .with_db(|db| {
+                db.insert_message(
+                    channel,
+                    "panelist",
+                    "🔒 sealed",
+                    1_700_000_000,
+                    &tags,
+                    Some(msgid),
+                    Some(commit_did),
+                )
+            })
+            .expect("insert_message via with_db");
+        hash_b64
+    }
+
+    fn reveal_payload(commit_msgid: &str, salt: &[u8]) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let salt_b64 = b64.encode(salt);
+        format!(
+            r#"{{"reveal_of":"{}","salt":"{}"}}"#,
+            commit_msgid, salt_b64
+        )
+    }
+
+    #[test]
+    fn commit_reveal_verify_happy_path() {
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let salt: &[u8] = b"saltsalt12345678";
+        let plaintext = "The answer is X because Y.";
+        stage_commit(
+            &state,
+            "01J...COMMIT",
+            did,
+            "#debate",
+            Some("01J...DEBATE"),
+            salt,
+            plaintext,
+            "sha256",
+        );
+        let payload = reveal_payload("01J...COMMIT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE"),
+            &payload,
+            plaintext,
+        );
+        assert_eq!(r, Ok(()));
+    }
+
+    #[test]
+    fn commit_reveal_hash_mismatch_on_tampered_body() {
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let salt: &[u8] = b"saltsalt12345678";
+        stage_commit(
+            &state,
+            "01J...COMMIT",
+            did,
+            "#debate",
+            Some("01J...DEBATE"),
+            salt,
+            "original",
+            "sha256",
+        );
+        let payload = reveal_payload("01J...COMMIT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE"),
+            &payload,
+            "tampered", // different from committed plaintext
+        );
+        assert_eq!(r, Err("hash_mismatch"));
+    }
+
+    #[test]
+    fn commit_reveal_commit_not_found() {
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let payload = reveal_payload("01J...DOESNOTEXIST", b"salt");
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE"),
+            &payload,
+            "anything",
+        );
+        assert_eq!(r, Err("commit_not_found"));
+    }
+
+    #[test]
+    fn commit_reveal_actor_mismatch() {
+        let state = test_state_with_db();
+        let salt: &[u8] = b"saltsalt";
+        let plaintext = "answer";
+        stage_commit(
+            &state,
+            "01J...COMMIT",
+            "did:key:zPANEL1",
+            "#debate",
+            Some("01J...DEBATE"),
+            salt,
+            plaintext,
+            "sha256",
+        );
+        let payload = reveal_payload("01J...COMMIT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some("did:key:zPANEL2"), // different DID reveals
+            "#debate",
+            Some("01J...DEBATE"),
+            &payload,
+            plaintext,
+        );
+        assert_eq!(r, Err("actor_mismatch"));
+    }
+
+    #[test]
+    fn commit_reveal_channel_mismatch() {
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let salt: &[u8] = b"saltsalt";
+        let plaintext = "answer";
+        stage_commit(
+            &state,
+            "01J...COMMIT",
+            did,
+            "#debate",
+            Some("01J...DEBATE"),
+            salt,
+            plaintext,
+            "sha256",
+        );
+        let payload = reveal_payload("01J...COMMIT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#other", // different channel
+            Some("01J...DEBATE"),
+            &payload,
+            plaintext,
+        );
+        assert_eq!(r, Err("channel_mismatch"));
+    }
+
+    #[test]
+    fn commit_reveal_ref_id_mismatch() {
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let salt: &[u8] = b"saltsalt";
+        let plaintext = "answer";
+        stage_commit(
+            &state,
+            "01J...COMMIT",
+            did,
+            "#debate",
+            Some("01J...DEBATE-A"),
+            salt,
+            plaintext,
+            "sha256",
+        );
+        let payload = reveal_payload("01J...COMMIT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE-B"), // different ref_id
+            &payload,
+            plaintext,
+        );
+        assert_eq!(r, Err("ref_id_mismatch"));
+    }
+
+    #[test]
+    fn commit_reveal_unsupported_alg() {
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let salt: &[u8] = b"saltsalt";
+        let plaintext = "answer";
+        stage_commit(
+            &state,
+            "01J...COMMIT",
+            did,
+            "#debate",
+            Some("01J...DEBATE"),
+            salt,
+            plaintext,
+            "md5", // unsupported
+        );
+        let payload = reveal_payload("01J...COMMIT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE"),
+            &payload,
+            plaintext,
+        );
+        assert_eq!(r, Err("unsupported_alg"));
+    }
+
+    #[test]
+    fn commit_reveal_not_a_commit() {
+        // Stage a non-commit message at the referenced msgid.
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL1";
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/event".to_string(), "task_request".to_string());
+        state
+            .with_db(|db| {
+                db.insert_message(
+                    "#debate",
+                    "panelist",
+                    "task request",
+                    1_700_000_000,
+                    &tags,
+                    Some("01J...NOTCOMMIT"),
+                    Some(did),
+                )
+            })
+            .expect("insert_message via with_db");
+
+        let payload = reveal_payload("01J...NOTCOMMIT", b"salt");
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            None,
+            &payload,
+            "anything",
+        );
+        assert_eq!(r, Err("not_a_commit"));
+    }
+
+    #[test]
+    fn commit_reveal_bad_payload() {
+        let state = test_state_with_db();
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some("did:key:zX"),
+            "#debate",
+            None,
+            "{not json",
+            "anything",
+        );
+        assert_eq!(r, Err("bad_payload"));
+    }
+
+    // ── Multiline reveal round-trip ───────────────────────────────────
+    //
+    // These tests prove that a reveal sent via a draft/multiline batch
+    // verifies correctly after Phase 2's `dispatch_assembled_batch` re-
+    // feeds the assembled body through the normal PRIVMSG path. The
+    // committer hashes plaintext; the sender chunks it across multiple
+    // PRIVMSGs inside a BATCH; the server reassembles per concat rules;
+    // verify_commit_reveal hashes the assembled body — same bytes, same
+    // hash. So Phase 3's "extend verify_commit_reveal" is a no-op at
+    // the verifier level; the work is in Phase 2's assembly. These tests
+    // pin that behavior so a future change to assembly or dispatch
+    // can't silently break commit-reveal.
+
+    /// Reproduce the spec's join rules in tests without coupling to
+    /// the production `assemble_body` (so a regression there shows up
+    /// as a hash mismatch rather than as both halves agreeing on a
+    /// broken assembly).
+    fn assemble_for_test(lines: &[(&str, bool)]) -> String {
+        let mut out = String::new();
+        for (i, (body, concat)) in lines.iter().enumerate() {
+            if i > 0 && !concat {
+                out.push('\n');
+            }
+            out.push_str(body);
+        }
+        out
+    }
+
+    #[test]
+    fn commit_reveal_verifies_multiline_assembled_body() {
+        // The committer locally assembled three paragraphs joined by
+        // newlines and hashed that, then sent the reveal in 3 chunks.
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL_MULTILINE";
+        let salt: &[u8] = b"saltforthemultiline";
+
+        let chunks: Vec<(&str, bool)> = vec![
+            ("Paragraph one — the opening claim.", false),
+            ("Paragraph two — supporting evidence.", false),
+            ("Paragraph three — the conclusion.", false),
+        ];
+        let assembled = assemble_for_test(&chunks);
+        // Sanity: the spec's join rule produces "a\nb\nc".
+        assert!(assembled.contains('\n'));
+        assert!(!assembled.ends_with('\n'));
+
+        stage_commit(
+            &state,
+            "01J...COMMIT_MULTI",
+            did,
+            "#debate",
+            Some("01J...DEBATE_MULTI"),
+            salt,
+            &assembled,
+            "sha256",
+        );
+
+        let payload = reveal_payload("01J...COMMIT_MULTI", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE_MULTI"),
+            &payload,
+            &assembled,
+        );
+        assert_eq!(r, Ok(()));
+    }
+
+    #[test]
+    fn commit_reveal_verifies_assembled_body_with_concat_chunks() {
+        // Splits a long single line across two PRIVMSGs via the
+        // `draft/multiline-concat` mechanism. The second chunk
+        // appends to the first with no separator — verifying the
+        // server's assembler agrees with the committer about the
+        // joined bytes.
+        let state = test_state_with_db();
+        let did = "did:key:zPANEL_CONCAT";
+        let salt: &[u8] = b"saltforconcatcase";
+
+        let chunks: Vec<(&str, bool)> = vec![
+            ("hello ", false),
+            ("everyone", true), // concat-to-previous
+        ];
+        let assembled = assemble_for_test(&chunks);
+        assert_eq!(assembled, "hello everyone");
+
+        stage_commit(
+            &state,
+            "01J...COMMIT_CONCAT",
+            did,
+            "#debate",
+            Some("01J...DEBATE_CONCAT"),
+            salt,
+            &assembled,
+            "sha256",
+        );
+
+        let payload = reveal_payload("01J...COMMIT_CONCAT", salt);
+        let r = crate::connection::messaging::verify_commit_reveal(
+            &state,
+            Some(did),
+            "#debate",
+            Some("01J...DEBATE_CONCAT"),
+            &payload,
+            &assembled,
+        );
+        assert_eq!(r, Ok(()));
+    }
+
+    #[test]
+    fn commit_reveal_assemble_for_test_matches_production_assemble_body() {
+        // Belt-and-suspenders: the assembly helper used in the tests
+        // above MUST agree byte-for-byte with the production
+        // `connection::draft_multiline::assemble_body`. If the spec
+        // join rules ever drift between the two, the multiline reveal
+        // round-trip tests would silently pass while production
+        // verification fails.
+        use crate::connection::draft_multiline as dm;
+        let chunks: Vec<(&str, bool)> = vec![
+            ("hello", false),
+            ("", false),
+            ("how is ", false),
+            ("everyone?", true),
+        ];
+        let from_test = assemble_for_test(&chunks);
+
+        let prod_batch = dm::OpenBatch {
+            batch_id: "x".to_string(),
+            batch_type: "draft/multiline".to_string(),
+            target: "#c".to_string(),
+            opener_tags: HashMap::new(),
+            lines: chunks
+                .iter()
+                .map(|(body, concat)| dm::BatchLine {
+                    body: (*body).to_string(),
+                    concat_to_previous: *concat,
+                    command: "PRIVMSG".to_string(),
+                })
+                .collect(),
+            byte_count: 0,
+            first_command: Some("PRIVMSG".to_string()),
+        };
+        let from_prod = dm::assemble_body(&prod_batch);
+
+        assert_eq!(from_test, from_prod);
+        assert_eq!(from_test, "hello\n\nhow is everyone?");
+    }
+
+    #[test]
+    fn bind_identity_refuses_nick_owned_by_other_did() {
+        let state = test_state();
+        assert_eq!(
+            state.bind_identity("did:key:A", "alice"),
+            BindOutcome::Bound
+        );
+        // A different DID claiming alice → refused, maps untouched.
+        let r = state.bind_identity("did:key:B", "alice");
+        assert_eq!(
+            r,
+            BindOutcome::ConflictOwnedByOther {
+                owner_did: "did:key:A".to_string()
+            }
+        );
+        assert_eq!(
+            state.nick_owners.lock().get("alice").map(String::as_str),
+            Some("did:key:A")
+        );
+        assert!(state.did_nicks.lock().get("did:key:B").is_none());
+    }
+
+    #[test]
+    fn display_nick_for_did_chain_falls_back_to_raw() {
+        let state = test_state();
+        // did_nicks hit
+        state.bind_identity("did:key:A", "alice");
+        assert_eq!(state.display_nick_for_did("did:key:A"), "alice");
+        // unknown DID, no session, no db → raw DID
+        assert_eq!(
+            state.display_nick_for_did("did:key:UNKNOWN"),
+            "did:key:UNKNOWN"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    // SyncResponse merge: key removal, invite authority, topic→CRDT
+    // ═══════════════════════════════════════════════════════════
+
+    fn sync_info(name: &str) -> crate::s2s::ChannelInfo {
+        crate::s2s::ChannelInfo {
+            name: name.to_string(),
+            topic: None,
+            nicks: vec![],
+            nick_info: vec![],
+            founder_did: None,
+            did_ops: vec![],
+            created_at: 0,
+            topic_locked: false,
+            invite_only: false,
+            no_ext_msg: false,
+            moderated: false,
+            key: None,
+            bans: vec![],
+            invites: vec![],
+            invite_exceptions: vec![],
+        }
+    }
+
+    async fn sync(state: &Arc<SharedState>, mgr: &Arc<S2sManager>, info: crate::s2s::ChannelInfo) {
+        process_s2s_message(
+            state,
+            mgr,
+            PEER,
+            S2sMessage::SyncResponse {
+                server_id: PEER.to_string(),
+                channels: vec![info],
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn sync_key_removal_adopted_when_no_local_members() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#kchan");
+        state.channels.lock().get_mut("#kchan").unwrap().key = Some("sekrit".to_string());
+
+        // Peer snapshot says the key was removed (-k). No local members →
+        // adopt the full snapshot, including removal.
+        sync(&state, &mgr, sync_info("#kchan")).await;
+        assert_eq!(state.channels.lock().get("#kchan").unwrap().key, None);
+    }
+
+    #[tokio::test]
+    async fn sync_key_not_removed_while_locals_present() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#kchan2");
+        {
+            let mut channels = state.channels.lock();
+            let ch = channels.get_mut("#kchan2").unwrap();
+            ch.key = Some("sekrit".to_string());
+            ch.members.insert("local-session".to_string());
+        }
+
+        // Locals set modes authoritatively — a snapshot must never weaken them.
+        sync(&state, &mgr, sync_info("#kchan2")).await;
+        assert_eq!(
+            state.channels.lock().get("#kchan2").unwrap().key.as_deref(),
+            Some("sekrit")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_invites_rejected_on_founder_mismatch() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#ichan");
+        state.channels.lock().get_mut("#ichan").unwrap().founder_did =
+            Some("did:plc:realfounder".to_string());
+
+        let mut info = sync_info("#ichan");
+        info.founder_did = Some("did:plc:imposter".to_string());
+        info.invites = vec!["did:plc:mallory".to_string()];
+        sync(&state, &mgr, info).await;
+
+        assert!(
+            state
+                .channels
+                .lock()
+                .get("#ichan")
+                .unwrap()
+                .invites
+                .is_empty(),
+            "invites from a peer with the wrong founder must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_invites_accepted_when_founder_matches() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#ichan2");
+        state
+            .channels
+            .lock()
+            .get_mut("#ichan2")
+            .unwrap()
+            .founder_did = Some("did:plc:realfounder".to_string());
+
+        let mut info = sync_info("#ichan2");
+        info.founder_did = Some("did:plc:realfounder".to_string());
+        info.invites = vec!["did:plc:friend".to_string()];
+        sync(&state, &mgr, info).await;
+
+        assert!(
+            state
+                .channels
+                .lock()
+                .get("#ichan2")
+                .unwrap()
+                .invites
+                .contains("did:plc:friend")
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_adopted_topic_is_seeded_into_crdt() {
+        let state = test_state();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#tchan");
+
+        let mut info = sync_info("#tchan");
+        info.topic = Some("welcome to tchan".to_string());
+        sync(&state, &mgr, info).await;
+
+        // Local adopted it…
+        assert_eq!(
+            state
+                .channels
+                .lock()
+                .get("#tchan")
+                .unwrap()
+                .topic
+                .as_ref()
+                .map(|t| t.text.clone()),
+            Some("welcome to tchan".to_string())
+        );
+        // …and the CRDT agrees, so reconciliation can never flap it back.
+        let crdt = state.cluster_doc.channel_topic("#tchan").await;
+        assert_eq!(
+            crdt.map(|(t, _)| t),
+            Some("welcome to tchan".to_string()),
+            "sync-adopted topic must be seeded into the CRDT"
+        );
+    }
+}
+
+#[cfg(test)]
+mod discoverability_tests {
+    use super::*;
+
+    fn ch() -> ChannelState {
+        ChannelState::default()
+    }
+
+    #[test]
+    fn open_channel_is_discoverable() {
+        // No access restriction → advertisable in LIST / api/v1/channels.
+        assert!(!ch().is_mode_restricted());
+    }
+
+    #[test]
+    fn invite_only_hides() {
+        let mut c = ch();
+        c.invite_only = true;
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn keyed_hides() {
+        let mut c = ch();
+        c.key = Some("s3cret".into());
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn encrypted_hides() {
+        // +E channels are hidden too — the name/topic can be as sensitive as
+        // the (encrypted) content.
+        let mut c = ch();
+        c.encrypted_only = true;
+        assert!(c.is_mode_restricted());
+    }
+
+    #[test]
+    fn moderation_flags_do_not_hide() {
+        // +n/+t/+m are quality/moderation flags, not access restrictions — such
+        // a channel is still publicly discoverable.
+        let mut c = ch();
+        c.no_ext_msg = true;
+        c.topic_locked = true;
+        c.moderated = true;
+        assert!(!c.is_mode_restricted());
+    }
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::did_allowed;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_allowlists_are_open() {
+        assert!(did_allowed(
+            &[],
+            &[],
+            "did:plc:anyone",
+            Some("a.bsky.social")
+        ));
+    }
+
+    #[test]
+    fn exact_did_allowed() {
+        let dids = v(&["did:plc:alice"]);
+        assert!(did_allowed(&dids, &[], "did:plc:alice", None));
+        assert!(!did_allowed(&dids, &[], "did:plc:mallory", None));
+    }
+
+    #[test]
+    fn handle_domain_and_subdomain_allowed() {
+        let doms = v(&["acme.com"]);
+        assert!(did_allowed(&[], &doms, "did:plc:x", Some("alice.acme.com")));
+        assert!(did_allowed(&[], &doms, "did:plc:x", Some("acme.com")));
+        assert!(!did_allowed(
+            &[],
+            &doms,
+            "did:plc:x",
+            Some("alice.evil.com")
+        ));
+        // Not fooled by a suffix that isn't a domain boundary.
+        assert!(!did_allowed(&[], &doms, "did:plc:x", Some("notacme.com")));
+    }
+
+    #[test]
+    fn no_handle_denies_domain_only_allowlist() {
+        // Challenge SASL has no handle → domain-only allowlists can't match.
+        let doms = v(&["acme.com"]);
+        assert!(!did_allowed(&[], &doms, "did:plc:x", None));
     }
 }

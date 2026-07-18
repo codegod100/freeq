@@ -364,3 +364,321 @@ describe('removeUserFromAll edge cases', () => {
     expect(ch.members.has('[bot]')).toBe(false);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// BUG: CHATHISTORY arriving after newer live messages produces
+// two-block swapped order (reproduces screenshot on 2026-04-21:
+// top→bottom [Apr 18, Apr 20, Apr 15, Apr 16, Apr 17]).
+// ═══════════════════════════════════════════════════════════════
+
+function msgAt(iso: string, id: string, text = 'x') {
+  return mkMsg({ id, timestamp: new Date(iso), text });
+}
+
+describe('history batch merge ordering (FIXED)', () => {
+  it('reproduces the two-block swapped-order screenshot', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    // Clear the init message so we test pure ordering.
+    s().channels.get(ch)!.messages = [];
+
+    // Existing live-state already shows recent messages.
+    s().addMessage(ch, msgAt('2026-04-18T14:17:00Z', 'm18', 'url post'));
+    s().addMessage(ch, msgAt('2026-04-20T13:04:00Z', 'm20', 'LLMs to conform...'));
+
+    // CHATHISTORY backfill arrives with older messages.
+    const history = [
+      msgAt('2026-04-15T21:09:00Z', 'm15', 'spec grammar...'),
+      msgAt('2026-04-16T16:24:00Z', 'm16', 'or domains to IUs...'),
+      msgAt('2026-04-17T15:54:00Z', 'm17', 'definite the right direction'),
+    ];
+    // This is the fix-path contract: a single sort-merge, not a per-msg append.
+    (s() as any).mergeHistory(ch, history);
+
+    const ids = s().channels.get(ch)!.messages.map((m) => m.id);
+    expect(ids).toEqual(['m15', 'm16', 'm17', 'm18', 'm20']);
+  });
+
+  it('handles history interleaved with existing', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+
+    s().addMessage(ch, msgAt('2026-04-18T00:00:00Z', 'm18'));
+    s().addMessage(ch, msgAt('2026-04-20T00:00:00Z', 'm20'));
+
+    // History straddles the existing window: one older, one between.
+    const history = [
+      msgAt('2026-04-14T00:00:00Z', 'm14'),
+      msgAt('2026-04-19T00:00:00Z', 'm19'),
+    ];
+    (s() as any).mergeHistory(ch, history);
+
+    expect(s().channels.get(ch)!.messages.map((m) => m.id))
+      .toEqual(['m14', 'm18', 'm19', 'm20']);
+  });
+
+  it('dedups by msgid when history repeats a live message', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+
+    s().addMessage(ch, msgAt('2026-04-18T00:00:00Z', 'm18', 'live'));
+
+    // History returns the same msgid plus older siblings.
+    const history = [
+      msgAt('2026-04-15T00:00:00Z', 'm15'),
+      msgAt('2026-04-18T00:00:00Z', 'm18', 'history-copy'),
+    ];
+    (s() as any).mergeHistory(ch, history);
+
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs.map((m) => m.id)).toEqual(['m15', 'm18']);
+    // Live copy wins (we don't clobber with the history copy).
+    expect(msgs.find((m) => m.id === 'm18')!.text).toBe('live');
+  });
+
+  it('tiebreaks by msgid when timestamps are identical', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+
+    const t = '2026-04-18T00:00:00Z';
+    s().addMessage(ch, msgAt(t, 'mC'));
+    (s() as any).mergeHistory(ch, [msgAt(t, 'mA'), msgAt(t, 'mB')]);
+
+    expect(s().channels.get(ch)!.messages.map((m) => m.id))
+      .toEqual(['mA', 'mB', 'mC']);
+  });
+
+  it('caps merged result to 1000 most recent messages', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+
+    // 600 existing live messages (chronological).
+    for (let i = 0; i < 600; i++) {
+      s().addMessage(ch, msgAt(
+        new Date(2026, 3, 1, i / 60 | 0, i % 60).toISOString(),
+        `live-${i.toString().padStart(4, '0')}`,
+      ));
+    }
+    // 600 older history messages.
+    const history = [];
+    for (let i = 0; i < 600; i++) {
+      history.push(msgAt(
+        new Date(2026, 2, 1, i / 60 | 0, i % 60).toISOString(),
+        `hist-${i.toString().padStart(4, '0')}`,
+      ));
+    }
+    (s() as any).mergeHistory(ch, history);
+
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs.length).toBe(1000);
+    // Should retain the 1000 most recent (all 600 live + last 400 history).
+    expect(msgs[msgs.length - 1].id).toBe('live-0599');
+    expect(msgs[0].id).toBe('hist-0200');
+  });
+});
+
+describe('mergeHistory safety / side-effects', () => {
+  it('no-op on empty array and does not create the channel', () => {
+    const s = () => useStore.getState();
+    expect(s().channels.has('#never')).toBe(false);
+    (s() as any).mergeHistory('#never', []);
+    expect(s().channels.has('#never')).toBe(false);
+  });
+
+  it('ignores the "server" target (matches addMessage contract)', () => {
+    const s = () => useStore.getState();
+    const before = s().serverMessages.length;
+    (s() as any).mergeHistory('server', [msgAt('2026-04-10T00:00:00Z', 'sv1')]);
+    (s() as any).mergeHistory('SERVER', [msgAt('2026-04-10T00:00:00Z', 'sv2')]);
+    expect(s().serverMessages.length).toBe(before);
+    expect(s().channels.has('server')).toBe(false);
+  });
+
+  it('does not bump unreadCount (history backfill is not unread)', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().setActiveChannel('#other'); // make #freeq inactive, so addMessage would bump
+    s().channels.get(ch)!.messages = [];
+    s().channels.get(ch)!.unreadCount = 0;
+
+    (s() as any).mergeHistory(ch, [
+      msgAt('2026-04-15T00:00:00Z', 'h1'),
+      msgAt('2026-04-16T00:00:00Z', 'h2'),
+    ]);
+
+    expect(s().channels.get(ch)!.unreadCount).toBe(0);
+  });
+
+  it('does not auto-unhide a hidden DM on backfill', () => {
+    const s = () => useStore.getState();
+    const dm = 'alice';
+    ensureChannel(dm);
+    s().channels.get(dm)!.messages = [];
+    s().hideDM(dm);
+    expect(s().hiddenDMs.has(dm.toLowerCase())).toBe(true);
+
+    (s() as any).mergeHistory(dm, [msgAt('2026-04-15T00:00:00Z', 'd1')]);
+
+    expect(s().hiddenDMs.has(dm.toLowerCase())).toBe(true);
+  });
+
+  it('merge into one channel does not touch another channel', () => {
+    const s = () => useStore.getState();
+    ensureChannel('#a');
+    ensureChannel('#b');
+    s().channels.get('#a')!.messages = [];
+    s().channels.get('#b')!.messages = [msgAt('2026-04-10T00:00:00Z', 'b1')];
+
+    (s() as any).mergeHistory('#a', [msgAt('2026-04-14T00:00:00Z', 'a1')]);
+
+    expect(s().channels.get('#a')!.messages.map((m) => m.id)).toEqual(['a1']);
+    expect(s().channels.get('#b')!.messages.map((m) => m.id)).toEqual(['b1']);
+  });
+
+  it('preserves topic / modes / members while merging messages', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    const c = s().channels.get(ch)!;
+    c.topic = 'hello world';
+    c.modes = new Set(['n', 't']);
+    s().addMember(ch, { nick: 'alice' });
+    c.messages = [msgAt('2026-04-18T00:00:00Z', 'm18')];
+
+    (s() as any).mergeHistory(ch, [msgAt('2026-04-15T00:00:00Z', 'm15')]);
+
+    const after = s().channels.get(ch)!;
+    expect(after.topic).toBe('hello world');
+    expect([...after.modes].sort()).toEqual(['n', 't']);
+    expect(after.members.has('alice')).toBe(true);
+    expect(after.messages.map((m) => m.id)).toEqual(['m15', 'm18']);
+  });
+
+  it('idempotent: merging the same history twice does not duplicate', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+    const history = [
+      msgAt('2026-04-15T00:00:00Z', 'h1'),
+      msgAt('2026-04-16T00:00:00Z', 'h2'),
+    ];
+    (s() as any).mergeHistory(ch, history);
+    (s() as any).mergeHistory(ch, history);
+    expect(s().channels.get(ch)!.messages.map((m) => m.id)).toEqual(['h1', 'h2']);
+  });
+
+  it('all-duplicate history leaves state unchanged (reference-equal channels map)', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [msgAt('2026-04-18T00:00:00Z', 'm18')];
+
+    const mapBefore = s().channels;
+    (s() as any).mergeHistory(ch, [msgAt('2026-04-18T00:00:00Z', 'm18', 'dup')]);
+    // No new state produced → the channels Map reference is unchanged.
+    expect(s().channels).toBe(mapBefore);
+    // And the original copy is preserved (not clobbered).
+    expect(s().channels.get(ch)!.messages[0].text).not.toBe('dup');
+  });
+
+  it('preserves reactions on existing live message when history repeats its msgid', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [msgAt('2026-04-18T00:00:00Z', 'm18', 'live')];
+    s().addReaction(ch, 'm18', '🎉', 'alice');
+
+    (s() as any).mergeHistory(ch, [msgAt('2026-04-18T00:00:00Z', 'm18', 'from-history')]);
+
+    const m = s().channels.get(ch)!.messages.find((x) => x.id === 'm18')!;
+    expect(m.text).toBe('live');
+    expect(m.reactions?.get('🎉')?.has('alice')).toBe(true);
+  });
+
+  it('is case-insensitive on the channel name', () => {
+    const s = () => useStore.getState();
+    ensureChannel('#FreeQ');
+    s().channels.get('#freeq')!.messages = [];
+
+    (s() as any).mergeHistory('#FREEQ', [msgAt('2026-04-15T00:00:00Z', 'h1')]);
+
+    expect(s().channels.get('#freeq')!.messages.map((m) => m.id)).toEqual(['h1']);
+  });
+
+  it('does not mutate the caller-supplied messages array', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+    const history = [
+      msgAt('2026-04-20T00:00:00Z', 'z'),
+      msgAt('2026-04-15T00:00:00Z', 'a'),
+    ];
+    const snapshotIds = history.map((m) => m.id);
+    (s() as any).mergeHistory(ch, history);
+    expect(history.map((m) => m.id)).toEqual(snapshotIds);
+  });
+
+  it('sorts messages with a missing timestamp to the front (epoch-0 fallback)', () => {
+    const s = () => useStore.getState();
+    const ch = '#freeq';
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+
+    // One message with no timestamp (simulates a malformed history item).
+    const noTs = mkMsg({ id: 'nt' });
+    // @ts-expect-error — deliberately drop timestamp for this test
+    noTs.timestamp = undefined;
+
+    (s() as any).mergeHistory(ch, [
+      msgAt('2026-04-18T00:00:00Z', 'm18'),
+      noTs,
+    ]);
+
+    expect(s().channels.get(ch)!.messages.map((m) => m.id)).toEqual(['nt', 'm18']);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// BUG: whoisCache stale after nick reuse (UI shows previous
+// occupant's DID/handle until something forces a re-WHOIS).
+// Same shape as the silent-guest-fallback bug: cached identity
+// outlives the wire event that should have invalidated it.
+// ═══════════════════════════════════════════════════════════════
+
+describe('whoisCache vs nick reassignment (stale identity bug)', () => {
+  it('removeUserFromAll must drop the whois cache entry for the quitter', () => {
+    const s = () => useStore.getState();
+    s().updateWhois('alice', { did: 'did:plc:OLD', handle: 'alice.example' });
+    s().removeUserFromAll('alice', 'bye');
+    expect(
+      s().whoisCache.has('alice'),
+      'whoisCache must not retain identity for a nick that has quit',
+    ).toBe(false);
+  });
+
+  it('renameUser must move the whois cache entry to the new nick (or clear it)', () => {
+    // If alice changes nick to bob, the cached DID is still valid for
+    // the same human at the new nick. But if we leave it under "alice",
+    // a different person taking the freed nick "alice" later inherits
+    // the stale identity.
+    const s = () => useStore.getState();
+    s().updateWhois('alice', { did: 'did:plc:HER', handle: 'alice.bsky' });
+    s().renameUser('alice', 'bob');
+    expect(
+      s().whoisCache.has('alice'),
+      'after a rename, the old nick must not still resolve to the renamer\'s DID',
+    ).toBe(false);
+  });
+});

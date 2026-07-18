@@ -1,7 +1,9 @@
-import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
-import { useStore, type Message, type PinnedMessage } from '../store';
-import { getNick, requestHistory, sendReaction } from '../irc/client';
+import { useEffect, useRef, useCallback, useState, useMemo, memo } from 'react';
+import { useStore, uniqueMemberCount, type Message, type PinnedMessage } from '../store';
+import { getNick, getClient, requestHistory, sendReaction, sendUnreact, joinChannel } from '../irc/client';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
+import { isDid, isPeerBlocked } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker } from './EmojiPicker';
 import { UserPopover } from './UserPopover';
 import { BlueskyEmbed } from './BlueskyEmbed';
@@ -90,9 +92,11 @@ function textWithoutImages(text: string, imageUrls: string[]): string {
 
 /** Parse text into typed segments for safe React rendering (no dangerouslySetInnerHTML). */
 interface TextSegment {
-  type: 'text' | 'link' | 'code' | 'codeblock' | 'bold' | 'italic' | 'strike';
+  type: 'text' | 'link' | 'code' | 'codeblock' | 'bold' | 'italic' | 'strike' | 'mention' | 'channel';
   content: string;
   href?: string;
+  /** For mention/channel: the actionable value (nick without @, or #channel). */
+  value?: string;
 }
 
 function parseTextSegments(text: string): TextSegment[] {
@@ -106,6 +110,8 @@ function parseTextSegments(text: string): TextSegment[] {
     { re: /\*\*(.+?)\*\*/g, type: 'bold', group: 1 },
     { re: /(?<!\*)\*([^*]+)\*(?!\*)/g, type: 'italic', group: 1 },
     { re: /~~(.+?)~~/g, type: 'strike', group: 1 },
+    { re: /(?<![A-Za-z0-9])@([A-Za-z0-9][A-Za-z0-9._-]*)/g, type: 'mention', group: 1 },
+    { re: /(?<![\w/#])#([A-Za-z0-9][A-Za-z0-9._-]*)/g, type: 'channel', group: 1 },
   ];
 
   // Build a combined list of all matches with positions
@@ -143,6 +149,12 @@ function parseTextSegments(text: string): TextSegment[] {
     }
     if (m.type === 'link') {
       segments.push({ type: 'link', content: m.content, href: m.content });
+    } else if (m.type === 'mention') {
+      // display the full "@nick", act on the bare nick
+      segments.push({ type: 'mention', content: m.full, value: m.content });
+    } else if (m.type === 'channel') {
+      // display + act on the full "#channel"
+      segments.push({ type: 'channel', content: m.full, value: m.full });
     } else {
       segments.push({ type: m.type, content: m.content });
     }
@@ -182,19 +194,48 @@ function renderWithBreaks(text: string): React.ReactNode {
   ));
 }
 
+/** Context for making @nick / #channel spans interactive. */
+interface RenderCtx {
+  channel?: string;
+  onNickClick?: (nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => void;
+}
+
 /** Render text segments as React elements (XSS-safe — no innerHTML). */
-function renderTextSafe(text: string, isMultiline = false): React.ReactElement {
+function renderTextSafe(text: string, ctx?: RenderCtx): React.ReactElement {
   const segments = parseTextSegmentsCached(text);
-  // Decode literal \n sequences for multiline messages and code blocks
-  const hasCodeBlock = segments.some(s => s.type === 'codeblock');
-  const shouldDecode = hasCodeBlock || isMultiline;
   return (
     <>
       {segments.map((seg, i) => {
-        const content = shouldDecode ? seg.content.replace(/\\n/g, '\n') : seg.content;
+        const content = seg.content;
         switch (seg.type) {
           case 'link':
             return <a key={i} href={seg.href} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline break-all">{content}</a>;
+          case 'mention':
+            return (
+              <button
+                key={i}
+                type="button"
+                className="text-accent hover:underline font-medium"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const nick = seg.value ?? content.replace(/^@/, '');
+                  // Resolve DID from the channel roster (impersonation-safe).
+                  const did = ctx?.channel
+                    ? useStore.getState().channels.get(ctx.channel.toLowerCase())?.members.get(nick.toLowerCase())?.did
+                    : undefined;
+                  ctx?.onNickClick?.(nick, did, undefined, e);
+                }}
+              >{content}</button>
+            );
+          case 'channel':
+            return (
+              <button
+                key={i}
+                type="button"
+                className="text-accent hover:underline font-medium"
+                onClick={(e) => { e.stopPropagation(); joinChannel(seg.value ?? content); }}
+              >{content}</button>
+            );
           case 'codeblock':
             return <pre key={i} className="bg-surface rounded px-2 py-1.5 my-1 text-[13px] font-mono overflow-x-auto whitespace-pre-wrap">{content.replace(/^\n|\n$/g, '')}</pre>;
           case 'code':
@@ -220,7 +261,12 @@ function renderTextSafe(text: string, isMultiline = false): React.ReactElement {
 /** Trusted domains that always load inline (our own infrastructure). */
 function isTrustedImageUrl(url: string): boolean {
   try {
-    const u = new URL(url);
+    const u = new URL(url, window.location.origin);
+    // Private freeq media served from our own origin is always first-party —
+    // never gate it behind the "load external media" setting.
+    if (u.origin === window.location.origin && u.pathname.startsWith('/api/v1/media/')) {
+      return true;
+    }
     const h = u.hostname;
     return h === 'cdn.bsky.app' || h.endsWith('.bsky.app') || h.endsWith('.bsky.network')
       || h === 'freeq.at' || h.endsWith('.freeq.at') || h === 'localhost';
@@ -363,15 +409,19 @@ function InlineVideoPlayer({ url }: { url: string }) {
   );
 }
 
-function MessageContent({ msg }: { msg: Message }) {
+function MessageContentImpl({ msg, channel, onNickClick }: {
+  msg: Message;
+  channel?: string;
+  onNickClick?: (nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => void;
+}) {
   const setLightbox = useStore((s) => s.setLightboxUrl);
-  const isMultiline = '+freeq.at/multiline' in (msg.tags || {});
+  const linkCtx: RenderCtx = { channel, onNickClick };
 
   if (msg.isAction) {
     const color = msg.isSelf ? '#b18cff' : nickColor(msg.from);
     return (
       <div className="text-fg-muted italic text-[15px] mt-0.5">
-        <span style={{ color }} className="font-semibold not-italic">{'* '}{msg.from}</span>{' '}{msg.text}
+        <span style={{ color }} className="font-semibold not-italic">{'* '}{displayNameForKey(msg.from)}</span>{' '}{msg.text}
       </div>
     );
   }
@@ -385,12 +435,10 @@ function MessageContent({ msg }: { msg: Message }) {
   // Markdown messages — render with full markdown support
   const mimeType = msg.tags?.['+freeq.at/mime'];
   if (mimeType === 'text/markdown') {
-    // Decode multiline encoding
-    const decoded = isMultiline ? msg.text.replace(/\\n/g, '\n') : msg.text;
     return (
       <div className="mt-0.5">
         {msg.replyTo && <ReplyBadge msgId={msg.replyTo} />}
-        <MarkdownMessage text={decoded} />
+        <MarkdownMessage text={msg.text} />
       </div>
     );
   }
@@ -425,7 +473,7 @@ function MessageContent({ msg }: { msg: Message }) {
     return (
       <div className="mt-0.5">
         {msg.replyTo && <ReplyBadge msgId={msg.replyTo} />}
-        {cleanText && <div className="text-[15px] leading-relaxed mb-1">{renderTextSafe(cleanText, isMultiline)}</div>}
+        {cleanText && <div className="text-[15px] leading-relaxed mb-1">{renderTextSafe(cleanText)}</div>}
         <InlineVideoPlayer url={videoMatch[0]} />
       </div>
     );
@@ -438,7 +486,7 @@ function MessageContent({ msg }: { msg: Message }) {
     return (
       <div className="mt-0.5">
         {msg.replyTo && <ReplyBadge msgId={msg.replyTo} />}
-        {cleanText && <div className="text-[15px] leading-relaxed mb-1">{renderTextSafe(cleanText, isMultiline)}</div>}
+        {cleanText && <div className="text-[15px] leading-relaxed mb-1">{renderTextSafe(cleanText)}</div>}
         <InlineAudioPlayer url={audioMatch[0]} />
       </div>
     );
@@ -458,7 +506,7 @@ function MessageContent({ msg }: { msg: Message }) {
 
       {cleanText && (
         <div className="text-[15px] leading-relaxed [&_pre]:my-1 [&_a]:break-all">
-          {renderTextSafe(cleanText, isMultiline)}
+          {renderTextSafe(cleanText, linkCtx)}
         </div>
       )}
 
@@ -537,6 +585,12 @@ function isGrouped(msgs: Message[], i: number): boolean {
   const curr = msgs[i];
   if (prev.isSystem || curr.isSystem || prev.deleted || curr.deleted) return false;
   if (prev.from !== curr.from) return false;
+  // Don't group across a provenance boundary: a federated message (carrying
+  // +freeq.at/origin) must not collapse under a local sender's header, or it
+  // loses its "via {origin}" and inherits the local verified/signed context.
+  // Same sender + same origin groups; local vs federated (or different origins)
+  // each start a fresh header.
+  if ((prev.tags?.['+freeq.at/origin'] ?? '') !== (curr.tags?.['+freeq.at/origin'] ?? '')) return false;
   if (curr.timestamp.getTime() - prev.timestamp.getTime() > 5 * 60 * 1000) return false;
   return true;
 }
@@ -595,7 +649,7 @@ function DateSeparator({ date }: { date: Date }) {
   );
 }
 
-function SystemMessage({ msg }: { msg: Message }) {
+function SystemMessageImpl({ msg }: { msg: Message }) {
   return (
     <div className="px-4 py-1 flex items-start gap-3">
       <span className="w-10 shrink-0" />
@@ -610,10 +664,10 @@ function SystemMessage({ msg }: { msg: Message }) {
 interface MessageProps {
   msg: Message;
   channel: string;
-  onNickClick: (nick: string, did: string | undefined, e: React.MouseEvent) => void;
+  onNickClick: (nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => void;
 }
 
-function FullMessage({ msg, channel, onNickClick }: MessageProps) {
+function FullMessageImpl({ msg, channel, onNickClick }: MessageProps) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | undefined>();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -625,7 +679,13 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
   // Find DID for this user — check channel members reactively, fall back to authDid for self
   const member = useStore((s) => s.channels.get(channel.toLowerCase())?.members.get(msg.from.toLowerCase()));
   const selfDid = useStore((s) => msg.isSelf ? s.authDid : null);
-  const did = member?.did || selfDid || undefined;
+  const did = member?.did || selfDid || msg.tags?.account || undefined;
+  // Federated provenance: when present, this message was relayed from another
+  // server (+freeq.at/origin = its name). Its identity is peer-vouched by that
+  // server, not verified here — so we show "via {origin}" and suppress the
+  // local "verified" (✓) and "signed" (🔒) badges, which would overstate trust.
+  const origin = msg.tags?.['+freeq.at/origin'];
+  const isFederated = !!origin;
 
   const openEmojiPicker = (e: React.MouseEvent) => {
     setPickerPos({ x: e.clientX, y: e.clientY });
@@ -642,7 +702,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
     >
       <div
         className="cursor-pointer mt-0.5"
-        onClick={(e) => onNickClick(msg.from, did, e)}
+        onClick={(e) => onNickClick(msg.from, did, origin, e)}
       >
         <Avatar nick={msg.from} did={did} />
       </div>
@@ -652,12 +712,14 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
           <button
             className="font-semibold text-[15px] hover:underline"
             style={{ color }}
-            onClick={(e) => onNickClick(msg.from, member?.did, e)}
+            title={isDid(msg.from) ? msg.from : undefined}
+            onClick={(e) => onNickClick(msg.from, member?.did, origin, e)}
           >
-            {msg.from}
+            {displayNameForKey(msg.from)}
           </button>
-          {member?.did && <VerifiedBadge />}
-          {msg.tags['+freeq.at/sig'] && <SignedBadge />}
+          {member?.did && !isFederated && <VerifiedBadge />}
+          {isFederated && <ViaBadge origin={origin!} />}
+          {msg.tags['+freeq.at/sig'] && !isFederated && <SignedBadge msgid={msg.id} />}
           {member?.away != null && (
             <span className="text-xs text-fg-dim bg-warning/10 text-warning px-1.5 py-0.5 rounded">away</span>
           )}
@@ -666,7 +728,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
           {msg.editOf && !msg.isStreaming && <span className="text-xs text-fg-dim">(edited)</span>}
           {msg.encrypted && <EncryptedBadge />}
         </div>
-        <MessageContent msg={msg} />
+        <MessageContent msg={msg} channel={channel} onNickClick={onNickClick} />
         <Reactions msg={msg} channel={channel} />
       </div>
 
@@ -714,7 +776,7 @@ function FullMessage({ msg, channel, onNickClick }: MessageProps) {
   );
 }
 
-function GroupedMessage({ msg, channel }: MessageProps) {
+function GroupedMessageImpl({ msg, channel, onNickClick }: MessageProps) {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [pickerPos, setPickerPos] = useState<{ x: number; y: number } | undefined>();
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
@@ -739,7 +801,7 @@ function GroupedMessage({ msg, channel }: MessageProps) {
         {formatTime(msg.timestamp)}
       </span>
       <div className="min-w-0 flex-1">
-        <MessageContent msg={msg} />
+        <MessageContent msg={msg} channel={channel} onNickClick={onNickClick} />
         <Reactions msg={msg} channel={channel} />
       </div>
 
@@ -783,6 +845,18 @@ function GroupedMessage({ msg, channel }: MessageProps) {
   );
 }
 
+// Memoized row components. The store preserves each message object's identity
+// across appends (only the new message is a fresh object), and `channel` +
+// `onNickClick` are stable, so React.memo's shallow prop check lets every
+// unchanged row bail out — turning a per-message re-render + media-regex
+// re-parse of all ~1000 rows into a single new row. `MessageContent` is
+// wrapped too so its ~10 uncached media/link regexes don't run for unchanged
+// rows.
+export const MessageContent = memo(MessageContentImpl);
+const SystemMessage = memo(SystemMessageImpl);
+const FullMessage = memo(FullMessageImpl);
+const GroupedMessage = memo(GroupedMessageImpl);
+
 /** Verification badge for AT Protocol-authenticated users */
 function VerifiedBadge() {
   return (
@@ -794,15 +868,74 @@ function VerifiedBadge() {
   );
 }
 
-/** Signed message badge — message has a server-attested cryptographic signature */
-function SignedBadge() {
+/** Provenance badge for a federated message — relayed from another server.
+    The sender's identity is vouched for by that server, not verified here. */
+function ViaBadge({ origin }: { origin: string }) {
+  return (
+    <span
+      className="text-xs text-fg-dim bg-white/5 px-1.5 py-0.5 rounded cursor-default"
+      title={`Relayed from ${origin}. This server didn't verify the sender's identity — ${origin} vouches for it.`}
+    >
+      via {origin}
+    </span>
+  );
+}
+
+/** Result of checking a signature against GET /api/v1/verify/{msgid}. */
+type VerifyOutcome = 'device' | 'server' | 'failed';
+
+// Cache checked results per msgid so re-opening the popover (or the same
+// badge in another render) doesn't re-fetch. Definitive server answers are
+// cached; network errors are not, so a transient failure can be retried.
+const verifyCache = new Map<string, VerifyOutcome>();
+
+async function verifySignature(msgid: string): Promise<VerifyOutcome> {
+  const cached = verifyCache.get(msgid);
+  if (cached) return cached;
+  try {
+    const r = await fetch(`/api/v1/verify/${encodeURIComponent(msgid)}`);
+    if (!r.ok) return 'failed';
+    const j = await r.json();
+    const v = j?.verification;
+    let outcome: VerifyOutcome = 'failed';
+    if (v?.valid && v.verified_by === 'client-session-key') outcome = 'device';
+    else if (v?.valid && v.verified_by === 'server-key') outcome = 'server';
+    verifyCache.set(msgid, outcome);
+    return outcome;
+  } catch {
+    return 'failed';
+  }
+}
+
+const VERIFY_LABELS: Record<VerifyOutcome, { text: string; tone: string }> = {
+  device: { text: 'Verified — signed on the sender’s device', tone: 'text-success' },
+  server: { text: 'Verified — signed by the server on the sender’s behalf', tone: 'text-success' },
+  failed: { text: 'Signature could not be verified', tone: 'text-warning' },
+};
+
+/** Signed message badge — message carries a cryptographic signature.
+ *  Clicking it checks the signature against the server's verify endpoint
+ *  and shows the actual result, instead of asserting validity unchecked. */
+function SignedBadge({ msgid }: { msgid: string }) {
   const [showInfo, setShowInfo] = useState(false);
+  const [outcome, setOutcome] = useState<VerifyOutcome | null>(() => verifyCache.get(msgid) ?? null);
+  const [checking, setChecking] = useState(false);
+
+  const toggle = () => {
+    const opening = !showInfo;
+    setShowInfo(opening);
+    if (opening && outcome === null && !checking) {
+      setChecking(true);
+      verifySignature(msgid).then((o) => { setOutcome(o); setChecking(false); });
+    }
+  };
+
   return (
     <span className="relative inline-block">
       <button
         className="text-success text-xs opacity-60 hover:opacity-100 transition-opacity"
-        onClick={(e) => { e.stopPropagation(); setShowInfo(!showInfo); }}
-        title="Cryptographically signed message"
+        onClick={(e) => { e.stopPropagation(); toggle(); }}
+        title="Signed message — click to verify"
       >
         <svg className="w-3 h-3 inline -mt-0.5" viewBox="0 0 16 16" fill="currentColor">
           <path d="M8 1a2 2 0 00-2 2v3H5a2 2 0 00-2 2v5a2 2 0 002 2h6a2 2 0 002-2V8a2 2 0 00-2-2H10V3a2 2 0 00-2-2zm0 1.5a.5.5 0 01.5.5v3h-1V3a.5.5 0 01.5-.5z"/>
@@ -817,9 +950,23 @@ function SignedBadge() {
             </svg>
             Signed Message
           </div>
+          {checking ? (
+            <div className="text-[11px] text-fg-dim flex items-center gap-1.5 mb-1">
+              <svg className="animate-spin w-3 h-3" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              Checking signature…
+            </div>
+          ) : outcome && (
+            <div className={`text-[11px] font-medium mb-1 ${VERIFY_LABELS[outcome].tone}`}>
+              {outcome !== 'failed' && '✓ '}{VERIFY_LABELS[outcome].text}
+            </div>
+          )}
           <p className="text-[11px] text-fg-muted leading-relaxed">
-            This message is cryptographically signed by the sender&apos;s verified identity.
-            It cannot be forged or tampered with — the signature is tied to their AT Protocol DID.
+            This message carries a cryptographic signature tied to the sender&apos;s
+            AT Protocol DID. The check above verifies it against the server&apos;s
+            signing keys.
           </p>
           <button
             className="text-[10px] text-fg-dim hover:text-fg-muted mt-1.5"
@@ -887,7 +1034,9 @@ function Reactions({ msg, channel }: { msg: Message; channel: string }) {
         return (
           <button
             key={emoji}
-            onClick={() => sendReaction(channel, emoji, msg.id)}
+            onClick={() => isMine
+              ? sendUnreact(channel, emoji, msg.id)
+              : sendReaction(channel, emoji, msg.id)}
             className={`rounded-lg px-2.5 py-1 text-sm inline-flex items-center gap-1.5 border ${
               isMine
                 ? 'bg-accent/10 border-accent/30 text-accent'
@@ -938,7 +1087,7 @@ function TypingIndicatorBar({ channel }: { channel: string }) {
 function ChannelEmptyState({ channel }: { channel: string }) {
   const ch = useStore((s) => s.channels.get(channel.toLowerCase()));
   const topic = ch?.topic;
-  const memberCount = ch?.members.size ?? 0;
+  const memberCount = ch ? uniqueMemberCount(ch.members) : 0;
   const isEncrypted = ch?.isEncrypted;
 
   return (
@@ -1068,14 +1217,38 @@ export function MessageList() {
     return s.channels.get(s.activeChannel.toLowerCase())?.messages || [];
   });
   const showJoinPart = useStore((s) => s.showJoinPart);
+  const blockedDids = useStore((s) => s.blockedDids);
+  const blockedNicks = useStore((s) => s.blockedNicks);
+  const activeMembers = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.members);
 
   // Filter out join/part/quit noise unless the user opted in.
   // Keep moderation actions (kicks, bans, mode changes) always visible.
   const JOIN_PART_RE = /^.+ (joined|left|quit)(\s|$)/;
   const messages = useMemo(() => {
-    if (showJoinPart) return rawMessages;
-    return rawMessages.filter((m) => !m.isSystem || !JOIN_PART_RE.test(m.text));
-  }, [rawMessages, showJoinPart]);
+    let msgs = rawMessages;
+    // Hide messages from blocked users (DID first, nick fallback for guests).
+    if (blockedDids.length > 0 || blockedNicks.length > 0) {
+      msgs = msgs.filter((m) => {
+        if (m.isSelf || m.isSystem) return true;
+        const did = activeMembers?.get(m.from.toLowerCase())?.did || m.tags?.account;
+        if (did && blockedDids.includes(did)) return false;
+        return !blockedNicks.includes(m.from.toLowerCase());
+      });
+    }
+    if (showJoinPart) return msgs;
+    return msgs.filter((m) => !m.isSystem || !JOIN_PART_RE.test(m.text));
+  }, [rawMessages, showJoinPart, blockedDids, blockedNicks, activeMembers]);
+
+  // In-thread blocked indicator: a blocked peer's thread is hidden from the
+  // sidebar but still reachable (quick switcher), and their messages are
+  // filtered — without a banner the history just looks silently one-sided.
+  const allChannels = useStore((s) => s.channels);
+  const peerBlocked =
+    activeChannel !== 'server' &&
+    !activeChannel.startsWith('#') &&
+    !activeChannel.startsWith('&') &&
+    isPeerBlocked(allChannels, activeChannel, blockedNicks, blockedDids,
+      (did) => getClient()?.getNickForDid(did));
 
   const lastReadMsgId = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.lastReadMsgId);
   const pins = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.pins ?? EMPTY_PINS);
@@ -1084,7 +1257,7 @@ export function MessageList() {
   const stickToBottomRef = useRef(true);
   const [showScrollBtn, setShowScrollBtn] = useState(false);
   const [newMsgCount, setNewMsgCount] = useState(0);
-  const [popover, setPopover] = useState<{ nick: string; did?: string; pos: { x: number; y: number } } | null>(null);
+  const [popover, setPopover] = useState<{ nick: string; did?: string; origin?: string; pos: { x: number; y: number } } | null>(null);
 
   // Track whether user has scrolled up (unstick from bottom)
   const handleScroll = useCallback(() => {
@@ -1181,8 +1354,8 @@ export function MessageList() {
     return () => clearTimeout(t);
   }, [activeChannel]);
 
-  const onNickClick = useCallback((nick: string, did: string | undefined, e: React.MouseEvent) => {
-    setPopover({ nick, did, pos: { x: e.clientX, y: e.clientY } });
+  const onNickClick = useCallback((nick: string, did: string | undefined, origin: string | undefined, e: React.MouseEvent) => {
+    setPopover({ nick, did, origin, pos: { x: e.clientX, y: e.clientY } });
   }, []);
 
   return (
@@ -1193,6 +1366,24 @@ export function MessageList() {
       {activeChannel.startsWith('#') && pins.length > 0 && (
         <div className="sticky top-0 z-10">
           <PinnedBar pins={pins} messages={messages} />
+        </div>
+      )}
+      {peerBlocked && (
+        <div className="sticky top-0 z-10 px-4 py-2 bg-danger/10 border-b border-danger/30 text-sm text-fg-muted flex items-center justify-between gap-2">
+          <span>
+            You've blocked <span className="font-semibold">{displayNameForKey(activeChannel)}</span> — their messages are hidden.
+          </span>
+          <button
+            className="text-danger hover:underline shrink-0 text-xs"
+            onClick={() => {
+              const s = useStore.getState();
+              s.unblockUser(activeChannel);
+              const peerNick = getClient()?.getNickForDid(activeChannel);
+              if (peerNick) s.unblockUser(peerNick);
+            }}
+          >
+            Unblock
+          </button>
         </div>
       )}
       {messages.length === 0 && showSkeleton && activeChannel !== 'server' && (
@@ -1227,9 +1418,11 @@ export function MessageList() {
           ) : (
             <>
               <div className="text-3xl mb-2">💬</div>
-              <div className="text-xl text-fg font-bold">Conversation with {activeChannel}</div>
+              <div className="text-xl text-fg font-bold" title={isDid(activeChannel) ? activeChannel : undefined}>
+                Conversation with {displayNameForKey(activeChannel)}
+              </div>
               <div className="text-sm mt-2 text-center max-w-xs leading-relaxed text-fg-dim">
-                Direct messages are private between you and <span className="text-fg-muted">{activeChannel}</span>.
+                Direct messages are private between you and <span className="text-fg-muted">{displayNameForKey(activeChannel)}</span>.
               </div>
             </>
           )}
@@ -1279,7 +1472,7 @@ export function MessageList() {
             {shouldShowDateSep(messages, i) && <DateSeparator date={msg.timestamp} />}
             {msg.deleted ? (
               <div className="px-4 py-0.5 text-xs italic text-[var(--text-muted)] opacity-50">
-                Message from {msg.from} deleted
+                Message from {displayNameForKey(msg.from)} deleted
               </div>
             ) : msg.isSystem ? (
               <SystemMessage msg={msg} />
@@ -1317,6 +1510,7 @@ export function MessageList() {
         <UserPopover
           nick={popover.nick}
           did={popover.did}
+          origin={popover.origin}
           position={popover.pos}
           onClose={() => setPopover(null)}
         />

@@ -1,19 +1,34 @@
 import SwiftUI
 
-/// Full-screen chat list — channels and DMs with last message preview.
+/// Top-level chat list. Renders either channels (`.channels`) or direct
+/// messages (`.dms`); MainTabView shows one of each as a peer tab.
 struct ChatsTab: View {
+    enum Mode {
+        case channels
+        case dms
+    }
+
+    let mode: Mode
+
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var networkMonitor: NetworkMonitor
     @State private var showingJoinSheet = false
+    @State private var showDigest = false
     @State private var searchText = ""
     @State private var navigationPath = NavigationPath()
+
+    /// Channels carrying unread messages — the input to the cross-channel
+    /// "catch me up" digest.
+    private var unreadChannels: [ChannelState] {
+        appState.channels.filter { (appState.unreadCounts[$0.name] ?? 0) > 0 }
+    }
 
     var body: some View {
         NavigationStack(path: $navigationPath) {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
-                if allConversations.isEmpty {
+                if conversations.isEmpty {
                     emptyState
                 } else {
                     List {
@@ -23,68 +38,57 @@ struct ChatsTab: View {
                                 Image(systemName: "wifi.slash")
                                     .font(.system(size: 12))
                                 Text("No network connection")
-                                    .font(.system(size: 13, weight: .medium))
+                                    .font(.fqFootnote.weight(.medium))
                             }
                             .foregroundColor(.white)
                             .listRowBackground(Theme.danger)
                         }
 
-                        ForEach(filteredConversations, id: \.name) { conv in
-                            NavigationLink(value: conv.name) {
-                                ChatRow(conversation: conv, unreadCount: appState.unreadCounts[conv.name] ?? 0)
+                        if showFavoritesSection {
+                            Section("Favorites") {
+                                ForEach(favoriteConversations, id: \.name) { conversationRow($0) }
                             }
-                            .listRowBackground(Theme.bgSecondary)
-                            .listRowSeparatorTint(Theme.border)
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) {
-                                    if conv.name.hasPrefix("#") {
-                                        appState.partChannel(conv.name)
-                                    } else {
-                                        appState.dmBuffers.removeAll { $0.name == conv.name }
-                                    }
-                                } label: {
-                                    Label(conv.name.hasPrefix("#") ? "Leave" : "Close", systemImage: "arrow.right.square")
-                                }
+                            Section(navTitle) {
+                                ForEach(otherConversations, id: \.name) { conversationRow($0) }
                             }
-                            .swipeActions(edge: .leading) {
-                                Button {
-                                    appState.toggleMute(conv.name)
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                } label: {
-                                    Label(
-                                        appState.isMuted(conv.name) ? "Unmute" : "Mute",
-                                        systemImage: appState.isMuted(conv.name) ? "bell.fill" : "bell.slash.fill"
-                                    )
-                                }
-                                .tint(Theme.warning)
-
-                                Button {
-                                    appState.markRead(conv.name)
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                } label: {
-                                    Label("Read", systemImage: "checkmark.circle")
-                                }
-                                .tint(Theme.accent)
-                            }
+                        } else {
+                            ForEach(filteredConversations, id: \.name) { conversationRow($0) }
                         }
                     }
                     .listStyle(.plain)
                     .scrollContentBackground(.hidden)
-                    .searchable(text: $searchText, prompt: "Search chats")
+                    .searchable(text: $searchText, prompt: searchPrompt)
                 }
             }
-            .navigationTitle("Chats")
+            .navigationTitle(navTitle)
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(action: { showingJoinSheet = true }) {
-                        Image(systemName: "square.and.pencil")
-                            .font(.system(size: 16))
-                            .foregroundColor(Theme.accent)
+                if mode == .channels {
+                    // Catch me up — on-device digest across all unread channels.
+                    if IntelligenceService.shared.isAvailable && !unreadChannels.isEmpty {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(action: { showDigest = true }) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundStyle(Theme.signalGradient)
+                            }
+                            .accessibilityLabel("Catch me up across channels")
+                        }
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button(action: { showingJoinSheet = true }) {
+                            Image(systemName: "square.and.pencil")
+                                .font(.system(size: 16))
+                                .foregroundColor(Theme.accent)
+                        }
                     }
                 }
+            }
+            .sheet(isPresented: $showDigest) {
+                CatchUpDigestSheet()
+                    .presentationDetents([.medium, .large])
             }
             .navigationDestination(for: String.self) { channelName in
                 ChatDetailView(channelName: channelName)
@@ -94,51 +98,176 @@ struct ChatsTab: View {
                     .presentationDetents([.medium])
                     .presentationDragIndicator(.visible)
             }
+            .onChange(of: appState.pendingChannelNav) {
+                // Only the Channels pane consumes channel navigations (from the
+                // catch-up digest).
+                guard mode == .channels, let ch = appState.pendingChannelNav else { return }
+                appState.pendingChannelNav = nil
+                navigationPath = NavigationPath()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    navigationPath.append(ch)
+                }
+            }
             .onChange(of: appState.pendingDMNick) {
-                if let nick = appState.pendingDMNick {
-                    appState.pendingDMNick = nil
-                    // Pop to root then push the DM
-                    navigationPath = NavigationPath()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        appState.activeChannel = nick
-                        navigationPath.append(nick)
-                    }
+                // Only the DMs pane consumes pending-DM navigations; the
+                // channels pane ignores them so we don't push a DM into
+                // the channels nav stack.
+                guard mode == .dms, let nick = appState.pendingDMNick else { return }
+                appState.pendingDMNick = nil
+                navigationPath = NavigationPath()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    appState.activeChannel = nick
+                    navigationPath.append(nick)
                 }
             }
         }
     }
 
-    private var allConversations: [ChannelState] {
-        (appState.channels + appState.dmBuffers)
-            .filter { !$0.name.trimmingCharacters(in: .whitespaces).isEmpty }
-            .sorted { a, b in a.lastActivity > b.lastActivity }
+    /// Favorited conversations, pinned to a top section (any name; works for
+    /// channels and DMs). Order follows the base sort (alpha / recency).
+    private var favoriteConversations: [ChannelState] {
+        filteredConversations.filter { appState.isFavorite($0.name) }.sorted { a, b in
+            (appState.favoritesOrder.firstIndex(of: a.name) ?? .max)
+                < (appState.favoritesOrder.firstIndex(of: b.name) ?? .max)
+        }
+    }
+
+    private var otherConversations: [ChannelState] {
+        filteredConversations.filter { !appState.isFavorite($0.name) }
+    }
+
+    /// Only split into Favorites / rest when there are favorites and we're not
+    /// filtering by search (a search should show one flat result list).
+    private var showFavoritesSection: Bool {
+        searchText.isEmpty && !favoriteConversations.isEmpty
+    }
+
+    /// One conversation row: navigation link + swipe actions + a press-and-hold
+    /// context menu (favorite / mute / mark-read / leave).
+    @ViewBuilder
+    private func conversationRow(_ conv: ChannelState) -> some View {
+        let isChannel = conv.name.hasPrefix("#") || conv.name.hasPrefix("&")
+        NavigationLink(value: conv.name) {
+            ChatRow(conversation: conv, unreadCount: appState.unreadCounts[conv.name] ?? 0)
+        }
+        .listRowBackground(Theme.bgSecondary)
+        .listRowSeparatorTint(Theme.border)
+        .swipeActions(edge: .trailing) {
+            Button(role: .destructive) {
+                if isChannel { appState.partChannel(conv.name) } else { appState.closeDM(conv.name) }
+            } label: {
+                Label(isChannel ? "Leave" : "Close", systemImage: "arrow.right.square")
+            }
+        }
+        .swipeActions(edge: .leading) {
+            Button {
+                appState.toggleFavorite(conv.name)
+            } label: {
+                Label(appState.isFavorite(conv.name) ? "Unfavorite" : "Favorite",
+                      systemImage: appState.isFavorite(conv.name) ? "star.slash.fill" : "star.fill")
+            }
+            .tint(.yellow)
+
+            Button {
+                appState.toggleMute(conv.name)
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } label: {
+                Label(appState.isMuted(conv.name) ? "Unmute" : "Mute",
+                      systemImage: appState.isMuted(conv.name) ? "bell.fill" : "bell.slash.fill")
+            }
+            .tint(Theme.warning)
+        }
+        .contextMenu {
+            Button {
+                appState.toggleFavorite(conv.name)
+            } label: {
+                Label(appState.isFavorite(conv.name) ? "Remove from Favorites" : "Add to Favorites",
+                      systemImage: appState.isFavorite(conv.name) ? "star.slash" : "star")
+            }
+            Button {
+                appState.toggleMute(conv.name)
+            } label: {
+                Label(appState.isMuted(conv.name) ? "Unmute" : "Mute",
+                      systemImage: appState.isMuted(conv.name) ? "bell" : "bell.slash")
+            }
+            Button {
+                appState.markRead(conv.name)
+            } label: {
+                Label("Mark as Read", systemImage: "checkmark.circle")
+            }
+            Divider()
+            Button(role: .destructive) {
+                if isChannel { appState.partChannel(conv.name) } else { appState.closeDM(conv.name) }
+            } label: {
+                Label(isChannel ? "Leave Channel" : "Close", systemImage: "arrow.right.square")
+            }
+        }
+    }
+
+    private var conversations: [ChannelState] {
+        let source: [ChannelState]
+        switch mode {
+        case .channels: source = appState.channels
+        case .dms:      source = appState.dmBuffers
+        }
+        let filtered = source.filter {
+            !$0.name.trimmingCharacters(in: .whitespaces).isEmpty
+            // Hide DMs from people you've blocked.
+            && !(mode == .dms && appState.isBlocked(nick: $0.name))
+        }
+        switch mode {
+        case .channels:
+            // Channels are durable, named rooms — alphabetical is the
+            // ordering the user can predict. The previous recency sort
+            // shuffled #freeq, #avtest, #yokota every time a message
+            // landed; alphabetical lets muscle memory work.
+            return filtered.sorted { a, b in
+                a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+        case .dms:
+            // DMs are 1:1 threads — recency matters: the person you're
+            // actively talking to should float to the top.
+            return filtered.sorted { a, b in a.lastActivity > b.lastActivity }
+        }
     }
 
     private var filteredConversations: [ChannelState] {
-        let convos = allConversations
+        let convos = conversations
         if searchText.isEmpty { return convos }
         return convos.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
     }
 
+    private var navTitle: String {
+        switch mode {
+        case .channels: return "Channels"
+        case .dms:      return "Direct Messages"
+        }
+    }
+
+    private var searchPrompt: String {
+        switch mode {
+        case .channels: return "Search channels"
+        case .dms:      return "Search messages"
+        }
+    }
+
+    @ViewBuilder
     private var emptyState: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "bubble.left.and.bubble.right")
-                .font(.system(size: 48))
-                .foregroundColor(Theme.textMuted)
-            Text("No conversations yet")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundColor(Theme.textSecondary)
-            Text("Join a channel to get started")
-                .font(.system(size: 14))
-                .foregroundColor(Theme.textMuted)
-            Button(action: { showingJoinSheet = true }) {
-                HStack(spacing: 6) {
-                    Image(systemName: "plus.circle.fill")
-                    Text("Join Channel")
-                }
-                .font(.system(size: 15, weight: .medium))
-                .foregroundColor(Theme.accent)
-            }
+        switch mode {
+        case .channels:
+            EmptyStateView(
+                icon: "number",
+                title: "No channels yet",
+                message: "Join a channel to jump into the conversation.",
+                actionTitle: "Join a channel",
+                action: { showingJoinSheet = true }
+            )
+        case .dms:
+            EmptyStateView(
+                icon: "bubble.left.and.bubble.right",
+                title: "No direct messages yet",
+                message: "Tap anyone's avatar in a channel to start a private, verified chat."
+            )
         }
     }
 }
@@ -171,19 +300,32 @@ struct ChatRow: View {
         conversation.messages.last(where: { !$0.from.isEmpty && !$0.isDeleted })
     }
 
+    private static let listTimeFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        f.timeStyle = .short  // "3:42 PM" in en_US, "15:42" in en_GB / de_DE / etc.
+        f.dateStyle = .none
+        return f
+    }()
+
+    private static let listDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = .current
+        // setLocalizedDateFormatFromTemplate respects the user's region:
+        // "1/15/26" in en_US, "15/01/2026" in en_GB / de_DE.
+        f.setLocalizedDateFormatFromTemplate("yMd")
+        return f
+    }()
+
     private var timeString: String {
         guard let msg = lastMessage else { return "" }
         let cal = Calendar.current
         if cal.isDateInToday(msg.timestamp) {
-            let fmt = DateFormatter()
-            fmt.dateFormat = "HH:mm"
-            return fmt.string(from: msg.timestamp)
+            return Self.listTimeFormatter.string(from: msg.timestamp)
         } else if cal.isDateInYesterday(msg.timestamp) {
             return "Yesterday"
         } else {
-            let fmt = DateFormatter()
-            fmt.dateFormat = "dd/MM/yy"
-            return fmt.string(from: msg.timestamp)
+            return Self.listDateFormatter.string(from: msg.timestamp)
         }
     }
 
@@ -219,7 +361,7 @@ struct ChatRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(isChannel ? conversation.name : "@" + conversation.name)
-                        .font(.system(size: 16, weight: unreadCount > 0 ? .bold : .regular))
+                        .font(.fqCallout.weight(unreadCount > 0 ? .bold : .regular))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(1)
 
@@ -230,16 +372,16 @@ struct ChatRow: View {
                     }
 
                     // Member count for channels
-                    if isChannel && conversation.members.count > 0 {
-                        Text("\(conversation.members.count)")
-                            .font(.system(size: 11))
+                    if isChannel && conversation.uniqueMemberCount > 0 {
+                        Text("\(conversation.uniqueMemberCount)")
+                            .font(.fqCaption2)
                             .foregroundColor(Theme.textMuted)
                     }
 
                     Spacer()
 
                     Text(timeString)
-                        .font(.system(size: 12))
+                        .font(.fqCaption)
                         .foregroundColor(unreadCount > 0 ? Theme.accent : Theme.textMuted)
                 }
 
@@ -252,17 +394,17 @@ struct ChatRow: View {
                                 Text("\(msg.from): \(msg.text)")
                             }
                         }
-                        .font(.system(size: 14))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textSecondary)
                         .lineLimit(2)
                     } else if !conversation.topic.isEmpty {
                         Text(conversation.topic)
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                             .lineLimit(1)
                     } else {
                         Text("No messages yet")
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                             .foregroundColor(Theme.textMuted)
                             .lineLimit(1)
                     }
@@ -271,7 +413,7 @@ struct ChatRow: View {
 
                     if unreadCount > 0 {
                         Text("\(unreadCount)")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.fqCaption.weight(.bold))
                             .foregroundColor(.white)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)

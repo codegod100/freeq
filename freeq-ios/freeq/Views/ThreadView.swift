@@ -43,7 +43,7 @@ struct ThreadView: View {
     @StateObject private var avatarCache = AvatarCache.shared
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -81,26 +81,37 @@ struct ThreadView: View {
                                     VStack(alignment: .leading, spacing: 4) {
                                         HStack(alignment: .firstTextBaseline, spacing: 6) {
                                             Text(((channel?.memberInfo(for: msg.from)?.prefix ?? "") + msg.from))
-                                                .font(.system(size: 14, weight: .bold))
+                                                .font(.fqFootnote.weight(.bold))
                                                 .foregroundColor(Theme.nickColor(for: msg.from))
 
-                                            if avatarCache.avatarURL(for: msg.from.lowercased()) != nil {
+                                            if msg.origin == nil && avatarCache.avatarURL(for: msg.from.lowercased()) != nil {
                                                 VerifiedBadge(size: 11)
                                             }
 
+                                            if let origin = msg.origin {
+                                                Text("via \(origin)")
+                                                    .font(.fqCaption2)
+                                                    .foregroundColor(Theme.textMuted)
+                                            }
+
                                             Text(formatTime(msg.timestamp))
-                                                .font(.system(size: 11))
+                                                .font(.fqCaption2)
                                                 .foregroundColor(Theme.textMuted)
+
+                                            if msg.origin == nil && msg.isSigned {
+                                                Image(systemName: "lock.fill")
+                                                    .font(.system(size: 9, weight: .semibold))
+                                                    .foregroundColor(Theme.success)
+                                            }
                                         }
 
-                                        Text(msg.text)
-                                            .font(.system(size: 15))
+                                        MarkdownText(raw: msg.text)
+                                            .font(.fqSubheadline)
                                             .foregroundColor(Theme.textPrimary)
-                                            .textSelection(.enabled)
 
                                         if msg.isEdited {
                                             Text("edited")
-                                                .font(.system(size: 10, weight: .semibold))
+                                                .font(.fqCaption2.weight(.semibold))
                                                 .foregroundColor(Theme.accent)
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
@@ -114,10 +125,10 @@ struct ThreadView: View {
                                                 ForEach(Array(msg.reactions.keys.sorted()), id: \.self) { emoji in
                                                     let nicks = msg.reactions[emoji] ?? []
                                                     HStack(spacing: 2) {
-                                                        Text(emoji).font(.system(size: 13))
+                                                        Text(emoji).font(.fqFootnote)
                                                         if nicks.count > 1 {
                                                             Text("\(nicks.count)")
-                                                                .font(.system(size: 10, weight: .medium))
+                                                                .font(.fqCaption2.weight(.medium))
                                                                 .foregroundColor(Theme.textSecondary)
                                                         }
                                                     }
@@ -150,7 +161,7 @@ struct ThreadView: View {
                             Image(systemName: "arrowshape.turn.up.left.fill")
                                 .font(.system(size: 13))
                             Text("Reply to thread")
-                                .font(.system(size: 15, weight: .medium))
+                                .font(.fqSubheadline.weight(.medium))
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 12)
@@ -164,7 +175,7 @@ struct ThreadView: View {
             }
             .navigationTitle("Thread")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {

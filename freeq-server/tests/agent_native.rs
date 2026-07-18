@@ -33,7 +33,7 @@ fn start_deadlock_detector() {
 use freeq_sdk::auth::{ChallengeSigner, KeySigner};
 use freeq_sdk::client::{self, ConnectConfig};
 use freeq_sdk::crypto::PrivateKey;
-use freeq_sdk::did::{self, DidResolver};
+use freeq_sdk::did::DidResolver;
 use freeq_sdk::event::Event;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -69,24 +69,6 @@ async fn start_test_server_with_db(
     };
     let server = freeq_server::server::Server::with_resolver(config, resolver);
     server.start().await.unwrap()
-}
-
-async fn start_test_server_with_web(
-    resolver: DidResolver,
-) -> (
-    std::net::SocketAddr,
-    std::net::SocketAddr,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-) {
-    let config = freeq_server::config::ServerConfig {
-        listen_addr: "127.0.0.1:0".to_string(),
-        web_addr: Some("127.0.0.1:0".to_string()),
-        server_name: "test-server".to_string(),
-        challenge_timeout_secs: 60,
-        ..Default::default()
-    };
-    let server = freeq_server::server::Server::with_resolver(config, resolver);
-    server.start_with_web().await.unwrap()
 }
 
 async fn start_test_server_with_web_and_db(
@@ -260,7 +242,7 @@ async fn expect_no_event(
 async fn did_key_auth_ed25519() {
     let (addr, server_handle) = start_test_server(empty_resolver()).await;
 
-    let (did, handle, mut events) = connect_did_key(addr, "keybot").await;
+    let (did, handle, _) = connect_did_key(addr, "keybot").await;
 
     assert!(did.starts_with("did:key:"));
 
@@ -447,13 +429,239 @@ async fn provenance_submit() {
         .await
         .unwrap();
 
+    // Free-form provenance (non FreeqBotDelegation/v1) is stored unverified.
     expect_raw_line(
         &mut events,
         2000,
-        "Provenance declaration stored",
-        "PROVENANCE stored",
+        "Provenance stored (unverified)",
+        "PROVENANCE stored unverified",
     )
     .await;
+
+    handle.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+// ── Test: PROVENANCE FreeqBotDelegation/v1 verification ──────────────
+
+/// Spin up a session, register a known ed25519 key as the creator's MSGSIG
+/// (overwriting the SDK's auto-generated one), then disconnect. Returns
+/// `(creator_did, creator_signing_key)` so the caller can mint signed certs.
+async fn register_creator_msgsig(
+    addr: std::net::SocketAddr,
+    nick: &str,
+) -> (String, ed25519_dalek::SigningKey) {
+    use base64::Engine;
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let pk = PrivateKey::ed25519_from_bytes(&signing_key.to_bytes()).unwrap();
+    let did = format!("did:key:{}", pk.public_key_multibase());
+    let signer: Arc<dyn ChallengeSigner> = Arc::new(KeySigner::new(did.clone(), pk));
+
+    let config = ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: nick.to_string(),
+        user: nick.to_string(),
+        realname: format!("{nick} creator"),
+        ..Default::default()
+    };
+    let (handle, mut events) = client::connect(config, Some(signer));
+    expect_event(
+        &mut events,
+        2000,
+        |e| matches!(e, Event::Connected),
+        "Connected",
+    )
+    .await;
+    expect_event(
+        &mut events,
+        2000,
+        |e| matches!(e, Event::Authenticated { .. }),
+        "Authenticated",
+    )
+    .await;
+    expect_event(
+        &mut events,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "Registered",
+    )
+    .await;
+
+    // Overwrite SDK's auto-MSGSIG with our known key
+    let pubkey_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(signing_key.verifying_key().as_bytes());
+    handle.raw(&format!("MSGSIG {pubkey_b64}")).await.unwrap();
+    expect_raw_line(&mut events, 2000, "MSGSIG OK", "MSGSIG accepted").await;
+
+    handle.quit(None).await.unwrap();
+    (did, signing_key)
+}
+
+/// Build a FreeqBotDelegation/v1 cert and sign it with the creator's key.
+fn build_signed_cert(
+    bot_did: &str,
+    creator_did: &str,
+    creator_key: &ed25519_dalek::SigningKey,
+) -> serde_json::Value {
+    use base64::Engine;
+    use ed25519_dalek::Signer;
+    let bot_multibase = bot_did.strip_prefix("did:key:").unwrap_or("");
+    let mut cert = serde_json::json!({
+        "type": "FreeqBotDelegation/v1",
+        "bot_did": bot_did,
+        "bot_public_key": bot_multibase,
+        "creator_did": creator_did,
+        "created_at": "2026-05-08T15:00:00Z",
+        "revocation_authority": creator_did,
+    });
+    let canonical = freeq_sdk::canonical::canonicalize(&cert).unwrap();
+    let sig = creator_key.sign(canonical.as_bytes());
+    cert["signature"] = serde_json::Value::String(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes()),
+    );
+    cert
+}
+
+#[tokio::test]
+async fn provenance_freeq_bot_delegation_verified() {
+    // Server with DB so MSGSIG keys persist across the disconnect/reconnect
+    // boundary.
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+
+    // Creator registers a known signing key, then disconnects.
+    let (creator_did, creator_key) = register_creator_msgsig(addr, "creator").await;
+
+    // Bot connects under its own did:key, mints a cert signed by creator's key.
+    let (bot_did, handle, mut events) = connect_did_key(addr, "verifybot").await;
+    let cert = build_signed_cert(&bot_did, &creator_did, &creator_key);
+    handle.submit_provenance(&cert).await.unwrap();
+
+    expect_raw_line(
+        &mut events,
+        2000,
+        "Provenance verified",
+        "FreeqBotDelegation/v1 verified",
+    )
+    .await;
+
+    handle.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn provenance_freeq_bot_delegation_tampered_signature() {
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (creator_did, creator_key) = register_creator_msgsig(addr, "creator").await;
+
+    let (bot_did, handle, mut events) = connect_did_key(addr, "tamperbot").await;
+    let mut cert = build_signed_cert(&bot_did, &creator_did, &creator_key);
+    // Tamper: flip a single character in the signature.
+    let sig = cert["signature"].as_str().unwrap().to_string();
+    let mut bytes = sig.into_bytes();
+    bytes[0] = if bytes[0] == b'A' { b'B' } else { b'A' };
+    cert["signature"] = serde_json::Value::String(String::from_utf8(bytes).unwrap());
+    handle.submit_provenance(&cert).await.unwrap();
+
+    let line = expect_raw_line(
+        &mut events,
+        2000,
+        "Provenance stored (unverified)",
+        "tampered cert stored unverified",
+    )
+    .await;
+    assert!(
+        line.contains("Signature did not verify") || line.contains("not valid base64url"),
+        "expected sig-verify failure reason, got: {line}"
+    );
+
+    handle.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn provenance_freeq_bot_delegation_unsigned() {
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (bot_did, handle, mut events) = connect_did_key(addr, "unsignedbot").await;
+
+    let cert = serde_json::json!({
+        "type": "FreeqBotDelegation/v1",
+        "bot_did": bot_did,
+        "bot_public_key": bot_did.strip_prefix("did:key:").unwrap(),
+        "creator_did": "did:plc:nokey",
+        "created_at": "2026-05-08T15:00:00Z",
+        "revocation_authority": "did:plc:nokey",
+        // intentionally no `signature` field
+    });
+    handle.submit_provenance(&cert).await.unwrap();
+
+    let line = expect_raw_line(
+        &mut events,
+        2000,
+        "Provenance stored (unverified)",
+        "unsigned cert stored unverified",
+    )
+    .await;
+    assert!(
+        line.contains("no signature") || line.contains("declarative"),
+        "expected unsigned reason, got: {line}"
+    );
+
+    handle.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn provenance_freeq_bot_delegation_creator_not_registered() {
+    // No creator session — creator_did never registered a MSGSIG key.
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+
+    // Mint a cert signed by an arbitrary ed25519 key, claim creator_did
+    // that the server has never seen.
+    let creator_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+    let creator_pk = PrivateKey::ed25519_from_bytes(&creator_key.to_bytes()).unwrap();
+    let creator_did = format!("did:key:{}", creator_pk.public_key_multibase());
+
+    let (bot_did, handle, mut events) = connect_did_key(addr, "lonelybot").await;
+    let cert = build_signed_cert(&bot_did, &creator_did, &creator_key);
+    handle.submit_provenance(&cert).await.unwrap();
+
+    let line = expect_raw_line(
+        &mut events,
+        2000,
+        "Provenance stored (unverified)",
+        "creator-not-registered stored unverified",
+    )
+    .await;
+    assert!(
+        line.contains("No registered MSGSIG key"),
+        "expected no-registered-key reason, got: {line}"
+    );
+
+    handle.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn provenance_freeq_bot_delegation_did_mismatch_rejected() {
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (creator_did, creator_key) = register_creator_msgsig(addr, "creator").await;
+
+    let (_bot_did, handle, mut events) = connect_did_key(addr, "mismatchbot").await;
+    // Cert claims a *different* bot_did than the session's authenticated DID.
+    let cert = build_signed_cert("did:key:zPretender", &creator_did, &creator_key);
+    handle.submit_provenance(&cert).await.unwrap();
+
+    let line = expect_raw_line(
+        &mut events,
+        2000,
+        "Provenance rejected",
+        "DID-mismatch cert rejected",
+    )
+    .await;
+    assert!(
+        line.contains("does not match the authenticated session DID"),
+        "expected DID-mismatch reason, got: {line}"
+    );
 
     handle.quit(None).await.unwrap();
     server_handle.abort();
@@ -769,7 +977,7 @@ async fn multiple_agents_different_classes() {
 async fn full_agent_lifecycle() {
     let (addr, server_handle) = start_test_server(empty_resolver()).await;
 
-    let (did, handle, mut events) = connect_did_key(addr, "lifecycle").await;
+    let (_, handle, mut events) = connect_did_key(addr, "lifecycle").await;
 
     // 1. Register as agent
     handle.register_agent("agent").await.unwrap();
@@ -787,7 +995,7 @@ async fn full_agent_lifecycle() {
     expect_raw_line(
         &mut events,
         2000,
-        "Provenance declaration stored",
+        "Provenance stored (unverified)",
         "Step 2: provenance",
     )
     .await;
@@ -2557,4 +2765,366 @@ async fn ghost_reclaim_cleans_stale_sessions() {
     user2.quit(None).await.unwrap();
     server_handle.abort();
     eprintln!("  ✓ Ghost reclaim cleans stale sessions — no duplicate members");
+}
+
+// ── Test: Commit-Reveal verification ────────────────────────────────
+//
+// End-to-end coverage of the server's verify-and-stamp of
+// `+freeq.at/event=reveal` against a prior `+freeq.at/event=commit`:
+// the receiver of the relayed reveal must see the server's verdict
+// tag (`+freeq.at/commit-verified=true|false`, with
+// `+freeq.at/commit-mismatch=<reason>` on failure). Wire format and
+// hash scope are spec'd in docs/agents.md § Commit-Reveal.
+
+/// Helper: compute base64url(sha256(salt || plaintext)) + base64url(salt).
+fn cr_hash_and_salt(salt: &[u8], plaintext: &str) -> (String, String) {
+    use base64::Engine;
+    use sha2::Digest;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let mut h = sha2::Sha256::new();
+    h.update(salt);
+    h.update(plaintext.as_bytes());
+    (b64.encode(h.finalize()), b64.encode(salt))
+}
+
+fn commit_payload_tag(hash_b64: &str) -> String {
+    format!(r#"{{"hash":"{hash_b64}","alg":"sha256"}}"#)
+}
+
+fn reveal_payload_tag(commit_msgid: &str, salt_b64: &str) -> String {
+    format!(r#"{{"reveal_of":"{commit_msgid}","salt":"{salt_b64}"}}"#)
+}
+
+/// Drive both clients to join `#crtest` and drain join events.
+async fn cr_join_both(
+    a: &client::ClientHandle,
+    a_ev: &mut mpsc::Receiver<Event>,
+    o: &client::ClientHandle,
+    o_ev: &mut mpsc::Receiver<Event>,
+    channel: &str,
+) {
+    a.join(channel).await.unwrap();
+    expect_event(
+        a_ev,
+        2000,
+        |e| matches!(e, Event::Joined { channel: c, .. } if c == channel),
+        "alice joined",
+    )
+    .await;
+    o.join(channel).await.unwrap();
+    expect_event(
+        o_ev,
+        2000,
+        |e| matches!(e, Event::Joined { channel: c, .. } if c == channel),
+        "observer joined",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while a_ev.try_recv().is_ok() {}
+    while o_ev.try_recv().is_ok() {}
+}
+
+#[tokio::test]
+async fn commit_reveal_happy_path() {
+    // DB-backed: commit-reveal verification looks up the prior commit via
+    // find_message_by_msgid, which requires the messages table to be live.
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (_alice_did, alice, mut alice_ev) = connect_did_key(addr, "alice").await;
+    let (observer, mut obs_ev) = connect_guest(addr, "crobs").await;
+
+    cr_join_both(&alice, &mut alice_ev, &observer, &mut obs_ev, "#crtest").await;
+
+    let salt: &[u8] = b"saltsalt12345678";
+    let plaintext = "The answer is X.";
+    let (hash_b64, salt_b64) = cr_hash_and_salt(salt, plaintext);
+
+    // Alice commits.
+    let mut commit_tags: HashMap<String, String> = HashMap::new();
+    commit_tags.insert("+freeq.at/event".to_string(), "commit".to_string());
+    commit_tags.insert("+freeq.at/ref".to_string(), "DEBATE-HAPPY".to_string());
+    commit_tags.insert(
+        "+freeq.at/payload".to_string(),
+        commit_payload_tag(&hash_b64),
+    );
+    alice
+        .send_tagged("#crtest", "🔒 sealed", commit_tags)
+        .await
+        .unwrap();
+
+    // Observer sees the commit; capture its msgid.
+    let commit_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "🔒 sealed"),
+        "observer got commit",
+    )
+    .await;
+    let commit_msgid = if let Event::Message { tags, .. } = &commit_event {
+        tags.get("msgid").cloned().expect("commit must carry msgid")
+    } else {
+        unreachable!()
+    };
+
+    // Alice reveals.
+    let mut reveal_tags: HashMap<String, String> = HashMap::new();
+    reveal_tags.insert("+freeq.at/event".to_string(), "reveal".to_string());
+    reveal_tags.insert("+freeq.at/ref".to_string(), "DEBATE-HAPPY".to_string());
+    reveal_tags.insert(
+        "+freeq.at/payload".to_string(),
+        reveal_payload_tag(&commit_msgid, &salt_b64),
+    );
+    alice
+        .send_tagged("#crtest", plaintext, reveal_tags)
+        .await
+        .unwrap();
+
+    // Observer sees the reveal with the server's verdict stamped on.
+    let reveal_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == plaintext),
+        "observer got reveal",
+    )
+    .await;
+    if let Event::Message { tags, .. } = &reveal_event {
+        assert_eq!(
+            tags.get("+freeq.at/commit-verified").map(String::as_str),
+            Some("true"),
+            "expected +freeq.at/commit-verified=true; tags={tags:?}",
+        );
+        assert!(
+            !tags.contains_key("+freeq.at/commit-mismatch"),
+            "expected no commit-mismatch on happy path; tags={tags:?}",
+        );
+    }
+
+    alice.quit(None).await.unwrap();
+    observer.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn commit_reveal_hash_mismatch_e2e() {
+    // DB-backed: commit-reveal verification looks up the prior commit via
+    // find_message_by_msgid, which requires the messages table to be live.
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (_alice_did, alice, mut alice_ev) = connect_did_key(addr, "alice").await;
+    let (observer, mut obs_ev) = connect_guest(addr, "crobs").await;
+
+    cr_join_both(&alice, &mut alice_ev, &observer, &mut obs_ev, "#crtest").await;
+
+    let salt: &[u8] = b"saltsalt12345678";
+    let (hash_b64, salt_b64) = cr_hash_and_salt(salt, "the committed answer");
+
+    let mut commit_tags: HashMap<String, String> = HashMap::new();
+    commit_tags.insert("+freeq.at/event".to_string(), "commit".to_string());
+    commit_tags.insert("+freeq.at/ref".to_string(), "DEBATE-TAMPER".to_string());
+    commit_tags.insert(
+        "+freeq.at/payload".to_string(),
+        commit_payload_tag(&hash_b64),
+    );
+    alice
+        .send_tagged("#crtest", "🔒 sealed", commit_tags)
+        .await
+        .unwrap();
+
+    let commit_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "🔒 sealed"),
+        "observer got commit",
+    )
+    .await;
+    let commit_msgid = if let Event::Message { tags, .. } = &commit_event {
+        tags.get("msgid").cloned().unwrap()
+    } else {
+        unreachable!()
+    };
+
+    // Reveal a DIFFERENT body than what was committed.
+    let mut reveal_tags: HashMap<String, String> = HashMap::new();
+    reveal_tags.insert("+freeq.at/event".to_string(), "reveal".to_string());
+    reveal_tags.insert("+freeq.at/ref".to_string(), "DEBATE-TAMPER".to_string());
+    reveal_tags.insert(
+        "+freeq.at/payload".to_string(),
+        reveal_payload_tag(&commit_msgid, &salt_b64),
+    );
+    alice
+        .send_tagged("#crtest", "a tampered body", reveal_tags)
+        .await
+        .unwrap();
+
+    let reveal_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "a tampered body"),
+        "observer got tampered reveal",
+    )
+    .await;
+    if let Event::Message { tags, .. } = &reveal_event {
+        assert_eq!(
+            tags.get("+freeq.at/commit-verified").map(String::as_str),
+            Some("false"),
+            "expected commit-verified=false on tampered body; tags={tags:?}",
+        );
+        assert_eq!(
+            tags.get("+freeq.at/commit-mismatch").map(String::as_str),
+            Some("hash_mismatch"),
+            "expected commit-mismatch=hash_mismatch; tags={tags:?}",
+        );
+    }
+
+    alice.quit(None).await.unwrap();
+    observer.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn commit_reveal_actor_mismatch_e2e() {
+    // DB-backed: commit-reveal verification looks up the prior commit via
+    // find_message_by_msgid, which requires the messages table to be live.
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (_alice_did, alice, mut alice_ev) = connect_did_key(addr, "alice").await;
+    let (_bob_did, bob, mut bob_ev) = connect_did_key(addr, "bob").await;
+    let (observer, mut obs_ev) = connect_guest(addr, "crobs").await;
+
+    // All three join.
+    alice.join("#crtest").await.unwrap();
+    expect_event(
+        &mut alice_ev,
+        2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#crtest"),
+        "alice joined",
+    )
+    .await;
+    bob.join("#crtest").await.unwrap();
+    expect_event(
+        &mut bob_ev,
+        2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#crtest"),
+        "bob joined",
+    )
+    .await;
+    observer.join("#crtest").await.unwrap();
+    expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Joined { channel, .. } if channel == "#crtest"),
+        "observer joined",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    while alice_ev.try_recv().is_ok() {}
+    while bob_ev.try_recv().is_ok() {}
+    while obs_ev.try_recv().is_ok() {}
+
+    let salt: &[u8] = b"saltsalt12345678";
+    let plaintext = "The answer is X.";
+    let (hash_b64, salt_b64) = cr_hash_and_salt(salt, plaintext);
+
+    // Alice commits.
+    let mut commit_tags: HashMap<String, String> = HashMap::new();
+    commit_tags.insert("+freeq.at/event".to_string(), "commit".to_string());
+    commit_tags.insert(
+        "+freeq.at/payload".to_string(),
+        commit_payload_tag(&hash_b64),
+    );
+    alice
+        .send_tagged("#crtest", "🔒 sealed", commit_tags)
+        .await
+        .unwrap();
+
+    let commit_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "🔒 sealed"),
+        "observer got commit",
+    )
+    .await;
+    let commit_msgid = if let Event::Message { tags, .. } = &commit_event {
+        tags.get("msgid").cloned().unwrap()
+    } else {
+        unreachable!()
+    };
+
+    // Bob tries to reveal Alice's commit.
+    let mut reveal_tags: HashMap<String, String> = HashMap::new();
+    reveal_tags.insert("+freeq.at/event".to_string(), "reveal".to_string());
+    reveal_tags.insert(
+        "+freeq.at/payload".to_string(),
+        reveal_payload_tag(&commit_msgid, &salt_b64),
+    );
+    bob.send_tagged("#crtest", plaintext, reveal_tags)
+        .await
+        .unwrap();
+
+    let reveal_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == plaintext),
+        "observer got bob's reveal",
+    )
+    .await;
+    if let Event::Message { tags, .. } = &reveal_event {
+        assert_eq!(
+            tags.get("+freeq.at/commit-verified").map(String::as_str),
+            Some("false"),
+        );
+        assert_eq!(
+            tags.get("+freeq.at/commit-mismatch").map(String::as_str),
+            Some("actor_mismatch"),
+            "expected commit-mismatch=actor_mismatch; tags={tags:?}",
+        );
+    }
+
+    alice.quit(None).await.unwrap();
+    bob.quit(None).await.unwrap();
+    observer.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+#[tokio::test]
+async fn commit_reveal_commit_not_found_e2e() {
+    // DB-backed: commit-reveal verification looks up the prior commit via
+    // find_message_by_msgid, which requires the messages table to be live.
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), true).await;
+    let (_alice_did, alice, mut alice_ev) = connect_did_key(addr, "alice").await;
+    let (observer, mut obs_ev) = connect_guest(addr, "crobs").await;
+
+    cr_join_both(&alice, &mut alice_ev, &observer, &mut obs_ev, "#crtest").await;
+
+    // Reveal pointing at a msgid that doesn't exist.
+    let mut reveal_tags: HashMap<String, String> = HashMap::new();
+    reveal_tags.insert("+freeq.at/event".to_string(), "reveal".to_string());
+    reveal_tags.insert(
+        "+freeq.at/payload".to_string(),
+        reveal_payload_tag("01J0000DOESNOTEXIST", "c2FsdA"),
+    );
+    alice
+        .send_tagged("#crtest", "anything", reveal_tags)
+        .await
+        .unwrap();
+
+    let reveal_event = expect_event(
+        &mut obs_ev,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "anything"),
+        "observer got reveal",
+    )
+    .await;
+    if let Event::Message { tags, .. } = &reveal_event {
+        assert_eq!(
+            tags.get("+freeq.at/commit-verified").map(String::as_str),
+            Some("false"),
+        );
+        assert_eq!(
+            tags.get("+freeq.at/commit-mismatch").map(String::as_str),
+            Some("commit_not_found"),
+            "expected commit-mismatch=commit_not_found; tags={tags:?}",
+        );
+    }
+
+    alice.quit(None).await.unwrap();
+    observer.quit(None).await.unwrap();
+    server_handle.abort();
 }

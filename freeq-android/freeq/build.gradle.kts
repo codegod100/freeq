@@ -17,12 +17,41 @@ android {
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
         }
+
+        // Defaults consumed by ServerConfig.kt. Override per flavor for
+        // deployments other than freeq.at (e.g. zerosum.org with embedded
+        // auth broker).
+        buildConfigField("String", "IRC_SERVER", "\"irc.freeq.at:6667\"")
+        buildConfigField("String", "AUTH_BROKER_BASE", "\"https://auth.freeq.at\"")
+
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+
+    // Per-deployment baked-in URLs. Values surface to the app via
+    // BuildConfig.IRC_SERVER / BuildConfig.AUTH_BROKER_BASE, read by
+    // ServerConfig.kt. Build a specific flavor with e.g.
+    //   ./gradlew :freeq:assembleZerosumDebug
+    //   ./gradlew :freeq:assembleFreeqDebug
+    // To add a deployment, append a new productFlavors entry below.
+    flavorDimensions += "deployment"
+    productFlavors {
+        create("freeq") {
+            dimension = "deployment"
+            // Inherits defaults: irc.freeq.at + auth.freeq.at standalone broker.
+        }
+        create("zerosum") {
+            dimension = "deployment"
+            applicationIdSuffix = ".zerosum"
+            buildConfigField("String", "IRC_SERVER", "\"irc.zerosum.org:6667\"")
+            // Embedded broker on the IRC server itself (no standalone /auth).
+            buildConfigField("String", "AUTH_BROKER_BASE", "\"https://irc.zerosum.org\"")
         }
     }
 
@@ -36,6 +65,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"
@@ -82,4 +112,13 @@ dependencies {
 
     // Debug
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // Unit tests (pure JVM, plain JUnit — no Robolectric on aarch64 Linux).
+    testImplementation("junit:junit:4.13.2")
+
+    // Instrumented tests (run on a device/emulator).
+    androidTestImplementation("androidx.test.ext:junit:1.1.5")
+    androidTestImplementation("androidx.test:runner:1.5.2")
+    androidTestImplementation("androidx.test:rules:1.5.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }

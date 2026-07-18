@@ -1,21 +1,136 @@
+import ActivityKit
+import AVFoundation
+import CoreSpotlight
 import Foundation
+import os.log
 import SwiftUI
+import WidgetKit
 
-/// A single chat message.
-struct ChatMessage: Identifiable, Equatable {
-    var id: String  // msgid or UUID
+/// Auth-path diagnostic log. Visible in Console.app attached to the device.
+/// We log credential-clearing events with the decision inputs so we can tell
+/// after the fact whether a re-OAuth was justified or whether the broker
+/// flapped past the 3-strike threshold for transient reasons.
+private let authLog = Logger(subsystem: "at.freeq.ios", category: "auth")
+
+// `ChatMessage` now lives in ChatMessage.swift (extracted so the pure model +
+// its MessageActions decisions can be unit-tested under SwiftPM without the
+// AppState UIKit/ActivityKit dependencies).
+
+// MARK: - Local buffer cache
+//
+// Persists the last N messages per channel/DM (plus channel topics and DM
+// peer list) to `Library/Application Support/freeq/buffers.json` so cold
+// launch can render the user's recent context instantly — before SASL +
+// JOIN + CHATHISTORY round-trips have completed. Saved on scene-background,
+// disconnect, and logout. CHATHISTORY from the wire dedupes against the
+// hydrated state via `ChannelState.appendIfNew`.
+
+private struct CachedReactions: Codable {
+    let byEmoji: [String: [String]]
+    init(_ r: [String: Set<String>]) {
+        var d: [String: [String]] = [:]
+        for (k, v) in r { d[k] = Array(v) }
+        self.byEmoji = d
+    }
+    func toDict() -> [String: Set<String>] {
+        var d: [String: Set<String>] = [:]
+        for (k, v) in byEmoji { d[k] = Set(v) }
+        return d
+    }
+}
+
+private struct CachedMessage: Codable {
+    let id: String
     let from: String
-    var text: String
+    let text: String
     let isAction: Bool
     let timestamp: Date
     let replyTo: String?
-    var isEdited: Bool = false
-    var isDeleted: Bool = false
-    var reactions: [String: Set<String>] = [:]  // emoji -> set of nicks
+    let isEdited: Bool
+    let isDeleted: Bool
+    let isSigned: Bool
+    let reactions: CachedReactions
 
-    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
+    init(_ m: ChatMessage) {
+        self.id = m.id
+        self.from = m.from
+        self.text = m.text
+        self.isAction = m.isAction
+        self.timestamp = m.timestamp
+        self.replyTo = m.replyTo
+        self.isEdited = m.isEdited
+        self.isDeleted = m.isDeleted
+        self.isSigned = m.isSigned
+        self.reactions = CachedReactions(m.reactions)
     }
+
+    func toChatMessage() -> ChatMessage {
+        var m = ChatMessage(
+            id: id, from: from, text: text, isAction: isAction,
+            timestamp: timestamp, replyTo: replyTo, isSigned: isSigned)
+        m.isEdited = isEdited
+        m.isDeleted = isDeleted
+        m.reactions = reactions.toDict()
+        return m
+    }
+}
+
+private struct CachedBuffer: Codable {
+    let name: String
+    let isDM: Bool
+    let topic: String?
+    let messages: [CachedMessage]
+}
+
+private struct BufferCacheRoot: Codable {
+    let version: Int
+    let buffers: [CachedBuffer]
+}
+
+enum BufferCacheStore {
+    static let version = 1
+    static let maxMessagesPerBuffer = 50
+
+    static func cacheURL() -> URL? {
+        let fm = FileManager.default
+        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return nil }
+        let dir = appSupport.appendingPathComponent("freeq", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            do { try fm.createDirectory(at: dir, withIntermediateDirectories: true) } catch { return nil }
+        }
+        return dir.appendingPathComponent("buffers.json")
+    }
+
+    fileprivate static func load() -> BufferCacheRoot? {
+        guard let url = cacheURL(),
+              let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(BufferCacheRoot.self, from: data)
+    }
+
+    fileprivate static func save(_ root: BufferCacheRoot) {
+        guard let url = cacheURL() else { return }
+        guard let data = try? JSONEncoder().encode(root) else { return }
+        // `.completeFileProtection` matches the Keychain's
+        // `kSecAttrAccessibleAfterFirstUnlock` accessibility class: data is
+        // encrypted at rest and only readable while the device is unlocked.
+        try? data.write(to: url, options: [.atomic, .completeFileProtection])
+    }
+
+    static func clear() {
+        guard let url = cacheURL() else { return }
+        try? FileManager.default.removeItem(at: url)
+    }
+}
+
+extension ISO8601DateFormatter {
+    /// Shared formatter for the server's CHATHISTORY TARGETS `time` tag
+    /// (`YYYY-MM-DDTHH:MM:SS.sssZ`). Cached because `ISO8601DateFormatter`
+    /// is expensive to construct.
+    static let freeqTargets: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
 }
 
 /// A channel with its messages and members.
@@ -31,6 +146,34 @@ class ChannelState: ObservableObject, Identifiable {
 
     var id: String { name }
 
+    /// Members collapsed to one row per account (same DID). Multi-session or
+    /// nick-collision twins (e.g. chadfowler.com / chadfowlercom, or a bot that
+    /// reconnected N times) count once. DID resolves from the roster or the
+    /// avatar cache; guests (no resolvable DID) are kept. Prefers the fuller
+    /// (dotted) handle for display. Single source for member lists + counts.
+    /// @MainActor because it reads the main-actor AvatarCache; all callers are
+    /// SwiftUI views.
+    @MainActor
+    var uniqueMembers: [MemberInfo] {
+        var indexByDid: [String: Int] = [:]
+        var out: [MemberInfo] = []
+        for m in members {
+            guard let did = m.did ?? AvatarCache.shared.did(for: m.nick) else {
+                out.append(m); continue
+            }
+            if let idx = indexByDid[did] {
+                if m.nick.contains("."), !out[idx].nick.contains(".") { out[idx] = m }
+            } else {
+                indexByDid[did] = out.count
+                out.append(m)
+            }
+        }
+        return out
+    }
+
+    @MainActor
+    var uniqueMemberCount: Int { uniqueMembers.count }
+
     var activeTypers: [String] {
         let cutoff = Date().addingTimeInterval(-5)
         return typingUsers.filter { $0.value > cutoff }.map { $0.key }.sorted()
@@ -41,13 +184,35 @@ class ChannelState: ObservableObject, Identifiable {
     }
 
     private var messageIds: Set<String> = []
+    /// id → index into `messages`. Makes findMessage / reactions / edits /
+    /// deletes / reply resolution O(1) instead of a linear scan of the whole
+    /// (unbounded) transcript on every TAGMSG and every reply row. Rebuilt
+    /// when indices shift (out-of-order history insert); updated in place on
+    /// the common in-order live append.
+    private var messageIndex: [String: Int] = [:]
 
     func findMessage(byId id: String) -> Int? {
-        messages.firstIndex(where: { $0.id == id })
+        messageIndex[id]
     }
 
     func memberInfo(for nick: String) -> MemberInfo? {
         members.first(where: { $0.nick.lowercased() == nick.lowercased() })
+    }
+
+    private func rebuildMessageIndex() {
+        messageIndex.removeAll(keepingCapacity: true)
+        for (i, m) in messages.enumerated() { messageIndex[m.id] = i }
+    }
+
+    /// Adopt another buffer's transcript (used when a DM buffer is renamed
+    /// after a peer NICK change). Copies the messages AND rebuilds the dedup
+    /// set + index — previously only `messages` was copied, leaving the dedup
+    /// Set empty so the next live/history message re-appended and duplicated
+    /// the whole transcript.
+    func adoptMessages(from other: ChannelState) {
+        messages = other.messages
+        messageIds = Set(messages.map(\.id))
+        rebuildMessageIndex()
     }
 
     /// Append a message only if its ID hasn't been seen before.
@@ -56,12 +221,16 @@ class ChannelState: ObservableObject, Identifiable {
         guard !messageIds.contains(msg.id) else { return }
         messageIds.insert(msg.id)
 
-        // If the message is older than the last message, insert in sorted position
+        // If the message is older than the last message, insert in sorted
+        // position (history backfill) — this shifts subsequent indices, so
+        // rebuild the map. The common live case appends at the end (O(1)).
         if let last = messages.last, msg.timestamp < last.timestamp {
             let idx = messages.firstIndex(where: { $0.timestamp > msg.timestamp }) ?? messages.endIndex
             messages.insert(msg, at: idx)
+            rebuildMessageIndex()
         } else {
             messages.append(msg)
+            messageIndex[msg.id] = messages.count - 1
         }
         // Update last activity for sorting
         if msg.timestamp > lastActivity {
@@ -76,6 +245,9 @@ class ChannelState: ObservableObject, Identifiable {
             if let newId = newId {
                 messages[idx].id = newId
                 messageIds.insert(newId)
+                // Re-key the index: the slot is unchanged, only its id moved.
+                messageIndex.removeValue(forKey: originalId)
+                messageIndex[newId] = idx
             }
         }
     }
@@ -95,6 +267,19 @@ class ChannelState: ObservableObject, Identifiable {
             reactions[emoji] = nicks
             messages[idx].reactions = reactions
         }
+    }
+
+    func removeReaction(msgId: String, emoji: String, from: String) {
+        guard let idx = findMessage(byId: msgId) else { return }
+        var reactions = messages[idx].reactions
+        guard var nicks = reactions[emoji] else { return }
+        nicks.remove(from)
+        if nicks.isEmpty {
+            reactions.removeValue(forKey: emoji)
+        } else {
+            reactions[emoji] = nicks
+        }
+        messages[idx].reactions = reactions
     }
 }
 
@@ -128,6 +313,34 @@ enum ConnectionState: Equatable {
     case registered
 }
 
+// MARK: - AV testability shims
+
+/// Minimal interface AppState needs out of the MoQ-backed AV session. The
+/// concrete `FreeqAv` from the Rust SDK conforms via the extension below.
+/// Tests substitute a fake.
+protocol AvSessionDriver: AnyObject {
+    func setMuted(muted: Bool)
+    func setCameraEnabled(enabled: Bool) throws
+    func pushVideoFrame(bgra: [UInt8], width: UInt32, height: UInt32, timestampUs: UInt64)
+    func pushAudioFrame(samples: [Float])
+    func leave()
+    func isConnected() -> Bool
+}
+
+// Default no-op so test fakes don't have to implement audio push — the
+// real `FreeqAv` provides the UniFFI-generated implementation.
+extension AvSessionDriver {
+    func pushAudioFrame(samples: [Float]) {}
+}
+
+extension FreeqAv: AvSessionDriver {}
+
+/// Outcome of a REST probe for an active session on a channel.
+enum ActiveSessionProbe {
+    case found(sessionId: String)
+    case none
+}
+
 /// Main application state — bridges the Rust SDK to SwiftUI.
 class AppState: ObservableObject {
     private static let minimumPersistentSessionDuration: TimeInterval = 14 * 24 * 60 * 60  // 14 days
@@ -138,10 +351,22 @@ class AppState: ObservableObject {
 
     @Published var connectionState: ConnectionState = .disconnected
     @Published var nick: String = ""
+    /// Cross-device read markers (draft/read-marker): target (lowercased) →
+    /// latest read timestamp. Forward-only, enforced server-side. Stored so
+    /// the unread-divider / catch-up UI can consume it.
+    var readMarkers: [String: String] = [:]
     @Published var serverAddress: String = ServerConfig.ircServer
-    @Published var authBrokerBase: String = "https://auth.freeq.at"
+    @Published var authBrokerBase: String = ServerConfig.authBrokerBase
     @Published var channels: [ChannelState] = []
-    @Published var activeChannel: String? = nil
+    @Published var activeChannel: String? = nil {
+        didSet {
+            // Persist so the app reopens the last conversation on next launch.
+            if let activeChannel { UserDefaults.standard.set(activeChannel, forKey: LastChannel.key) }
+        }
+    }
+    /// True once we've restored the last-open channel this launch, so a later
+    /// channel joining doesn't re-hijack the user's current selection.
+    private var didRestoreLastChannel = false
     @Published var errorMessage: String? = nil
     @Published var authenticatedDID: String? = nil
     @Published var dmBuffers: [ChannelState] = []
@@ -155,6 +380,41 @@ class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(Array(mutedChannels), forKey: "freeq.mutedChannels") }
     }
 
+    /// Favorited channels/DMs, pinned to the top of the list. Stored by exact
+    /// name so it round-trips through UserDefaults.
+    @Published var favorites: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(favorites), forKey: "freeq.favorites") }
+    }
+
+    /// Favorite buffer names in user-visible order (newest-favorited last).
+    /// Drives the Favorites section order and ⌃⌘1–9 "go to favorite N". Kept in
+    /// sync with `favorites` by `toggleFavorite`.
+    @Published var favoritesOrder: [String] = [] {
+        didSet { UserDefaults.standard.set(favoritesOrder, forKey: "freeq.favoritesOrder") }
+    }
+
+    // Command-driven sheet triggers (hardware-keyboard shortcuts on iPad).
+    @Published var showQuickSwitcher = false
+    @Published var showJoinSheet = false
+    @Published var showSearchSheet = false
+    @Published var showShortcutsHelp = false
+    @Published var showNewDMSheet = false
+    /// Member-list panel visibility for the active channel (⇧⌘D). Lifted from
+    /// ChatDetailView so a keyboard shortcut can toggle it.
+    @Published var showMemberList = false
+
+    /// DM peers the user has explicitly closed. Stored lowercased so we
+    /// can compare against any case-shape the server hands back. Closed
+    /// DMs are:
+    ///   - skipped during cache hydration on cold launch
+    ///   - skipped when the server sends `CHATHISTORY TARGETS` on register
+    /// A close is automatically *undone* when the peer sends a new PRIVMSG
+    /// (incoming activity is the universal signal that we want the DM
+    /// back), or when the user manually opens a new DM with that nick.
+    @Published var closedDMs: Set<String> = [] {
+        didSet { UserDefaults.standard.set(Array(closedDMs), forKey: "freeq.closedDMs") }
+    }
+
     /// MOTD lines collected from server
     @Published var motdLines: [String] = []
     @Published var showMotd: Bool = false
@@ -165,6 +425,630 @@ class AppState: ObservableObject {
 
     /// Pending DM navigation — set by profile "Message" button, consumed by ChatsTab
     @Published var pendingDMNick: String? = nil
+    /// Pending channel navigation — set by the catch-up digest, consumed by the
+    /// Channels pane of ChatsTab to push that channel.
+    @Published var pendingChannelNav: String? = nil
+
+    // ── Safety: blocking & reporting (App Store UGC requirement) ──
+    // Blocked by DID when we have one (stable across nick changes); by
+    // lowercased nick otherwise. Blocked people's messages are hidden and their
+    // DMs suppressed.
+    @Published var blockedDIDs: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "freeq.blockedDIDs") ?? []) {
+        didSet { UserDefaults.standard.set(Array(blockedDIDs), forKey: "freeq.blockedDIDs") }
+    }
+    @Published var blockedNicks: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "freeq.blockedNicks") ?? []) {
+        didSet { UserDefaults.standard.set(Array(blockedNicks), forKey: "freeq.blockedNicks") }
+    }
+
+    func isBlocked(nick: String, did: String? = nil) -> Bool {
+        if let did, !did.isEmpty, blockedDIDs.contains(did) { return true }
+        return blockedNicks.contains(nick.lowercased())
+    }
+
+    /// Whether a message/tag came from us. Prefers the account DID — robust to
+    /// nick case and to force-renames across our own sessions, unlike a raw nick
+    /// compare (a stale `nick` made our own DM echoes look like incoming DMs,
+    /// spawning a phantom self-DM buffer + notification). Falls back to nick.
+    func isSelfSender(nick sender: String, account: String?) -> Bool {
+        if let account, !account.isEmpty, let mine = authenticatedDID, account == mine { return true }
+        return sender.lowercased() == nick.lowercased()
+    }
+
+    func blockUser(nick: String, did: String?) {
+        if let did, !did.isEmpty { blockedDIDs.insert(did) }
+        blockedNicks.insert(nick.lowercased())
+    }
+
+    func unblockUser(nick: String?, did: String?) {
+        if let did { blockedDIDs.remove(did) }
+        if let nick { blockedNicks.remove(nick.lowercased()) }
+    }
+
+    /// Record a user's report of a message/user. There's no server report
+    /// endpoint yet, so we hide the content immediately and block the author —
+    /// report-and-block — which is the user-visible remedy App Review requires.
+    /// The reason is logged for the eventual moderation pipeline.
+    func reportUser(nick: String, did: String?, reason: String) {
+        authLog.notice("user report: nick=\(nick, privacy: .public) reason=\(reason, privacy: .public)")
+        blockUser(nick: nick, did: did)
+    }
+
+    // ── AV (voice/video calls) ──
+    @Published var isInCall: Bool = false
+    @Published var isMuted: Bool = false
+    @Published var isCameraOn: Bool = false
+    /// True when the user has expanded the call to fill the screen.
+    @Published var isCallExpanded: Bool = false
+    /// True when call audio is on the loud speaker (vs the quiet handset
+    /// receiver). Defaults on — a call should be audible at arm's length.
+    @Published var isSpeakerOn: Bool = true
+    @Published var callParticipants: [String] = []
+    /// channel (lowercased) → active session id, populated from `+freeq.at/av-state` TAGMSGs
+    @Published var activeAvSessions: [String: String] = [:]
+    /// Channel + session id of the call we're currently in (if any).
+    @Published var currentCallChannel: String? = nil
+    @Published var currentCallSessionId: String? = nil
+    var currentNick: String? { client != nil ? nick : nil }
+    /// Active AV session driver. Typed as a protocol so tests can swap in a
+    /// fake — production binds the concrete `FreeqAv` via `avSessionFactory`.
+    internal var avSession: AvSessionDriver? = nil
+    /// Channels where we sent `av-start` and are waiting on the server's `started` echo.
+    internal var pendingAvStart: Set<String> = []
+
+    /// Test hook: when set, `sendRaw` lines for AV TAGMSGs are diverted to
+    /// this closure instead of `client?.sendRaw`. Tests use it to capture
+    /// the exact wire payloads we put on the IRC connection.
+    internal var rawSenderForTest: ((String) -> Void)? = nil
+
+    /// Test hook: returns the active session id (or .none) for a channel,
+    /// replacing the live REST probe used in `discoverAndJoinOrStart`. When
+    /// nil (the production default), the REST probe runs normally.
+    internal var activeSessionProbeForTest: ((String) async -> ActiveSessionProbe)? = nil
+
+    /// Test hook: factory for the AV driver. Production builds a `FreeqAv`;
+    /// tests substitute a stub that records calls and re-emits AvEvents via
+    /// the handler. Returning nil from the closure simulates a failed
+    /// constructor (the production path catches and rolls back).
+    internal var avSessionFactory: ((_ serverUrl: String, _ sessionId: String, _ nick: String, _ instanceId: String, _ handler: AvEventHandler) throws -> AvSessionDriver)? = nil
+    /// Live Activity tracking the in-call state. Drives the Dynamic Island.
+    fileprivate var callActivity: Activity<CallActivityAttributes>? = nil
+
+    /// Front-camera capture. Allocated on first `toggleCamera(true)`; the
+    /// capture session itself is started/stopped here. Held across toggles
+    /// so we don't pay the AVCaptureSession setup cost more than once per
+    /// call.
+    internal var cameraCapture: CallCameraCapture? = nil
+
+    /// Swift-driven mic capture. Runs for the whole call (audio is
+    /// always-on, unlike the camera). Held so `leaveCall` can stop it.
+    internal var micCapture: CallMicCapture? = nil
+
+    /// Per-nick remote video display layers, keyed by lower-cased nick. Set
+    /// by `RemoteVideoTile` when it appears; cleared when the underlying
+    /// view goes away (weak values let the table drop the entry).
+    fileprivate var remoteVideoLayers: NSMapTable<NSString, AVSampleBufferDisplayLayer> =
+        NSMapTable.strongToWeakObjects()
+
+    /// Per-nick remote screen-share display layers, keyed by lower-cased nick.
+    /// Set by `RemoteScreenTile` when it appears; cleared when the view goes
+    /// away (weak values). Kept separate from `remoteVideoLayers` so a peer's
+    /// camera and screen render into independent tiles.
+    fileprivate var remoteScreenLayers: NSMapTable<NSString, AVSampleBufferDisplayLayer> =
+        NSMapTable.strongToWeakObjects()
+
+    /// Set of nicks for which we've received at least one frame this call.
+    /// Drives the "video active" indicator on the participant tile.
+    @Published var participantsWithVideo: Set<String> = []
+
+    /// Nicks with a live screen-share broadcast (the `{peer}/screen` MoQ
+    /// path). Distinct from `participantsWithVideo` (the camera track) so a
+    /// participant can share their screen and their camera at the same time,
+    /// each rendered in its own tile.
+    @Published var participantsWithScreen: Set<String> = []
+
+    /// Remote playout levels (lowercased nick → 0…1) from
+    /// `AvEvent.audioLevel`. Stored for active-speaker highlighting; the iOS
+    /// call UI does not draw a speaking ring yet, so this is currently a data
+    /// sink the UI can start reading whenever that indicator lands.
+    @Published var remoteAudioLevels: [String: Float] = [:]
+
+    /// Quiet in-call transport status ("Reconnecting…"), shown inline in the
+    /// call controls bar — never as a modal alert. Reconnection is automatic,
+    /// so it must not look like a hard failure. nil when the transport is
+    /// healthy.
+    @Published var callTransportStatus: String? = nil
+
+    /// Local-preview wrapper for the call UI to bind against. Returns nil
+    /// when the camera is off.
+    var localPreviewCapture: CallCameraCapture? { cameraCapture }
+
+    /// Per-call instance identifier — short random hex generated when we
+    /// start or join an AV session. Sent on every av-join/av-leave TAGMSG
+    /// as `+freeq.at/av-instance=<id>`, and used by the SDK to suffix the
+    /// MoQ broadcast path so two devices on the same DID don't collide.
+    internal var currentAvInstance: String? = nil
+
+    /// Maps a remote device's stable AV instance id → the nick it joined
+    /// under. Populated from `AvEvent.participantJoined` (and the `joined`
+    /// `av-state` TAGMSG). Used to key presence teardown on the instance
+    /// rather than the nick, since a multi-nick account can present a
+    /// different nick on the `left` signal than the one it joined with.
+    internal var avInstanceToNick: [String: String] = [:]
+
+    /// If a connection blip tears down a live call, we stash its identity here
+    /// so a reconnect that re-joins the same channel can rejoin the *same* AV
+    /// session with the *same* instance — reactivating the server's grace-held
+    /// slot in place rather than starting a fresh call. Cleared on an explicit
+    /// leave (an intentional leave must never auto-rejoin) and once consumed or
+    /// once the grace window has passed.
+    internal var pendingCallRejoin: PendingCallRejoin? = nil
+
+    func startCall(channel: String, sessionId: String) {
+        guard client != nil || rawSenderForTest != nil else { return }
+        // Native clients take the SFU's QUIC listener on :8080 — the
+        // low-latency media path that doesn't starve audio the way the :443
+        // WebSocket path can. The web client rides :443 WebSocket (browsers
+        // can't use the self-signed QUIC cert). Both transports terminate in
+        // the SAME moq_relay::Cluster and — as of the av_sfu.rs root-unify fix
+        // — share one broadcast namespace, so QUIC (native) and WS (web)
+        // participants see and hear each other. (Before that fix QUIC rooted
+        // at "/av/moq" and WS at "", leaving them mutually invisible.)
+        let serverUrl = ServerConfig.sfuBaseUrl
+
+        // iOS won't let cpal/iroh-live open both mic and speaker until the
+        // app's AVAudioSession is configured for two-way voice. Without this,
+        // the audio backend gets 0 Hz back from the hardware and bails out
+        // with "device no longer available" before the MoQ session is even
+        // constructed. Other code paths (voice-message recording, audio
+        // playback) leave the session in `.record` or `.playback`, both of
+        // which would block the AV path.
+        Self.activateVoiceCallSession()
+
+        // Reuse the instance generated at av-start if we have one (so the
+        // server-side instance recorded for the av-start TAGMSG, the FreeqAv
+        // broadcast path, and the av-join TAGMSG all match). Otherwise mint
+        // a fresh one — that's the path taken when we're joining a session
+        // someone else already started.
+        let instance = currentAvInstance ?? Self.generateAvInstanceId()
+        currentAvInstance = instance
+
+        do {
+            let handler = AvCallbackHandler(appState: self)
+            if let factory = avSessionFactory {
+                avSession = try factory(serverUrl, sessionId, nick, instance, handler)
+            } else {
+                avSession = try FreeqAv(
+                    serverUrl: serverUrl,
+                    sessionId: sessionId,
+                    nick: nick,
+                    instanceId: instance,
+                    handler: handler
+                )
+            }
+            // Start Swift-driven mic capture for the broadcast. Audio is
+            // always-on for a call, so this runs for the whole session.
+            startLocalMic()
+            // Tell peers we joined this session — instance suffix lets the
+            // server allocate a per-device participant slot. Send BEFORE
+            // flipping `isInCall` so a test observing the synchronously-
+            // captured wire payload sees both the join line and the state
+            // change as a single coherent event.
+            sendRawLine(
+                "@+freeq.at/av-join;+freeq.at/av-id=\(sessionId);+freeq.at/av-instance=\(instance) TAGMSG \(channel)"
+            )
+            // Tests run synchronously without a real RunLoop spinning the
+            // main queue; dispatch async would defer state mutation past the
+            // end of the test. Use `runOnMain` so tests see immediate updates.
+            runOnMain {
+                self.isInCall = true
+                self.isSpeakerOn = true
+                self.currentCallChannel = channel
+                self.currentCallSessionId = sessionId
+                self.startCallActivity(channel: channel, sessionId: sessionId)
+                // Surface as a system call (Recents, lock screen, green pill).
+                CallKitManager.shared.onEnd = { [weak self] in self?.leaveCall() }
+                CallKitManager.shared.onSetMuted = { [weak self] muted in
+                    guard let self, self.isMuted != muted else { return }
+                    self.toggleMute()
+                }
+                CallKitManager.shared.reportStarted(channel: channel)
+            }
+        } catch {
+            print("[av] Failed to start call: \(error)")
+            currentAvInstance = nil
+            // Hand the audio hardware back to other paths since the call
+            // never actually engaged it.
+            Self.deactivateVoiceCallSession()
+        }
+    }
+
+    /// Internal raw-send shim. In production this routes to the IRC client;
+    /// tests can swap in `rawSenderForTest` to capture the wire payload.
+    fileprivate func sendRawLine(_ line: String) {
+        if let hook = rawSenderForTest {
+            hook(line)
+            return
+        }
+        try? client?.sendRaw(line: line)
+    }
+
+    /// Run a block on main without an async dispatch. Tests run on the main
+    /// thread without an active RunLoop, so `DispatchQueue.main.async` would
+    /// never fire before the test assertions execute. Production keeps its
+    /// async semantics.
+    fileprivate func runOnMain(_ block: @escaping () -> Void) {
+        if Thread.isMainThread {
+            block()
+        } else {
+            DispatchQueue.main.async(execute: block)
+        }
+    }
+
+    /// 8-char lowercase hex. Short enough to keep broadcast paths readable;
+    /// 4 bytes of entropy is plenty for collision avoidance within a session.
+    private static func generateAvInstanceId() -> String {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Set up the iOS audio session for a duplex voice call before the Rust
+    /// AV backend tries to open any audio units. `.playAndRecord` allows
+    /// simultaneous mic + speaker; `.voiceChat` mode picks an echo-cancelled
+    /// audio route appropriate for a call; `.defaultToSpeaker` keeps audio
+    /// on the loudspeaker by default; `.allowBluetooth` lets headsets work.
+    private static func activateVoiceCallSession() {
+        let session = AVAudioSession.sharedInstance()
+        do {
+            try session.setCategory(
+                .playAndRecord,
+                mode: .voiceChat,
+                options: [.defaultToSpeaker, .allowBluetooth, .allowBluetoothA2DP]
+            )
+            try session.setActive(true, options: [])
+        } catch {
+            print("[av] AVAudioSession setup failed: \(error)")
+        }
+    }
+
+    /// Deactivate the voice call session so other audio paths (push
+    /// notifications, voice-message recording, link previews) can grab the
+    /// hardware back. `.notifyOthersOnDeactivation` lets the system know to
+    /// resume any music apps that were ducked during the call.
+    private static func deactivateVoiceCallSession() {
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+    }
+
+    func leaveCall() {
+        // Send av-leave for the channel we're currently in, if any.
+        if let channel = currentCallChannel, let sessionId = currentCallSessionId {
+            let instanceTag = currentAvInstance.map { ";+freeq.at/av-instance=\($0)" } ?? ""
+            sendRawLine("@+freeq.at/av-leave;+freeq.at/av-id=\(sessionId)\(instanceTag) TAGMSG \(channel)")
+        }
+        // Explicit leave — a reconnect must NOT drag us back into the call.
+        pendingCallRejoin = nil
+        cameraCapture?.stop()
+        cameraCapture = nil
+        micCapture?.stop()
+        micCapture = nil
+        avSession?.leave()
+        avSession = nil
+        currentAvInstance = nil
+        Self.deactivateVoiceCallSession()
+        CallKitManager.shared.reportEnded()
+        runOnMain {
+            self.isInCall = false
+            self.isMuted = false
+            self.isCameraOn = false
+            self.isCallExpanded = false
+            self.callParticipants = []
+            self.participantsWithVideo = []
+            self.participantsWithScreen = []
+            self.remoteAudioLevels = [:]
+            self.callTransportStatus = nil
+            self.currentCallChannel = nil
+            self.currentCallSessionId = nil
+            self.endCallActivity()
+        }
+    }
+
+    func toggleMute() {
+        isMuted.toggle()
+        avSession?.setMuted(muted: isMuted)
+        updateCallActivity()
+        CallKitManager.shared.reflectMuted(isMuted)
+    }
+
+    /// Toggle call audio between the loud speaker and the handset
+    /// receiver — the iOS equivalent of a speakerphone button.
+    func toggleSpeaker() {
+        isSpeakerOn.toggle()
+        let port: AVAudioSession.PortOverride = isSpeakerOn ? .speaker : .none
+        do {
+            try AVAudioSession.sharedInstance().overrideOutputAudioPort(port)
+        } catch {
+            print("[av] speaker toggle failed: \(error)")
+        }
+    }
+
+    /// Test helper: drives the AV event handler synchronously from outside
+    /// the FFI. Production code never calls this; tests use it to simulate
+    /// participant join/leave/disconnect events without standing up a real
+    /// `FreeqAv`.
+    internal func deliverAvEventForTest(_ event: AvEvent) {
+        let handler = AvCallbackHandler(appState: self)
+        handler.onAvEvent(event: event)
+        withExtendedLifetime(handler) {}
+    }
+
+    /// Tear down an in-progress call when the IRC connection itself dropped.
+    /// Unlike `leaveCall`, this does NOT try to send `av-leave` — the wire is
+    /// gone. Otherwise identical: stop capture, close the MoQ session, clear
+    /// UI state.
+    internal func tearDownCallLocallyOnDisconnect() {
+        // Capture the call identity BEFORE clearing state so a reconnect that
+        // re-joins this channel can rejoin the same session+instance within
+        // the server's AV grace window. Only when we're actually in a call.
+        if isInCall,
+           let channel = currentCallChannel,
+           let sessionId = currentCallSessionId,
+           let instance = currentAvInstance {
+            pendingCallRejoin = PendingCallRejoin(
+                channel: channel,
+                sessionId: sessionId,
+                instance: instance,
+                disconnectedAt: Date()
+            )
+        }
+        cameraCapture?.stop()
+        cameraCapture = nil
+        micCapture?.stop()
+        micCapture = nil
+        avSession?.leave()
+        avSession = nil
+        currentAvInstance = nil
+        Self.deactivateVoiceCallSession()
+        CallKitManager.shared.reportEnded()
+        runOnMain {
+            self.isInCall = false
+            self.isMuted = false
+            self.isCameraOn = false
+            self.isCallExpanded = false
+            self.callParticipants = []
+            self.participantsWithVideo = []
+            self.participantsWithScreen = []
+            self.remoteAudioLevels = [:]
+            self.callTransportStatus = nil
+            self.currentCallChannel = nil
+            self.currentCallSessionId = nil
+            self.endCallActivity()
+        }
+    }
+
+    // MARK: - Live Activity (Dynamic Island)
+
+    /// Start the in-call Live Activity. The Dynamic Island will show the
+    /// channel + duration + participant count + mute state until `endCallActivity`.
+    fileprivate func startCallActivity(channel: String, sessionId: String) {
+        // Make sure no stale activity from a prior call is still alive.
+        endCallActivity()
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            // User has Live Activities disabled at the OS level.
+            return
+        }
+        let attrs = CallActivityAttributes(channel: channel, sessionId: sessionId)
+        let state = CallActivityAttributes.ContentState(
+            participantCount: max(callParticipants.count, 1),
+            isMuted: isMuted,
+            startedAt: Date()
+        )
+        do {
+            callActivity = try Activity<CallActivityAttributes>.request(
+                attributes: attrs,
+                content: .init(state: state, staleDate: nil),
+                pushType: nil
+            )
+        } catch {
+            print("[av] Failed to start Live Activity: \(error)")
+        }
+    }
+
+    /// Push the current participant / mute state to the Live Activity.
+    fileprivate func updateCallActivity() {
+        guard let activity = callActivity else { return }
+        let started = activity.content.state.startedAt
+        let new = CallActivityAttributes.ContentState(
+            participantCount: max(callParticipants.count, 1),
+            isMuted: isMuted,
+            startedAt: started
+        )
+        Task {
+            await activity.update(.init(state: new, staleDate: nil))
+        }
+    }
+
+    /// End the Live Activity. Called from `leaveCall` and on AV disconnect.
+    fileprivate func endCallActivity() {
+        guard let activity = callActivity else { return }
+        callActivity = nil
+        Task {
+            await activity.end(nil, dismissalPolicy: .immediate)
+        }
+    }
+
+    func toggleCamera() {
+        let next = !isCameraOn
+        if next {
+            startLocalCamera()
+        } else {
+            stopLocalCamera()
+        }
+        isCameraOn = next
+    }
+
+    /// Start Swift-driven mic capture for the call and feed samples to the
+    /// broadcast. Audio is always-on, so this runs the whole call.
+    fileprivate func startLocalMic() {
+        guard avSession != nil else { return }
+        let cap = CallMicCapture()
+        cap.onSamples = { [weak self] samples in
+            self?.avSession?.pushAudioFrame(samples: samples)
+        }
+        micCapture = cap
+        cap.start()
+    }
+
+    /// Spin up `AVCaptureSession` (if needed) and turn on the publish-side
+    /// video track. Idempotent.
+    fileprivate func startLocalCamera() {
+        guard let av = avSession else { return }
+        if cameraCapture == nil {
+            let cap = CallCameraCapture()
+            cap.onFrame = { [weak self] ptr, length, width, height, ts in
+                guard let av = self?.avSession else { return }
+                let bytes = Array(UnsafeBufferPointer(start: ptr, count: length))
+                av.pushVideoFrame(
+                    bgra: bytes,
+                    width: UInt32(width),
+                    height: UInt32(height),
+                    timestampUs: ts
+                )
+            }
+            cameraCapture = cap
+        }
+        do {
+            try av.setCameraEnabled(enabled: true)
+        } catch {
+            print("[av] setCameraEnabled(true) failed: \(error)")
+            return
+        }
+        cameraCapture?.start()
+    }
+
+    fileprivate func stopLocalCamera() {
+        cameraCapture?.stop()
+        do {
+            try avSession?.setCameraEnabled(enabled: false)
+        } catch {
+            // NotConnected is fine — we may be leaving the call.
+            print("[av] setCameraEnabled(false): \(error)")
+        }
+    }
+
+    /// Called by `RemoteVideoTile.makeUIView/updateUIView`. Weakly retains
+    /// the display layer; when the SwiftUI view disappears, the layer is
+    /// released and the entry self-clears.
+    func bindVideoSink(nick: String, to layer: AVSampleBufferDisplayLayer) {
+        remoteVideoLayers.setObject(layer, forKey: nick.lowercased() as NSString)
+    }
+
+    /// Lookup helper used by the AV event handler.
+    fileprivate func videoLayer(for nick: String) -> AVSampleBufferDisplayLayer? {
+        remoteVideoLayers.object(forKey: nick.lowercased() as NSString)
+    }
+
+    /// Called by `RemoteScreenTile`. Weakly retains the screen display layer.
+    func bindScreenSink(nick: String, to layer: AVSampleBufferDisplayLayer) {
+        remoteScreenLayers.setObject(layer, forKey: nick.lowercased() as NSString)
+    }
+
+    /// Lookup helper used by the AV event handler for screen frames.
+    fileprivate func screenLayer(for nick: String) -> AVSampleBufferDisplayLayer? {
+        remoteScreenLayers.object(forKey: nick.lowercased() as NSString)
+    }
+
+    /// Start or join a voice session on a channel.
+    ///
+    /// Always resolves the channel's *live* session from the server before
+    /// joining — never from the in-memory `activeAvSessions` cache. That
+    /// cache is only cleared by an `av-state=ended` TAGMSG, which is easily
+    /// missed: app backgrounded, a brief disconnect, or a session that the
+    /// server auto-ended with no broadcast (every Eliza/bot restart does
+    /// exactly this — the old session is auto-ended and a new id minted).
+    /// A stale cache entry points at a dead session, and joining it puts
+    /// our MoQ broadcast under a session prefix no other participant
+    /// watches — so we publish audio and video and are still unheard. The
+    /// REST probe in `discoverAndJoinOrStart` is the single source of truth.
+    func startOrJoinVoice(channel: String) {
+        guard !isInCall else { return }
+
+        if let probe = activeSessionProbeForTest {
+            Task { @MainActor in
+                switch await probe(channel) {
+                case .found(let sessionId):
+                    self.activeAvSessions[channel.lowercased()] = sessionId
+                    self.startCall(channel: channel, sessionId: sessionId)
+                case .none:
+                    self.activeAvSessions.removeValue(forKey: channel.lowercased())
+                    self.startFreshAvSession(channel: channel)
+                }
+            }
+        } else {
+            Task { await self.discoverAndJoinOrStart(channel: channel) }
+        }
+    }
+
+    /// Resolve the channel's active AV session from the server and join it,
+    /// or start a fresh one if none is running. Three outcomes:
+    ///  - probe succeeds, a session is Active → join exactly that session id
+    ///  - probe succeeds, nothing Active      → drop any stale cache entry,
+    ///                                          send `av-start`
+    ///  - probe fails (offline/unreachable)   → fall back to a cached id if
+    ///                                          we have one, else `av-start`
+    private func discoverAndJoinOrStart(channel: String) async {
+        let key = channel.lowercased()
+        let encoded = channel.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? channel
+        let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/channels/\(encoded)/sessions")
+
+        if let url {
+            var req = URLRequest(url: url)
+            req.timeoutInterval = 4
+            if let (data, _) = try? await URLSession.shared.data(for: req),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // The probe reached the server and parsed. Its answer is
+                // authoritative — trust it over any cached session id.
+                if let active = json["active"] as? [String: Any],
+                   let sessionState = active["state"] as? String,
+                   sessionState == "Active",
+                   let sessionId = active["id"] as? String {
+                    await MainActor.run {
+                        self.activeAvSessions[key] = sessionId
+                        self.startCall(channel: channel, sessionId: sessionId)
+                    }
+                } else {
+                    await MainActor.run {
+                        self.activeAvSessions.removeValue(forKey: key)
+                        self.startFreshAvSession(channel: channel)
+                    }
+                }
+                return
+            }
+        }
+
+        // Probe failed (no network / server unreachable). Fall back to a
+        // cached session id if we have one — it may be stale, but it's the
+        // only hint available; otherwise start fresh.
+        await MainActor.run {
+            if let cached = self.activeAvSessions[key] {
+                self.startCall(channel: channel, sessionId: cached)
+            } else {
+                self.startFreshAvSession(channel: channel)
+            }
+        }
+    }
+
+    /// Mint a per-device instance id, mark this channel as pending, and put
+    /// `av-start` on the wire. Factored out so the testable probe-injected
+    /// path can share the same body as the production REST path.
+    fileprivate func startFreshAvSession(channel: String) {
+        let instance = Self.generateAvInstanceId()
+        currentAvInstance = instance
+        pendingAvStart.insert(channel.lowercased())
+        sendRawLine("@+freeq.at/av-start;+freeq.at/av-instance=\(instance) TAGMSG \(channel)")
+    }
 
     /// For reply UI
     @Published var replyingTo: ChatMessage? = nil
@@ -174,14 +1058,21 @@ class AppState: ObservableObject {
     @Published var lightboxURL: URL? = nil
     /// Pending web-token for SASL auth (from AT Protocol OAuth)
     var pendingWebToken: String? = nil
-    /// Persistent broker session token
-    var brokerToken: String? = nil
+    /// Persistent broker session token. `@Published` so credential changes
+    /// (sign-in, automatic wipe past grace, explicit logout) immediately
+    /// re-evaluate `hasSavedSession` and flip the root UI between
+    /// MainTabView and ConnectView.
+    @Published var brokerToken: String? = nil
     /// Cached web-token + expiry (reuse across reconnects within TTL)
     fileprivate var cachedWebToken: String? = nil
     fileprivate var cachedWebTokenExpiry: Date = .distantPast
 
     /// Read position tracking — channel name -> last read message ID
     @Published var lastReadMessageIds: [String: String] = [:]
+
+    /// Unread count captured the instant a channel is opened, BEFORE markRead
+    /// clears it — powers the "while you were away" summary card. Session-only.
+    @Published var awayCardCounts: [String: Int] = [:]
 
     /// Theme
     @Published var isDarkTheme: Bool = true
@@ -209,15 +1100,72 @@ class AppState: ObservableObject {
         return brokerToken != nil
     }
 
+    /// Singleton handle for App Intents / Spotlight handoff. Set by `init`.
+    /// App Intents can't easily inject the SwiftUI environment, so we expose
+    /// the live instance here. Always read on main.
+    static weak var shared: AppState? = nil
+
+    /// Drops saved auth + server-scoped state when the build has been
+    /// retargeted at a different deployment since the last run. The default
+    /// freeq.at build never trips this; it only fires when `IRC_SERVER` /
+    /// `AUTH_BROKER_BASE` change (e.g. a zerosum scheme), where the
+    /// bundle-shared keychain/UserDefaults would otherwise carry a freeq.at
+    /// token and session into the new host.
+    private func reconcileDeploymentChange() {
+        let current = ServerConfig.deploymentID
+        let key = "freeq.deployment"
+        let previous = UserDefaults.standard.string(forKey: key)
+        UserDefaults.standard.set(current, forKey: key)
+        guard let previous, previous != current else { return }
+
+        for credential in ["brokerToken", "did", "webToken", "webTokenExpiry"] {
+            KeychainHelper.delete(key: credential)
+        }
+        for staleKey in [
+            "freeq.brokerBase", "freeq.nick", "freeq.channels", "freeq.closedDMs",
+            "freeq.mutedChannels", "freeq.lastLogin", "freeq.webTokenExpiry",
+            "freeq.readPositions", "freeq.unreadCounts", "freeq.motdSeenHash",
+            // Legacy keychain-migration sources: clear them too, else the
+            // migrateFromUserDefaults pass below re-imports a stale freeq.at
+            // DID/token into the freshly-cleared keychain on retarget.
+            "freeq.did", "freeq.brokerToken",
+        ] {
+            UserDefaults.standard.removeObject(forKey: staleKey)
+        }
+    }
+
     init() {
+        AppState.shared = self
+        // Interactive Live Activity buttons (mute / end call) post here; the
+        // intent runs in this process so the notification reaches us directly.
+        NotificationCenter.default.addObserver(
+            forName: .freeqCallControl, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, let action = note.object as? String else { return }
+            switch CallControlAction(rawValue: action) {
+            case .toggleMute: self.toggleMute()
+            case .endCall: self.leaveCall()
+            case .none: break
+            }
+        }
+        reconcileDeploymentChange()
         if let savedNick = UserDefaults.standard.string(forKey: "freeq.nick") {
             nick = savedNick
         }
-        if let savedServer = UserDefaults.standard.string(forKey: "freeq.server") {
-            serverAddress = savedServer
-        }
+        // Always boot against the production server defined in ServerConfig.
+        // Any legacy `freeq.server` value (from earlier staging builds) is
+        // discarded so existing installs don't keep talking to the wrong host.
+        serverAddress = ServerConfig.ircServer
+        UserDefaults.standard.removeObject(forKey: "freeq.server")
         if let savedChannels = UserDefaults.standard.stringArray(forKey: "freeq.channels") {
-            autoJoinChannels = savedChannels
+            // Drop anything that isn't a channel-prefixed name. Older builds
+            // could land bare nicks in here (the @yokota-as-channel bug); we
+            // never want to send `JOIN` for those.
+            let cleaned = savedChannels.filter { $0.hasPrefix("#") || $0.hasPrefix("&") }
+            autoJoinChannels = cleaned
+            if cleaned.count != savedChannels.count {
+                UserDefaults.standard.set(cleaned, forKey: "freeq.channels")
+            }
         }
         if let savedReadPositions = UserDefaults.standard.dictionary(forKey: "freeq.readPositions") as? [String: String] {
             lastReadMessageIds = savedReadPositions
@@ -227,6 +1175,18 @@ class AppState: ObservableObject {
         }
         if let savedMuted = UserDefaults.standard.stringArray(forKey: "freeq.mutedChannels") {
             mutedChannels = Set(savedMuted)
+        }
+        if let savedFavorites = UserDefaults.standard.stringArray(forKey: "freeq.favorites") {
+            favorites = Set(savedFavorites)
+        }
+        // Ordered favorites (for the Favorites section order + ⌃⌘1–9). Migrate
+        // from the unordered set on first run, and reconcile any drift.
+        var order = UserDefaults.standard.stringArray(forKey: "freeq.favoritesOrder") ?? []
+        order = order.filter { favorites.contains($0) }
+        for name in favorites where !order.contains(name) { order.append(name) }
+        favoritesOrder = order
+        if let savedClosed = UserDefaults.standard.stringArray(forKey: "freeq.closedDMs") {
+            closedDMs = Set(savedClosed)
         }
         // Migrate secrets from UserDefaults to Keychain (one-time)
         KeychainHelper.migrateFromUserDefaults(userDefaultsKey: "freeq.did", keychainKey: "did")
@@ -241,9 +1201,17 @@ class AppState: ObservableObject {
         if let savedBrokerBase = UserDefaults.standard.string(forKey: "freeq.brokerBase") {
             authBrokerBase = savedBrokerBase
         }
-        // Restore cached web token if still valid
+        // Restore cached web token if still valid. The expiry is kept in
+        // the Keychain — NOT UserDefaults — so it survives an app
+        // reinstall alongside the token itself. When the expiry lived in
+        // UserDefaults, a fresh build wiped it, the still-valid token
+        // could no longer be trusted, and every fresh install was forced
+        // into a broker round-trip that hung the launch on "Reconnecting".
+        // The UserDefaults read is a one-time migration fallback for
+        // installs that predate this change.
         if let savedToken = KeychainHelper.load(key: "webToken"),
-           let expiryStr = UserDefaults.standard.string(forKey: "freeq.webTokenExpiry"),
+           let expiryStr = KeychainHelper.load(key: "webTokenExpiry")
+               ?? UserDefaults.standard.string(forKey: "freeq.webTokenExpiry"),
            let expiryTs = Double(expiryStr) {
             let expiry = Date(timeIntervalSince1970: expiryTs)
             if Date() < expiry {
@@ -251,9 +1219,14 @@ class AppState: ObservableObject {
                 cachedWebTokenExpiry = expiry
             } else {
                 KeychainHelper.delete(key: "webToken")
+                KeychainHelper.delete(key: "webTokenExpiry")
             }
         }
         isDarkTheme = UserDefaults.standard.object(forKey: "freeq.darkTheme") as? Bool ?? true
+
+        // Hydrate channels/DMs from on-disk cache so the UI can render the
+        // last session's context before the network round-trips complete.
+        hydrateBuffersFromCache()
 
         // Prune stale typing indicators every 3 seconds
         Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
@@ -261,13 +1234,137 @@ class AppState: ObservableObject {
                 self?.pruneTypingIndicators()
             }
         }
+
+        // Kick off the broker round-trip the moment we know we have a saved
+        // session — well before SwiftUI mounts ContentView. The broker call
+        // then runs in parallel with view hydration instead of waiting for
+        // `.onAppear`. `reconnectSavedSession` is idempotent (guards on
+        // `connectionState == .disconnected`), so a second call from
+        // ContentView.onAppear is a no-op.
+        if hasSavedSession {
+            DispatchQueue.main.async { [weak self] in
+                self?.reconnectSavedSession()
+            }
+        }
+    }
+
+    // MARK: - Buffer cache hydrate/save
+
+    /// Read cached channels/DMs from disk and populate `channels` and
+    /// `dmBuffers`. CHATHISTORY from the wire dedupes against the hydrated
+    /// state via `ChannelState.appendIfNew(msg:)`.
+    private func hydrateBuffersFromCache() {
+        guard let root = BufferCacheStore.load() else { return }
+        guard root.version == BufferCacheStore.version else {
+            // Future migration hook — discard incompatible caches rather
+            // than crashing on a partial decode.
+            BufferCacheStore.clear()
+            return
+        }
+        for cb in root.buffers {
+            // Respect user-closed DMs even if a stale cache file (written
+            // before the current closedDMs set was added) carries them.
+            if cb.isDM && closedDMs.contains(cb.name.lowercased()) { continue }
+            let buffer = cb.isDM
+                ? getOrCreateDM(cb.name)
+                : getOrCreateChannel(cb.name)
+            if let topic = cb.topic, !topic.isEmpty {
+                buffer.topic = topic
+            }
+            for cm in cb.messages {
+                buffer.appendIfNew(cm.toChatMessage())
+            }
+            // The most recent cached message sets a reasonable lastActivity
+            // so the sidebar sort order on cold launch matches what the user
+            // saw last session, instead of dumping everything to the bottom.
+            if let last = buffer.messages.last {
+                buffer.lastActivity = last.timestamp
+            }
+        }
+    }
+
+    /// Background-refresh the cached web token if it's within
+    /// `proactiveRefreshLeadTime` of expiry. No-op if the cache is fresh,
+    /// no broker token is available, or a fetch is already in flight.
+    /// Failures are silent — the cache simply stays at its current value
+    /// and the next genuine reconnect will retry through the standard path.
+    /// Web tokens have a ~30 min server TTL. Cache for 28 min — pair with the
+    /// 10-min proactive-refresh window so the cached token transitions to a
+    /// fresh one in the background well before any reconnect needs it. The
+    /// older 25-min cache wasted ~3 min of every token's life forcing broker
+    /// round-trips that didn't need to happen.
+    static let webTokenCacheLifetime: TimeInterval = 28 * 60
+    private static let proactiveRefreshLeadTime: TimeInterval = 10 * 60  // 10 min
+    /// One broker `/session` round-trip at a time, ever — shared by the
+    /// reconnect path and the proactive refresh. AT Protocol refresh
+    /// tokens are single-use and rotate on every refresh; two concurrent
+    /// `/session` calls race, and the loser writes back a token the PDS
+    /// has already invalidated — permanently bricking the saved session
+    /// until a fresh login. Serializing every broker fetch is the fix.
+    private var brokerFetchInFlight = false
+    private func proactivelyRefreshWebTokenIfStale() {
+        guard !brokerFetchInFlight else { return }
+        guard let brokerToken else { return }
+        // Threshold: cached token's remaining lifetime < 10 minutes.
+        let remaining = cachedWebTokenExpiry.timeIntervalSinceNow
+        guard remaining < Self.proactiveRefreshLeadTime else { return }
+        brokerFetchInFlight = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { Task { @MainActor in self.brokerFetchInFlight = false } }
+            do {
+                let session = try await self.fetchBrokerSession(brokerToken: brokerToken)
+                await MainActor.run {
+                    self.cachedWebToken = session.token
+                    self.cachedWebTokenExpiry = Date().addingTimeInterval(Self.webTokenCacheLifetime)
+                    KeychainHelper.save(key: "webToken", value: session.token)
+                    KeychainHelper.save(
+                        key: "webTokenExpiry",
+                        value: String(self.cachedWebTokenExpiry.timeIntervalSince1970))
+                    authLog.info("proactive web-token refresh succeeded")
+                }
+            } catch {
+                // Genuine 401 may have wiped credentials inside fetchBrokerSession;
+                // that already flips the UI via @Published. Otherwise stay quiet —
+                // the existing token is still valid for several more minutes.
+                await MainActor.run {
+                    authLog.notice("proactive web-token refresh failed: \(String(describing: error), privacy: .public)")
+                }
+            }
+        }
+    }
+
+    /// Snapshot all channels/DMs and write to disk. Safe to call from any
+    /// thread; the snapshot is taken synchronously on the calling thread.
+    /// `flushBuffersToCache()` is the only entry point — `handleScenePhase`,
+    /// `disconnect`, and `logout` all call it.
+    func flushBuffersToCache() {
+        let snapshot: [CachedBuffer] = (channels + dmBuffers).map { buf in
+            let isDM = !(buf.name.hasPrefix("#") || buf.name.hasPrefix("&"))
+            let tail = buf.messages.suffix(BufferCacheStore.maxMessagesPerBuffer)
+            return CachedBuffer(
+                name: buf.name,
+                isDM: isDM,
+                topic: buf.topic.isEmpty ? nil : buf.topic,
+                messages: tail.map(CachedMessage.init)
+            )
+        }
+        let root = BufferCacheRoot(version: BufferCacheStore.version, buffers: snapshot)
+        BufferCacheStore.save(root)
     }
 
     /// Reconnect with saved session (requires SASL web-token).
     /// Retries broker fetch with backoff on failure.
     fileprivate var brokerRetryCount = 0
+
+    /// Increments at the start of each `reconnectSavedSession()` invocation.
+    /// `ContentView` watches this to reset its "Connecting…" timer per
+    /// attempt instead of running it continuously from first appearance.
+    @Published var reconnectAttempt: Int = 0
+
     func reconnectSavedSession() {
         guard hasSavedSession, connectionState == .disconnected else { return }
+        reconnectAttempt &+= 1
 
         // 1. Already have a pending token (e.g., from initial login)
         if pendingWebToken != nil && !nick.isEmpty {
@@ -287,24 +1384,32 @@ class AppState: ObservableObject {
             // No broker token at all — must log in fresh
             return
         }
+        // Never overlap broker /session calls — see `brokerFetchInFlight`.
+        // reconnectSavedSession fires from several triggers (boot, the
+        // network monitor, the retry scheduler, AV teardown), so without
+        // this guard they stack into concurrent refreshes that race the
+        // rotating refresh token and brick the session.
+        guard !brokerFetchInFlight else { return }
+        brokerFetchInFlight = true
         Task {
             do {
                 let session = try await fetchBrokerSession(brokerToken: brokerToken)
                 await MainActor.run {
+                    self.brokerFetchInFlight = false
                     self.brokerRetryCount = 0
                     self.pendingWebToken = session.token
-                    // Cache for reuse (25 min — conservative vs 30 min server TTL)
                     self.cachedWebToken = session.token
-                    let expiry = Date().addingTimeInterval(25 * 60)
+                    let expiry = Date().addingTimeInterval(Self.webTokenCacheLifetime)
                     self.cachedWebTokenExpiry = expiry
                     KeychainHelper.save(key: "webToken", value: session.token)
-                    UserDefaults.standard.set(String(expiry.timeIntervalSince1970), forKey: "freeq.webTokenExpiry")
+                    KeychainHelper.save(key: "webTokenExpiry", value: String(expiry.timeIntervalSince1970))
                     self.authenticatedDID = session.did
                     KeychainHelper.save(key: "did", value: session.did)
                     self.connect(nick: session.nick)
                 }
             } catch let error as NSError {
                 await MainActor.run {
+                    self.brokerFetchInFlight = false
                     // If broker token was cleared (genuinely expired), stop retrying
                     if error.code == 401 && self.brokerToken == nil {
                         // Credentials cleared — show login screen
@@ -312,8 +1417,23 @@ class AppState: ObservableObject {
                     }
 
                     self.brokerRetryCount += 1
-                    // Keep retrying indefinitely with capped backoff (max 60s)
-                    // The user will see "Connecting..." and can cancel after 15s
+                    // After a run of failures the broker isn't blipping —
+                    // the saved session genuinely can't be refreshed (its
+                    // AT Protocol refresh token is dead). Stop looping and
+                    // drop to the sign-in screen so the user can re-auth,
+                    // instead of being trapped on "Connecting…" forever.
+                    if self.brokerRetryCount >= 8 {
+                        authLog.error("broker unrecoverable after \(self.brokerRetryCount, privacy: .public) attempts — clearing session for re-login")
+                        self.brokerToken = nil
+                        self.cachedWebToken = nil
+                        self.cachedWebTokenExpiry = .distantPast
+                        KeychainHelper.delete(key: "brokerToken")
+                        KeychainHelper.delete(key: "webToken")
+                        KeychainHelper.delete(key: "webTokenExpiry")
+                        self.errorMessage = "Couldn't restore your session — please sign in again."
+                        return
+                    }
+                    // Capped-backoff retry (max 60s).
                     let delay: Double
                     if self.brokerRetryCount <= 3 {
                         delay = Double(self.brokerRetryCount) // 1, 2, 3s
@@ -333,7 +1453,18 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Tracks whether the current session has already fallen back from
+    /// WebSocket to TCP. We only allow one fallback per `connect(nick:)`
+    /// call to avoid an infinite loop if both transports fail.
+    fileprivate var transportFallbackUsed = false
+
     func connect(nick: String) {
+        // Fresh connect attempt — start by preferring WebSocket again.
+        transportFallbackUsed = false
+        connect(nick: nick, useWebSocket: true)
+    }
+
+    fileprivate func connect(nick: String, useWebSocket: Bool) {
         self.nick = nick
         self.connectionState = .connecting
         self.errorMessage = nil
@@ -350,6 +1481,13 @@ class AppState: ObservableObject {
                 handler: handler
             )
 
+            // Prefer WebSocket on port 443. Pass an empty string to disable
+            // and use the configured TCP server when falling back.
+            let wsUrl = useWebSocket ? ServerConfig.wssServer : ""
+            try client?.setWebsocketUrl(url: wsUrl)
+            print("[freeq.connect] transport=\(useWebSocket ? "ws" : "tcp") wsUrl=\(wsUrl) tcp=\(serverAddress) nick=\(nick) hasToken=\(pendingWebToken != nil)")
+            authLog.info("connect transport=\(useWebSocket ? "ws" : "tcp", privacy: .public) ws_url=\(wsUrl, privacy: .public)")
+
             // Set web-token for SASL auth if available (from AT Protocol OAuth)
             if let token = pendingWebToken {
                 try client?.setWebToken(token: token)
@@ -357,7 +1495,9 @@ class AppState: ObservableObject {
             }
 
             try client?.connect()
+            print("[freeq.connect] client?.connect() returned")
         } catch {
+            print("[freeq.connect] threw error: \(error)")
             DispatchQueue.main.async {
                 self.connectionState = .disconnected
                 self.errorMessage = "Connection failed: \(error)"
@@ -365,7 +1505,32 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Fall back from WebSocket to plain TCP if a WS connect fails — but only
+    /// once per `connect(nick:)` call. Triggered by `Event.Disconnected` whose
+    /// reason starts with "WebSocket".
+    fileprivate func attemptTransportFallback(reason: String) -> Bool {
+        guard !transportFallbackUsed,
+              reason.lowercased().contains("websocket"),
+              hasSavedSession,
+              !nick.isEmpty else {
+            return false
+        }
+        transportFallbackUsed = true
+        authLog.notice("WS connect failed; falling back to TCP. reason=\(reason, privacy: .public)")
+        DispatchQueue.main.async {
+            // Tear the (failed) client down cleanly before re-issuing connect.
+            self.client?.disconnect()
+            self.client = nil
+            self.connect(nick: self.nick, useWebSocket: false)
+        }
+        return true
+    }
+
     func disconnect() {
+        // Persist the current buffer state before tearing down. Without this,
+        // a Guest-fallback retry or manual disconnect drops the last session
+        // and the next cold launch hydrates from a stale cache.
+        flushBuffersToCache()
         client?.disconnect()
         DispatchQueue.main.async {
             self.connectionState = .disconnected
@@ -378,20 +1543,46 @@ class AppState: ObservableObject {
     }
 
     /// Full logout — clears saved session so ConnectView shows next launch
+    /// (or this launch, since `hasSavedSession` is driven by the published
+    /// `brokerToken` and ContentView routes on it).
     func logout() {
         disconnect()
         UserDefaults.standard.removeObject(forKey: "freeq.lastLogin")
         KeychainHelper.delete(key: "did")
         KeychainHelper.delete(key: "brokerToken")
         KeychainHelper.delete(key: "webToken")
+        KeychainHelper.delete(key: "webTokenExpiry")
         UserDefaults.standard.removeObject(forKey: "freeq.webTokenExpiry")
-        UserDefaults.standard.removeObject(forKey: "freeq.nick")
-        UserDefaults.standard.removeObject(forKey: "freeq.handle")
+        UserDefaults.standard.removeObject(forKey: "freeq.channels")
+        // Intentionally NOT clearing `freeq.handle` and `freeq.nick`. They're
+        // the user-typed identity from the previous session; ConnectView
+        // pre-fills the Bluesky handle field from `freeq.handle` so the
+        // user doesn't have to retype it after a sign-out / forced
+        // re-auth. Credentials are in the keychain and have already been
+        // removed above.
         cachedWebToken = nil
         cachedWebTokenExpiry = .distantPast
+        SpotlightIndexer.clear()
+        // Drop the on-disk buffer cache — never leak the previous user's
+        // messages into a fresh sign-in.
+        BufferCacheStore.clear()
         DispatchQueue.main.async {
+            // CRITICAL: must nil the in-memory copies. `hasSavedSession`
+            // reads `brokerToken != nil`; without this, ContentView keeps
+            // routing to MainTabView and `reconnectSavedSession` keeps
+            // firing even after the keychain is empty.
+            self.brokerToken = nil
+            self.pendingWebToken = nil
             self.authenticatedDID = nil
             self.nick = ""
+            self.autoJoinChannels = []
+            self.channels = []
+            self.dmBuffers = []
+            self.activeChannel = nil
+            self.reconnectAttempt = 0
+            self.brokerRetryCount = 0
+            self.connectionState = .disconnected
+            self.errorMessage = nil
         }
     }
 
@@ -420,33 +1611,34 @@ class AppState: ObservableObject {
         sendRaw("@+typing=done TAGMSG \(target)")
         lastTypingSent = .distantPast
 
-        let isMultiline = text.contains("\n")
         let wireText = text.replacingOccurrences(of: "\r", with: "")
+        let isMultiline = wireText.contains("\n")
         let encoded = isMultiline ? wireText.replacingOccurrences(of: "\n", with: "\\n") : wireText
         let multilineTag = isMultiline ? ";+freeq.at/multiline" : ""
 
-        // Check for edit mode
+        // Edit + reply paths go through sendRaw because the FFI doesn't
+        // expose typed send_reply/send_edit yet. For those, encode `\n`
+        // as the legacy `+freeq.at/multiline` inline form so multi-line
+        // content survives a single PRIVMSG — receivers (web app, TUI,
+        // freeq-aware mobile) decode the tag on render.
         if let editing = editingMessage {
             sendRaw("@+draft/edit=\(editing.id)\(multilineTag) PRIVMSG \(target) :\(encoded)")
             editingMessage = nil
             return true
         }
 
-        // Check for reply mode
         if let reply = replyingTo {
             sendRaw("@+reply=\(reply.id)\(multilineTag) PRIVMSG \(target) :\(encoded)")
             replyingTo = nil
             return true
         }
 
-        if isMultiline {
-            // Send via raw to include multiline tag
-            sendRaw("@+freeq.at/multiline PRIVMSG \(target) :\(encoded)")
-            return true
-        }
-
+        // Plain send: pass text as-is. The FFI calls Rust SDK's privmsg,
+        // which auto-routes `\n`-bearing text to a draft/multiline BATCH
+        // when the server acked the cap — one logical message, msgid
+        // coherence for edits / reactions / replies.
         do {
-            try client?.sendMessage(target: target, text: text)
+            try client?.sendMessage(target: target, text: wireText)
             return true
         } catch {
             DispatchQueue.main.async { self.errorMessage = "Send failed" }
@@ -467,11 +1659,51 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Close a DM: remove from the live list and persist a "stay closed"
+    /// marker so it doesn't come back via cache hydration or the server's
+    /// CHATHISTORY TARGETS list on next register. The peer messaging us
+    /// (or us messaging them) automatically un-closes it.
+    func closeDM(_ name: String) {
+        closedDMs.insert(name.lowercased())
+        dmBuffers.removeAll { $0.name.lowercased() == name.lowercased() }
+        activeChannel = nil
+    }
+
+    /// Resolve a wire target (channel `#…`/`&…` or peer nick) to its local
+    /// buffer for optimistic-send updates. Mirrors the inbound routing logic.
+    private func bufferForSend(_ target: String) -> ChannelState {
+        if target.hasPrefix("#") || target.hasPrefix("&") {
+            return getOrCreateChannel(target)
+        } else {
+            return getOrCreateDM(target)
+        }
+    }
+
     func sendReaction(target: String, msgId: String, emoji: String) {
+        // Optimistic local update — keeps the UI consistent even if the
+        // `echo-message` cap isn't negotiated on the current connection.
+        // `applyReaction` is idempotent (Set keyed by nick), so the inbound
+        // echo (if any) is a no-op.
+        bufferForSend(target).applyReaction(msgId: msgId, emoji: emoji, from: nick)
         sendRaw("@+react=\(emoji);+reply=\(msgId) TAGMSG \(target)")
     }
 
+    func sendUnreaction(target: String, msgId: String, emoji: String) {
+        bufferForSend(target).removeReaction(msgId: msgId, emoji: emoji, from: nick)
+        sendRaw("@+freeq.at/unreact=\(emoji);+reply=\(msgId) TAGMSG \(target)")
+    }
+
+    /// Toggle the current user's reaction on a message: react if absent, unreact if present.
+    func toggleReaction(target: String, msgId: String, emoji: String, currentlyMine: Bool) {
+        if currentlyMine {
+            sendUnreaction(target: target, msgId: msgId, emoji: emoji)
+        } else {
+            sendReaction(target: target, msgId: msgId, emoji: emoji)
+        }
+    }
+
     func deleteMessage(target: String, msgId: String) {
+        bufferForSend(target).applyDelete(msgId: msgId)
         sendRaw("@+draft/delete=\(msgId) TAGMSG \(target)")
     }
 
@@ -541,6 +1773,12 @@ class AppState: ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["broker_token": brokerToken])
+            // Cap a single attempt at 8 s. URLSession's default (~60 s) is far
+            // too long for cold-launch UX — the user is staring at a status
+            // banner while the request sits in connect/TLS. With our buffer
+            // cache hydrated, falling back to "the cached UI works, send is
+            // disabled" is strictly better than blocking on a doomed request.
+            request.timeoutInterval = 8
 
             let data: Data
             let response: URLResponse
@@ -557,14 +1795,42 @@ class AppState: ObservableObject {
 
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
 
-            if (status == 502 || status == 503 || status == 504) && attempt < 3 {
-                try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
-                continue
+            // 5xx is a *server* error, not an auth verdict. Treat every 502/
+            // 503/504 as transient: retry inside this fetch, then let the
+            // outer reconnect loop back off. NEVER clear credentials on a 5xx.
+            //
+            // History: we used to substring-search the response body for
+            // "invalid_grant" / "invalid_token" / "expired" / "revoked" and
+            // wipe credentials immediately on a match. That was dangerously
+            // brittle — any 5xx body containing those words (CDN error pages,
+            // stack traces, unrelated PDS chatter) silently logged users
+            // out. The genuine "PDS refused refresh" signal must come from
+            // the broker as a structured discriminator (a specific status
+            // code or JSON field), not inferred from English text. Until
+            // the broker exposes that, treat 5xx as recoverable; if the
+            // refresh truly is dead the broker will surface it as a 401
+            // and the 3-strikes-past-grace path will eventually wipe.
+            if status == 502 || status == 503 || status == 504 {
+                authLog.notice("broker \(status, privacy: .public) attempt=\(attempt, privacy: .public) — treating as transient")
+                if attempt < 3 {
+                    try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+                    continue
+                }
+                throw NSError(domain: "Broker", code: status, userInfo: [NSLocalizedDescriptionKey: "Broker temporarily unavailable"])
             }
 
             // 401 = broker token might be invalid, but could also be transient
-            // (e.g., broker DB was just recreated). Only clear after 3 consecutive 401s
-            // across separate reconnect attempts.
+            // (broker DB recreated, broker restarting, deploy in flight, etc.).
+            // Within the 14-day grace window we NEVER auto-clear credentials —
+            // the user signs in often enough that 14 days of nothing-but-401
+            // means something is genuinely wrong with their PDS, and that
+            // case is better surfaced as a banner than by silently dropping
+            // them onto ConnectScreen mid-flight.
+            //
+            // Past grace: 3 consecutive 401s (across reconnect cycles) is our
+            // only auto-wipe path. There is intentionally no "escalated"
+            // bypass — burst 401s during a broker hiccup should not nuke a
+            // logged-in user.
             if status == 401 {
                 await MainActor.run { self.consecutive401Count += 1 }
                 if attempt < 3 {
@@ -573,21 +1839,33 @@ class AppState: ObservableObject {
                     continue
                 }
                 let count = await MainActor.run { self.consecutive401Count }
-                if count >= 3 && canAutoClearBrokerCredentials {
-                    // Genuinely invalid — clear credentials
+                let lastLogin = await MainActor.run { self.lastLoginDate }
+                let withinGrace = !canAutoClearBrokerCredentials
+                let shouldClear = count >= 3 && !withinGrace
+                if shouldClear {
+                    // Genuinely invalid — clear credentials.
+                    let sinceLoginHours = lastLogin.map { Date().timeIntervalSince($0) / 3600 } ?? -1
+                    authLog.error(
+                        "Clearing broker credentials: consecutive401=\(count, privacy: .public) sinceLoginHours=\(sinceLoginHours, privacy: .public) lastStatus=401"
+                    )
                     await MainActor.run {
                         self.brokerToken = nil
                         self.cachedWebToken = nil
                         self.cachedWebTokenExpiry = .distantPast
                         KeychainHelper.delete(key: "brokerToken")
                         KeychainHelper.delete(key: "webToken")
+                        KeychainHelper.delete(key: "webTokenExpiry")
                         UserDefaults.standard.removeObject(forKey: "freeq.webTokenExpiry")
                     }
+                } else {
+                    authLog.notice(
+                        "Broker 401 NOT clearing creds: consecutive401=\(count, privacy: .public) withinGraceWindow=\(withinGrace, privacy: .public)"
+                    )
                 }
                 throw NSError(domain: "Broker", code: 401, userInfo: [NSLocalizedDescriptionKey: "Session expired — please sign in again"])
             }
             guard status == 200 else { throw NSError(domain: "Broker", code: status) }
-            // Success — reset 401 counter
+            // Success — reset 401 counter.
             await MainActor.run { self.consecutive401Count = 0 }
             return try JSONDecoder().decode(BrokerSessionResponse.self, from: data)
         }
@@ -608,6 +1886,25 @@ class AppState: ObservableObject {
     func updateBadgeCount() {
         let total = unreadCounts.filter { !mutedChannels.contains($0.key) }.values.reduce(0, +)
         UNUserNotificationCenter.current().setBadgeCount(total)
+        updateWidgetSnapshot(total: total)
+    }
+
+    /// Publish the widget snapshot (App Group) and nudge WidgetKit to reload.
+    /// Cheap and idempotent; called whenever unread changes.
+    private func updateWidgetSnapshot(total: Int) {
+        let top = unreadCounts
+            .filter { $0.value > 0 && !mutedChannels.contains($0.key) }
+            .sorted { $0.value > $1.value }
+            .prefix(4)
+            .map { SharedStore.ChannelUnread(name: $0.key, unread: $0.value) }
+        let snapshot = SharedStore.Snapshot(
+            totalUnread: total,
+            topChannels: Array(top),
+            connected: connectionState == .registered,
+            updatedAt: Date()
+        )
+        SharedStore.write(snapshot)
+        WidgetCenter.shared.reloadTimelines(ofKind: "FreeqUnreadWidget")
     }
 
     func toggleMute(_ channel: String) {
@@ -622,6 +1919,23 @@ class AppState: ObservableObject {
         mutedChannels.contains(channel)
     }
 
+    // MARK: - Favorites
+
+    func isFavorite(_ channel: String) -> Bool {
+        favorites.contains(channel)
+    }
+
+    func toggleFavorite(_ channel: String) {
+        if favorites.contains(channel) {
+            favorites.remove(channel)
+            favoritesOrder.removeAll { $0 == channel }
+        } else {
+            favorites.insert(channel)
+            if !favoritesOrder.contains(channel) { favoritesOrder.append(channel) }
+        }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
     func toggleTheme() {
         isDarkTheme.toggle()
         UserDefaults.standard.set(isDarkTheme, forKey: "freeq.darkTheme")
@@ -631,17 +1945,37 @@ class AppState: ObservableObject {
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active:
-            // Returning to foreground — reconnect if needed
+            // Returning to foreground — reconnect if needed.
             NotificationManager.shared.clearBadge()
+            // FEAT-004: skip the broker round-trip when the SDK still has a
+            // live transport. Backgrounded apps with healthy WebSocket /
+            // TCP keep their connection across short pauses; tearing it
+            // down to re-fetch a web token burns broker requests for
+            // nothing — and on a slow broker, lights up the user-visible
+            // reconnect UI for what was a working connection.
+            if let c = client, c.isConnected() {
+                // Even with a healthy transport, if the cached web token is
+                // about to expire we want a fresh one ready *before* the
+                // next reconnect (e.g., the user is on a flaky train and
+                // the WebSocket drops 20 minutes from now). A reactive
+                // fetch on that drop would block reconnect on the broker;
+                // a proactive fetch here means the next reconnect uses a
+                // cached fresh token and bypasses the broker entirely.
+                proactivelyRefreshWebTokenIfStale()
+                return
+            }
             if connectionState == .disconnected && hasSavedSession {
                 brokerRetryCount = 0  // Reset retries on foreground
                 reconnectSavedSession()
             }
         case .background:
-            // Going to background — nothing for now (WebSocket dies naturally)
-            break
+            // Going to background — WebSocket dies naturally. Persist the
+            // buffer cache here so the next cold launch can hydrate with
+            // the latest state. iOS also calls .inactive shortly before
+            // .background; we save on both for belt-and-suspenders.
+            flushBuffersToCache()
         case .inactive:
-            break
+            flushBuffersToCache()
         @unknown default:
             break
         }
@@ -654,20 +1988,65 @@ class AppState: ObservableObject {
         updateBadgeCount()
     }
 
+    /// IRC channel names must start with `#` (federated) or `&` (local-only).
+    /// Anything else is a peer nick and belongs in `dmBuffers`, not here.
+    /// We route mis-typed callers automatically so a stray event from the
+    /// wire (or a future code path) can't pollute the Channels pane —
+    /// that's how `@yokota` ended up showing as a channel.
     func getOrCreateChannel(_ name: String) -> ChannelState {
-        if let existing = channels.first(where: { $0.name.lowercased() == name.lowercased() }) {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("#") || trimmed.hasPrefix("&") else {
+            return getOrCreateDM(trimmed)
+        }
+        if let existing = channels.first(where: { $0.name.lowercased() == trimmed.lowercased() }) {
             return existing
         }
-        let channel = ChannelState(name: name)
+        let channel = ChannelState(name: trimmed)
         channels.append(channel)
+        SpotlightIndexer.reindex(self)
+        attemptRestoreLastChannel()
         return channel
     }
 
+    /// Reopen the conversation the user was last in (persisted in `activeChannel`'s
+    /// `didSet`). Called as channels/DMs load after connect: selects the saved
+    /// target once it's present, or falls back to the first channel once all the
+    /// auto-join channels have loaded and the saved one didn't reappear (it was
+    /// left). Runs at most once per launch so a late JOIN can't hijack the user's
+    /// current selection.
+    func attemptRestoreLastChannel() {
+        guard !didRestoreLastChannel else { return }
+        let saved = UserDefaults.standard.string(forKey: LastChannel.key)
+        let chanNames = channels.map(\.name)
+        let dmNames = dmBuffers.map(\.name)
+        let savedIsPresent = saved.map { s in
+            (chanNames + dmNames).contains { $0.caseInsensitiveCompare(s) == .orderedSame }
+        } ?? false
+
+        // Wait for the saved target to appear; only fall back once every
+        // expected auto-join channel has loaded (so we don't prematurely land
+        // on the first channel while the real one is still joining).
+        guard savedIsPresent || (!chanNames.isEmpty && chanNames.count >= autoJoinChannels.count) else {
+            return
+        }
+        if let target = LastChannel.restore(saved: saved, channels: chanNames, dms: dmNames) {
+            activeChannel = target
+            didRestoreLastChannel = true
+        }
+    }
+
+    /// DMs are keyed by peer nick. Refuse anything that looks like a channel —
+    /// a `#`/`&` name in `dmBuffers` would render with the DM avatar/style and
+    /// silently shadow the real channel.
     func getOrCreateDM(_ nick: String) -> ChannelState {
         let trimmed = nick.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
             // Return a throwaway buffer — never append empty nicks to the list
             return ChannelState(name: "_empty")
+        }
+        guard !trimmed.hasPrefix("#"), !trimmed.hasPrefix("&") else {
+            // Caller handed us a channel name; route to the channel store instead.
+            return getOrCreateChannel(trimmed)
         }
         if let existing = dmBuffers.first(where: { $0.name.lowercased() == trimmed.lowercased() }) {
             return existing
@@ -675,6 +2054,8 @@ class AppState: ObservableObject {
         let dm = ChannelState(name: trimmed)
         dmBuffers.append(dm)
         requestHistory(channel: trimmed)
+        SpotlightIndexer.reindex(self)
+        attemptRestoreLastChannel()
         return dm
     }
 
@@ -697,6 +2078,71 @@ class AppState: ObservableObject {
                 ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: awayMsg, did: m.did)
             }
         }
+    }
+
+    /// The user's own custom status (emoji + text), carried over IRC AWAY so it
+    /// broadcasts to everyone in shared channels natively. Persists across
+    /// launches and is re-broadcast after each (re)connect.
+    @Published var selfStatus: String? = UserDefaults.standard.string(forKey: "freeq.status")
+
+    func setStatus(_ text: String?) {
+        let trimmed = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let t = trimmed, !t.isEmpty {
+            selfStatus = t
+            UserDefaults.standard.set(t, forKey: "freeq.status")
+            sendRaw("AWAY :\(t)")
+        } else {
+            selfStatus = nil
+            UserDefaults.standard.removeObject(forKey: "freeq.status")
+            sendRaw("AWAY")
+        }
+        // Reflect immediately on our own roster entries so the UI updates before
+        // the away-notify echo returns.
+        updateAwayStatus(nick: nick, awayMsg: selfStatus)
+    }
+
+    /// Re-broadcast a saved status after (re)connect so others see it again.
+    func reapplyStatusIfNeeded() {
+        if let s = selfStatus, !s.isEmpty { sendRaw("AWAY :\(s)") }
+    }
+
+    /// Handle freeq://auth?token=...&broker_token=...&nick=...&did=...&handle=...
+    /// — the broker's OAuth completion. Reached two ways: the in-app
+    /// ASWebAuthenticationSession completion (primary), or onOpenURL if the
+    /// flow ever bounces through Safari (legacy/fallback).
+    func handleAuthCallback(_ url: URL) {
+        guard url.scheme == "freeq", url.host == "auth" else { return }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return }
+
+        if let error = components.queryItems?.first(where: { $0.name == "error" })?.value {
+            errorMessage = error
+            connectionState = .disconnected
+            return
+        }
+
+        guard let token = components.queryItems?.first(where: { $0.name == "token" })?.value,
+              let nick = components.queryItems?.first(where: { $0.name == "nick" })?.value,
+              let did = components.queryItems?.first(where: { $0.name == "did" })?.value
+        else {
+            errorMessage = "Invalid auth response"
+            return
+        }
+
+        let brokerTok = components.queryItems?.first(where: { $0.name == "broker_token" })?.value
+        let handle = components.queryItems?.first(where: { $0.name == "handle" })?.value ?? nick
+
+        // Save session
+        UserDefaults.standard.set(handle, forKey: "freeq.handle")
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "freeq.lastLogin")
+        if let brokerTok { KeychainHelper.save(key: "brokerToken", value: brokerTok) }
+        UserDefaults.standard.removeObject(forKey: "freeq.loginPending")
+
+        // Connect
+        pendingWebToken = token
+        brokerToken = brokerTok
+        authenticatedDID = did
+        serverAddress = ServerConfig.ircServer
+        connect(nick: nick)
     }
 
     func awayMessage(for nick: String) -> String? {
@@ -722,7 +2168,7 @@ class AppState: ObservableObject {
         if let idx = dmBuffers.firstIndex(where: { $0.name.lowercased() == oldNick.lowercased() }) {
             let old = dmBuffers[idx]
             let renamed = ChannelState(name: newNick)
-            renamed.messages = old.messages
+            renamed.adoptMessages(from: old)
             renamed.members = old.members
             renamed.topic = old.topic
             renamed.typingUsers = old.typingUsers
@@ -758,17 +2204,32 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
         }
     }
 
-    private func handleEvent(_ event: FreeqEvent) {
+    // Internal (not private) so tests in `freeqTests` can invoke the dispatcher
+    // directly via `@testable import freeq` without going through the FFI.
+    func handleEvent(_ event: FreeqEvent) {
         guard let state = appState else { return }
 
         switch event {
         case .connected:
+            print("[freeq.event] .connected")
             state.connectionState = .connected
 
         case .registered(let nick):
+            print("[freeq.event] .registered nick=\(nick)")
+            // (continue to existing handler)
             state.connectionState = .registered
             state.reconnectAttempts = 0
             UINotificationFeedbackGenerator().notificationOccurred(.success)
+            // Prefetch our own Bluesky avatar via the authenticated DID. Without
+            // this we'd fall back to "<nick>.bsky.social" — which fails for users
+            // whose handle is a custom domain (e.g. chadfowler.com), leaving
+            // the self-avatar blank while other users' avatars resolve fine
+            // because their messages carry account=did tags.
+            if let did = state.authenticatedDID {
+                Task { @MainActor in
+                    AvatarCache.shared.prefetch(nick, did: did)
+                }
+            }
             // If we expected an authenticated session but got Guest, retry
             // instead of showing login screen. Token may have been stale.
             if state.authenticatedDID != nil && nick.lowercased().hasPrefix("guest") {
@@ -795,12 +2256,22 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             if state.authenticatedDID != nil {
                 state.sendRaw("CHATHISTORY TARGETS * * 50")
             }
+            // Re-broadcast a saved custom status so peers see it again.
+            state.reapplyStatusIfNeeded()
 
         case .authenticated(let did):
             state.authenticatedDID = did
             KeychainHelper.save(key: "did", value: did)
             // Refresh login timestamp so hasSavedSession stays valid
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "freeq.lastLogin")
+            // Self-avatar by DID — covers the case where `.authenticated`
+            // arrives after `.registered` so the prefetch in that handler
+            // saw a nil DID.
+            if !state.nick.isEmpty {
+                Task { @MainActor in
+                    AvatarCache.shared.prefetch(state.nick, did: did)
+                }
+            }
 
         case .authFailed(let reason):
             state.errorMessage = "Auth failed: \(reason)"
@@ -821,6 +2292,21 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 // Fetch pinned messages
                 state.fetchPins(channel: channel)
                 // Don't show "you joined" system message — the user knows they joined
+                // If a blip dropped us mid-call in this channel, rejoin the
+                // same AV session with the same instance — the server held the
+                // slot in its grace window, so this re-enters in place.
+                if shouldRejoinCall(pending: state.pendingCallRejoin, joinedChannel: channel, now: Date()),
+                   let rejoin = state.pendingCallRejoin {
+                    state.pendingCallRejoin = nil
+                    state.currentAvInstance = rejoin.instance
+                    print("[av] rejoining call after reconnect (session \(rejoin.sessionId))")
+                    state.startCall(channel: rejoin.channel, sessionId: rejoin.sessionId)
+                } else if let p = state.pendingCallRejoin,
+                          Date().timeIntervalSince(p.disconnectedAt) >= 30 {
+                    // Any other join clears a stale pending (wrong channel or
+                    // past the window) so it can't fire later.
+                    state.pendingCallRejoin = nil
+                }
             } else {
                 let msg = ChatMessage(
                     id: UUID().uuidString, from: "", text: "\(nick) joined",
@@ -852,18 +2338,32 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
         case .message(let ircMsg):
             let target = ircMsg.target
             let from = ircMsg.fromNick
-            let isSelf = from.lowercased() == state.nick.lowercased()
+            let isSelf = state.isSelfSender(nick: from, account: ircMsg.account)
+            // A blocked sender's message still lands in the buffer (filtered at
+            // render, so unblocking restores it) but must not ring, badge, or
+            // haptic — block is the advertised safety remedy, so it has to
+            // suppress notifications too (by nick AND DID).
+            let senderBlocked = !isSelf && state.isBlocked(nick: from, did: ircMsg.account)
 
-            // Decode multiline: \\n → newline (server encodes newlines as literal \n)
-            let decodedText = ircMsg.text.replacingOccurrences(of: "\\n", with: "\n")
+            // Prefetch avatar using DID if available (from account-tag)
+            if let did = ircMsg.account {
+                Task { @MainActor in
+                    AvatarCache.shared.prefetch(from, did: did)
+                }
+            }
 
+            // SDK normalizes both wire forms (draft/multiline BATCH and
+            // legacy +freeq.at/multiline) into real `\n` before this
+            // point; no decode here. SwiftUI Text renders `\n` natively.
             let msg = ChatMessage(
                 id: ircMsg.msgid ?? UUID().uuidString,
                 from: from,
-                text: decodedText,
+                text: ircMsg.text,
                 isAction: ircMsg.isAction,
                 timestamp: Date(timeIntervalSince1970: Double(ircMsg.timestampMs) / 1000.0),
-                replyTo: ircMsg.replyTo
+                replyTo: ircMsg.replyTo,
+                isSigned: ircMsg.isSigned,
+                origin: ircMsg.origin
             )
 
             // Handle edits
@@ -915,11 +2415,14 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             if target.hasPrefix("#") {
                 let ch = state.getOrCreateChannel(target)
                 ch.appendIfNew(msg)
-                state.incrementUnread(target)
+                if !senderBlocked { state.incrementUnread(target) }
                 ch.typingUsers.removeValue(forKey: from)
 
-                // Notify on mention (skip if muted)
-                if !isSelf && ircMsg.text.lowercased().contains(state.nick.lowercased()) && !state.isMuted(target) {
+                // Notify on mention (skip if muted, blocked, or our nick is
+                // empty — an empty nick makes `contains` match every message).
+                let mentioned = !state.nick.isEmpty
+                    && ircMsg.text.range(of: state.nick, options: .caseInsensitive) != nil
+                if !isSelf && !senderBlocked && mentioned && !state.isMuted(target) {
                     NotificationManager.shared.sendMessageNotification(
                         from: from, text: ircMsg.text, channel: target, isMention: true
                     )
@@ -928,12 +2431,16 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 }
             } else {
                 let bufferName = isSelf ? target : from
+                // New activity in a previously-closed DM un-closes it. If
+                // the peer messages me, or I message them, I want the DM
+                // back in the list.
+                state.closedDMs.remove(bufferName.lowercased())
                 let dm = state.getOrCreateDM(bufferName)
                 dm.appendIfNew(msg)
-                state.incrementUnread(bufferName)
+                if !senderBlocked { state.incrementUnread(bufferName) }
 
-                // Always notify on DMs
-                if !isSelf {
+                // Always notify on DMs (unless blocked)
+                if !isSelf && !senderBlocked {
                     NotificationManager.shared.sendMessageNotification(
                         from: from, text: ircMsg.text, channel: bufferName
                     )
@@ -1013,19 +2520,50 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 for msg in sorted { dm.appendIfNew(msg) }
             }
 
-        case .chatHistoryTarget(let nick, _):
-            // Create DM buffer for each conversation partner
-            let _ = state.getOrCreateDM(nick)
+        case .memberDid:
+            // Emitted by the updated SDK when a nick<->DID binding is
+            // learned. Adopted in the iOS DID-DM pass; ignored until then.
+            break
+
+        case .chatHistoryTarget(let nick, let timestamp, _):
+            // Server tells us "you have history with this peer"; create the
+            // DM buffer and seed lastActivity from the server-provided
+            // timestamp (`time` tag, ISO8601). Without this, every DM
+            // created from CHATHISTORY TARGETS gets `Date()` as its
+            // lastActivity and the DM list sorts by registration order
+            // (effectively random) until messages backfill.
+            //
+            // Respect user-closed DMs: server-side history is what made
+            // closed DMs reappear on reload before we tracked them locally.
+            if state.closedDMs.contains(nick.lowercased()) { return }
+            let dm = state.getOrCreateDM(nick)
+            if let ts = timestamp,
+               let parsed = ISO8601DateFormatter.freeqTargets.date(from: ts) {
+                // If the buffer has no real messages yet, the current
+                // lastActivity is just `Date()` from `getOrCreateDM` —
+                // overwrite it. If the buffer was hydrated with messages
+                // (cache or in-session), only update when the server's
+                // timestamp is more recent. The previous version only had
+                // the `parsed > dm.lastActivity` branch, which always
+                // failed for fresh buffers (parsed is older than `now`).
+                if dm.messages.isEmpty || parsed > dm.lastActivity {
+                    dm.lastActivity = parsed
+                }
+            }
 
         case .tagMsg(let tagMsg):
             let tags = Dictionary(uniqueKeysWithValues: tagMsg.tags.map { ($0.key, $0.value) })
             let target = tagMsg.target
             let from = tagMsg.from
+            let isSelf = state.isSelfSender(nick: from, account: tags["account"] ?? tags["+freeq.at/account"])
+            // For DMs, an echoed TAGMSG from ourselves carries target=peer, from=self —
+            // route to the peer's DM buffer, not a DM keyed by our own nick.
+            let dmBuffer = isSelf ? target : from
+            let bufferName = target.hasPrefix("#") ? target : dmBuffer
 
             // Typing indicators
             if let typing = tags["+typing"] {
-                if from.lowercased() != state.nick.lowercased() {
-                    let bufferName = target.hasPrefix("#") ? target : from
+                if !isSelf {
                     let ch = bufferName.hasPrefix("#") ? state.getOrCreateChannel(bufferName) : state.getOrCreateDM(bufferName)
                     if typing == "active" {
                         ch.typingUsers[from] = Date()
@@ -1037,16 +2575,89 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
 
             // Message deletion
             if let deleteId = tags["+draft/delete"] {
-                let bufferName = target.hasPrefix("#") ? target : from
                 let ch = bufferName.hasPrefix("#") ? state.getOrCreateChannel(bufferName) : state.getOrCreateDM(bufferName)
                 ch.applyDelete(msgId: deleteId)
             }
 
             // Reactions
             if let emoji = tags["+react"], let replyId = tags["+reply"] {
-                let bufferName = target.hasPrefix("#") ? target : from
                 let ch = bufferName.hasPrefix("#") ? state.getOrCreateChannel(bufferName) : state.getOrCreateDM(bufferName)
                 ch.applyReaction(msgId: replyId, emoji: emoji, from: from)
+            }
+
+            // Reaction removal (toggle off)
+            if let emoji = tags["+freeq.at/unreact"], let replyId = tags["+reply"] {
+                let ch = bufferName.hasPrefix("#") ? state.getOrCreateChannel(bufferName) : state.getOrCreateDM(bufferName)
+                ch.removeReaction(msgId: replyId, emoji: emoji, from: from)
+            }
+
+            // AV session lifecycle (`+freeq.at/av-state`)
+            if let avState = tags["+freeq.at/av-state"],
+               let avId = tags["+freeq.at/av-id"],
+               target.hasPrefix("#") {
+                let avActor = tags["+freeq.at/av-actor"] ?? from
+                let chanKey = target.lowercased()
+                let inThisCall = state.isInCall
+                    && state.currentCallChannel?.lowercased() == chanKey
+                switch avState {
+                case "started":
+                    state.activeAvSessions[chanKey] = avId
+                    // If we triggered the start, auto-join now that we have an id.
+                    if state.pendingAvStart.contains(chanKey)
+                       && avActor.lowercased() == state.nick.lowercased() {
+                        state.pendingAvStart.remove(chanKey)
+                        state.startCall(channel: target, sessionId: avId)
+                    }
+                case "ended":
+                    state.activeAvSessions.removeValue(forKey: chanKey)
+                    state.pendingAvStart.remove(chanKey)
+                    // If we were in this session, tear it down. But never let
+                    // an `ended` for a channel we're not in (or no longer in)
+                    // accidentally trigger a `leaveCall` on the current call.
+                    if inThisCall {
+                        state.tearDownCallLocallyOnDisconnect()
+                    }
+                case "joined":
+                    // Only mutate the participant roster if we're in this
+                    // call AND the joiner is someone else. (Self-joined is a
+                    // self-echo of our own av-join; FreeqAv ParticipantJoined
+                    // will also fire for everyone else's video tracks.)
+                    // Record the actor's instance→nick so a later `left` for
+                    // a multi-nick account still resolves to the right tile.
+                    if let avInstance = tags["+freeq.at/av-instance"], !avInstance.isEmpty {
+                        state.avInstanceToNick[avInstance] = avActor
+                    }
+                    if inThisCall
+                       && avActor.lowercased() != state.nick.lowercased()
+                       && !state.callParticipants.contains(where: { $0.lowercased() == avActor.lowercased() }) {
+                        state.callParticipants.append(avActor)
+                    }
+                case "left":
+                    // Same gating: only update if it's a different participant
+                    // and we're in this call. Symmetric with `joined`.
+                    // Prefer the av-instance tag to resolve who left: the
+                    // actor nick can differ from the joined nick for a
+                    // multi-nick account. Fall back to the actor when the
+                    // instance is absent or unmapped.
+                    let avInstance = tags["+freeq.at/av-instance"]
+                    let leaver = (avInstance.flatMap { $0.isEmpty ? nil : state.avInstanceToNick[$0] }) ?? avActor
+                    let leaverKey = leaver.lowercased()
+                    if inThisCall {
+                        state.callParticipants.removeAll { $0.lowercased() == leaverKey }
+                        state.participantsWithVideo = state.participantsWithVideo.filter {
+                            $0.lowercased() != leaverKey
+                        }
+                        state.participantsWithScreen = state.participantsWithScreen.filter {
+                            $0.lowercased() != leaverKey
+                        }
+                        state.remoteAudioLevels.removeValue(forKey: leaverKey)
+                    }
+                    if let avInstance, !avInstance.isEmpty {
+                        state.avInstanceToNick.removeValue(forKey: avInstance)
+                    }
+                default:
+                    break
+                }
             }
 
         case .nickChanged(let oldNick, let newNick):
@@ -1090,9 +2701,27 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             break
 
         case .disconnected(let reason):
+            print("[freeq.event] .disconnected reason=\(reason)")
             state.connectionState = .disconnected
             if !reason.isEmpty && !reason.contains("EOF") {
                 state.errorMessage = "Disconnected: \(reason)"
+            }
+            // If we were in a call when the IRC connection dropped, tear it
+            // down locally. The MoQ session is on a separate transport but
+            // peers will only learn we left via the IRC `av-leave` TAGMSG —
+            // which we obviously can't send right now. Surfacing a phantom
+            // in-call state in the UI while the wire is dead is worse than
+            // dropping the call: tap-to-rejoin is one tap, but trying to
+            // mute/leave a zombie call is broken UX.
+            if state.isInCall {
+                state.tearDownCallLocallyOnDisconnect()
+            }
+            // FEAT-003: a WebSocket-named failure on this very attempt means
+            // the network is hostile to WS — try plain TCP once before going
+            // through the broker / showing the user any error UI.
+            if state.attemptTransportFallback(reason: reason) {
+                print("[freeq.event] -> falling back to TCP")
+                return
             }
             // Auto-reconnect with exponential backoff
             if state.hasSavedSession {
@@ -1105,6 +2734,198 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     }
                 }
             }
+
+        case .readMarker(let target, let timestamp):
+            // draft/read-marker — cross-device read state (forward-only,
+            // enforced server-side). Store the latest marker so the unread
+            // divider / catch-up UI can consume it. No standalone UI yet.
+            if let timestamp { state.readMarkers[target.lowercased()] = timestamp }
+        }
+    }
+}
+
+// ── AV Event Handler ──
+
+final class AvCallbackHandler: @unchecked Sendable, AvEventHandler {
+    private weak var appState: AppState?
+
+    init(appState: AppState) {
+        self.appState = appState
+    }
+
+    func onAvEvent(event: AvEvent) {
+        // FreeqAv delivers events from a background queue. Hop to main for
+        // any state mutation, but stay synchronous when we're already there
+        // (tests drive this synchronously; an async hop would defer past
+        // the assertions).
+        if Thread.isMainThread {
+            handle(event: event)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.handle(event: event)
+            }
+        }
+    }
+
+    private func handle(event: AvEvent) {
+        guard let state = self.appState else { return }
+        let myNick = state.nick.lowercased()
+
+        switch event {
+        case .connected:
+            state.isInCall = true
+            print("[av] Connected to MoQ SFU")
+
+        case .disconnected(let reason):
+            state.isInCall = false
+            state.callParticipants = []
+            state.participantsWithVideo = []
+            state.participantsWithScreen = []
+            state.remoteAudioLevels = [:]
+            state.callTransportStatus = nil
+            state.isCameraOn = false
+            state.isMuted = false
+            state.isCallExpanded = false
+            state.currentCallChannel = nil
+            state.currentCallSessionId = nil
+            state.endCallActivity()
+            print("[av] Disconnected: \(reason)")
+
+        case .participantJoined(let nick, let instance):
+            // Don't filter on nick alone here — the SDK already drops our
+            // own broadcast at the path level (`path == our_name`), so
+            // anything that reaches us is a *different device's* broadcast,
+            // including same-DID multi-device (chadfowler on iOS + chadfowler
+            // on web). The bare-nick "self-echo" filter we used to have
+            // here was the cause of "iOS doesn't show my web client" — it
+            // collapsed the multi-device case into a no-op.
+            // Remember which nick this device joined under so a later `left`
+            // signal (which can carry a different nick for a multi-nick
+            // account) still resolves to the right tile via its instance.
+            if !instance.isEmpty {
+                state.avInstanceToNick[instance] = nick
+            }
+            if !state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) {
+                state.callParticipants.append(nick)
+            }
+            state.updateCallActivity()
+            print("[av] Participant joined: \(nick) [instance=\(instance)]")
+
+        case .participantLeft(let nick, let instance):
+            // Prefer the instance→nick mapping recorded at join time: the
+            // `left` signal's nick can differ from the joined nick for a
+            // multi-nick account, so keying teardown on the instance removes
+            // the correct tile. Fall back to the signalled nick when the
+            // instance is absent (legacy peer) or unmapped.
+            let target = (!instance.isEmpty ? state.avInstanceToNick[instance] : nil) ?? nick
+            let key = target.lowercased()
+            // Symmetric removal: drop the tile AND the video-active marker.
+            // Leaving the latter behind made the next call show a frozen-frame
+            // tile for the departed nick the moment a same-named user joined.
+            state.callParticipants.removeAll { $0.lowercased() == key }
+            state.participantsWithVideo = state.participantsWithVideo.filter {
+                $0.lowercased() != key
+            }
+            state.participantsWithScreen = state.participantsWithScreen.filter {
+                $0.lowercased() != key
+            }
+            state.remoteAudioLevels.removeValue(forKey: key)
+            if !instance.isEmpty {
+                state.avInstanceToNick.removeValue(forKey: instance)
+            }
+            state.updateCallActivity()
+            print("[av] Participant left: \(target) [instance=\(instance)]")
+
+        case .audioTrackStarted(let nick):
+            print("[av] Audio started: \(nick)")
+
+        case .audioTrackStopped(let nick):
+            print("[av] Audio stopped: \(nick)")
+
+        case .videoTrackStarted(let nick):
+            print("[av] Video started: \(nick)")
+
+        case .videoTrackStopped(let nick):
+            state.participantsWithVideo = state.participantsWithVideo.filter {
+                $0.lowercased() != nick.lowercased()
+            }
+            print("[av] Video stopped: \(nick)")
+
+        case .videoFrame(let nick, let bgra, let width, let height):
+            // SDK already filters our own broadcast at the path level;
+            // anything reaching us is for a different device. Matching on
+            // bare nick blocked the multi-device case (same handle on
+            // iOS + web).
+            // Race: a frame can arrive before the SFU's ParticipantJoined event
+            // fires (out-of-order on the network). Drop the frame silently
+            // rather than crash or create a phantom participant; the next
+            // frame after the Joined arrives will render normally.
+            guard state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) else {
+                return
+            }
+            if let layer = state.videoLayer(for: nick) {
+                VideoSampleBuffer.enqueue(
+                    bgra: bgra,
+                    width: Int(width),
+                    height: Int(height),
+                    on: layer
+                )
+            }
+            _ = state.participantsWithVideo.insert(nick)
+
+        case .screenTrackStarted(let nick):
+            // A peer began sharing their screen on the `{peer}/screen` path.
+            // Mark them so the UI can offer a screen tile even before the
+            // first frame lands.
+            _ = state.participantsWithScreen.insert(nick)
+            print("[av] Screen started: \(nick)")
+
+        case .screenTrackStopped(let nick):
+            state.participantsWithScreen = state.participantsWithScreen.filter {
+                $0.lowercased() != nick.lowercased()
+            }
+            print("[av] Screen stopped: \(nick)")
+
+        case .screenFrame(let nick, let bgra, let width, let height):
+            // Screen frames flow through a dedicated per-nick display layer
+            // (bound by `RemoteScreenTile`), separate from the camera-track
+            // layer, so a participant can share screen and camera at once.
+            // Same join/frame race tolerance as videoFrame: a frame from a
+            // nick we haven't logged as a participant yet is still real media,
+            // so adopt them rather than dropping it.
+            if !state.callParticipants.contains(where: { $0.lowercased() == nick.lowercased() }) {
+                state.callParticipants.append(nick)
+            }
+            _ = state.participantsWithScreen.insert(nick)
+            if let layer = state.screenLayer(for: nick) {
+                VideoSampleBuffer.enqueue(
+                    bgra: bgra,
+                    width: Int(width),
+                    height: Int(height),
+                    on: layer
+                )
+            }
+
+        case .audioLevel(let nick, let level):
+            // Remote playout level → stored for active-speaker highlighting.
+            // The iOS call UI doesn't render a speaking ring yet, so this is
+            // just a data sink for now; the value is keyed lowercased to match
+            // the other per-nick maps.
+            state.remoteAudioLevels[nick.lowercased()] = level
+
+        case .reconnecting(let attempt):
+            // Inline call-bar status only — NOT an errorMessage/modal alert.
+            // Automatic transport recovery must not read as a hard failure.
+            state.callTransportStatus = attempt <= 1
+                ? "Reconnecting…" : "Reconnecting… (attempt \(attempt))"
+            print("[av] Reconnecting (attempt \(attempt))")
+
+        case .reconnected:
+            state.callTransportStatus = nil
+            print("[av] Reconnected")
+
+        case .error(let message):
+            print("[av] Error: \(message)")
         }
     }
 }

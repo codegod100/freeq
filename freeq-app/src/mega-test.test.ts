@@ -72,10 +72,10 @@ describe('compound mode parsing (client-side fix verified via store)', () => {
     expect(s().channels.get('#cm')!.members.get('a')!.isOp).toBe(true);
   });
   it('19: mode with empty arg ignored', () => { s().handleMode('#cm', '+o', '', 'x'); });
-  it('20: mode with undefined arg goes to channel mode path', () => {
+  it('20: mode +o without arg ignored (FIXED)', () => {
     s().handleMode('#cm', '+o', undefined, 'x');
-    // Without arg, +o goes to channel modes (bug-ish but not crash)
-    expect(s().channels.get('#cm')!.modes.has('o')).toBe(true);
+    // FIXED: user modes without arg are now ignored (don't corrupt channel modes)
+    expect(s().channels.get('#cm')!.modes.has('o')).toBe(false);
   });
 });
 

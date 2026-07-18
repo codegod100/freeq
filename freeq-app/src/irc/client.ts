@@ -1,338 +1,170 @@
 /**
- * IRC client adapter.
+ * IRC client bridge — thin wrapper that connects @freeq/sdk to the Zustand store.
  *
- * Handles CAP negotiation, SASL auth, and translates IRC events
- * into store actions. The React UI never sees IRC protocol.
+ * Components import from here and get the same API as before.
+ * Internally, all protocol handling is delegated to the SDK's FreeqClient.
  */
 
-import { parse, prefixNick, format, type IRCMessage } from './parser';
-import { Transport, type TransportState } from './transport';
-import { useStore, type Message, type Member } from '../store';
+import { FreeqClient, format } from '@freeq/sdk';
+import { useStore } from '../store';
 import { notify } from '../lib/notifications';
-import { prefetchProfiles } from '../lib/profiles';
-import * as e2ee from '../lib/e2ee';
-import * as signing from './signing';
+import { prefetchProfiles } from '@freeq/sdk';
+import { shouldRejoinCall, AV_REJOIN_WINDOW_MS, type PendingCallRejoin } from '../lib/av-mesh';
 
-// ── State ──
+// ── Singleton SDK client ──
 
-let transport: Transport | null = null;
-let nick = '';
-let lastUrl = '';
-let ackedCaps = new Set<string>();
-
-// SASL state (set before connect when doing OAuth)
-let saslToken = '';
-let saslDid = '';
-let saslPdsUrl = '';
-let saslMethod = '';
-let skipBrokerRefresh = false; // Set when we already have a fresh token (e.g. from OAuth)
-let guestFallbackCount = 0; // Track retries when authenticated user gets Guest nick
-
-// Auto-join channels after registration
-let autoJoinChannels: string[] = [];
-
-// Channels we're currently in (for rejoin on reconnect)
-let joinedChannels = new Set<string>();
+let client: FreeqClient | null = null;
 
 const SAVED_CHANNELS_KEY = 'freeq-joined-channels';
 
 function saveJoinedChannels() {
   try {
-    localStorage.setItem(SAVED_CHANNELS_KEY, JSON.stringify([...joinedChannels]));
+    if (client) {
+      localStorage.setItem(SAVED_CHANNELS_KEY, JSON.stringify([...client.joinedChannels]));
+    }
   } catch { /* quota exceeded, etc */ }
 }
 
-function loadSavedChannels(): string[] {
-  try {
-    const stored = localStorage.getItem(SAVED_CHANNELS_KEY);
-    if (stored) return JSON.parse(stored);
-  } catch { /* corrupted */ }
-  return [];
+/** Get the underlying SDK client (for advanced usage). */
+export function getClient(): FreeqClient | null {
+  return client;
 }
 
-// Background WHOIS lookups (suppress output for these)
-const backgroundWhois = new Set<string>();
+/**
+ * Test-only seam. Lets unit tests inject a stub FreeqClient (typically
+ * something that only implements `raw`/`nick`) so they can assert on the
+ * raw IRC lines our AV functions send without bringing up a real SDK.
+ *
+ * Never call this from production code.
+ */
+export function __setClientForTests(c: FreeqClient | null): void {
+  client = c;
+}
 
-// ── Public API (called by UI) ──
+/** Test-only: reset the per-call instance suffix so tests can start fresh. */
+export function __resetAvInstanceForTests(): void {
+  currentAvInstance = null;
+  pendingAvStart = null;
+  pendingCallRejoin = null;
+}
+
+/** Test-only: inspect the captured pending rejoin (null when none). */
+export function __getPendingCallRejoinForTests(): PendingCallRejoin | null {
+  return pendingCallRejoin;
+}
+
+// ── Public API (same signatures as before) ──
 
 export function connect(url: string, desiredNick: string, channels?: string[]) {
-  // Clean up any existing transport to prevent duplicate connections
-  if (transport) {
-    try { transport.disconnect(); } catch { /* ignore */ }
-    transport = null;
+  if (client) {
+    try { client.disconnect(); } catch { /* ignore */ }
+    client = null;
   }
-  nick = desiredNick;
-  lastUrl = url;
-  autoJoinChannels = channels || [];
+
   const store = useStore.getState();
   store.reset();
 
-  // Serialize async line handling to prevent race conditions.
-  // Without this, BATCH end can be processed before async PRIVMSG handlers
-  // (which await E2EE decryption) have finished adding messages to the batch.
-  let lineQueue: Promise<void> = Promise.resolve();
-  const serializedHandleLine = (line: string) => {
-    lineQueue = lineQueue.then(() => handleLine(line)).catch((e) => console.error('[irc] line handler error:', e));
+  client = new FreeqClient({
+    url,
+    nick: desiredNick,
+    channels,
+    brokerUrl: localStorage.getItem('freeq-broker-base') || undefined,
+    brokerToken: localStorage.getItem('freeq-broker-token') || undefined,
+    skipInitialBrokerRefresh: !!saslState.skipBrokerRefresh,
+  });
+
+  // Set SASL credentials if we have them
+  if (saslState.token) {
+    client.setSaslCredentials({
+      token: saslState.token,
+      did: saslState.did,
+      pdsUrl: saslState.pdsUrl,
+      method: saslState.method,
+    });
+  }
+
+  // Provide nick→DID resolver for E2EE
+  client.nickToDid = (targetNick: string) => {
+    const s = useStore.getState();
+    const lower = targetNick.toLowerCase();
+    for (const ch of s.channels.values()) {
+      const m = ch.members.get(lower);
+      if (m?.did) return m.did;
+    }
+    return undefined;
   };
 
-  transport = new Transport({
-    url,
-    onLine: serializedHandleLine,
-    onStateChange: (s: TransportState) => {
-      useStore.getState().setConnectionState(s);
-      if (s === 'connected') {
-        ackedCaps = new Set(); // reset caps for new connection
-        let registrationSent = false;
-        const sendRegistration = (token?: string) => {
-          if (registrationSent) return;
-          registrationSent = true;
-          if (token) saslToken = token;
-          raw('CAP LS 302');
-          raw(`NICK ${nick}`);
-          raw(`USER ${nick} 0 * :freeq web app`);
-        };
+  wireEvents(client);
+  client.connect();
 
-        // Safety net: if registration hasn't been sent in 8s, send it as guest
-        const safetyTimer = setTimeout(() => {
-          if (!registrationSent) {
-            console.warn('[irc] Registration safety timeout — sending as guest');
-            saslToken = '';
-            saslDid = '';
-            saslMethod = '';
-            sendRegistration();
-          }
-        }, 8000);
-
-        // If we have a broker token and SASL credentials, refresh the web-token
-        // before registering (web-tokens are one-time use).
-        // Skip if we already have a fresh token (e.g. just came from OAuth).
-        const brokerToken = localStorage.getItem('freeq-broker-token');
-        const brokerBase = localStorage.getItem('freeq-broker-base');
-        if (skipBrokerRefresh && saslToken) {
-          skipBrokerRefresh = false;
-          clearTimeout(safetyTimer);
-          sendRegistration();
-        } else if (brokerToken && brokerBase && saslDid) {
-          const ctrl = new AbortController();
-          const tm = setTimeout(() => ctrl.abort(), 8000);
-          // Broker /session returns 502 on first call due to DPoP nonce rotation —
-          // retry up to 2 times on transient errors.
-          const brokerBody = JSON.stringify({ broker_token: brokerToken });
-          const doFetch = () => fetch(`${brokerBase}/session`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: brokerBody,
-            signal: ctrl.signal,
-          });
-          const fetchWithRetry = async (): Promise<any> => {
-            for (let attempt = 0; attempt < 3; attempt++) {
-              try {
-                const r = await doFetch();
-                if (r.status === 502 && attempt < 2) {
-                  await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-                  continue;
-                }
-                if (r.status === 401) {
-                  // Token genuinely invalid — clear it
-                  localStorage.removeItem('freeq-broker-token');
-                  throw new Error('broker token invalid');
-                }
-                if (!r.ok) throw new Error('broker refresh failed');
-                return r.json();
-              } catch (e: any) {
-                if (e?.name === 'AbortError' || attempt >= 2) throw e;
-                await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
-              }
-            }
-            throw new Error('broker fetch exhausted retries');
-          };
-          fetchWithRetry()
-            .then((session: { token: string; nick: string; did: string; handle: string }) => {
-              clearTimeout(tm);
-              clearTimeout(safetyTimer);
-              sendRegistration(session.token);
-            })
-            .catch(() => {
-              clearTimeout(tm);
-              clearTimeout(safetyTimer);
-              // Broker refresh failed — still try with existing saslToken if we have one.
-              // Only fall back to guest if we have no token at all.
-              if (saslToken) {
-                sendRegistration();
-              } else {
-                saslToken = '';
-                saslDid = '';
-                saslMethod = '';
-                sendRegistration();
-              }
-            });
-        } else {
-          clearTimeout(safetyTimer);
-          sendRegistration();
-        }
-      }
-    },
-  });
-  transport.connect();
-
-  // Send QUIT when tab/window is closing to avoid ghost connections
+  // Send QUIT when tab/window is closing
   window.addEventListener('beforeunload', () => {
-    if (transport) {
-      try { transport.send('QUIT :Leaving'); } catch { /* ignore */ }
+    if (client) {
+      try { client.quit('Leaving'); } catch { /* ignore */ }
     }
   });
 }
 
 export function disconnect() {
-  transport?.disconnect();
-  transport = null;
-  nick = '';
-  ackedCaps = new Set();
-  saslToken = '';
-  saslDid = '';
-  saslPdsUrl = '';
-  saslMethod = '';
-  joinedChannels.clear();
-  signing.resetSigning();
+  client?.disconnect();
+  client = null;
+  saslState = { token: '', did: '', pdsUrl: '', method: '', skipBrokerRefresh: false };
+  // Clear persistent-login material so ConnectScreen doesn't immediately
+  // re-auth the user via broker session refresh after a deliberate logout.
+  try {
+    localStorage.removeItem('freeq-broker-token');
+    localStorage.removeItem('freeq-oauth-result');
+    localStorage.removeItem('freeq-oauth-pending');
+  } catch { /* ignore */ }
   useStore.getState().fullReset();
 }
 
-/** Force an immediate reconnect (e.g. from the reconnect button). */
 export function reconnect() {
-  if (!lastUrl || !nick) return;
-  transport?.disconnect();
-  transport = null;
-  // Re-run connect with existing state — broker token refresh happens in onStateChange
-  const channels = [...joinedChannels];
+  if (!client) return;
+  const channels = [...(client.joinedChannels)];
+  const opts = client['opts']; // access private opts for url/nick
+  client.disconnect();
+  client = null;
+  // For an authenticated, broker-backed (web) session, force a fresh broker
+  // session refresh instead of replaying the in-memory token: web tokens are
+  // single-use, so a manual reconnect with the stale token would just fail
+  // SASL and bounce us back to guest. Clearing the token + skipBrokerRefresh
+  // makes the SDK re-mint via /session on (re)connect.
+  const hasBroker =
+    !!localStorage.getItem('freeq-broker-token') &&
+    !!localStorage.getItem('freeq-broker-base');
+  if (saslState.did && hasBroker) {
+    saslState = { ...saslState, token: '', skipBrokerRefresh: false };
+  }
   const store = useStore.getState();
   store.reset();
-  connect(lastUrl, nick, channels);
+  connect(opts.url, opts.nick, channels);
 }
+
+// SASL state (set before connect)
+let saslState = { token: '', did: '', pdsUrl: '', method: '', skipBrokerRefresh: false };
 
 export function setSaslCredentials(token: string, did: string, pdsUrl: string, method: string) {
-  saslToken = token;
-  saslDid = did;
-  saslPdsUrl = pdsUrl;
-  saslMethod = method;
-  // If we're given a fresh token, don't waste it by calling broker again
-  if (token) skipBrokerRefresh = true;
-}
-
-/** Resolve a nick to a DID by searching member lists across all channels. */
-function didForNick(targetNick: string): string | undefined {
-  const store = useStore.getState();
-  const lower = targetNick.toLowerCase();
-  for (const ch of store.channels.values()) {
-    const m = ch.members.get(lower);
-    if (m?.did) return m.did;
-  }
-  return undefined;
-}
-
-/**
- * Cache of plaintext for outgoing encrypted messages, keyed by ciphertext.
- * Needed because echo-message returns our own ciphertext and we can't
- * decrypt what we encrypted (Double Ratchet is asymmetric: send ≠ recv chain).
- * Entries auto-expire after 60 seconds.
- */
-const echoPlaintextCache = new Map<string, { plaintext: string; ts: number }>();
-function cacheEchoPlaintext(ciphertext: string, plaintext: string) {
-  echoPlaintextCache.set(ciphertext, { plaintext, ts: Date.now() });
-  // Prune old entries
-  if (echoPlaintextCache.size > 100) {
-    const now = Date.now();
-    for (const [k, v] of echoPlaintextCache) {
-      if (now - v.ts > 60_000) echoPlaintextCache.delete(k);
-    }
-  }
-}
-
-/** Send a signed PRIVMSG (async — signs then sends) */
-async function signedPrivmsg(target: string, text: string, extraTags?: Record<string, string>) {
-  const sig = await signing.signMessage(target, text);
-  const tags: Record<string, string> = { ...extraTags };
-  if (sig) tags['+freeq.at/sig'] = sig;
-  if (Object.keys(tags).length > 0) {
-    const line = format('PRIVMSG', [target, text], tags);
-    raw(line);
-  } else {
-    raw(`PRIVMSG ${target} :${text}`);
+  saslState = { token, did, pdsUrl, method, skipBrokerRefresh: !!token };
+  if (client) {
+    client.setSaslCredentials({ token, did, pdsUrl, method });
   }
 }
 
 export function sendMessage(target: string, text: string, multiline = false) {
-  const isChannel = target.startsWith('#') || target.startsWith('&');
-
-  // Encode multi-line: replace newlines with \n for IRC wire format
-  const wireText = multiline ? text.replace(/\n/g, '\\n') : text;
-  const extraTags: Record<string, string> = multiline ? { '+freeq.at/multiline': '' } : {};
-
-  // Check if channel has E2EE key — if so, encrypt before sending
-  if (e2ee.hasChannelKey(target)) {
-    e2ee.encryptChannel(target, wireText).then((encrypted) => {
-      if (encrypted) {
-        cacheEchoPlaintext(encrypted, text);
-        const tags: Record<string, string> = { '+encrypted': '', ...extraTags };
-        const line = format('PRIVMSG', [target, encrypted], tags);
-        raw(line);
-      } else {
-        signedPrivmsg(target, wireText, extraTags);
-      }
-    });
-  }
-  // DM to an AT-authenticated user: encrypt with Double Ratchet
-  else if (!isChannel && e2ee.isE2eeReady()) {
-    const remoteDid = didForNick(target);
-    if (remoteDid) {
-      const origin = window.location.origin;
-      e2ee.encryptMessage(remoteDid, wireText, origin).then((encrypted) => {
-        if (encrypted) {
-          cacheEchoPlaintext(encrypted, text);
-          const tags: Record<string, string> = { '+encrypted': '', ...extraTags };
-          const line = format('PRIVMSG', [target, encrypted], tags);
-          raw(line);
-        } else {
-          signedPrivmsg(target, wireText, extraTags);
-        }
-      });
-    } else {
-      signedPrivmsg(target, wireText, extraTags);
-    }
-  } else {
-    signedPrivmsg(target, wireText, extraTags);
-  }
-
+  client?.sendMessage(target, text, multiline);
   // Ensure DM buffer exists
+  const isChannel = target.startsWith('#') || target.startsWith('&');
   if (!isChannel) {
     const store = useStore.getState();
     if (!store.channels.has(target.toLowerCase())) {
       store.addChannel(target);
     }
   }
-
-  // If we have echo-message, server will echo it back.
-  // Otherwise, add it locally (show plaintext, not ciphertext).
-  const willEncrypt = e2ee.hasChannelKey(target) || (!isChannel && e2ee.isE2eeReady() && !!didForNick(target));
-  if (!ackedCaps.has('echo-message')) {
-    useStore.getState().addMessage(target, {
-      id: crypto.randomUUID(),
-      from: nick,
-      text,
-      timestamp: new Date(),
-      tags: {},
-      isSelf: true,
-      encrypted: willEncrypt,
-    });
-  }
 }
 
 export function sendReply(target: string, replyToMsgId: string, text: string, multiline = false) {
-  const tags: Record<string, string> = { '+reply': replyToMsgId };
-  if (multiline) tags['+freeq.at/multiline'] = '';
-  const line = format('PRIVMSG', [target, text], tags);
-  raw(line);
-
-  // Ensure DM buffer exists
+  client?.sendReply(target, replyToMsgId, text, multiline);
   const isChannel = target.startsWith('#') || target.startsWith('&');
   if (!isChannel) {
     const store = useStore.getState();
@@ -343,891 +175,592 @@ export function sendReply(target: string, replyToMsgId: string, text: string, mu
 }
 
 export function sendEdit(target: string, originalMsgId: string, newText: string, multiline = false) {
-  const tags: Record<string, string> = { '+draft/edit': originalMsgId };
-  if (multiline) tags['+freeq.at/multiline'] = '';
-  const line = format('PRIVMSG', [target, newText], tags);
-  raw(line);
+  client?.sendEdit(target, originalMsgId, newText, multiline);
 }
 
 export function sendMarkdown(target: string, text: string) {
-  const isMultiline = text.includes('\n');
-  const wireText = isMultiline ? text.replace(/\n/g, '\\n') : text;
-  const tags: Record<string, string> = { '+freeq.at/mime': 'text/markdown' };
-  if (isMultiline) tags['+freeq.at/multiline'] = '';
-  signedPrivmsg(target, wireText, tags);
-
-  // Local echo if no echo-message cap
-  if (!ackedCaps.has('echo-message')) {
-    useStore.getState().addMessage(target, {
-      id: crypto.randomUUID(),
-      from: nick,
-      text: wireText,
-      timestamp: new Date(),
-      tags,
-      isSelf: true,
-    });
-  }
+  client?.sendMarkdown(target, text);
 }
 
 export function sendDelete(target: string, msgId: string) {
-  useStore.getState().deleteMessage(target, msgId);
-  const line = format('TAGMSG', [target], { '+draft/delete': msgId });
-  raw(line);
+  client?.sendDelete(target, msgId);
 }
 
 export function sendReaction(target: string, emoji: string, msgId?: string) {
-  const tags: Record<string, string> = { '+react': emoji };
-  if (msgId) tags['+reply'] = msgId;
-  raw(format('TAGMSG', [target], tags));
+  client?.sendReaction(target, emoji, msgId);
+}
+
+export function sendUnreact(target: string, emoji: string, msgId: string) {
+  client?.sendUnreact(target, emoji, msgId);
 }
 
 export function joinChannel(channel: string) {
-  raw(`JOIN ${channel}`);
-  // Optimistic switch — user expects to land on the channel they just joined
+  client?.join(channel);
   useStore.getState().addChannel(channel);
   useStore.getState().setActiveChannel(channel);
 }
 
 export function partChannel(channel: string) {
-  raw(`PART ${channel}`);
-  // Optimistic removal — don't wait for server confirmation
+  client?.part(channel);
   useStore.getState().removeChannel(channel);
-  joinedChannels.delete(channel.toLowerCase());
   saveJoinedChannels();
 }
 
 export function setTopic(channel: string, topic: string) {
-  raw(`TOPIC ${channel} :${topic}`);
+  client?.setTopic(channel, topic);
 }
 
 export function setMode(channel: string, mode: string, arg?: string) {
-  raw(arg ? `MODE ${channel} ${mode} ${arg}` : `MODE ${channel} ${mode}`);
+  client?.setMode(channel, mode, arg);
 }
 
 export function kickUser(channel: string, userNick: string, reason?: string) {
-  raw(`KICK ${channel} ${userNick} :${reason || 'kicked'}`);
+  client?.kick(channel, userNick, reason);
 }
 
 export function inviteUser(channel: string, userNick: string) {
-  raw(`INVITE ${userNick} ${channel}`);
+  client?.invite(channel, userNick);
 }
 
-let pendingAwayReason: string | null = null;
 export function setAway(reason?: string) {
-  pendingAwayReason = reason || null;
-  raw(reason ? `AWAY :${reason}` : 'AWAY');
+  client?.setAway(reason);
 }
 
 export function sendWhois(userNick: string) {
-  raw(`WHOIS ${userNick}`);
+  client?.whois(userNick);
 }
 
-export function requestHistory(channel: string, before?: string) {
-  if (before) {
-    raw(`CHATHISTORY BEFORE ${channel} timestamp=${before} 50`);
+export function requestHistory(channel: string, beforeTimestamp?: string) {
+  if (!client) return;
+  if (beforeTimestamp) {
+    client.requestHistory({ target: channel, mode: 'before', timestamp: beforeTimestamp });
   } else {
-    raw(`CHATHISTORY LATEST ${channel} * 50`);
+    client.requestHistory({ target: channel, mode: 'latest' });
   }
 }
 
 export function requestDmTargets(limit = 50) {
-  raw(`CHATHISTORY TARGETS * * ${limit}`);
+  client?.requestHistoryTargets(limit);
 }
 
 export function rawCommand(line: string) {
-  raw(line);
+  client?.raw(line);
 }
 
 export function getNick(): string {
-  return nick;
+  return client?.nick ?? '';
 }
 
 export function pinMessage(channel: string, msgid: string) {
-  raw(`PIN ${channel} ${msgid}`);
+  client?.pin(channel, msgid);
 }
 
 export function unpinMessage(channel: string, msgid: string) {
-  raw(`UNPIN ${channel} ${msgid}`);
+  client?.unpin(channel, msgid);
 }
 
-async function fetchPins(channel: string) {
-  try {
-    const name = channel.startsWith('#') ? channel.slice(1) : channel;
-    const resp = await fetch(`${window.location.origin}/api/v1/channels/${encodeURIComponent(name)}/pins`);
-    if (resp.ok) {
-      const data = await resp.json();
-      useStore.getState().setPins(channel, data.pins || []);
-    }
-  } catch { /* ignore */ }
+// ── AV Session ──
+
+let pendingAvStart: { channel: string; did: string } | null = null;
+
+/// Per-call random suffix. Sent on every av-start/av-join/av-leave as the
+/// `+freeq.at/av-instance` tag and used to build the MoQ broadcast path
+/// (`{sessionId}/{nick}~{instance}`), so two devices signed in as the same
+/// DID get distinct participant slots and broadcasts.
+let currentAvInstance: string | null = null;
+
+/// A call dropped by a connection blip, kept so a reconnect can rejoin the
+/// same session+instance within the server's AV grace window. Set only on a
+/// disconnect-driven teardown (see `connectionStateChanged`); cleared on
+/// explicit leave, once consumed by a rejoin, or once it passes the window.
+let pendingCallRejoin: PendingCallRejoin | null = null;
+
+function generateAvInstanceId(): string {
+  // 4 random bytes → 8 lowercase hex chars. Plenty of entropy for
+  // collision avoidance within a session; short enough that broadcast
+  // paths stay readable in logs.
+  const buf = new Uint8Array(4);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ── Internals ──
-
-function raw(line: string) {
-  transport?.send(line);
+export function getAvInstanceId(): string | null {
+  return currentAvInstance;
 }
 
-async function handleLine(rawLine: string) {
-  const msg = parse(rawLine);
+// Per-channel in-flight guard. We only want to suppress *concurrent*
+// startAvSession invocations for the same channel (rapid double-clicks
+// while the discovery fetch is in flight); the previous guard checked
+// store.avAudioActive which would stick true after any teardown blip
+// and silently no-op every future button click on that user's session.
+const _startInFlight = new Set<string>();
+
+/** Seed an AV session into the store from the REST `/sessions` shape, so
+ *  CallPanel (which renders `avSessions.get(activeAvSession)`) can mount
+ *  immediately rather than waiting for the 5s discovery poll. */
+function seedAvSessionFromRest(active: {
+  id: string; channel: string; created_by?: string; created_by_nick?: string;
+  title?: string; created_at?: number; iroh_ticket?: string;
+  participants?: Array<{ nick: string; did?: string; role?: string; joined_at?: number }>;
+}) {
+  const participants = new Map<string, import('../store').AvParticipant>();
+  for (const p of active.participants || []) {
+    participants.set(p.nick, {
+      did: p.did || '', nick: p.nick,
+      role: (p.role as import('../store').AvParticipant['role']) || 'speaker',
+      joinedAt: new Date((p.joined_at || 0) * 1000),
+    });
+  }
+  useStore.getState().updateAvSession({
+    id: active.id, channel: active.channel, createdBy: active.created_by || '',
+    createdByNick: active.created_by_nick || '', title: active.title || undefined,
+    participants, state: 'active', startedAt: new Date((active.created_at || 0) * 1000),
+    irohTicket: active.iroh_ticket || undefined,
+  });
+}
+
+export async function startAvSession(channel: string, title?: string) {
   const store = useStore.getState();
-  const from = prefixNick(msg.prefix);
+  if (!store.authDid) {
+    store.addSystemMessage(channel, 'You must be signed in with AT Protocol to start a voice session.');
+    return;
+  }
+  if (store.connectionState !== 'connected') {
+    store.addSystemMessage(channel, 'Cannot start voice session: not connected to server.');
+    return;
+  }
+  const key = channel.toLowerCase();
+  if (_startInFlight.has(key)) return;
+  _startInFlight.add(key);
 
-
-
-  switch (msg.command) {
-    // ── CAP negotiation ──
-    case 'CAP':
-      handleCap(msg);
-      break;
-
-    // ── SASL ──
-    case 'AUTHENTICATE':
-      handleAuthenticate(msg);
-      break;
-    case '900':
-      store.setAuth(saslDid, msg.params[msg.params.length - 1]);
-      if (saslDid) {
-        prefetchProfiles([saslDid]);
-        // Initialize E2EE keys for this DID
-        const origin = window.location.origin;
-        e2ee.initialize(saslDid, origin).catch((e) =>
-          console.warn('[e2ee] Init failed:', e)
-        );
-      }
-      break;
-    case '903':
-      // Register client message-signing key if we have a DID
-      if (saslDid) {
-        signing.setSigningDid(saslDid);
-        signing.generateSigningKey().then((pubkey) => {
-          if (pubkey) raw(`MSGSIG ${pubkey}`);
-        });
-      }
-      raw('CAP END');
-      break;
-    case '904':
-      store.setAuthError(msg.params[msg.params.length - 1] || 'SASL failed');
-      raw('CAP END');
-      break;
-
-    case 'PING':
-      raw(`PONG :${msg.params[0] || ''}`);
-      break;
-
-    // ── ERROR (server closing link) ──
-    case 'ERROR': {
-      const reason = msg.params[0] || '';
-      // If ghosted (same identity reconnected elsewhere), don't auto-reconnect
-      if (reason.includes('same identity reconnected')) {
-        transport?.disconnect(); // sets intentionalClose = true, prevents reconnect
-        useStore.getState().fullReset();
-      }
-      break;
-    }
-
-    // ── Registration ──
-    case '001': {
-      const serverNick = msg.params[0] || nick;
-
-      // If we were authenticated but server gave us a Guest nick,
-      // the web-token was consumed or expired. Retry with a fresh broker session.
-      const wasAuthenticated = localStorage.getItem('freeq-handle');
-      if (wasAuthenticated && /^Guest\d+$/i.test(serverNick)) {
-        guestFallbackCount++;
-        if (guestFallbackCount <= 3) {
-          // Disconnect and let auto-reconnect retry with fresh broker session
-          raw('QUIT :Retrying auth');
+  try {
+    try {
+      const resp = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.active && data.active.state === 'Active') {
+          store.addSystemMessage(channel, `Joining existing voice session (${data.active.participant_count} participants)`);
+          // Seed the session NOW so CallPanel can mount on this same click —
+          // setting activeAvSession alone, before the 5s poll populates the
+          // map, leaves CallPanel with nothing to render.
+          seedAvSessionFromRest(data.active);
+          joinAvSession(channel, data.active.id);
+          store.setAvAudioActive(true);
           return;
         }
-        // After 3 retries, give up — but DON'T delete the broker token.
-        // The broker token is a long-lived credential; the issue is likely
-        // transient (server restart, DPoP nonce, etc.). Let the user retry
-        // from the connect screen which will try broker again.
-        guestFallbackCount = 0;
-        raw('QUIT :Session expired');
-        transport?.disconnect();
-        transport = null;
-        useStore.getState().fullReset();
-        return;
       }
-      guestFallbackCount = 0; // Reset on successful auth
-
-      nick = serverNick;
-      store.setNick(nick);
-      store.setRegistered(true);
-      store.setConnectedServer(lastUrl);
-      // Auto-join channels:
-      // - Explicit channels from connect() call (e.g. invite link) always apply.
-      // - For DID-authenticated users, the server auto-joins from the DB
-      //   (user_channels table, maintained on JOIN/PART). Don't duplicate.
-      // - For guests, join from in-memory session set or #freeq default.
-      let toJoin: string[];
-      if (autoJoinChannels.length > 0) {
-        // Explicit channels (invite link, connect screen)
-        toJoin = autoJoinChannels;
-      } else if (saslDid) {
-        // Authenticated: server handles auto-rejoin from DB.
-        // Only join #freeq if the server doesn't auto-join anything
-        // (the server will send JOINs which populate the channel list).
-        toJoin = [];
-      } else if (joinedChannels.size > 0) {
-        // Guest reconnect: rejoin channels from current session
-        toJoin = [...joinedChannels];
-      } else {
-        // Fresh guest: join #freeq
-        toJoin = ['#freeq'];
-      }
-      // Ensure #freeq for guests with no channels
-      if (!saslDid && toJoin.length === 0) {
-        toJoin = ['#freeq'];
-      }
-      for (const ch of toJoin) {
-        const name = ch.trim();
-        if (name && !store.channels.has(name.toLowerCase())) {
-          raw(`JOIN ${name}`);
-        }
-      }
-      autoJoinChannels = [];
-      // Fetch DM conversation list if authenticated
-      if (saslDid) {
-        requestDmTargets();
-      }
-      // Restore last active channel after joins complete
-      const savedActive = localStorage.getItem('freeq-active-channel');
-      if (savedActive && savedActive !== 'server') {
-        setTimeout(() => {
-          const ch = useStore.getState().channels.get(savedActive.toLowerCase());
-          if (ch) useStore.getState().setActiveChannel(savedActive);
-        }, 500);
-      }
-      break;
-    }
-    case '433': // Nick in use — append underscore and retry
-      nick += '_';
-      raw(`NICK ${nick}`);
-      break;
-
-    case 'NICK': {
-      const newNick = msg.params[0];
-      if (from.toLowerCase() === nick.toLowerCase()) {
-        nick = newNick;
-        store.setNick(nick);
-      }
-      store.renameUser(from, newNick);
-      break;
+    } catch (e) {
+      console.warn('[av] Failed to check existing sessions:', e);
     }
 
-    case 'JOIN': {
-      const channel = msg.params[0];
-      const account = msg.params[1]; // extended-join
-      if (from.toLowerCase() === nick.toLowerCase()) {
-        store.addChannel(channel);
-        store.clearMembers(channel); // Clear stale members before NAMES reply arrives
-        // Only auto-switch if no saved channel preference or still on server tab
-        const savedActive = localStorage.getItem('freeq-active-channel');
-        if (!savedActive || store.activeChannel === 'server') {
-          store.setActiveChannel(channel);
-        }
-        joinedChannels.add(channel.toLowerCase());
-        saveJoinedChannels();
-        // Fetch pinned messages
-        fetchPins(channel);
-      }
-      const joinDid = account && account !== '*' ? account : undefined;
-      const actorClass = (msg.tags?.['freeq.at/actor-class'] || msg.tags?.['+freeq.at/actor-class']) as Member['actorClass'] | undefined;
-      store.addMember(channel, {
-        nick: from,
-        did: joinDid,
-        // Don't override op/voice status — JOIN doesn't carry prefix info.
-        // NAMES (353) or MODE will set these correctly.
-        actorClass,
-      });
-      if (joinDid) prefetchProfiles([joinDid]);
-      store.addSystemMessage(channel, `${from} joined`);
-      break;
-    }
+    store.addSystemMessage(channel, 'Starting voice session...');
+    pendingAvStart = { channel, did: store.authDid };
+    currentAvInstance = generateAvInstanceId();
+    const tags: Record<string, string> = {
+      '+freeq.at/av-start': '',
+      '+freeq.at/av-instance': currentAvInstance,
+    };
+    if (title) tags['+freeq.at/av-title'] = title;
+    client?.raw(format('TAGMSG', [channel], tags));
+    store.setAvAudioActive(true);
 
-    case 'PART': {
-      const channel = msg.params[0];
-      if (from.toLowerCase() === nick.toLowerCase()) {
-        store.removeChannel(channel);
-        joinedChannels.delete(channel.toLowerCase());
-        saveJoinedChannels();
-      } else {
-        store.removeMember(channel, from);
-        store.addSystemMessage(channel, `${from} left`);
-      }
-      break;
-    }
-
-    case 'QUIT': {
-      const reason = msg.params[0] || '';
-      store.removeUserFromAll(from, reason);
-      break;
-    }
-
-    case 'KICK': {
-      const channel = msg.params[0];
-      const kicked = msg.params[1];
-      const reason = msg.params[2] || '';
-      if (kicked.toLowerCase() === nick.toLowerCase()) {
-        store.removeChannel(channel);
-        joinedChannels.delete(channel.toLowerCase());
-        saveJoinedChannels();
-        store.addSystemMessage('server', `Kicked from ${channel} by ${from}: ${reason}`);
-      } else {
-        store.removeMember(channel, kicked);
-        store.addSystemMessage(channel, `${kicked} kicked by ${from}${reason ? `: ${reason}` : ''}`);
-      }
-      break;
-    }
-
-    // ── PRIVMSG / NOTICE ──
-    case 'PRIVMSG': {
-      const target = msg.params[0];
-      const text = msg.params[1] || '';
-      const isAction = text.startsWith('\x01ACTION ') && text.endsWith('\x01');
-      // For channels, buffer = channel name. For DMs, buffer = the other person's nick.
-      const isChannel = target.startsWith('#') || target.startsWith('&');
-      const isSelf = from.toLowerCase() === nick.toLowerCase();
-      const bufName = isChannel ? target : (isSelf ? target : from);
-
-      // Handle edits
-      const editOf = msg.tags['+draft/edit'];
-      if (editOf) {
-        const isStreaming = msg.tags['+freeq.at/streaming'] === '1';
-        // Ensure DM buffer exists before editing (streaming edits can race with initial message)
-        if (!isChannel && !useStore.getState().channels.has(bufName.toLowerCase())) {
-          useStore.getState().addChannel(bufName);
-        }
-        store.editMessage(bufName, editOf, text, msg.tags['msgid'], isStreaming);
-        break;
-      }
-
-      // Decrypt E2EE messages
-      let displayText = isAction ? text.slice(8, -1) : text;
-      let isEncryptedMsg = false;
-
-      // Check echo cache first — our own encrypted messages echoed back
-      const cachedPlain = echoPlaintextCache.get(text);
-      if (cachedPlain && isSelf) {
-        displayText = cachedPlain.plaintext;
-        isEncryptedMsg = true;
-        echoPlaintextCache.delete(text);
-      }
-      // ENC1: channel passphrase-based encryption
-      else if (e2ee.isENC1(text) && isChannel) {
-        const plain = await e2ee.decryptChannel(target, text);
-        if (plain !== null) {
-          displayText = plain;
-          isEncryptedMsg = true;
-        } else {
-          displayText = '🔒 [encrypted message — use /encrypt <passphrase> to decrypt]';
-          isEncryptedMsg = true;
-        }
-      }
-      // ENC3: DM Double Ratchet encryption (from someone else)
-      else if (e2ee.isEncrypted(text) && !isChannel && !isSelf) {
-        const remoteDid = didForNick(from);
-        if (remoteDid) {
-          const origin = window.location.origin;
-          const plain = await e2ee.decryptMessage(remoteDid, text, origin);
-          if (plain !== null) {
-            displayText = plain;
-            isEncryptedMsg = true;
-          } else {
-            displayText = '🔒 [encrypted DM — could not decrypt]';
-            isEncryptedMsg = true;
+    // Converge on the session we just created. The av-state SDK event is
+    // supposed to fire and set activeAvSession (see the avSessionUpdate
+    // handler), but if it doesn't fire or its createdBy doesn't match, a user
+    // starting a call ALONE is left with avAudioActive=true and no
+    // activeAvSession — so CallPanel never mounts and the call seems to never
+    // start. Poll the channel roster for our freshly-created session and
+    // activate it directly. Idempotent with the event: whichever sets
+    // activeAvSession first wins; the other no-ops.
+    const myDid = store.authDid;
+    for (let i = 0; i < 16; i++) {
+      if (useStore.getState().activeAvSession) { pendingAvStart = null; break; }
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        const r = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+        if (!r.ok) continue;
+        const d = await r.json();
+        const active = d.active;
+        if (active && active.state === 'Active' && active.created_by === myDid) {
+          if (!useStore.getState().activeAvSession) {
+            seedAvSessionFromRest(active);
+            useStore.getState().setActiveAvSession(active.id);
           }
-        } else {
-          displayText = '🔒 [encrypted DM — unknown sender identity]';
-          isEncryptedMsg = true;
+          pendingAvStart = null;
+          break;
         }
-      }
-      // ENC3: own echo that wasn't in cache (e.g. CHATHISTORY)
-      else if (e2ee.isEncrypted(text) && !isChannel && isSelf) {
-        displayText = '🔒 [encrypted message]';
-        isEncryptedMsg = true;
-      }
-      if (msg.tags['+encrypted']) isEncryptedMsg = true;
-
-      const message: Message = {
-        id: msg.tags['msgid'] || crypto.randomUUID(),
-        from,
-        text: displayText,
-        timestamp: msg.tags['time'] ? new Date(msg.tags['time']) : new Date(),
-        tags: msg.tags,
-        isAction,
-        isSelf: isSelf,
-        replyTo: msg.tags['+reply'],
-        encrypted: isEncryptedMsg,
-        isStreaming: msg.tags['+freeq.at/streaming'] === '1',
-      };
-
-      // Ensure DM buffer exists
-      if (!isChannel && !useStore.getState().channels.has(bufName.toLowerCase())) {
-        useStore.getState().addChannel(bufName);
-      }
-
-      // Background WHOIS for DM partners to learn their DID (enables E2EE)
-      if (!isChannel && !isSelf && !didForNick(from) && !backgroundWhois.has(from.toLowerCase())) {
-        backgroundWhois.add(from.toLowerCase());
-        raw(`WHOIS ${from}`);
-      }
-
-      // If this message is part of a batch (CHATHISTORY), add to batch buffer
-      const batchId = msg.tags['batch'];
-      if (batchId && store.batches.has(batchId)) {
-        store.addBatchMessage(batchId, message);
-        break;
-      }
-
-      store.addMessage(bufName, message);
-
-      // Mention detection + notification
-      const isMention = !message.isSelf && text.toLowerCase().includes(nick.toLowerCase());
-      const isDM = !isChannel && !message.isSelf;
-      if (isMention) {
-        store.incrementMentions(bufName);
-      }
-      if (isDM) {
-        store.incrementMentions(bufName);
-      }
-      if ((isMention || isDM) && !useStore.getState().mutedChannels.has(bufName.toLowerCase())) {
-        notify(
-          isDM ? `DM from ${from}` : bufName,
-          `${from}: ${text.slice(0, 100)}`,
-          () => useStore.getState().setActiveChannel(bufName),
-        );
-      }
-      break;
+      } catch { /* keep polling */ }
     }
-
-    case 'NOTICE': {
-      const target = msg.params[0];
-      const text = msg.params[1] || '';
-      const buf = target === '*' || target === nick ? 'server' : target;
-      // Update actor class from agent registration broadcast
-      const noticeActorClass = (msg.tags?.['freeq.at/actor-class'] || msg.tags?.['+freeq.at/actor-class']) as Member['actorClass'] | undefined;
-      if (noticeActorClass && from && (target.startsWith('#') || target.startsWith('&'))) {
-        store.addMember(target, { nick: from, actorClass: noticeActorClass });
-      }
-      // Handle pin/unpin sync broadcasts (update local state, then show server's message)
-      const pinMsgid = msg.tags?.['+freeq.at/pin'];
-      const unpinMsgid = msg.tags?.['+freeq.at/unpin'];
-      if (pinMsgid && (target.startsWith('#') || target.startsWith('&'))) {
-        store.addPin(target, pinMsgid, from);
-      }
-      if (unpinMsgid && (target.startsWith('#') || target.startsWith('&'))) {
-        store.removePin(target, unpinMsgid);
-      }
-      // Strip CTCP ACTION wrapper for display (e.g., pin/unpin notifications)
-      const isAction = text.startsWith('\x01ACTION ') && text.endsWith('\x01');
-      if (isAction) {
-        store.addSystemMessage(buf, `${from} ${text.slice(8, -1)}`);
-      } else {
-        store.addSystemMessage(buf, `[${from || 'server'}] ${text}`);
-      }
-      break;
-    }
-
-    // ── TAGMSG ──
-    case 'TAGMSG': {
-      const target = msg.params[0];
-      // For DMs, buffer = the other person's nick (not our own)
-      const isChannel = target.startsWith('#') || target.startsWith('&');
-      const isSelf = from.toLowerCase() === nick.toLowerCase();
-      const bufName = isChannel ? target : (isSelf ? target : from);
-
-      // Handle deletes
-      const deleteOf = msg.tags['+draft/delete'];
-      if (deleteOf) {
-        store.deleteMessage(bufName, deleteOf);
-        break;
-      }
-      // Handle reactions — +reply tag references the target message
-      const reaction = msg.tags['+react'];
-      if (reaction) {
-        const reactTarget = msg.tags['+reply'];
-        if (reactTarget) {
-          store.addReaction(bufName, reactTarget, reaction, from);
-        } else {
-          // No +reply — reaction to the channel generally.
-          // Attach to the most recent non-system message.
-          const ch = store.channels.get(bufName.toLowerCase());
-          if (ch) {
-            const lastMsg = [...ch.messages].reverse().find((m) => !m.isSystem && !m.deleted);
-            if (lastMsg) {
-              store.addReaction(bufName, lastMsg.id, reaction, from);
-            }
-          }
-        }
-      }
-      // Handle typing
-      const typing = msg.tags['+typing'];
-      if (typing) {
-        store.setTyping(bufName, from, typing === 'active');
-      }
-      break;
-    }
-
-    // ── TOPIC ──
-    case 'TOPIC': {
-      const channel = msg.params[0];
-      const topic = msg.params[1] || '';
-      store.setTopic(channel, topic, from);
-      break;
-    }
-    case '332': {
-      const channel = msg.params[1];
-      const topic = msg.params[2] || '';
-      store.setTopic(channel, topic);
-      break;
-    }
-
-    // ── NAMES ──
-    case '353': {
-      const channel = msg.params[2];
-      const nicks = (msg.params[3] || '').split(' ').filter(Boolean);
-      for (const n of nicks) {
-        // With multi-prefix, nicks can have multiple prefixes: @+nick, @%+nick, etc.
-        // Strip all leading prefix chars to get bare nick.
-        const prefixMatch = n.match(/^([@%+]+)/);
-        const prefixes = prefixMatch ? prefixMatch[1] : '';
-        const bare = n.slice(prefixes.length);
-        const isOp = prefixes.includes('@');
-        const isHalfop = prefixes.includes('%');
-        const isVoiced = prefixes.includes('+');
-        store.addMember(channel, { nick: bare, isOp, isHalfop, isVoiced });
-      }
-      break;
-    }
-    case '366': { // End of NAMES — request history and WHOIS members for avatars
-      const namesChannel = msg.params[1];
-      // Fetch recent history for the channel
-      requestHistory(namesChannel);
-      const ch = store.channels.get(namesChannel?.toLowerCase());
-      if (ch) {
-        const toWhois: string[] = [];
-        for (const m of ch.members.values()) {
-          const ml = m.nick.toLowerCase();
-          if (ml !== nick.toLowerCase() && !backgroundWhois.has(ml)) {
-            toWhois.push(m.nick);
-          }
-        }
-        // Stagger WHOIS to avoid flooding
-        for (const n of toWhois) {
-          backgroundWhois.add(n.toLowerCase());
-          raw(`WHOIS ${n}`);
-        }
-      }
-      break;
-    }
-
-    // ── MODE ──
-    case 'MODE': {
-      const target = msg.params[0];
-      if (target.startsWith('#') || target.startsWith('&')) {
-        const modeStr = msg.params[1] || '';
-        // Parse compound mode string: "+ov alice bob" → [+o alice, +v bob]
-        // Modes that take an argument: o, h, v, k, b
-        const argsWithParam = new Set(['o', 'h', 'v', 'k', 'b']);
-        let adding = true;
-        let argIdx = 2; // msg.params index for next arg
-        for (const ch of modeStr) {
-          if (ch === '+') { adding = true; continue; }
-          if (ch === '-') { adding = false; continue; }
-          const modeArg = argsWithParam.has(ch) ? msg.params[argIdx++] : undefined;
-          store.handleMode(target, `${adding ? '+' : '-'}${ch}`, modeArg, from);
-        }
-        const allArgs = msg.params.slice(2).join(' ');
-        store.addSystemMessage(target, `${from} set mode ${modeStr}${allArgs ? ' ' + allArgs : ''}`);
-      }
-      break;
-    }
-
-    // ── AWAY ──
-    case 'AWAY': {
-      const reason = msg.params[0];
-      store.setUserAway(from, reason || null);
-      break;
-    }
-
-    // ── RPL_NOWAWAY (306) / RPL_UNAWAY (305) — self away status ──
-    case '306': {
-      // "You have been marked as being away"
-      const reason = pendingAwayReason || 'away';
-      pendingAwayReason = null;
-      store.setUserAway(nick, reason);
-      store.addSystemMessage('server', `You are now away: ${reason}`);
-      break;
-    }
-    case '305': {
-      // "You are no longer marked as being away"
-      pendingAwayReason = null;
-      store.setUserAway(nick, null);
-      store.addSystemMessage('server', 'You are no longer away');
-      break;
-    }
-
-    // ── BATCH ──
-    case 'BATCH': {
-      const ref = msg.params[0];
-      if (ref.startsWith('+')) {
-        store.startBatch(ref.slice(1), msg.params[1] || '', msg.params[2] || '');
-      } else if (ref.startsWith('-')) {
-        store.endBatch(ref.slice(1));
-      }
-      break;
-    }
-
-    // ── CHATHISTORY (TARGETS response) ──
-    case 'CHATHISTORY': {
-      const sub = msg.params[0];
-      if (sub === 'TARGETS' && msg.params[1]) {
-        const targetNick = msg.params[1];
-        store.addDmTarget(targetNick);
-        requestHistory(targetNick);
-      }
-      break;
-    }
-
-    // ── INVITE ──
-    case 'INVITE':
-      if (msg.params.length >= 2) {
-        store.addSystemMessage('server', `${from} invited you to ${msg.params[1]}`);
-      }
-      break;
-
-    // ── Error numerics ──
-    case '401': {
-      const failNick = msg.params[1];
-      // DMs are persisted server-side for authenticated users, so the message
-      // is stored even when the recipient is offline.  Only show in the DM
-      // buffer (not the server tab) to avoid alarm.
-      if (failNick && store.channels.has(failNick.toLowerCase())) {
-        store.addSystemMessage(failNick, `${failNick} is offline — message saved, they'll see it next time they connect`);
-      } else {
-        store.addSystemMessage('server', `No such nick: ${failNick}`);
-      }
-      break;
-    }
-    case '404': { // ERR_CANNOTSENDTOCHAN
-      const ch = msg.params[1] || '';
-      const reason = msg.params[2] || 'Cannot send to channel';
-      store.addSystemMessage(ch || 'server', reason);
-      break;
-    }
-    case '473': {
-      const ch = msg.params[1] || '';
-      store.addSystemMessage(ch || 'server', `Cannot join ${ch} — channel is invite only (+i)`);
-      break;
-    }
-    case '474': {
-      const ch = msg.params[1] || '';
-      store.addSystemMessage(ch || 'server', `Cannot join ${ch} — you are banned`);
-      break;
-    }
-    case '475': {
-      const ch = msg.params[1] || '';
-      store.addSystemMessage(ch || 'server', `Cannot join ${ch} — incorrect channel key`);
-      break;
-    }
-    case '477': {
-      const ch = msg.params[1] || '';
-      const reason = msg.params[2] || 'Policy acceptance required';
-      store.addSystemMessage('server', `Cannot join ${ch}: ${reason}`);
-      // Open the join gate modal if user has a DID (authenticated)
-      if (useStore.getState().authDid) {
-        useStore.getState().setJoinGateChannel(ch);
-      }
-      break;
-    }
-    case '482': store.addSystemMessage(msg.params[1] || 'server', msg.params[2] || 'Not operator'); break;
-
-    // ── WHOIS ──
-    case '311': { // RPL_WHOISUSER: nick user host * :realname
-      const whoisNick = msg.params[1] || '';
-      // Reset identity fields — they'll only be re-set if server sends 330/671.
-      // This prevents stale DID/handle from a previous user with the same nick.
-      store.updateWhois(whoisNick, {
-        user: msg.params[2],
-        host: msg.params[3],
-        realname: msg.params[5] || msg.params[4],
-        did: undefined,
-        handle: undefined,
-      });
-      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
-        store.addSystemMessage('server', `WHOIS ${whoisNick}: ${msg.params[2]}@${msg.params[3]} (${msg.params[5] || msg.params[4]})`);
-      }
-      break;
-    }
-    case '312': { // RPL_WHOISSERVER
-      const whoisNick = msg.params[1] || '';
-      store.updateWhois(whoisNick, { server: msg.params[2] });
-      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
-        store.addSystemMessage('server', `  Server: ${msg.params[2]}`);
-      }
-      break;
-    }
-    case '318': { // RPL_ENDOFWHOIS
-      const whoisNick = msg.params[1] || '';
-      backgroundWhois.delete(whoisNick.toLowerCase());
-      break;
-    }
-    case '319': { // RPL_WHOISCHANNELS
-      const whoisNick = msg.params[1] || '';
-      store.updateWhois(whoisNick, { channels: msg.params[2] });
-      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
-        store.addSystemMessage('server', `  Channels: ${msg.params[2]}`);
-      }
-      break;
-    }
-    case '330': { // RPL_WHOISACCOUNT (DID)
-      const whoisNick = msg.params[1] || '';
-      const did = msg.params[2]?.trim() || undefined;
-      store.updateWhois(whoisNick, { did });
-      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
-        store.addSystemMessage('server', `  DID: ${did}`);
-      }
-      if (whoisNick) {
-        store.updateMemberDid(whoisNick, did);
-      }
-      if (did) {
-        prefetchProfiles([did]);
-      }
-      break;
-    }
-    case '673': { // RPL_ACTORCLASS — actor_class=agent
-      const whoisNick = msg.params[1] || '';
-      const classStr = msg.params[2] || '';
-      const match = classStr.match(/actor_class=(\w+)/);
-      if (match && whoisNick) {
-        const actorClass = match[1] as Member['actorClass'];
-        // Update member in all channels this nick is in
-        for (const [, ch] of store.channels) {
-          if (ch.members.has(whoisNick.toLowerCase())) {
-            store.addMember(ch.name, { nick: whoisNick, actorClass });
-          }
-        }
-      }
-      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
-        store.addSystemMessage('server', `  Actor class: ${classStr}`);
-      }
-      break;
-    }
-    case '671': { // AT handle
-      const whoisNick = msg.params[1] || '';
-      const handle = msg.params[2]?.trim() || undefined;
-      store.updateWhois(whoisNick, { handle });
-      if (!backgroundWhois.has(whoisNick.toLowerCase())) {
-        store.addSystemMessage('server', `  Handle: ${handle}`);
-      }
-      break;
-    }
-
-    // ── Channel list ──
-    case '321': // RPL_LISTSTART
-      store.setChannelList([]);
-      break;
-    case '322': { // RPL_LIST
-      const chName = msg.params[1] || '';
-      const chCount = parseInt(msg.params[2] || '0', 10);
-      const chTopic = msg.params[3] || '';
-      store.addChannelListEntry({ name: chName, topic: chTopic, count: chCount });
-      store.addSystemMessage('server', `  ${chName} (${chCount}) ${chTopic}`);
-      break;
-    }
-    case '323': // RPL_LISTEND
-      break;
-
-    // ── Informational ──
-    case '375': case '372': {
-      const motdLine = msg.params[msg.params.length - 1];
-      store.addSystemMessage('server', motdLine);
-      // 375 = MOTD start — clear previous MOTD lines (prevents duplication on reconnect)
-      if (msg.command === '375') useStore.setState({ motd: [], motdDismissed: false });
-      if (msg.command === '372') store.appendMotd(motdLine.replace(/^- ?/, ''));
-      break;
-    }
-
-    default:
-      // Numeric replies → server buffer
-      if (/^\d{3}$/.test(msg.command)) {
-        store.addSystemMessage('server', msg.params.slice(1).join(' '));
-      }
-      break;
+  } finally {
+    _startInFlight.delete(key);
   }
 }
 
-function handleCap(msg: IRCMessage) {
-  const sub = (msg.params[1] || '').toUpperCase();
-  if (sub === 'LS') {
-    const available = msg.params.slice(2).join(' ');
-    const wantedCaps: string[] = [];
-    const caps = [
-      'message-tags', 'server-time', 'batch', 'multi-prefix',
-      'echo-message', 'account-notify', 'extended-join', 'away-notify',
-      'draft/chathistory',
-    ];
-    for (const c of caps) {
-      if (available.includes(c)) wantedCaps.push(c);
-    }
-    if (saslToken && available.includes('sasl')) {
-      wantedCaps.push('sasl');
-    }
-    if (wantedCaps.length) {
-      raw(`CAP REQ :${wantedCaps.join(' ')}`);
-    } else {
-      raw('CAP END');
-    }
-  } else if (sub === 'ACK') {
-    const caps = msg.params.slice(2).join(' ');
-    for (const c of caps.split(' ')) ackedCaps.add(c);
-    if (ackedCaps.has('sasl') && saslToken) {
-      raw('AUTHENTICATE ATPROTO-CHALLENGE');
-    } else {
-      raw('CAP END');
-    }
-  } else if (sub === 'NAK') {
-    raw('CAP END');
-  }
+export function joinAvSession(channel: string, sessionId?: string) {
+  // Without a sessionId there's no way for the server to route the join,
+  // so don't send a half-formed TAGMSG that just looks like noise. Callers
+  // that don't know the session ID yet should call `startAvSession`
+  // (which discovers and joins as appropriate).
+  if (!sessionId) return;
+  if (!currentAvInstance) currentAvInstance = generateAvInstanceId();
+  const tags: Record<string, string> = {
+    '+freeq.at/av-join': '',
+    '+freeq.at/av-instance': currentAvInstance,
+    '+freeq.at/av-id': sessionId,
+  };
+  useStore.getState().setActiveAvSession(sessionId);
+  client?.raw(format('TAGMSG', [channel], tags));
 }
 
-function handleAuthenticate(msg: IRCMessage) {
-  const param = msg.params[0] || '';
-  if (param === '+' || !param) return;
+export function leaveAvSession(channel: string, sessionId: string) {
+  const tags: Record<string, string> = {
+    '+freeq.at/av-leave': '',
+    '+freeq.at/av-id': sessionId,
+  };
+  if (currentAvInstance) tags['+freeq.at/av-instance'] = currentAvInstance;
+  client?.raw(format('TAGMSG', [channel], tags));
+  currentAvInstance = null;
+  // Explicit leave — a reconnect must NOT drag us back into the call.
+  pendingCallRejoin = null;
+  useStore.getState().setActiveAvSession(null);
+}
 
-  // Server sent the challenge — decode it to extract the nonce, then respond.
-  // The challenge_nonce binds our PDS-verified session to this specific
-  // challenge, preventing token replay across different servers/sessions.
-  let challengeNonce: string | undefined;
-  try {
-    const challengeJson = atob(param.replace(/-/g, '+').replace(/_/g, '/'));
-    const challenge = JSON.parse(challengeJson);
-    challengeNonce = challenge.nonce;
-  } catch {
-    // If we can't decode the challenge, proceed without the nonce.
-    // The server will reject PDS methods that lack it.
-  }
-  const response = JSON.stringify({
-    did: saslDid,
-    method: saslMethod || 'pds-session',
-    signature: saslToken,
-    pds_url: saslPdsUrl,
-    challenge_nonce: challengeNonce,
-  });
-  const encoded = btoa(response)
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/, '');
+export function endAvSession(channel: string, sessionId: string) {
+  const tags: Record<string, string> = {
+    '+freeq.at/av-end': '',
+    '+freeq.at/av-id': sessionId,
+  };
+  client?.raw(format('TAGMSG', [channel], tags));
+}
 
-  if (encoded.length <= 400) {
-    raw(`AUTHENTICATE ${encoded}`);
+export function sendAvSignal(targetNick: string, data: string) {
+  const encoded = encodeURIComponent(data);
+  const MAX_CHUNK = 4000;
+  if (encoded.length <= MAX_CHUNK) {
+    client?.raw(format('TAGMSG', [targetNick], { '+freeq.at/av-signal': encoded }));
   } else {
-    for (let i = 0; i < encoded.length; i += 400) {
-      raw(`AUTHENTICATE ${encoded.slice(i, i + 400)}`);
+    const id = Math.random().toString(36).slice(2, 8);
+    const chunks = Math.ceil(encoded.length / MAX_CHUNK);
+    for (let i = 0; i < chunks; i++) {
+      const chunk = encoded.slice(i * MAX_CHUNK, (i + 1) * MAX_CHUNK);
+      client?.raw(format('TAGMSG', [targetNick], {
+        '+freeq.at/av-signal': chunk,
+        '+freeq.at/av-chunk': `${id}:${i}:${chunks}`,
+      }));
     }
-    raw('AUTHENTICATE +');
   }
+}
+
+// ── Event wiring: SDK events → Zustand store ──
+
+/**
+ * Test-only export of the event wiring. Production callers should
+ * use {@link connect}, which wires events as part of bringing up the
+ * real SDK client. Tests use this to drive synthetic events through
+ * a stub `FreeqClient` and assert on the resulting store state.
+ */
+export function __wireEventsForTests(c: FreeqClient): void {
+  wireEvents(c);
+}
+
+function wireEvents(c: FreeqClient) {
+  const s = () => useStore.getState();
+
+  c.on('connectionStateChanged', (state) => {
+    s().setConnectionState(state);
+    // Left 'connected' while in a call: capture the call identity so the
+    // reconnect can rejoin the SAME session with the SAME instance within
+    // the server's AV grace window (mirrors macOS
+    // tearDownCallLocallyOnDisconnect). Guarded on `!pendingCallRejoin` so
+    // the intermediate disconnected → connecting transitions don't reset the
+    // drop timestamp — the window is measured from the actual drop.
+    const instance = currentAvInstance;
+    if (state !== 'connected' && !pendingCallRejoin && instance) {
+      const store = s();
+      const sess = store.activeAvSession
+        ? store.avSessions.get(store.activeAvSession)
+        : null;
+      if (store.avAudioActive && sess && sess.channel) {
+        pendingCallRejoin = {
+          channel: sess.channel,
+          sessionId: sess.id,
+          instance,
+          disconnectedAt: Date.now(),
+        };
+      }
+    }
+  });
+
+  c.on('registered', (nick) => {
+    s().setNick(nick);
+    s().setRegistered(true);
+    s().setConnectedServer(c['opts'].url);
+
+    // Restore last active channel after joins complete
+    const savedActive = localStorage.getItem('freeq-active-channel');
+    if (savedActive && savedActive !== 'server') {
+      setTimeout(() => {
+        const ch = useStore.getState().channels.get(savedActive.toLowerCase());
+        if (ch) useStore.getState().setActiveChannel(savedActive);
+      }, 500);
+    }
+  });
+
+  c.on('nickChanged', (nick) => {
+    s().setNick(nick);
+  });
+
+  c.on('authenticated', (did, message) => {
+    s().setAuth(did, message);
+    if (did) prefetchProfiles([did]);
+  });
+
+  c.on('authError', (error) => {
+    s().setAuthError(error);
+  });
+
+  c.on('channelJoined', (channel) => {
+    s().addChannel(channel);
+    s().clearMembers(channel);
+    const savedActive = localStorage.getItem('freeq-active-channel');
+    if (!savedActive || s().activeChannel === 'server') {
+      s().setActiveChannel(channel);
+    }
+    saveJoinedChannels();
+
+    // If a blip dropped us mid-call in this channel, rejoin the same AV
+    // session with the same instance — the server held the slot in its grace
+    // window, so this re-enters in place and instance-keyed peers see media
+    // continuity. joinAvSession re-sends av-join and re-activates the panel.
+    if (shouldRejoinCall(pendingCallRejoin, channel, Date.now())) {
+      const rejoin = pendingCallRejoin!;
+      pendingCallRejoin = null;
+      currentAvInstance = rejoin.instance; // stable across the blip
+      joinAvSession(rejoin.channel, rejoin.sessionId);
+      s().setAvAudioActive(true);
+    } else if (
+      pendingCallRejoin &&
+      Date.now() - pendingCallRejoin.disconnectedAt >= AV_REJOIN_WINDOW_MS
+    ) {
+      // Stale pending (past the window) — clear so it can't fire on a later join.
+      pendingCallRejoin = null;
+    }
+  });
+
+  c.on('channelLeft', (channel) => {
+    s().removeChannel(channel);
+    saveJoinedChannels();
+  });
+
+  c.on('memberJoined', (channel, member) => {
+    if (channel) s().addMember(channel, member);
+    if (member.did) prefetchProfiles([member.did]);
+  });
+
+  c.on('memberLeft', (channel, nick) => {
+    s().removeMember(channel, nick);
+  });
+
+  c.on('userQuit', (nick, reason) => {
+    s().removeUserFromAll(nick, reason);
+  });
+
+  c.on('userRenamed', (oldNick, newNick) => {
+    s().renameUser(oldNick, newNick);
+  });
+
+  c.on('userAway', (nick, reason) => {
+    s().setUserAway(nick, reason);
+  });
+
+  c.on('typing', (channel, nick, isTyping) => {
+    s().setTyping(channel, nick, isTyping);
+  });
+
+  c.on('topicChanged', (channel, topic, setBy) => {
+    s().setTopic(channel, topic, setBy);
+  });
+
+  c.on('modeChanged', (channel, mode, arg, setBy) => {
+    s().handleMode(channel, mode, arg, setBy);
+  });
+
+  c.on('membersList', (channel, members) => {
+    for (const m of members) {
+      s().addMember(channel, m);
+    }
+  });
+
+  // End-of-NAMES: replace the roster with the server's authoritative snapshot.
+  // This is what makes a self-JOIN clear / nick collision / reconnect unable to
+  // leave the member list showing only live-joined members (the bug where
+  // everyone delivered via NAMES — zapnap, etc. — vanished).
+  c.on('membersSync', (channel, members) => {
+    s().setMembers(channel, members);
+    for (const m of members) if (m.did) prefetchProfiles([m.did]);
+  });
+
+  c.on('memberDid', (nick, did) => {
+    s().updateMemberDid(nick, did);
+  });
+
+  c.on('message', (channel, message) => {
+    // Prefetch avatar by DID if available (from account-tag)
+    if (message.tags?.account) prefetchProfiles([message.tags.account]);
+
+    // Ensure DM buffer exists
+    const isChannel = channel.startsWith('#') || channel.startsWith('&');
+    if (!isChannel && !useStore.getState().channels.has(channel.toLowerCase())) {
+      s().addChannel(channel);
+    }
+    s().addMessage(channel, message as import('../store').Message);
+
+    // Mention/DM notification
+    const isMention = !message.isSelf && message.text.toLowerCase().includes(c.nick.toLowerCase());
+    const isDM = !isChannel && !message.isSelf;
+    if (isMention) s().incrementMentions(channel);
+    if (isDM) s().incrementMentions(channel);
+    if ((isMention || isDM) && !useStore.getState().mutedChannels.has(channel.toLowerCase())) {
+      notify(
+        isDM ? `DM from ${message.from}` : channel,
+        `${message.from}: ${message.text.slice(0, 100)}`,
+        () => useStore.getState().setActiveChannel(channel),
+      );
+    }
+  });
+
+  c.on('messageEdited', (channel, originalMsgId, newText, newMsgId, isStreaming) => {
+    // Ensure DM buffer exists
+    const isChannel = channel.startsWith('#') || channel.startsWith('&');
+    if (!isChannel && !useStore.getState().channels.has(channel.toLowerCase())) {
+      s().addChannel(channel);
+    }
+    s().editMessage(channel, originalMsgId, newText, newMsgId, isStreaming);
+  });
+
+  c.on('messageDeleted', (channel, msgId) => {
+    s().deleteMessage(channel, msgId);
+  });
+
+  c.on('reactionAdded', (channel, msgId, emoji, fromNick) => {
+    s().addReaction(channel, msgId, emoji, fromNick);
+  });
+
+  c.on('reactionRemoved', (channel, msgId, emoji, fromNick) => {
+    s().removeReaction(channel, msgId, emoji, fromNick);
+  });
+
+  c.on('systemMessage', (target, text) => {
+    // Skip internal mention markers
+    if (target === '__mention__') return;
+    s().addSystemMessage(target, text);
+  });
+
+  c.on('historyBatch', (channel, messages) => {
+    // Prefetch avatars by DID for history messages
+    const dids = messages.map((m: any) => m.tags?.account).filter(Boolean);
+    if (dids.length) prefetchProfiles(dids);
+
+    useStore.getState().mergeHistory(
+      channel,
+      messages as import('../store').Message[],
+    );
+  });
+
+  c.on('dmTarget', (nick) => {
+    s().addDmTarget(nick);
+  });
+
+  c.on('channelListEntry', (entry) => {
+    s().addChannelListEntry(entry);
+  });
+
+  c.on('pins', (channel, pins) => {
+    s().setPins(channel, pins);
+  });
+
+  c.on('pinAdded', (channel, msgid, pinnedBy) => {
+    s().addPin(channel, msgid, pinnedBy);
+  });
+
+  c.on('pinRemoved', (channel, msgid) => {
+    s().removePin(channel, msgid);
+  });
+
+  c.on('whois', (nick, info) => {
+    s().updateWhois(nick, info);
+  });
+
+  c.on('motdStart', () => {
+    useStore.setState({ motd: [], motdDismissed: false });
+  });
+
+  c.on('motd', (line) => {
+    s().appendMotd(line);
+  });
+
+  c.on('avSessionUpdate', (session) => {
+    const sess = session as import('../store').AvSession;
+    s().updateAvSession(sess);
+    if (
+      pendingAvStart &&
+      sess.channel === pendingAvStart.channel &&
+      sess.createdBy === pendingAvStart.did &&
+      !s().activeAvSession
+    ) {
+      s().setActiveAvSession(sess.id);
+      pendingAvStart = null;
+    }
+    // When the session we're currently in ends (anyone ran `/av end`, or
+    // the host disconnected and the server reaped it), tear the panel
+    // down on our side too. Without this the leaver hears nothing but
+    // the remaining device still shows an "active call" UI.
+    if (sess.state === 'ended' && s().activeAvSession === sess.id) {
+      s().setAvAudioActive(false);
+      s().setAvCameraOn(false);
+      s().setActiveAvSession(null);
+      currentAvInstance = null;
+      if (pendingCallRejoin?.sessionId === sess.id) pendingCallRejoin = null;
+    }
+  });
+
+  c.on('avSessionRemoved', (id) => {
+    // If the SDK reaped a session we were still in (e.g. ended before we
+    // saw the `state: 'ended'` update), close the panel as a safety net.
+    if (s().activeAvSession === id) {
+      s().setAvAudioActive(false);
+      s().setAvCameraOn(false);
+      s().setActiveAvSession(null);
+      currentAvInstance = null;
+    }
+    if (pendingCallRejoin?.sessionId === id) pendingCallRejoin = null;
+    s().removeAvSession(id);
+  });
+
+  c.on('avTicket', (sessionId, ticket) => {
+    const session = s().avSessions.get(sessionId);
+    if (session) {
+      s().updateAvSession({ ...session, irohTicket: ticket } as import('../store').AvSession);
+    }
+  });
+
+  c.on('joinGateRequired', (channel) => {
+    if (useStore.getState().authDid) {
+      s().setJoinGateChannel(channel);
+    }
+  });
+
+  c.on('userKicked', (channel, kicked, _by, _reason) => {
+    s().removeMember(channel, kicked);
+  });
+
+  c.on('error', (message) => {
+    if (message.includes('same identity reconnected')) {
+      useStore.getState().fullReset();
+    }
+  });
+
+  // Handle '001' guest fallback detection — broker token refresh
+  // This is handled within the SDK now; the app just needs to handle the
+  // registered event, which we do above.
 }

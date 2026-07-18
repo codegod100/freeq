@@ -29,6 +29,10 @@ path = "src/bin/stream_demo.rs"
 name = "stream-demo2"
 path = "src/bin/stream_demo2.rs"
 
+[[bin]]
+name = "post"
+path = "src/bin/post.rs"
+
 [dependencies]
 freeq-sdk = { path = "../freeq-sdk" }
 tokio = { workspace = true }
@@ -37,7 +41,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
 clap = { workspace = true }
 chrono = { workspace = true }
 rusqlite = { workspace = true }

@@ -1,11 +1,20 @@
 import SwiftUI
 
-/// Autocomplete popup for @mentions, /commands, and :emoji:
-struct AutocompletePopup: View {
-    @Environment(AppState.self) private var appState
-    @Binding var text: String
-    @Binding var selectedIndex: Int
-    let anchor: CGPoint  // Not used for positioning (overlay at bottom of compose)
+/// Shared autocomplete core for @mentions, /commands, and :emoji: — used by
+/// both the visible `AutocompletePopup` and the composer's key handling so
+/// that the keyboard (↑/↓ to move, Tab/Return to accept) operates on exactly
+/// the suggestions the user sees. Keeping this in one place is what makes the
+/// popup and the keyboard agree; when they were separate, Tab ran a different
+/// matcher that didn't strip the leading "@" and silently did nothing.
+enum ComposeAutocomplete {
+    /// A mention candidate: the real IRC nick to insert, plus the names the
+    /// user might actually type (Bluesky display name + handle). Members are
+    /// shown in the sidebar by display name, so "@nandi" must match a member
+    /// whose nick isn't literally "nandi".
+    struct Member {
+        let nick: String
+        let aliases: [String]
+    }
 
     enum Suggestion: Identifiable {
         case nick(String)
@@ -27,14 +36,6 @@ struct AutocompletePopup: View {
             case .emoji(let s, let e): return "\(e)  :\(s):"
             }
         }
-
-        var completion: String {
-            switch self {
-            case .nick(let n): return "@\(n) "
-            case .command(let c, _): return "/\(c) "
-            case .emoji(_, let e): return "\(e)"
-            }
-        }
     }
 
     static let commands: [(String, String)] = [
@@ -53,6 +54,9 @@ struct AutocompletePopup: View {
         ("whois", "Look up user info"),
         ("mode", "Set channel/user mode"),
         ("raw", "Send raw IRC command"),
+        ("av", "Start, join, or control a call"),
+        ("encrypt", "Enable channel E2EE with a passphrase"),
+        ("decrypt", "Disable channel E2EE"),
         ("p2p", "P2P commands"),
         ("help", "Show help"),
     ]
@@ -68,24 +72,49 @@ struct AutocompletePopup: View {
         ("brain", "🧠"), ("gem", "💎"), ("trophy", "🏆"), ("party", "🥳"),
     ]
 
-    var suggestions: [Suggestion] {
-        let t = text
-        // @mention
+    /// Build mention candidates from channel members, folding in each member's
+    /// Bluesky display name + handle as searchable aliases.
+    static func members(from infos: [MemberInfo]) -> [Member] {
+        infos.map { info in
+            var aliases: [String] = []
+            if let p = ProfileCache.shared.profile(for: info.nick) {
+                if let dn = p.displayName, !dn.isEmpty {
+                    aliases.append(dn)                                   // "Jess Martin"
+                    let compact = dn.replacingOccurrences(of: " ", with: "")
+                    if compact != dn { aliases.append(compact) }         // "JessMartin"
+                    if let first = dn.split(separator: " ").first { aliases.append(String(first)) }
+                }
+                if let h = p.handle, !h.isEmpty {
+                    aliases.append(h)                                    // "nandi.uk"
+                    if let label = h.split(separator: ".").first { aliases.append(String(label)) }  // "nandi"
+                }
+            }
+            return Member(nick: info.nick, aliases: aliases)
+        }
+    }
+
+    /// Suggestions for the current draft, given the channel's members.
+    static func suggestions(text t: String, members: [Member]) -> [Suggestion] {
+        // @mention — match the nick OR any alias (display name / handle), but
+        // always insert the real nick.
         if let atRange = t.range(of: "@", options: .backwards),
            t.distance(from: atRange.lowerBound, to: t.endIndex) <= 20,
            (atRange.lowerBound == t.startIndex || t[t.index(before: atRange.lowerBound)] == " ") {
             let prefix = String(t[atRange.upperBound...]).lowercased()
-            let members = appState.activeChannelState?.members.map(\.nick) ?? []
             return members
-                .filter { prefix.isEmpty || $0.lowercased().hasPrefix(prefix) }
+                .filter { m in
+                    prefix.isEmpty
+                        || m.nick.lowercased().hasPrefix(prefix)
+                        || m.aliases.contains { $0.lowercased().hasPrefix(prefix) }
+                }
                 .prefix(8)
-                .map { .nick($0) }
+                .map { .nick($0.nick) }
         }
 
         // /command
         if t.hasPrefix("/") && !t.contains(" ") {
             let prefix = String(t.dropFirst()).lowercased()
-            return Self.commands
+            return commands
                 .filter { prefix.isEmpty || $0.0.hasPrefix(prefix) }
                 .prefix(8)
                 .map { .command($0.0, $0.1) }
@@ -98,7 +127,7 @@ struct AutocompletePopup: View {
            (colonRange.lowerBound == t.startIndex || t[t.index(before: colonRange.lowerBound)] == " ") {
             let prefix = String(t[colonRange.upperBound...]).lowercased()
             guard !prefix.isEmpty else { return [] }
-            return Self.commonEmoji
+            return commonEmoji
                 .filter { $0.0.contains(prefix) }
                 .prefix(8)
                 .map { .emoji($0.0, $0.1) }
@@ -107,13 +136,73 @@ struct AutocompletePopup: View {
         return []
     }
 
+    /// The draft text after accepting `item` (replaces the in-progress token).
+    static func accept(_ item: Suggestion, in text: String) -> String {
+        switch item {
+        case .nick(let nick):
+            if let atRange = text.range(of: "@", options: .backwards) {
+                return String(text[..<atRange.lowerBound]) + "@\(nick) "
+            }
+            return text
+        case .command(let cmd, _):
+            return "/\(cmd) "
+        case .emoji(_, let char):
+            if let colonRange = text.range(of: ":", options: .backwards) {
+                return String(text[..<colonRange.lowerBound]) + char
+            }
+            return text
+        }
+    }
+
+    /// Shortcode → emoji lookup (the same curated set the popup offers).
+    static let emojiByShortcode: [String: String] =
+        Dictionary(commonEmoji.map { ($0.0, $0.1) }, uniquingKeysWith: { a, _ in a })
+
+    /// Replace complete `:shortcode:` tokens with their emoji — what users
+    /// expect when they type the Slack-style form with both colons (the popup
+    /// only helps with the partial `:wave` form). Applied on send.
+    static func replacingShortcodes(_ text: String) -> String {
+        guard text.contains(":") else { return text }
+        guard let regex = try? NSRegularExpression(pattern: ":([a-z0-9_+-]+):", options: [.caseInsensitive]) else {
+            return text
+        }
+        let ns = text as NSString
+        var result = ""
+        var last = 0
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let code = ns.substring(with: match.range(at: 1)).lowercased()
+            guard let emoji = emojiByShortcode[code] else { continue }
+            result += ns.substring(with: NSRange(location: last, length: match.range.location - last))
+            result += emoji
+            last = match.range.location + match.range.length
+        }
+        guard last > 0 else { return text }
+        result += ns.substring(from: last)
+        return result
+    }
+}
+
+/// Autocomplete popup for @mentions, /commands, and :emoji:. Purely presents
+/// `ComposeAutocomplete.suggestions`; the composer drives selection + accept so
+/// mouse and keyboard stay in sync.
+struct AutocompletePopup: View {
+    @Environment(AppState.self) private var appState
+    @Binding var text: String
+    @Binding var selectedIndex: Int
+    /// True when the user pressed Esc to dismiss — hides the popup until the
+    /// draft changes again.
+    var suppressed: Bool
+
     var body: some View {
-        let items = suggestions
+        let members = ComposeAutocomplete.members(from: appState.activeChannelState?.members ?? [])
+        let items = suppressed ? [] : ComposeAutocomplete.suggestions(text: text, members: members)
         if !items.isEmpty {
+            let sel = min(max(0, selectedIndex), items.count - 1)
             VStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                     Button {
-                        accept(item)
+                        text = ComposeAutocomplete.accept(item, in: text)
+                        selectedIndex = 0
                     } label: {
                         HStack {
                             Text(item.display)
@@ -122,7 +211,7 @@ struct AutocompletePopup: View {
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
-                        .background(index == selectedIndex ? Color.accentColor.opacity(0.15) : Color.clear)
+                        .background(index == sel ? Color.accentColor.opacity(0.15) : Color.clear)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
@@ -135,23 +224,5 @@ struct AutocompletePopup: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 4)
         }
-    }
-
-    private func accept(_ item: Suggestion) {
-        switch item {
-        case .nick(let nick):
-            // Replace @prefix with @nick
-            if let atRange = text.range(of: "@", options: .backwards) {
-                text = String(text[..<atRange.lowerBound]) + "@\(nick) "
-            }
-        case .command(let cmd, _):
-            text = "/\(cmd) "
-        case .emoji(_, let char):
-            // Replace :prefix with emoji
-            if let colonRange = text.range(of: ":", options: .backwards) {
-                text = String(text[..<colonRange.lowerBound]) + char
-            }
-        }
-        selectedIndex = 0
     }
 }

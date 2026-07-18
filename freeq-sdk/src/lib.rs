@@ -8,19 +8,25 @@
 //!
 //! - [`client`] — Async IRC client with SASL support
 //! - [`auth`] — Challenge signing traits and implementations
+//! - [`canonical`] — JCS (RFC 8785) canonicalization for hashing/signing
 //! - [`crypto`] — secp256k1 and ed25519 key operations
 //! - [`did`] — DID document resolution (did:plc, did:web)
 //! - [`pds`] — AT Protocol PDS client (session creation/verification)
 //! - [`event`] — Events emitted by the client
 //! - [`irc`] — IRC message parsing/formatting
 
+pub mod act;
+pub mod address;
 pub mod auth;
+pub mod av;
 pub mod bot;
+pub mod canonical;
 pub mod client;
 pub mod crypto;
 pub mod did;
 pub mod e2ee;
 pub mod e2ee_did;
+pub mod e2ee_group;
 pub mod event;
 pub mod irc;
 pub mod media;
@@ -29,6 +35,8 @@ pub mod oauth;
 pub mod p2p;
 pub mod pds;
 pub mod ratchet;
-pub mod ssrf;
+// SSRF-safe outbound HTTP now lives in its own single-purpose crate; re-export
+// so the `freeq_sdk::ssrf::` path stays stable for existing consumers.
+pub use freeq_ssrf as ssrf;
 pub mod streaming;
 pub mod x3dh;

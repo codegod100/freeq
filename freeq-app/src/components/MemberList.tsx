@@ -2,7 +2,11 @@ import { useState, useEffect } from 'react';
 import { useStore, type Member } from '../store';
 import { fetchProfile, getCachedProfile, type ATProfile } from '../lib/profiles';
 import { UserPopover } from './UserPopover';
-import { sendWhois } from '../irc/client';
+import { sendWhois, getClient } from '../irc/client';
+import { SpeakerIcon } from './SessionIndicator';
+import { parseAwayStatus } from '../lib/status';
+import { isDid, resolveIdentityName, findMemberByKey } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
 import * as e2ee from '../lib/e2ee';
 
 const NICK_COLORS = [
@@ -19,8 +23,15 @@ function nickColor(nick: string): string {
 export function MemberList() {
   const activeChannel = useStore((s) => s.activeChannel);
   const channels = useStore((s) => s.channels);
+  const avSessions = useStore((s) => s.avSessions);
   const ch = channels.get(activeChannel.toLowerCase());
   const [popover, setPopover] = useState<{ nick: string; did?: string; pos: { x: number; y: number } } | null>(null);
+
+  // Nicks (lowercased) currently in this channel's active voice session.
+  const voiceSession = [...avSessions.values()].find(
+    (s) => s.channel?.toLowerCase() === activeChannel.toLowerCase() && s.state === 'active'
+  );
+  const inCall = new Set([...(voiceSession?.participants.values() ?? [])].map((p) => p.nick.toLowerCase()));
 
   if (!ch || activeChannel === 'server') return null;
 
@@ -30,11 +41,29 @@ export function MemberList() {
     return <DMProfilePanel key={activeChannel} nick={activeChannel} channel={ch} />;
   }
 
-  const members = [...ch.members.values()].sort((a, b) => {
+  const sortedMembers = [...ch.members.values()].sort((a, b) => {
     const wa = a.isOp ? 0 : a.isHalfop ? 1 : a.isVoiced ? 2 : 3;
     const wb = b.isOp ? 0 : b.isHalfop ? 1 : b.isVoiced ? 2 : 3;
     return wa - wb || a.nick.localeCompare(b.nick);
   });
+  // Collapse multiple connections of the same account (same DID) into one row.
+  // The same person on two devices — or a nick-collision twin like
+  // chadfowler.com / chadfowlercom — is one member, not two. Guests (no DID)
+  // are always kept, keyed by nick. Prefer the connection whose nick is the
+  // fuller handle (has a dot) as the canonical display.
+  const bestByDid = new Map<string, Member>();
+  const members: Member[] = [];
+  for (const m of sortedMembers) {
+    if (!m.did) { members.push(m); continue; }
+    const existing = bestByDid.get(m.did);
+    if (!existing) { bestByDid.set(m.did, m); members.push(m); continue; }
+    // Keep the more canonical nick (dotted handle) if this one is better.
+    if (m.nick.includes('.') && !existing.nick.includes('.')) {
+      const idx = members.indexOf(existing);
+      if (idx >= 0) members[idx] = m;
+      bestByDid.set(m.did, m);
+    }
+  }
 
   const isAgent = (m: Member) => m.actorClass === 'agent' || m.actorClass === 'external_agent';
   const ops = members.filter((m) => m.isOp && !isAgent(m));
@@ -52,25 +81,25 @@ export function MemberList() {
       <div className="px-3 pt-4 pb-2">
         {ops.length > 0 && (
           <Section label={`Operators — ${ops.length}`}>
-            {ops.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} />)}
+            {ops.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} inCall={inCall.has(m.nick.toLowerCase())} />)}
           </Section>
         )}
         {halfops.length > 0 && (
           <Section label={`Moderators — ${halfops.length}`}>
-            {halfops.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} />)}
+            {halfops.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} inCall={inCall.has(m.nick.toLowerCase())} />)}
           </Section>
         )}
         {voiced.length > 0 && (
           <Section label={`Voiced — ${voiced.length}`}>
-            {voiced.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} />)}
+            {voiced.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} inCall={inCall.has(m.nick.toLowerCase())} />)}
           </Section>
         )}
         <Section label={`${ops.length > 0 || halfops.length > 0 || voiced.length > 0 ? 'Members' : 'Online'} — ${regular.length}`}>
-          {regular.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} />)}
+          {regular.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} inCall={inCall.has(m.nick.toLowerCase())} />)}
         </Section>
         {agents.length > 0 && (
           <Section label={`Agents — ${agents.length}`}>
-            {agents.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} />)}
+            {agents.map((m) => <MemberItem key={m.nick} member={m} onClick={onMemberClick} inCall={inCall.has(m.nick.toLowerCase())} />)}
           </Section>
         )}
       </div>
@@ -87,33 +116,34 @@ export function MemberList() {
   );
 }
 
-/** Determine online/away status by checking shared channel member lists (not the DM member map) */
-function usePresence(nick: string): { online: boolean; away: string | null } {
+/** Determine online/away status by checking shared channel member lists (not
+ *  the DM member map). `key` is the DM thread key — a nick or a DID. */
+function usePresence(key: string): { online: boolean; away: string | null } {
   const channels = useStore((s) => s.channels);
-  const nickLower = nick.toLowerCase();
-  for (const [name, ch] of channels) {
-    if (!name.startsWith('#')) continue; // skip DM buffers
-    const member = ch.members.get(nickLower);
-    if (member) {
-      return { online: true, away: member.away ?? null };
-    }
-  }
-  return { online: false, away: null };
+  const hit = findMemberByKey(channels, key, true);
+  return { online: !!hit, away: hit?.member.away ?? null };
 }
 
 /** Rich profile panel shown in the right sidebar for DMs */
 function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: Map<string, any>; isEncrypted?: boolean } }) {
+  // `nick` is the DM thread key — a nick, or the peer's DID once the thread is
+  // DID-keyed. Resolve it to a real nick for the lookups that need one (WHOIS
+  // is a nick command; a DID target would just fail).
+  const channels = useStore((s) => s.channels);
+  const peerNick = isDid(nick)
+    ? (findMemberByKey(channels, nick)?.nick ?? getClient()?.getNickForDid(nick))
+    : nick;
   const whoisCache = useStore((s) => s.whoisCache);
-  const whois = whoisCache.get(nick.toLowerCase());
+  const whois = peerNick ? whoisCache.get(peerNick.toLowerCase()) : undefined;
   const partnerMember = channel.members.values().next().value;
-  const did = partnerMember?.did || whois?.did;
+  const did = isDid(nick) ? nick : (partnerMember?.did || whois?.did);
   const [profile, setProfile] = useState<ATProfile | null>(null);
   const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
   const presence = usePresence(nick);
 
   useEffect(() => {
-    sendWhois(nick);
-  }, [nick]);
+    if (peerNick) sendWhois(peerNick);
+  }, [peerNick]);
 
   useEffect(() => {
     if (did) {
@@ -127,7 +157,16 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
     }
   }, [did]);
 
-  const displayName = profile?.displayName || whois?.realname || nick;
+  // Never show a raw DID as the peer's name: prefer a real name, else the
+  // resolved nick, and only compact the DID when nothing resolves.
+  const label = resolveIdentityName(nick, {
+    nickForDid: () => peerNick,
+    nameForDid: () => profile?.handle || profile?.displayName,
+  });
+  // Same guard as UserPopover: a realname whose first token is a DID is the
+  // server's "did:… (via S2S federation)" placeholder, not a human name.
+  const saneRealname = whois?.realname && !isDid(whois.realname.split(' ')[0]) ? whois.realname : undefined;
+  const displayName = profile?.displayName || saneRealname || label;
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 
@@ -178,8 +217,8 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
       <div className="pt-2 px-4 pb-4 text-center">
         {/* Display name */}
         <div className="font-semibold text-fg text-base">{displayName}</div>
-        {displayName !== nick && (
-          <div className="text-sm text-fg-muted">{nick}</div>
+        {displayName !== label && (
+          <div className="text-sm text-fg-muted">{label}</div>
         )}
 
         {/* AT Handle — linked to Bluesky (not for did:key users) */}
@@ -202,12 +241,10 @@ function DMProfilePanel({ nick, channel }: { nick: string; channel: { members: M
         <div className="text-xs text-fg-dim mt-1">
           {presence.online ? (
             presence.away ? (
-              <span className="text-warning">Away{presence.away !== '' ? `: ${(() => {
-                try {
-                  const j = JSON.parse(presence.away!);
-                  return j.status || j.state || presence.away;
-                } catch { return presence.away; }
-              })()}` : ''}</span>
+              <span className="text-warning">Away{(() => {
+                const status = parseAwayStatus(presence.away);
+                return status ? `: ${status}` : '';
+              })()}</span>
             ) : (
               <span className="text-success">Online</span>
             )
@@ -346,19 +383,24 @@ interface MemberItemProps {
     actorClass?: 'human' | 'agent' | 'external_agent';
   };
   onClick: (nick: string, did: string | undefined, e: React.MouseEvent) => void;
+  inCall?: boolean;
 }
 
-function MemberItem({ member, onClick }: MemberItemProps) {
+function MemberItem({ member, onClick, inCall }: MemberItemProps) {
+  const nick = useStore((s) => s.nick);
+  const authDid = useStore((s) => s.authDid);
+  const isSelf = member.nick.toLowerCase() === nick.toLowerCase();
+  const effectiveDid = member.did || (isSelf ? authDid : undefined) || undefined;
   const color = nickColor(member.nick);
 
   return (
     <button
-      onClick={(e) => onClick(member.nick, member.did, e)}
+      onClick={(e) => onClick(member.nick, effectiveDid, e)}
       className="w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-[15px] hover:bg-bg-tertiary group"
-      title={member.did || member.nick}
+      title={effectiveDid || member.nick}
     >
       <div className="relative">
-        <MiniAvatar nick={member.nick} did={member.did} color={color} />
+        <MiniAvatar nick={member.nick} did={effectiveDid} color={color} />
         {/* Presence dot */}
         <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-bg-secondary ${
           member.away ? 'bg-warning' : 'bg-success'
@@ -373,7 +415,7 @@ function MemberItem({ member, onClick }: MemberItemProps) {
         <span className={`truncate text-[15px] ${
           member.away ? 'text-fg-dim' : 'text-fg-muted group-hover:text-fg'
         }`}>
-          {member.nick}
+          {displayNameForKey(member.nick)}
         </span>
 
         {member.actorClass === 'agent' && (
@@ -383,8 +425,12 @@ function MemberItem({ member, onClick }: MemberItemProps) {
           <span className="text-xs" title="External Agent">🌐</span>
         )}
 
-        {member.did && !member.actorClass?.includes('agent') && (
-          <span className="text-accent text-xs" title={`Verified AT Protocol identity: ${member.did}`}>✓</span>
+        {effectiveDid && !member.actorClass?.includes('agent') && (
+          <span className="text-accent text-xs" title={`Verified AT Protocol identity: ${effectiveDid}`}>✓</span>
+        )}
+
+        {inCall && (
+          <span className="text-success shrink-0" title="In voice call"><SpeakerIcon size={12} /></span>
         )}
 
         {member.typing && (

@@ -35,6 +35,23 @@ export interface Member {
   actorClass?: 'human' | 'agent' | 'external_agent';
 }
 
+/** Count members collapsed to one per account (same DID) — multi-session or
+ *  nick-collision twins (e.g. chadfowler.com / chadfowlercom, or a bot that
+ *  reconnected N times) count once; guests (no DID) count individually.
+ *  Matches the deduped roster so header/badge counts agree with the list. */
+export function uniqueMemberCount(members: Map<string, Member>): number {
+  const dids = new Set<string>();
+  let count = 0;
+  for (const m of members.values()) {
+    if (m.did) {
+      if (dids.has(m.did)) continue;
+      dids.add(m.did);
+    }
+    count++;
+  }
+  return count;
+}
+
 export interface PinnedMessage {
   msgid: string;
   pinned_by: string;
@@ -93,11 +110,36 @@ export interface ChannelListEntry {
   count: number;
 }
 
+// ── AV Sessions ──
+
+export interface AvSession {
+  id: string;
+  channel: string | null;
+  createdBy: string;       // DID
+  createdByNick: string;
+  title?: string;
+  participants: Map<string, AvParticipant>;
+  state: 'active' | 'ended';
+  startedAt: Date;
+  irohTicket?: string;     // Room ticket for media transport
+}
+
+export interface AvParticipant {
+  did: string;
+  nick: string;
+  role: 'host' | 'speaker' | 'listener';
+  joinedAt: Date;
+}
+
 export interface Store {
   // Connection
   connectionState: TransportState;
   nick: string;
   registered: boolean;
+  // Sticky version of `registered` — set true on first registration, kept true
+  // through transient reconnects (so the app stays mounted), cleared on explicit
+  // logout (`fullReset`). App.tsx uses this to decide ConnectScreen vs app shell.
+  wasRegistered: boolean;
   authDid: string | null;
   authMessage: string | null;
   authError: string | null;
@@ -128,6 +170,8 @@ export interface Store {
   bookmarks: { channel: string; msgId: string; from: string; text: string; timestamp: Date }[];
   bookmarksPanelOpen: boolean;
   hiddenDMs: Set<string>; // lowercase nicks — hidden from sidebar but messages preserved
+  blockedDids: string[]; // blocked users by DID (authoritative — survives nick changes)
+  blockedNicks: string[]; // lowercase nicks — fallback for DID-less (guest) users
   searchOpen: boolean;
   scrollToMsgId: string | null;
   searchQuery: string;
@@ -137,10 +181,20 @@ export interface Store {
   threadMsgId: string | null;
   threadChannel: string | null;
 
+  // AV sessions
+  avSessions: Map<string, AvSession>;
+  activeAvSession: string | null;  // session ID we're in
+  avAudioActive: boolean;          // call panel visible/audio connected
+  avMuted: boolean;                // local mic muted
+  avCameraOn: boolean;             // local camera on (off by default)
+  avScreenShareOn: boolean;        // local screen share on (off by default)
+  sidebarRevealChannel: string | null; // transient: scroll this channel into view in the sidebar
+
   // Actions — connection
   setConnectionState: (state: TransportState) => void;
   setNick: (nick: string) => void;
   setRegistered: (v: boolean) => void;
+  setWasRegistered: (v: boolean) => void;
   setAuth: (did: string, message: string) => void;
   setAuthError: (error: string) => void;
   appendMotd: (line: string) => void;
@@ -158,6 +212,10 @@ export interface Store {
   // Actions — members
   clearMembers: (channel: string) => void;
   addMember: (channel: string, member: Partial<Member> & { nick: string }) => void;
+  /** Replace the whole roster with the server's authoritative NAMES snapshot
+   *  (end-of-NAMES). Fixes the case where a self-JOIN clear / nick collision /
+   *  reconnect left the list with only live-joined members. */
+  setMembers: (channel: string, members: Array<Partial<Member> & { nick: string }>) => void;
   removeMember: (channel: string, nick: string) => void;
   removeUserFromAll: (nick: string, reason: string) => void;
   renameUser: (oldNick: string, newNick: string) => void;
@@ -168,10 +226,12 @@ export interface Store {
 
   // Actions — messages
   addMessage: (channel: string, msg: Message) => void;
+  mergeHistory: (channel: string, messages: Message[]) => void;
   addSystemMessage: (channel: string, text: string) => void;
   editMessage: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean) => void;
   deleteMessage: (channel: string, msgId: string) => void;
   addReaction: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
+  removeReaction: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
   incrementMentions: (channel: string) => void;
   clearUnread: (channel: string) => void;
 
@@ -197,6 +257,9 @@ export interface Store {
   toggleMuted: (channel: string) => void;
   hideDM: (nick: string) => void;
   unhideDM: (nick: string) => void;
+  blockUser: (nick: string, did?: string | null) => void;
+  unblockUser: (nickOrDid: string) => void;
+  isBlocked: (nick: string, did?: string | null) => boolean;
   isFavorite: (channel: string) => boolean;
   isMuted: (channel: string) => boolean;
   addBookmark: (channel: string, msgId: string, from: string, text: string, timestamp: Date) => void;
@@ -214,6 +277,16 @@ export interface Store {
   setLightboxUrl: (url: string | null) => void;
   openThread: (msgId: string, channel: string) => void;
   closeThread: () => void;
+
+  // AV session actions
+  updateAvSession: (session: AvSession) => void;
+  removeAvSession: (id: string) => void;
+  setActiveAvSession: (id: string | null) => void;
+  setAvAudioActive: (active: boolean) => void;
+  setAvMuted: (muted: boolean) => void;
+  setAvCameraOn: (on: boolean) => void;
+  setAvScreenShareOn: (on: boolean) => void;
+  setSidebarRevealChannel: (name: string | null) => void;
 
   // Join gate
   joinGateChannel: string | null;
@@ -260,6 +333,7 @@ export const useStore = create<Store>((set, get) => ({
   connectionState: 'disconnected',
   nick: '',
   registered: false,
+  wasRegistered: false,
   authDid: null,
   authMessage: null,
   authError: null,
@@ -275,13 +349,15 @@ export const useStore = create<Store>((set, get) => ({
   editingMsg: null,
   theme: (localStorage.getItem('freeq-theme') as 'dark' | 'light') || 'dark',
   messageDensity: (localStorage.getItem('freeq-density') as 'default' | 'compact' | 'cozy') || 'default',
-  showJoinPart: localStorage.getItem('freeq-show-join-part') === 'true',
+  showJoinPart: localStorage.getItem('freeq-show-join-part') !== 'false',
   loadExternalMedia: localStorage.getItem('freeq-load-media') !== 'false',
   favorites: new Set(safeJsonParse(localStorage.getItem('freeq-favorites'), [])),
   mutedChannels: new Set(safeJsonParse(localStorage.getItem('freeq-muted'), [])),
   bookmarks: safeJsonParse(localStorage.getItem('freeq-bookmarks'), []).map((b: any) => ({ ...b, timestamp: new Date(b.timestamp) })),
   bookmarksPanelOpen: false,
   hiddenDMs: new Set(safeJsonParse(localStorage.getItem('freeq-hidden-dms'), [])),
+  blockedDids: safeJsonParse(localStorage.getItem('freeq-blocked-dids'), []),
+  blockedNicks: safeJsonParse(localStorage.getItem('freeq-blocked-nicks'), []),
   searchOpen: false,
   scrollToMsgId: null,
   searchQuery: '',
@@ -290,6 +366,13 @@ export const useStore = create<Store>((set, get) => ({
   lightboxUrl: null,
   threadMsgId: null,
   threadChannel: null,
+  avSessions: new Map(),
+  activeAvSession: null,
+  avAudioActive: false,
+  avMuted: false,
+  avCameraOn: false,
+  avScreenShareOn: false,
+  sidebarRevealChannel: null,
   joinGateChannel: null,
   channelSettingsOpen: null,
 
@@ -297,6 +380,7 @@ export const useStore = create<Store>((set, get) => ({
   setConnectionState: (state) => set({ connectionState: state }),
   setNick: (nick) => set({ nick }),
   setRegistered: (v) => set({ registered: v }),
+  setWasRegistered: (v) => set({ wasRegistered: v }),
   setAuth: (did, message) => set({ authDid: did, authMessage: message, authError: null }),
   appendMotd: (line) => set((s) => ({ motd: [...s.motd, line] })),
   dismissMotd: () => set({ motdDismissed: true }),
@@ -317,6 +401,7 @@ export const useStore = create<Store>((set, get) => ({
     connectionState: 'disconnected',
     nick: '',
     registered: false,
+    wasRegistered: false,
     connectedServer: null,
     authDid: null,
     authMessage: null,
@@ -337,7 +422,9 @@ export const useStore = create<Store>((set, get) => ({
     threadChannel: null,
     joinGateChannel: null,
     channelSettingsOpen: null,
-    theme: s.theme, messageDensity: s.messageDensity, loadExternalMedia: s.loadExternalMedia, favorites: s.favorites, mutedChannels: s.mutedChannels, bookmarks: s.bookmarks, bookmarksPanelOpen: false, // preserve across reconnects
+    avSessions: new Map(),
+    activeAvSession: null,
+    theme: s.theme, messageDensity: s.messageDensity, loadExternalMedia: s.loadExternalMedia, favorites: s.favorites, mutedChannels: s.mutedChannels, blockedDids: s.blockedDids, blockedNicks: s.blockedNicks, bookmarks: s.bookmarks, bookmarksPanelOpen: false, // preserve across reconnects
   })),
 
   // Channels
@@ -435,6 +522,32 @@ export const useStore = create<Store>((set, get) => ({
     return { channels };
   }),
 
+  setMembers: (channel, members) => set((s) => {
+    const channels = new Map(s.channels);
+    const ch = getOrCreateChannel(channels, channel);
+    const prev = new Map(ch.members); // keep enriched fields (did/handle/…) by nick
+    ch.members.clear();
+    for (const member of members) {
+      if (!member.nick || !member.nick.trim()) continue;
+      const key = member.nick.toLowerCase();
+      const existing = prev.get(key);
+      ch.members.set(key, {
+        nick: member.nick,
+        did: member.did ?? existing?.did,
+        handle: member.handle ?? existing?.handle,
+        displayName: member.displayName ?? existing?.displayName,
+        avatarUrl: member.avatarUrl ?? existing?.avatarUrl,
+        isOp: member.isOp ?? false,
+        isHalfop: member.isHalfop ?? false,
+        isVoiced: member.isVoiced ?? false,
+        away: existing?.away,
+        actorClass: member.actorClass ?? existing?.actorClass,
+      });
+    }
+    channels.set(channel.toLowerCase(), ch);
+    return { channels };
+  }),
+
   removeMember: (channel, nick) => set((s) => {
     const channels = new Map(s.channels);
     const ch = channels.get(channel.toLowerCase());
@@ -461,7 +574,12 @@ export const useStore = create<Store>((set, get) => ({
         channels.set(key, { ...ch });
       }
     }
-    return { channels };
+    // Drop the cached WHOIS identity for this nick. The nick is now
+    // freed and could be claimed by an entirely different account; a
+    // stale cache would show the previous occupant's DID/handle.
+    const whoisCache = new Map(s.whoisCache);
+    whoisCache.delete(nick.toLowerCase());
+    return { channels, whoisCache };
   }),
 
   renameUser: (oldNick, newNick) => set((s) => {
@@ -475,7 +593,18 @@ export const useStore = create<Store>((set, get) => ({
         channels.set(key, ch);
       }
     }
-    return { channels };
+    // Move the WHOIS cache entry to the new nick. The same human is
+    // behind it; the old nick must not still resolve to their DID
+    // because the freed nick may be reclaimed by someone else.
+    const whoisCache = new Map(s.whoisCache);
+    const oldKey = oldNick.toLowerCase();
+    const newKey = newNick.toLowerCase();
+    const cached = whoisCache.get(oldKey);
+    if (cached) {
+      whoisCache.delete(oldKey);
+      whoisCache.set(newKey, { ...cached, nick: newNick });
+    }
+    return { channels, whoisCache };
   }),
 
   setUserAway: (nick, reason) => set((s) => {
@@ -490,18 +619,30 @@ export const useStore = create<Store>((set, get) => ({
     return { channels };
   }),
 
-  setTyping: (channel, nick, typing) => set((s) => {
-    const channels = new Map(s.channels);
-    const ch = channels.get(channel.toLowerCase());
-    if (ch) {
-      const member = ch.members.get(nick.toLowerCase());
-      if (member) {
-        ch.members.set(nick.toLowerCase(), { ...member, typing });
-        channels.set(channel.toLowerCase(), { ...ch });
+  setTyping: (channel, nick, typing) => {
+    set((s) => {
+      const channels = new Map(s.channels);
+      const ch = channels.get(channel.toLowerCase());
+      if (ch) {
+        const member = ch.members.get(nick.toLowerCase());
+        if (member) {
+          ch.members.set(nick.toLowerCase(), { ...member, typing });
+          channels.set(channel.toLowerCase(), { ...ch });
+        }
       }
+      return { channels };
+    });
+    // Auto-clear typing after 10 seconds if not refreshed
+    if (typing) {
+      setTimeout(() => {
+        const s = useStore.getState();
+        const ch = s.channels.get(channel.toLowerCase());
+        if (ch?.members.get(nick.toLowerCase())?.typing) {
+          useStore.getState().setTyping(channel, nick, false);
+        }
+      }, 10_000);
     }
-    return { channels };
-  }),
+  },
 
   updateMemberDid: (nick, did) => set((s) => {
     const channels = new Map(s.channels);
@@ -523,8 +664,9 @@ export const useStore = create<Store>((set, get) => ({
     const adding = mode.startsWith('+');
     const modeChar = mode.replace(/^[+-]/, '');
 
-    // User modes (+o, +h, +v) — only apply if member exists (don't create phantoms)
-    if ((modeChar === 'o' || modeChar === 'h' || modeChar === 'v') && arg) {
+    // User modes (+o, +h, +v) require an arg (the target nick)
+    const isUserMode = modeChar === 'o' || modeChar === 'h' || modeChar === 'v';
+    if (isUserMode && arg) {
       const member = ch.members.get(arg.toLowerCase());
       if (member) {
         if (modeChar === 'o') member.isOp = adding;
@@ -532,6 +674,9 @@ export const useStore = create<Store>((set, get) => ({
         if (modeChar === 'v') member.isVoiced = adding;
         ch.members.set(arg.toLowerCase(), { ...member });
       }
+    } else if (isUserMode && !arg) {
+      // User mode without arg is a protocol error — ignore silently
+      // (don't fall through to channel modes or "o" gets added to modes set)
     } else {
       // Channel modes
       if (adding) ch.modes.add(modeChar);
@@ -549,35 +694,77 @@ export const useStore = create<Store>((set, get) => ({
       return { serverMessages: [...s.serverMessages, msg].slice(-500) };
     }
 
-    const channels = new Map(s.channels);
-    const ch = getOrCreateChannel(channels, channel);
+    const key = channel.toLowerCase();
+    const oldCh = s.channels.get(key);
 
-    // Auto-join DM buffers so they appear in the sidebar
-    const isDMBuf = !channel.startsWith('#') && !channel.startsWith('&') && channel !== 'server';
-    if (isDMBuf && !ch.isJoined) {
-      ch.isJoined = true;
-    }
-
-    // Dedup by msgid — CHATHISTORY can return messages already shown live
-    if (msg.id && !msg.isSystem && ch.messages.some((m) => m.id === msg.id)) {
+    // Dedup by msgid — CHATHISTORY can return messages already shown live.
+    // Done BEFORE any mutation so the short-circuit doesn't leak in-place
+    // edits through `return {}`.
+    if (msg.id && !msg.isSystem && oldCh?.messages.some((m) => m.id === msg.id)) {
       return {};
     }
 
-    ch.messages = [...ch.messages, msg].slice(-1000);
-    if (s.activeChannel.toLowerCase() !== channel.toLowerCase()) {
-      ch.unreadCount++;
-    }
-    channels.set(channel.toLowerCase(), ch);
+    const isDMBuf = !channel.startsWith('#') && !channel.startsWith('&') && channel !== 'server';
+    const base = oldCh ?? {
+      name: channel,
+      topic: '',
+      members: new Map(),
+      messages: [],
+      modes: new Set(),
+      isEncrypted: false,
+      unreadCount: 0,
+      mentionCount: 0,
+      isJoined: false,
+      pins: [],
+    };
+    // Always produce a fresh Channel object so subscribers comparing
+    // channel identity (Sidebar, MessageList children, etc.) see a new
+    // reference and re-render. Mutating in place can hide updates from
+    // memoized components and shallow selectors.
+    const ch: typeof base = {
+      ...base,
+      messages: [...base.messages, msg].slice(-1000),
+      isJoined: base.isJoined || isDMBuf,
+      unreadCount:
+        !msg.isSystem && s.activeChannel.toLowerCase() !== key
+          ? base.unreadCount + 1
+          : base.unreadCount,
+    };
+
+    const channels = new Map(s.channels);
+    channels.set(key, ch);
 
     // Auto-unhide DM conversations when a new live message arrives
-    const isDM = !channel.startsWith('#') && !channel.startsWith('&') && channel !== 'server';
-    if (isDM && !msg.isSystem && s.hiddenDMs.has(channel.toLowerCase())) {
+    if (isDMBuf && !msg.isSystem && s.hiddenDMs.has(key)) {
       const hidden = new Set(s.hiddenDMs);
-      hidden.delete(channel.toLowerCase());
+      hidden.delete(key);
       localStorage.setItem('freeq-hidden-dms', JSON.stringify([...hidden]));
       return { channels, hiddenDMs: hidden };
     }
 
+    return { channels };
+  }),
+
+  mergeHistory: (channel, incoming) => set((s) => {
+    if (!incoming || incoming.length === 0) return {};
+    if (channel === 'server' || channel.toLowerCase() === 'server') return {};
+    const channels = new Map(s.channels);
+    const ch = getOrCreateChannel(channels, channel);
+
+    // Dedup by msgid — existing (live) copy wins over a history copy.
+    const existingIds = new Set(ch.messages.map((m) => m.id).filter(Boolean));
+    const novel = incoming.filter((m) => !m.id || !existingIds.has(m.id));
+    if (novel.length === 0) return {};
+
+    const merged = [...ch.messages, ...novel];
+    merged.sort((a, b) => {
+      const ta = a.timestamp?.getTime?.() ?? 0;
+      const tb = b.timestamp?.getTime?.() ?? 0;
+      if (ta !== tb) return ta - tb;
+      return (a.id || '').localeCompare(b.id || '');
+    });
+    ch.messages = merged.slice(-1000);
+    channels.set(channel.toLowerCase(), ch);
     return { channels };
   }),
 
@@ -646,6 +833,26 @@ export const useStore = create<Store>((set, get) => ({
       const nicks = new Set(reactions.get(emoji) || []);
       nicks.add(fromNick);
       reactions.set(emoji, nicks);
+      return { ...m, reactions };
+    });
+    channels.set(channel.toLowerCase(), { ...ch });
+    return { channels };
+  }),
+
+  removeReaction: (channel, msgId, emoji, fromNick) => set((s) => {
+    if (!emoji) return {};
+    const channels = new Map(s.channels);
+    const ch = channels.get(channel.toLowerCase());
+    if (!ch) return { channels };
+    ch.messages = ch.messages.map((m) => {
+      if (m.id !== msgId || !m.reactions) return m;
+      const existing = m.reactions.get(emoji);
+      if (!existing || !existing.has(fromNick)) return m;
+      const reactions = new Map(m.reactions);
+      const nicks = new Set(existing);
+      nicks.delete(fromNick);
+      if (nicks.size === 0) reactions.delete(emoji);
+      else reactions.set(emoji, nicks);
       return { ...m, reactions };
     });
     channels.set(channel.toLowerCase(), { ...ch });
@@ -778,6 +985,34 @@ export const useStore = create<Store>((set, get) => ({
     localStorage.setItem('freeq-hidden-dms', JSON.stringify([...hidden]));
     return { hiddenDMs: hidden };
   }),
+  blockUser: (nick, did) => set((s) => {
+    // Block by DID when we have one (survives nick changes); nick fallback for guests.
+    if (did) {
+      if (s.blockedDids.includes(did)) return {};
+      const blockedDids = [...s.blockedDids, did];
+      localStorage.setItem('freeq-blocked-dids', JSON.stringify(blockedDids));
+      return { blockedDids };
+    }
+    const key = nick.toLowerCase();
+    if (s.blockedNicks.includes(key)) return {};
+    const blockedNicks = [...s.blockedNicks, key];
+    localStorage.setItem('freeq-blocked-nicks', JSON.stringify(blockedNicks));
+    return { blockedNicks };
+  }),
+  unblockUser: (nickOrDid) => set((s) => {
+    const key = nickOrDid.toLowerCase();
+    const blockedDids = s.blockedDids.filter((d) => d !== nickOrDid);
+    const blockedNicks = s.blockedNicks.filter((n) => n !== key);
+    if (blockedDids.length === s.blockedDids.length && blockedNicks.length === s.blockedNicks.length) return {};
+    localStorage.setItem('freeq-blocked-dids', JSON.stringify(blockedDids));
+    localStorage.setItem('freeq-blocked-nicks', JSON.stringify(blockedNicks));
+    return { blockedDids, blockedNicks };
+  }),
+  isBlocked: (nick, did) => {
+    const s = get();
+    if (did && s.blockedDids.includes(did)) return true;
+    return s.blockedNicks.includes(nick.toLowerCase());
+  },
   isFavorite: (channel) => get().favorites.has(channel.toLowerCase()),
   isMuted: (channel) => get().mutedChannels.has(channel.toLowerCase()),
   addBookmark: (channel, msgId, from, text, timestamp) => set((s) => {
@@ -827,6 +1062,25 @@ export const useStore = create<Store>((set, get) => ({
   setLightboxUrl: (url) => set({ lightboxUrl: url }),
   openThread: (msgId, channel) => set({ threadMsgId: msgId, threadChannel: channel }),
   closeThread: () => set({ threadMsgId: null, threadChannel: null }),
+
+  // AV sessions
+  updateAvSession: (session) => set((s) => {
+    const avSessions = new Map(s.avSessions);
+    avSessions.set(session.id, session);
+    return { avSessions };
+  }),
+  removeAvSession: (id) => set((s) => {
+    const avSessions = new Map(s.avSessions);
+    avSessions.delete(id);
+    return { avSessions, activeAvSession: s.activeAvSession === id ? null : s.activeAvSession };
+  }),
+  setActiveAvSession: (id) => set({ activeAvSession: id }),
+  setAvAudioActive: (active) => set({ avAudioActive: active }),
+  setAvMuted: (muted) => set({ avMuted: muted }),
+  setAvCameraOn: (on) => set({ avCameraOn: on }),
+  setAvScreenShareOn: (on) => set({ avScreenShareOn: on }),
+  setSidebarRevealChannel: (name) => set({ sidebarRevealChannel: name }),
+
   setJoinGateChannel: (channel) => set({ joinGateChannel: channel }),
   setChannelSettingsOpen: (channel) => set({ channelSettingsOpen: channel }),
 }));

@@ -141,7 +141,7 @@ export function ConnectScreen() {
     if (stored) return stored;
     if (isTauri) return 'https://auth.freeq.at';
     const host = window.location.host;
-    if (host.endsWith('freeq.at')) return 'https://auth.freeq.at';
+    if (host === 'irc.freeq.at') return 'https://auth.freeq.at';
     return webOrigin;
   });
   const [error, setError] = useState('');
@@ -200,7 +200,12 @@ export function ConnectScreen() {
         oauthConnectInProgress = true;
         setAutoConnecting(true);
         const h = localStorage.getItem(LS_HANDLE) || result.handle || '';
-        const ch = (localStorage.getItem(LS_CHANNELS) || '#freeq').split(',').map(s => s.trim()).filter(Boolean);
+        // Use saved joined channels if available (reflects actual PART/JOIN state),
+        // otherwise fall back to the saved channels from connect screen input.
+        const savedJoined = localStorage.getItem('freeq-joined-channels');
+        const ch = savedJoined
+          ? JSON.parse(savedJoined)
+          : (localStorage.getItem(LS_CHANNELS) || '#freeq').split(',').map(s => s.trim()).filter(Boolean);
         const finalNick = nickFromHandle(result.handle || h);
         const token = result.web_token || result.token || result.access_jwt || '';
         setSaslCredentials(token, result.did, result.pds_url || '', 'web-token');
@@ -220,10 +225,19 @@ export function ConnectScreen() {
     if (brokerAutoAttempts >= MAX_BROKER_AUTO_ATTEMPTS) return;
     const brokerToken = localStorage.getItem(LS_BROKER_TOKEN);
     if (!brokerToken) return;
+    // Refresh via `${brokerOrigin}/session` regardless of deployment: for a
+    // standalone broker brokerOrigin is the separate auth host; for an embedded
+    // server it equals webOrigin (the server serves /session in-process). A
+    // stale/cross-server token simply 401s below and is cleared there.
 
     brokerAutoAttempts++;
     setAutoConnecting(true);
-    const ch = (localStorage.getItem(LS_CHANNELS) || '#freeq').split(',').map(s => s.trim()).filter(Boolean);
+    // Use saved joined channels if available (reflects actual PART/JOIN state),
+    // otherwise fall back to the saved channels from connect screen input.
+    const savedJoined = localStorage.getItem('freeq-joined-channels');
+    const ch = savedJoined
+      ? JSON.parse(savedJoined)
+      : (localStorage.getItem(LS_CHANNELS) || '#freeq').split(',').map(s => s.trim()).filter(Boolean);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
@@ -329,8 +343,15 @@ export function ConnectScreen() {
   const doGuestLogin = () => {
     if (!nick.trim()) { setError('Enter a nickname'); return; }
     setError('');
+    // Persist the channel input for next visit (doAtLogin does the same).
     localStorage.setItem(LS_CHANNELS, channels);
-    connect(server, nick.trim(), chans);
+    // Use saved joined channels if available (reflects actual PART/JOIN state),
+    // otherwise fall back to what's typed in the connect screen input.
+    const savedJoined = localStorage.getItem('freeq-joined-channels');
+    const ch = savedJoined
+      ? JSON.parse(savedJoined)
+      : (channels || '#freeq').split(',').map(s => s.trim()).filter(Boolean);
+    connect(server, nick.trim(), ch);
   };
 
   const connecting = connectionState === 'connecting' || connectionState === 'connected';
@@ -525,6 +546,24 @@ export function ConnectScreen() {
             >
               Advanced settings ›
             </button>
+          )}
+
+          {/* Consent preview — show what we're asking Bluesky for BEFORE
+              redirecting, so the consent screen there is no surprise. */}
+          {mode === 'at-proto' && !oauthPending && !connecting && (
+            <div className="bg-bg/50 border border-border/60 rounded-lg px-3 py-2.5 text-[11px] leading-relaxed text-fg-dim">
+              <div className="font-semibold text-fg-muted mb-1">
+                What freeq will ask Bluesky for
+              </div>
+              <ul className="space-y-0.5 list-disc list-inside marker:text-fg-dim/60">
+                <li>Prove you are <span className="font-mono">@{handle || 'your.handle'}</span></li>
+              </ul>
+              <div className="mt-1.5 text-fg-dim/80">
+                That's it for sign-in. Image upload to your PDS asks for one
+                extra permission, only the first time you upload — never up
+                front.
+              </div>
+            </div>
           )}
 
           {/* Connect button */}

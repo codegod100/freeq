@@ -80,8 +80,15 @@ pub(super) fn handle_join(
             if ch.members.contains(session_id) {
                 return;
             }
+            // Founder + persistent DID-ops bypass admission gates (+k, +b, +i).
+            // Standard IRC behavior: the channel's authority figures can always
+            // rejoin their own channel. Without this bypass, a founder who sets
+            // +i and then disconnects is locked out of their own channel.
+            let is_did_authority =
+                did.is_some_and(|d| ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d));
             // Check channel key (+k)
-            if let Some(ref key) = ch.key
+            if !is_did_authority
+                && let Some(ref key) = ch.key
                 && supplied_key != Some(key.as_str())
             {
                 let reply = Message::from_server(
@@ -93,7 +100,7 @@ pub(super) fn handle_join(
                 return;
             }
             // Check bans
-            if ch.is_banned(&hostmask, did) {
+            if !is_did_authority && ch.is_banned(&hostmask, did) {
                 let reply = Message::from_server(
                     server_name,
                     irc::ERR_BANNEDFROMCHAN,
@@ -103,11 +110,12 @@ pub(super) fn handle_join(
                 return;
             }
             // Check invite-only
-            if ch.invite_only {
+            if !is_did_authority && ch.invite_only {
                 let has_invite = ch.invites.contains(session_id)
                     || did.is_some_and(|d| ch.invites.contains(d))
                     || ch.invites.contains(&format!("nick:{nick}"));
-                if !has_invite {
+                let on_invite_exception = ch.is_invite_excepted(&hostmask, did);
+                if !has_invite && !on_invite_exception {
                     let reply = Message::from_server(
                         server_name,
                         irc::ERR_INVITEONLYCHAN,
@@ -116,15 +124,18 @@ pub(super) fn handle_join(
                     send(state, session_id, format!("{reply}\r\n"));
                     return;
                 }
-                // Consume the invite (all forms: session, DID, nick)
-                drop(channels);
-                let mut channels = state.channels.lock();
-                if let Some(ch) = channels.get_mut(channel) {
-                    ch.invites.remove(session_id);
-                    if let Some(d) = did {
-                        ch.invites.remove(d);
+                // Consume the invite ONLY if that's how we got in (sticky +I
+                // entries are persistent and must NOT be consumed).
+                if has_invite {
+                    drop(channels);
+                    let mut channels = state.channels.lock();
+                    if let Some(ch) = channels.get_mut(channel) {
+                        ch.invites.remove(session_id);
+                        if let Some(d) = did {
+                            ch.invites.remove(d);
+                        }
+                        ch.invites.remove(&format!("nick:{nick}"));
                     }
-                    ch.invites.remove(&format!("nick:{nick}"));
                 }
             }
         }
@@ -385,6 +396,11 @@ pub(super) fn handle_join(
         .get(channel)
         .map(|ch| ch.ops.contains(session_id))
         .unwrap_or(false);
+    let actor_class = state
+        .session_actor_class
+        .lock()
+        .get(session_id)
+        .map(|c| c.to_string());
     s2s_broadcast(
         state,
         crate::s2s::S2sMessage::Join {
@@ -394,6 +410,7 @@ pub(super) fn handle_join(
             did: did.map(|d| d.to_string()),
             handle,
             is_op: user_is_op,
+            actor_class,
             origin: origin.clone(),
         },
     );
@@ -450,14 +467,35 @@ pub(super) fn handle_join(
         let has_tags_cap = state.cap_message_tags.lock().contains(session_id);
         let has_time_cap = state.cap_server_time.lock().contains(session_id);
         let has_batch_cap = state.cap_batch.lock().contains(session_id);
-        let history: Vec<_> = {
+        let has_multiline_cap = state.cap_draft_multiline.lock().contains(session_id);
+
+        // Clone the history out so the DB call (reactions lookup) can
+        // happen without holding the channels lock — and so the per-row
+        // emit loop below isn't holding the lock either.
+        let history: Vec<crate::server::HistoryMessage> = {
             let channels = state.channels.lock();
             channels
                 .get(channel)
                 .map(|ch| ch.history.iter().cloned().collect())
                 .unwrap_or_default()
         };
+
         if !history.is_empty() {
+            // Fetch persisted reactions for this batch so they ride on
+            // the replayed messages — mirrors the explicit CHATHISTORY
+            // emission path (messaging.rs). Without this, joiners see
+            // history with no reaction chips until a live TAGMSG
+            // arrives.
+            let msgids: Vec<&str> = history.iter().filter_map(|h| h.msgid.as_deref()).collect();
+            let reactions: std::collections::HashMap<String, Vec<crate::db::ReactionRow>> =
+                if has_tags_cap && !msgids.is_empty() {
+                    state
+                        .with_db(|db| db.get_reactions_for_messages(&msgids))
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                };
+
             // Start batch if client supports it
             let batch_id = format!("hist{}", crate::msgid::generate());
             if has_batch_cap {
@@ -465,11 +503,6 @@ pub(super) fn handle_join(
                     format!(":{server_name} BATCH +{batch_id} chathistory {channel}\r\n");
                 send(state, session_id, batch_start);
             }
-
-            let msgids: Vec<&str> = history.iter().filter_map(|h| h.msgid.as_deref()).collect();
-            let reactions = state
-                .with_db(|db| db.get_reactions_for_messages(&msgids))
-                .unwrap_or_default();
 
             for hist in &history {
                 let mut msg_tags = if has_tags_cap {
@@ -481,10 +514,21 @@ pub(super) fn handle_join(
                 // Add msgid tag if available
                 if has_tags_cap && let Some(ref mid) = hist.msgid {
                     msg_tags.insert("msgid".to_string(), mid.clone());
-                    if let Some(rows) = reactions.get(mid)
-                        && let Some(encoded) = crate::db::encode_reactions_tag(rows)
-                    {
-                        msg_tags.insert("+freeq.at/reactions".to_string(), encoded);
+                    // Include persisted reactions as `+freeq.at/reactions`
+                    // (format: `emoji1:nick1,nick2;emoji2:nick3`).
+                    if let Some(reaction_rows) = reactions.get(mid) {
+                        let mut by_emoji: std::collections::HashMap<&str, Vec<&str>> =
+                            std::collections::HashMap::new();
+                        for r in reaction_rows {
+                            by_emoji.entry(&r.emoji).or_default().push(&r.reactor_nick);
+                        }
+                        if !by_emoji.is_empty() {
+                            let encoded: Vec<String> = by_emoji
+                                .iter()
+                                .map(|(emoji, nicks)| format!("{}:{}", emoji, nicks.join(",")))
+                                .collect();
+                            msg_tags.insert("+freeq.at/reactions".to_string(), encoded.join(";"));
+                        }
                     }
                 }
 
@@ -500,6 +544,81 @@ pub(super) fn handle_join(
                 // Add batch tag
                 if has_batch_cap {
                     msg_tags.insert("batch".to_string(), batch_id.clone());
+                }
+
+                // Multi-line stored bodies: emitting `\n` raw in a
+                // PRIVMSG terminates the IRC line mid-text. Mirror the
+                // explicit CHATHISTORY emission path — nested
+                // `draft/multiline` BATCH for capable receivers, split
+                // PRIVMSGs otherwise.
+                let bodies: Vec<&str> = hist.text.split('\n').collect();
+                let is_multiline = bodies.len() > 1;
+                if is_multiline && has_multiline_cap && has_batch_cap {
+                    let ml_id = format!("ml{}", crate::msgid::generate());
+                    let opener = irc::Message {
+                        tags: msg_tags.clone(),
+                        prefix: Some(hist.from.clone()),
+                        command: "BATCH".to_string(),
+                        params: vec![
+                            format!("+{ml_id}"),
+                            "draft/multiline".to_string(),
+                            channel.to_string(),
+                        ],
+                    };
+                    send(state, session_id, format!("{opener}\r\n"));
+                    for body in &bodies {
+                        let mut chunk_tags = std::collections::HashMap::new();
+                        chunk_tags.insert("batch".to_string(), ml_id.clone());
+                        let chunk = irc::Message {
+                            tags: chunk_tags,
+                            prefix: Some(hist.from.clone()),
+                            command: "PRIVMSG".to_string(),
+                            params: vec![channel.to_string(), body.to_string()],
+                        };
+                        send(state, session_id, format!("{chunk}\r\n"));
+                    }
+                    let mut closer_tags = std::collections::HashMap::new();
+                    if let Some(b) = msg_tags.get("batch") {
+                        closer_tags.insert("batch".to_string(), b.clone());
+                    }
+                    let closer = irc::Message {
+                        tags: closer_tags,
+                        prefix: None,
+                        command: "BATCH".to_string(),
+                        params: vec![format!("-{ml_id}")],
+                    };
+                    send(state, session_id, format!("{closer}\r\n"));
+                    continue;
+                }
+                if is_multiline {
+                    // Fallback: split at \n into N PRIVMSGs. msgid +
+                    // client tags ride on the first chunk; later chunks
+                    // carry only the chathistory batch tag so they stay
+                    // grouped under the same replay unit.
+                    for (i, body) in bodies.iter().enumerate() {
+                        let chunk_tags = if i == 0 {
+                            msg_tags.clone()
+                        } else {
+                            let mut t = std::collections::HashMap::new();
+                            if has_batch_cap {
+                                t.insert("batch".to_string(), batch_id.clone());
+                            }
+                            t
+                        };
+                        if !chunk_tags.is_empty() && has_tags_cap {
+                            let chunk = irc::Message {
+                                tags: chunk_tags,
+                                prefix: Some(hist.from.clone()),
+                                command: "PRIVMSG".to_string(),
+                                params: vec![channel.to_string(), body.to_string()],
+                            };
+                            send(state, session_id, format!("{chunk}\r\n"));
+                        } else {
+                            let line = format!(":{} PRIVMSG {} :{}\r\n", hist.from, channel, body);
+                            send(state, session_id, line);
+                        }
+                    }
+                    continue;
                 }
 
                 if !msg_tags.is_empty() && has_tags_cap {
@@ -603,6 +722,56 @@ pub(super) fn handle_join(
     );
     send(state, session_id, format!("{names}\r\n"));
     send(state, session_id, format!("{end_names}\r\n"));
+
+    // Notify joining client about active AV session in this channel (if any)
+    {
+        let mgr = state.av_sessions.lock();
+        if let Some(av_session) = mgr.active_session_for_channel(channel) {
+            let participant_count = av_session
+                .participants
+                .values()
+                .filter(|p| p.left_at.is_none())
+                .count();
+            let title = av_session.title.as_deref().unwrap_or("");
+            let mut tags = std::collections::HashMap::new();
+            tags.insert("+freeq.at/av-state".to_string(), "started".to_string());
+            tags.insert("+freeq.at/av-id".to_string(), av_session.id.clone());
+            tags.insert(
+                "+freeq.at/av-participants".to_string(),
+                participant_count.to_string(),
+            );
+            tags.insert(
+                "+freeq.at/av-actor".to_string(),
+                av_session.created_by_nick.clone(),
+            );
+            if !title.is_empty() {
+                tags.insert("+freeq.at/av-title".to_string(), title.to_string());
+            }
+            let time_tag = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%S.000Z")
+                .to_string();
+            tags.insert("time".to_string(), time_tag);
+            let tag_msg = irc::Message {
+                tags,
+                prefix: Some(server_name.to_string()),
+                command: "TAGMSG".to_string(),
+                params: vec![channel.to_string()],
+            };
+            // Only send if client supports message-tags
+            if state.cap_message_tags.lock().contains(session_id) {
+                send(state, session_id, format!("{tag_msg}\r\n"));
+            } else {
+                // Fallback: human-readable notice
+                let notice_text = format!(
+                    "Active voice session ({} participants) — use /av to join",
+                    participant_count
+                );
+                let notice =
+                    Message::from_server(server_name, "NOTICE", vec![channel, &notice_text]);
+                send(state, session_id, format!("{notice}\r\n"));
+            }
+        }
+    }
 }
 
 pub(super) fn handle_mode(
@@ -937,11 +1106,22 @@ pub(super) fn handle_mode(
                 if mask.is_empty() {
                     return; // Reject empty/whitespace-only ban masks
                 }
-                let mask = mask; // rebind after trim
                 if adding {
                     let entry = BanEntry::new(mask.to_string(), conn.hostmask());
                     let mut channels = state.channels.lock();
                     if let Some(chan) = channels.get_mut(channel) {
+                        // Per-channel ban limit to prevent resource exhaustion
+                        const MAX_BANS_PER_CHANNEL: usize = 500;
+                        if chan.bans.len() >= MAX_BANS_PER_CHANNEL {
+                            drop(channels);
+                            let reply = Message::from_server(
+                                server_name,
+                                "478",
+                                vec![nick, channel, "Channel ban list is full"],
+                            );
+                            send(state, session_id, format!("{reply}\r\n"));
+                            return;
+                        }
                         // Don't duplicate
                         if !chan.bans.iter().any(|b| b.mask == mask) {
                             chan.bans.push(entry.clone());
@@ -969,6 +1149,97 @@ pub(super) fn handle_mode(
                     s2s_broadcast(
                         state,
                         crate::s2s::S2sMessage::Ban {
+                            event_id: s2s_next_event_id(state),
+                            channel: channel.to_string(),
+                            mask: mask.to_string(),
+                            set_by: nick.to_string(),
+                            adding,
+                            origin,
+                        },
+                    );
+                }
+            }
+            'I' => {
+                use crate::server::InviteExceptionEntry;
+
+                if !adding && mode_arg.is_none() {
+                    // -I with no arg is invalid, ignore
+                    return;
+                }
+
+                if adding && mode_arg.is_none() {
+                    // +I with no arg: list invite exceptions
+                    let channels = state.channels.lock();
+                    if let Some(chan) = channels.get(channel) {
+                        for entry in &chan.invite_exceptions {
+                            let reply = Message::from_server(
+                                server_name,
+                                irc::RPL_INVITELIST,
+                                vec![
+                                    nick,
+                                    channel,
+                                    &entry.mask,
+                                    &entry.set_by,
+                                    &entry.set_at.to_string(),
+                                ],
+                            );
+                            send(state, session_id, format!("{reply}\r\n"));
+                        }
+                    }
+                    let end = Message::from_server(
+                        server_name,
+                        irc::RPL_ENDOFINVITELIST,
+                        vec![nick, channel, "End of channel invite list"],
+                    );
+                    send(state, session_id, format!("{end}\r\n"));
+                    return;
+                }
+
+                let mask = mode_arg.unwrap().trim();
+                if mask.is_empty() {
+                    return;
+                }
+                if adding {
+                    let entry = InviteExceptionEntry::new(mask.to_string(), conn.hostmask());
+                    let mut channels = state.channels.lock();
+                    if let Some(chan) = channels.get_mut(channel) {
+                        const MAX_INVITE_EXCEPTIONS_PER_CHANNEL: usize = 500;
+                        if chan.invite_exceptions.len() >= MAX_INVITE_EXCEPTIONS_PER_CHANNEL {
+                            drop(channels);
+                            let reply = Message::from_server(
+                                server_name,
+                                "478",
+                                vec![nick, channel, "Channel invite-exception list is full"],
+                            );
+                            send(state, session_id, format!("{reply}\r\n"));
+                            return;
+                        }
+                        if !chan.invite_exceptions.iter().any(|e| e.mask == mask) {
+                            chan.invite_exceptions.push(entry.clone());
+                            drop(channels);
+                            state.with_db(|db| db.add_invite_exception(channel, &entry));
+                        }
+                    }
+                } else {
+                    let mut channels = state.channels.lock();
+                    if let Some(chan) = channels.get_mut(channel) {
+                        chan.invite_exceptions.retain(|e| e.mask != mask);
+                    }
+                    drop(channels);
+                    state.with_db(|db| db.remove_invite_exception(channel, mask));
+                }
+
+                let sign = if adding { "+" } else { "-" };
+                let hostmask = conn.hostmask();
+                let mode_msg = format!(":{hostmask} MODE {channel} {sign}I {mask}\r\n");
+                broadcast_to_channel(state, channel, &mode_msg);
+
+                // S2S: propagate the invite-exception change to peers
+                {
+                    let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
+                    s2s_broadcast(
+                        state,
+                        crate::s2s::S2sMessage::InviteException {
                             event_id: s2s_next_event_id(state),
                             channel: channel.to_string(),
                             mask: mask.to_string(),
@@ -1214,6 +1485,30 @@ pub(super) fn handle_kick(
                     ch.halfops.remove(&target_session);
                 }
             }
+
+            // Clear the victim's auto-rejoin entry — same per-DID rule as
+            // PART. Otherwise the kicked user reconnects and the server
+            // silently puts them right back in the channel they were
+            // kicked from. Skip the clear if another session for that DID
+            // is still a member (multi-device: only this device was kicked).
+            let victim_did = state.session_dids.lock().get(&target_session).cloned();
+            if let Some(did) = victim_did {
+                let other_session_still_member = {
+                    let did_sessions = state.did_sessions.lock();
+                    let channels = state.channels.lock();
+                    match (did_sessions.get(&did), channels.get(channel)) {
+                        (Some(sessions), Some(ch)) => sessions
+                            .iter()
+                            .any(|sid| sid != &target_session && ch.members.contains(sid)),
+                        _ => false,
+                    }
+                };
+                if !other_session_still_member {
+                    let did_owned = did.clone();
+                    let channel_owned = channel.to_string();
+                    state.with_db(|db| db.remove_user_channel(&did_owned, &channel_owned));
+                }
+            }
         }
 
         ChannelTarget::Remote(_rm) => {
@@ -1313,14 +1608,17 @@ pub(super) fn handle_invite(
         NetworkTarget::Local {
             session_id: target_sid,
         } => {
-            // Add invite by session ID + DID
+            // Add invite by session ID + DID (with limit)
             let s2s_invitee = {
                 let mut channels = state.channels.lock();
                 let did = state.session_dids.lock().get(&target_sid).cloned();
                 if let Some(ch) = channels.get_mut(channel) {
-                    ch.invites.insert(target_sid.clone());
-                    if let Some(ref d) = did {
-                        ch.invites.insert(d.clone());
+                    const MAX_INVITES: usize = 500;
+                    if ch.invites.len() < MAX_INVITES {
+                        ch.invites.insert(target_sid.clone());
+                        if let Some(ref d) = did {
+                            ch.invites.insert(d.clone());
+                        }
                     }
                 }
                 // For S2S, prefer DID over nick-based token
@@ -1610,11 +1908,28 @@ pub(super) fn handle_part(
 
     // NOTE: Presence is NOT in CRDT (avoids ghost users on crash)
 
-    // Remove from auto-rejoin list
+    // Remove from auto-rejoin list — but only when no OTHER session for this
+    // DID is still a member of the channel. Otherwise the user has another
+    // device that never PARTed, and clearing the row would silently make
+    // that channel non-restorable on the next reconnect (the cross-device
+    // "I left on web but iOS keeps showing it / can't get rid of it"
+    // failure mode).
     if let Some(ref did) = conn.authenticated_did {
-        let did_owned = did.clone();
-        let channel_owned = channel.to_string();
-        state.with_db(|db| db.remove_user_channel(&did_owned, &channel_owned));
+        let other_session_still_member = {
+            let did_sessions = state.did_sessions.lock();
+            let channels = state.channels.lock();
+            match (did_sessions.get(did), channels.get(channel)) {
+                (Some(sessions), Some(ch)) => sessions
+                    .iter()
+                    .any(|sid| sid != session_id && ch.members.contains(sid)),
+                _ => false,
+            }
+        };
+        if !other_session_still_member {
+            let did_owned = did.clone();
+            let channel_owned = channel.to_string();
+            state.with_db(|db| db.remove_user_channel(&did_owned, &channel_owned));
+        }
     }
 
     // Broadcast PART to S2S peers
@@ -1725,6 +2040,12 @@ pub(super) fn handle_list(
     let nick = conn.nick_or_star();
     let channels = state.channels.lock();
     for (name, ch) in channels.iter() {
+        // Don't advertise restricted (+i/+k/+E/policy-gated) channels to
+        // non-members — listing them only leaks a private channel's existence,
+        // name, and topic. Members still see their own channels.
+        if !state.channel_is_discoverable(name, ch) && !ch.members.contains(session_id) {
+            continue;
+        }
         let count = ch.members.len() + ch.remote_members.len();
         let topic = ch.topic.as_ref().map(|t| t.text.as_str()).unwrap_or("");
         let reply = Message::from_server(

@@ -13,26 +13,43 @@ struct BrokerSession {
 enum BrokerAuth {
     /// Fetch a web-token from the broker using a stored broker token.
     static func fetchSession(brokerBase: String, brokerToken: String) async throws -> BrokerSession {
-        let url = URL(string: "\(brokerBase)/session")!
+        guard let url = Validation.brokerSessionURL(brokerBase: brokerBase) else {
+            throw BrokerError.sessionFailed("Invalid broker URL: \(brokerBase)")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
+        // A healthy broker answers in well under a second; an unhealthy one
+        // has been observed to HANG on specific tokens (upstream PDS/DPoP
+        // stall). Without a bound, URLSession waits 60s per attempt and the
+        // reconnect loop looks stuck forever.
+        request.timeoutInterval = 10
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["broker_token": brokerToken])
 
         let (data, response) = try await URLSession.shared.data(for: request)
-        let httpResponse = response as! HTTPURLResponse
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw BrokerError.sessionFailed("Non-HTTP response from broker")
+        }
 
         // Retry once on 502 (DPoP nonce rotation)
         if httpResponse.statusCode == 502 {
             let (retryData, retryResponse) = try await URLSession.shared.data(for: request)
-            let retryHttp = retryResponse as! HTTPURLResponse
+            guard let retryHttp = retryResponse as? HTTPURLResponse else {
+                throw BrokerError.sessionFailed("Non-HTTP retry response from broker")
+            }
             guard retryHttp.statusCode == 200 else {
+                if retryHttp.statusCode == 401 {
+                    throw BrokerError.invalidToken
+                }
                 throw BrokerError.sessionFailed("Status \(retryHttp.statusCode)")
             }
             return try parseSession(retryData)
         }
 
         guard httpResponse.statusCode == 200 else {
+            if httpResponse.statusCode == 401 {
+                throw BrokerError.invalidToken
+            }
             throw BrokerError.sessionFailed("Status \(httpResponse.statusCode)")
         }
         return try parseSession(data)
@@ -56,11 +73,17 @@ enum BrokerAuth {
     /// Start OAuth flow via the auth broker.
     /// Opens a browser window for AT Protocol login, receives callback.
     @MainActor
-    static func startOAuth(brokerBase: String, handle: String) async throws -> (brokerToken: String, session: BrokerSession) {
+    static func startOAuth(brokerBase: String, handle: String) async throws -> (brokerToken: String?, session: BrokerSession) {
         let callbackScheme = "freeq"
-        let encodedHandle = handle.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? handle
-        let returnTo = "https://irc.freeq.at/auth/mobile".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
-        let loginURL = URL(string: "\(brokerBase)/auth/login?handle=\(encodedHandle)&return_to=\(returnTo)&popup=1")!
+        // return_to must match the active deployment's host; a hardcoded
+        // host breaks login on any other deployment.
+        guard let loginURL = Validation.brokerLoginURL(
+            brokerBase: brokerBase,
+            handle: handle,
+            returnTo: "\(ServerConfig.apiBaseUrl)/auth/mobile"
+        ) else {
+            throw BrokerError.sessionFailed("Invalid broker URL or handle")
+        }
 
         return try await withCheckedThrowingContinuation { continuation in
             let session = ASWebAuthenticationSession(
@@ -72,27 +95,38 @@ enum BrokerAuth {
                     return
                 }
                 guard let url = callbackURL,
-                      let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-                      let token = components.queryItems?.first(where: { $0.name == "broker_token" })?.value,
-                      let did = components.queryItems?.first(where: { $0.name == "did" })?.value,
-                      let nick = components.queryItems?.first(where: { $0.name == "nick" })?.value else {
-                    continuation.resume(throwing: BrokerError.sessionFailed("No token in callback"))
+                      let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                    continuation.resume(throwing: BrokerError.sessionFailed("No callback URL"))
+                    return
+                }
+                let items = components.queryItems ?? []
+                func value(_ name: String) -> String? { items.first(where: { $0.name == name })?.value }
+
+                if let err = value("error") {
+                    continuation.resume(throwing: BrokerError.sessionFailed(err))
                     return
                 }
 
-                let handle = components.queryItems?.first(where: { $0.name == "handle" })?.value ?? ""
-
-                // Now fetch a web-token using the broker token
-                Task {
-                    do {
-                        let session = try await fetchSession(brokerBase: brokerBase, brokerToken: token)
-                        continuation.resume(returning: (brokerToken: token, session: session))
-                    } catch {
-                        // Return what we have from the callback
-                        let session = BrokerSession(token: "", nick: nick, did: did, handle: handle)
-                        continuation.resume(returning: (brokerToken: token, session: session))
-                    }
+                // The broker completes via
+                // freeq://auth?token=<web token>&nick=&did=[&broker_token=&handle=].
+                // `token` (the web token) is what we connect with; `broker_token`
+                // is optional — the standalone broker includes it (used to re-mint
+                // web tokens on reconnect), the embedded broker does not. Mirrors
+                // the iOS handler.
+                guard let webToken = value("token"),
+                      let nick = value("nick"),
+                      let did = value("did") else {
+                    continuation.resume(throwing: BrokerError.sessionFailed("Invalid auth response"))
+                    return
                 }
+
+                let session = BrokerSession(
+                    token: webToken,
+                    nick: nick,
+                    did: did,
+                    handle: value("handle") ?? nick
+                )
+                continuation.resume(returning: (brokerToken: value("broker_token"), session: session))
             }
             session.prefersEphemeralWebBrowserSession = false
 
@@ -115,5 +149,6 @@ class MacPresentationContextProvider: NSObject, ASWebAuthenticationPresentationC
 }
 
 enum BrokerError: Error {
+    case invalidToken
     case sessionFailed(String)
 }

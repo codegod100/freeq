@@ -1,8 +1,162 @@
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
 import { useStore } from '../store';
-import { sendWhois } from '../irc/client';
+import { sendWhois, getNick } from '../irc/client';
+import { REPORT_REASONS, reportUser } from '../lib/safety';
+import { parseAwayStatus } from '../lib/status';
+import { isDid } from '../lib/identity';
+import { displayNameForKey } from '../lib/display-name';
+import { showToast } from './Toast';
 import * as e2ee from '../lib/e2ee';
+
+export interface CreatorChainLink {
+  did: string;
+  nick: string | null;
+  displayName: string | null;
+  avatar: string | null;
+  isHuman: boolean;
+}
+
+/** Default depth cap when callers don't pass one. Picked deep enough
+ *  to cover realistic nesting (bot owns bot owns bot owns human is
+ *  already exotic) without enabling runaway loops on bad data. */
+export const CREATOR_CHAIN_MAX_DEPTH = 8;
+
+interface CreatorChainActorResp {
+  nick?: string | null;
+  provenance?: { creator_did?: string | null } | null;
+}
+
+interface CreatorChainProfile {
+  displayName?: string | null;
+  handle?: string | null;
+  avatar?: string | null;
+}
+
+/**
+ * Walk the creator lineage starting from `rootDid`. Returns links in
+ * order of distance from the displayed user (closest first).
+ *
+ * Stops on:
+ *  - empty/undefined `rootDid` (returns [])
+ *  - actor response with no `provenance.creator_did` (root reached)
+ *  - cycle (DID seen twice)
+ *  - hit `maxDepth`
+ *
+ * `fetchActor` and `fetchProfileFn` are injected so this is testable
+ * without a network. In production, callers pass the live fetch +
+ * fetchProfile from `lib/profiles`.
+ */
+export async function walkCreatorChain(
+  rootDid: string | null | undefined,
+  fetchActor: (did: string) => Promise<CreatorChainActorResp | null>,
+  fetchProfileFn: (did: string) => Promise<CreatorChainProfile | null>,
+  maxDepth: number = CREATOR_CHAIN_MAX_DEPTH,
+): Promise<CreatorChainLink[]> {
+  if (!rootDid) return [];
+  const chain: CreatorChainLink[] = [];
+  const seen = new Set<string>();
+  // Explicit annotations on `did` + the Promise.all tuple are not just
+  // documentation — tsc -b (project-references mode) can't infer them
+  // without help because `nextDid` is reassigned inside the loop from
+  // `actorResp.provenance.creator_did`, which itself depends on the
+  // tuple type. The implicit-any inference becomes circular.
+  let nextDid: string | null | undefined = rootDid;
+  while (nextDid && chain.length < maxDepth) {
+    if (seen.has(nextDid)) break;
+    seen.add(nextDid);
+    const did: string = nextDid;
+    const isDidKey = did.startsWith('did:key:');
+    const [actorResp, profile]: [
+      CreatorChainActorResp | null,
+      CreatorChainProfile | null,
+    ] = await Promise.all([
+      fetchActor(did).catch(() => null),
+      isDidKey ? Promise.resolve(null) : fetchProfileFn(did).catch(() => null),
+    ]);
+    chain.push({
+      did,
+      nick: actorResp?.nick ?? null,
+      displayName: profile?.displayName ?? profile?.handle ?? null,
+      avatar: profile?.avatar ?? null,
+      isHuman: !isDidKey,
+    });
+    nextDid = actorResp?.provenance?.creator_did ?? null;
+  }
+  return chain;
+}
+
+function defaultFetchActor(did: string): Promise<CreatorChainActorResp | null> {
+  return fetch(`/api/v1/actors/${encodeURIComponent(did)}`)
+    .then((r) => (r.ok ? r.json() : null))
+    .catch(() => null);
+}
+
+export function ProvenanceBlock({ provenance }: { provenance: NonNullable<ActorInfo['provenance']> }) {
+  // Walks the creator lineage to render e.g. "Creator: lobot ← Nap"
+  // so the chain of trust is visible at a glance for nested bot
+  // hierarchies (panel-2 owned by lobot owned by a human). See
+  // `walkCreatorChain` for the walk logic + stop conditions.
+  const [creatorChain, setCreatorChain] = useState<CreatorChainLink[]>([]);
+  useEffect(() => {
+    if (!provenance.creator_did) {
+      setCreatorChain([]);
+      return;
+    }
+    let cancelled = false;
+    walkCreatorChain(provenance.creator_did, defaultFetchActor, fetchProfile).then(
+      (chain) => {
+        if (!cancelled) setCreatorChain(chain);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [provenance.creator_did]);
+
+  return (
+    <div className="mt-2 p-2 bg-bg-tertiary rounded-lg text-left">
+      <div className="text-[10px] text-fg-dim font-semibold mb-1">Provenance</div>
+      {creatorChain.length > 0 && (
+        <div className="text-[10px] text-fg-dim flex items-center gap-1.5 flex-wrap">
+          <span className="text-fg-dim/60">Creator:</span>
+          {creatorChain.map((link, i) => (
+            <span key={link.did} className="flex items-center gap-1.5">
+              {i > 0 && <span className="text-fg-dim/40" aria-hidden="true">←</span>}
+              <button
+                onClick={() => { navigator.clipboard.writeText(link.did); import('./Toast').then(m => m.showToast('DID copied', 'success', 2000)); }}
+                title={`Click to copy DID\n${link.did}`}
+                className="flex items-center gap-1 cursor-pointer hover:opacity-80"
+              >
+                {link.avatar && (
+                  <img src={link.avatar} alt="" className="w-3.5 h-3.5 rounded-full" />
+                )}
+                <span className="text-fg-muted">
+                  {link.displayName || link.nick || link.did}
+                </span>
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      {provenance.source_repo && (
+        <div className="text-[10px] text-fg-dim">
+          <span className="text-fg-dim/60">Source:</span>{' '}
+          <a href={provenance.source_repo} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+            {provenance.source_repo.replace('https://', '')}
+          </a>
+        </div>
+      )}
+      {provenance.implementation_ref && (
+        <div className="text-[10px] text-fg-dim">
+          <span className="text-fg-dim/60">Impl:</span>{' '}
+          <span className="font-mono">{provenance.implementation_ref}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
 interface ActorInfo {
   actor_class?: string;
@@ -38,11 +192,15 @@ interface ActorInfo {
 interface UserPopoverProps {
   nick: string;
   did?: string;
+  /** Set when opened from a federated message (+freeq.at/origin = peer name).
+   *  The sender is vouched for by that server, not verified here — so we show
+   *  a warning bar and suppress the local "verified" / WHOIS context. */
+  origin?: string;
   position: { x: number; y: number };
   onClose: () => void;
 }
 
-export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) {
+export function UserPopover({ nick, did, origin, position, onClose }: UserPopoverProps) {
   const [profile, setProfile] = useState<ATProfile | null>(null);
   const [loading, setLoading] = useState(false);
   const setActive = useStore((s) => s.setActiveChannel);
@@ -50,6 +208,7 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
   const whois = useStore((s) => s.whoisCache.get(nick.toLowerCase()));
   const [safetyNumber, setSafetyNumber] = useState<string | null>(null);
   const [actorInfo, setActorInfo] = useState<ActorInfo | null>(null);
+  const [showReportReasons, setShowReportReasons] = useState(false);
 
   useEffect(() => {
     // Always trigger WHOIS to get latest info
@@ -58,6 +217,18 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
 
   const effectiveDid = did || whois?.did;
   const isDidKey = effectiveDid?.startsWith('did:key:');
+  const isSelf = nick.toLowerCase() === getNick().toLowerCase();
+  const isBlocked = useStore((s) =>
+    (!!effectiveDid && s.blockedDids.includes(effectiveDid)) || s.blockedNicks.includes(nick.toLowerCase()));
+  // Away status from any shared channel member list (custom status text)
+  const away = useStore((s) => {
+    for (const ch of s.channels.values()) {
+      const m = ch.members.get(nick.toLowerCase());
+      if (m) return m.away ?? null;
+    }
+    return null;
+  });
+  const awayStatus = parseAwayStatus(away);
 
   // Fetch safety number for E2EE verification
   useEffect(() => {
@@ -95,8 +266,12 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
   }, [effectiveDid, nick]);
 
   const startDM = () => {
-    addChannel(nick);
-    setActive(nick);
+    // Open the thread under the same canonical key the SDK sends/echoes
+    // under — the peer's DID when we know it, else the nick. Opening by nick
+    // while the echo keys by DID would split one person into two threads.
+    const key = effectiveDid && isDid(effectiveDid) ? effectiveDid : nick;
+    addChannel(key);
+    setActive(key);
     onClose();
   };
 
@@ -108,14 +283,30 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
     zIndex: 100,
   };
 
-  const displayName = profile?.displayName || whois?.realname || nick;
+  // A realname whose first token is a DID is not a human name — the server
+  // sends "did:key:… (via S2S federation)" for remote users it can't name.
+  const saneRealname = whois?.realname && !isDid(whois.realname.split(' ')[0]) ? whois.realname : undefined;
+  const displayName = profile?.displayName || saneRealname || displayNameForKey(nick);
   const handle = profile?.handle || whois?.handle;
   const avatarUrl = profile?.avatar;
 
-  return (
+  // Portal to <body>: the right-sidebar shell has `will-change: transform`
+  // (from the sidebar toggle animation), which makes it the containing block
+  // for `position: fixed` descendants — so an in-tree popover positions
+  // relative to the sidebar and lands off-screen. Rendering into <body>
+  // escapes that ancestor so `position: fixed` is viewport-relative again.
+  // (Same fix the channel-list context menu already uses.)
+  return createPortal(
     <>
       <div className="fixed inset-0 z-40" onClick={onClose} />
       <div style={style} className="z-50 bg-bg-secondary border border-border rounded-xl shadow-2xl w-72 animate-fadeIn overflow-hidden">
+        {/* Federated provenance warning — opened from a relayed message */}
+        {origin && (
+          <div className="bg-warning/15 border-b border-warning/30 px-3 py-2 text-[11px] text-warning flex items-start gap-1.5">
+            <span aria-hidden="true">⚠️</span>
+            <span>Relayed via <span className="font-semibold">{origin}</span> — this server did not verify this identity.</span>
+          </div>
+        )}
         {/* Header */}
         <div className="h-16 bg-gradient-to-r from-accent/20 to-purple/20 relative">
           {avatarUrl ? (
@@ -142,7 +333,14 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
           {handle && !isDidKey && (
             <div className="text-xs text-accent mt-1 flex items-center gap-1">
               <span>@{handle}</span>
-              <span className="text-success text-[10px]" title="AT Protocol identity">✓</span>
+              {!origin && <span className="text-success text-[10px]" title="AT Protocol identity">✓</span>}
+            </div>
+          )}
+
+          {/* Away / custom status */}
+          {away != null && (
+            <div className="text-xs text-warning mt-1 truncate" title={awayStatus ?? undefined}>
+              Away{awayStatus ? `: ${awayStatus}` : ''}
             </div>
           )}
 
@@ -214,29 +412,7 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
 
           {/* Provenance */}
           {actorInfo?.provenance && (
-            <div className="mt-2 p-2 bg-bg-tertiary rounded-lg text-left">
-              <div className="text-[10px] text-fg-dim font-semibold mb-1">Provenance</div>
-              {actorInfo.provenance.creator_did && (
-                <div className="text-[10px] text-fg-dim">
-                  <span className="text-fg-dim/60">Creator:</span>{' '}
-                  <span className="font-mono">{actorInfo.provenance.creator_did.slice(0, 40)}…</span>
-                </div>
-              )}
-              {actorInfo.provenance.source_repo && (
-                <div className="text-[10px] text-fg-dim">
-                  <span className="text-fg-dim/60">Source:</span>{' '}
-                  <a href={actorInfo.provenance.source_repo} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
-                    {actorInfo.provenance.source_repo.replace('https://', '')}
-                  </a>
-                </div>
-              )}
-              {actorInfo.provenance.implementation_ref && (
-                <div className="text-[10px] text-fg-dim">
-                  <span className="text-fg-dim/60">Impl:</span>{' '}
-                  <span className="font-mono">{actorInfo.provenance.implementation_ref}</span>
-                </div>
-              )}
-            </div>
+            <ProvenanceBlock provenance={actorInfo.provenance} />
           )}
 
           {/* Heartbeat */}
@@ -276,8 +452,10 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
             </div>
           )}
 
-          {/* WHOIS info (for guests or extra detail) */}
-          {whois && (
+          {/* WHOIS info (for guests or extra detail) — suppressed for federated
+              senders: it's local-server, resolved-by-nick data, i.e. the wrong
+              person for a relayed message. */}
+          {whois && !origin && (
             <div className="mt-2 space-y-0.5">
               {whois.user && whois.host && (
                 <div className="text-[11px] text-fg-dim font-mono">
@@ -333,8 +511,58 @@ export function UserPopover({ nick, did, position, onClose }: UserPopoverProps) 
               </a>
             )}
           </div>
+
+          {/* Safety actions — not for yourself */}
+          {!isSelf && (
+            showReportReasons ? (
+              <div className="mt-2">
+                <div className="text-[10px] uppercase tracking-widest text-fg-dim font-semibold mb-1">Report for…</div>
+                <div className="flex flex-wrap gap-1">
+                  {REPORT_REASONS.map((reason) => (
+                    <button
+                      key={reason}
+                      onClick={() => {
+                        reportUser(nick, effectiveDid, reason);
+                        showToast(`Reported and blocked ${nick}`, 'success', 2500);
+                        onClose();
+                      }}
+                      className="text-[11px] px-2 py-1 rounded-lg bg-danger/10 hover:bg-danger/20 text-danger"
+                    >
+                      {reason}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="flex gap-2 mt-2">
+                <button
+                  onClick={() => {
+                    if (isBlocked) {
+                      if (effectiveDid) useStore.getState().unblockUser(effectiveDid);
+                      useStore.getState().unblockUser(nick);
+                      showToast(`Unblocked ${nick}`, 'success', 2000);
+                    } else {
+                      useStore.getState().blockUser(nick, effectiveDid);
+                      showToast(`Blocked ${nick}`, 'success', 2000);
+                      onClose();
+                    }
+                  }}
+                  className="flex-1 bg-danger/10 hover:bg-danger/20 text-danger text-xs py-1.5 rounded-lg font-medium"
+                >
+                  {isBlocked ? 'Unblock' : 'Block'}
+                </button>
+                <button
+                  onClick={() => setShowReportReasons(true)}
+                  className="flex-1 bg-danger/10 hover:bg-danger/20 text-danger text-xs py-1.5 rounded-lg font-medium"
+                >
+                  Report…
+                </button>
+              </div>
+            )
+          )}
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }

@@ -3,6 +3,7 @@ package com.freeq.model
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import androidx.compose.runtime.mutableStateListOf
@@ -24,6 +25,11 @@ data class ChatMessage(
     val replyTo: String? = null,
     var isEdited: Boolean = false,
     var isDeleted: Boolean = false,
+    val isSigned: Boolean = false,
+    // Origin server name when relayed from a federated peer (+freeq.at/origin).
+    // null = locally-originated. Drives "via {origin}" + suppresses the local
+    // verified/signed badges, which would overstate trust for a peer-vouched msg.
+    val origin: String? = null,
     val reactions: MutableMap<String, MutableSet<String>> = mutableMapOf()
 )
 
@@ -45,6 +51,21 @@ data class MemberInfo(
 }
 
 // ── Channel state ──
+
+/**
+ * Parse an IRCv3 `time`-tag value (ISO-8601 UTC, e.g.
+ * `2011-10-19T16:40:51.620Z`) to epoch millis. Returns null on
+ * blank/unparseable input so callers can no-op safely.
+ */
+internal fun parseServerTimeMillis(raw: String?): Long? {
+    val s = raw?.trim().orEmpty()
+    if (s.isEmpty()) return null
+    return try {
+        java.time.Instant.parse(s).toEpochMilli()
+    } catch (_: Exception) {
+        null
+    }
+}
 
 class ChannelState(val name: String) {
     val messages = mutableStateListOf<ChatMessage>()
@@ -78,6 +99,21 @@ class ChannelState(val name: String) {
         // Only real messages (not system join/part) update lastActivityTime
         if (msg.from.isNotEmpty() && msg.timestamp.time > lastActivityTime.value) {
             lastActivityTime.value = msg.timestamp.time
+        }
+    }
+
+    /**
+     * Seed `lastActivityTime` from a CHATHISTORY TARGETS server-time tag.
+     * Mirrors iOS 6dff8b2: a freshly minted DM buffer (no messages yet)
+     * takes the server time unconditionally so the chat list sorts
+     * correctly on cold launch before per-DM history backfills; a buffer
+     * that already has messages only moves forward, never regressing past
+     * in-session activity. No-op on blank/unparseable input.
+     */
+    fun seedActivityFromTarget(serverTime: String?) {
+        val ms = parseServerTimeMillis(serverTime) ?: return
+        if (messages.isEmpty() || ms > lastActivityTime.value) {
+            lastActivityTime.value = ms
         }
     }
 
@@ -142,6 +178,32 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val unreadCounts = mutableStateMapOf<String, Int>()
     val mutedChannels = mutableStateListOf<String>()
 
+    // Safety: client-side block list (Google Play UGC policy requires in-app
+    // block + report). SnapshotStateLists rather than plain MutableSets so
+    // hiding blocked content recomposes immediately; set semantics are
+    // enforced on insert. blockedNicks entries are stored lowercased.
+    val blockedDids = mutableStateListOf<String>()
+    val blockedNicks = mutableStateListOf<String>()
+
+    // DID → display nick, learned from the conversation list's partner-did
+    // tag and every nick↔DID binding. Display-grade: survives the peer going
+    // offline, so a DID-keyed thread keeps rendering as a name.
+    val didDisplayNames = mutableStateMapOf<String, String>()
+
+    /** Human label for a thread key that may be a raw DID (see DidDisplay). */
+    fun displayNameForKey(key: String): String =
+        DidDisplay.displayName(key, didDisplayNames, knownDids)
+
+    // Nick → server-bound DID learned from message account-tags. Keyed by
+    // lowercased nick. Backfills channel member entries (the FFI NAMES reply
+    // carries no DID) so DID-gated UI has a real source.
+    val knownDids = mutableStateMapOf<String, String>()
+
+    // Custom status, shipped as the IRC AWAY message (matches iOS):
+    // `AWAY :<text>` on set, bare `AWAY` to clear. Persisted and re-sent
+    // after every (re)registration.
+    var customStatus = mutableStateOf("")
+
     var replyingTo = mutableStateOf<ChatMessage?>(null)
     var editingMessage = mutableStateOf<ChatMessage?>(null)
 
@@ -149,8 +211,8 @@ class AppState(application: Application) : AndroidViewModel(application) {
     var pendingNavigation = mutableStateOf<String?>(null)
     var pendingJoinChannel: String? = null  // Track user-initiated joins for navigation
     var brokerToken: String? = null
-    val authBrokerBase: String
-        get() = "${ServerConfig.apiBaseUrl}/auth/broker"
+    private val authBrokerBase: String
+        get() = ServerConfig.authBrokerBase
     private var brokerRetryCount = 0
     private var consecutive401Count = 0  // Require 3 consecutive 401s before nuking token
 
@@ -165,19 +227,23 @@ class AppState(application: Application) : AndroidViewModel(application) {
             return System.currentTimeMillis() - lastLoginTime >= fourteenDaysMs
         }
     internal var intentionalDisconnect = false
+    /** Set to true after a WS connect attempt has been swapped for plain
+     *  TCP within a single user-initiated `connect()` call. Prevents
+     *  ping-ponging between transports. Reset on each fresh `connect()`. */
+    private var transportFallbackUsed = false
     var loggedOut = mutableStateOf(false)
     private var cachedWebToken: String? = null
     private var cachedWebTokenExpiry: Long = 0L  // epoch millis
 
     val hasSavedSession: Boolean
-        get() = nick.value.isNotEmpty() && (brokerToken != null
-                || (cachedWebToken != null && System.currentTimeMillis() < cachedWebTokenExpiry))
+        // brokerToken alone is enough — broker /session call returns the real
+        // handle, so we don't need a saved nick to attempt reconnect.
+        get() = brokerToken != null
     val lastReadMessageIds = mutableStateMapOf<String, String>()
     val lastReadTimestamps = mutableStateMapOf<String, Long>()
     var isDarkTheme = mutableStateOf(true)
 
     val batches = mutableMapOf<String, BatchBuffer>()
-    data class BatchBuffer(val target: String, val batchType: String = "", val messages: MutableList<ChatMessage> = mutableListOf())
 
     // MOTD
     val motdLines = mutableStateListOf<String>()
@@ -194,17 +260,47 @@ class AppState(application: Application) : AndroidViewModel(application) {
     internal val prefs: SharedPreferences
         get() = getApplication<Application>().getSharedPreferences("freeq", Context.MODE_PRIVATE)
 
-    internal val securePrefs: SharedPreferences by lazy {
+    internal val securePrefs: SharedPreferences by lazy { buildSecurePrefs() }
+
+    private fun createEncryptedPrefs(): SharedPreferences {
         val masterKey = MasterKey.Builder(getApplication<Application>())
             .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
             .build()
-        EncryptedSharedPreferences.create(
+        return EncryptedSharedPreferences.create(
             getApplication(),
             "freeq_secure",
             masterKey,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )
+    }
+
+    /**
+     * Build the encrypted store, recovering from a corrupt keyset. On some
+     * devices the Keystore master key survives an uninstall in a bad state, so
+     * EncryptedSharedPreferences can't decrypt its own keyset and throws
+     * (AEADBadTagException) — which, unhandled, crashes AppState construction on
+     * launch. Reset the keyset + master-key alias and rebuild; stored secrets
+     * are re-derived on next login. Falls back to plain prefs if even that fails.
+     */
+    private fun buildSecurePrefs(): SharedPreferences {
+        return try {
+            createEncryptedPrefs()
+        } catch (e: Exception) {
+            android.util.Log.w("AppState", "Encrypted prefs unreadable, resetting keyset", e)
+            getApplication<Application>().deleteSharedPreferences("freeq_secure")
+            try {
+                val ks = java.security.KeyStore.getInstance("AndroidKeyStore")
+                ks.load(null)
+                ks.deleteEntry("_androidx_security_master_key_")
+            } catch (_: Exception) {}
+            try {
+                createEncryptedPrefs()
+            } catch (e2: Exception) {
+                android.util.Log.e("AppState", "Encrypted prefs unavailable; using plaintext prefs", e2)
+                getApplication<Application>().getSharedPreferences("freeq_secure_fallback", Context.MODE_PRIVATE)
+            }
+        }
     }
 
     val activeChannelState: ChannelState?
@@ -235,8 +331,17 @@ class AppState(application: Application) : AndroidViewModel(application) {
             prefs.edit().remove("webTokenExpiry").apply()
         }
 
-        // Restore persisted state
-        nick.value = prefs.getString("nick", "") ?: ""
+        // Restore persisted state. If the saved nick is a Guest temp name but
+        // we have a DID, the previous session got Guest-renamed and poisoned
+        // the saved nick — drop it and let the broker /session call return the
+        // user's real handle on next reconnect.
+        val savedNick = prefs.getString("nick", "") ?: ""
+        if (authenticatedDID.value != null && savedNick.startsWith("Guest", ignoreCase = true)) {
+            prefs.edit().remove("nick").apply()
+            nick.value = ""
+        } else {
+            nick.value = savedNick
+        }
         serverAddress.value = prefs.getString("server", ServerConfig.ircServer) ?: ServerConfig.ircServer
         prefs.getStringSet("channels", setOf("#general"))?.forEach { ch ->
             if (ch !in autoJoinChannels) autoJoinChannels.add(ch)
@@ -255,6 +360,17 @@ class AppState(application: Application) : AndroidViewModel(application) {
         prefs.getStringSet("mutedChannels", emptySet())?.forEach { ch ->
             if (ch !in mutedChannels) mutedChannels.add(ch)
         }
+
+        // Restore block lists
+        prefs.getStringSet("blockedNicks", emptySet())?.forEach { n ->
+            if (n !in blockedNicks) blockedNicks.add(n)
+        }
+        prefs.getStringSet("blockedDids", emptySet())?.forEach { d ->
+            if (d !in blockedDids) blockedDids.add(d)
+        }
+
+        // Restore custom status
+        customStatus.value = prefs.getString("customStatus", "") ?: ""
 
         // Prune stale typing indicators every 3 seconds
         scope.launch {
@@ -275,18 +391,37 @@ class AppState(application: Application) : AndroidViewModel(application) {
     // ── Connection ──
 
     fun connect(nickName: String) {
+        // Fresh user-initiated connect — start by preferring WebSocket again.
+        transportFallbackUsed = false
+        connect(nickName, useWebSocket = true)
+    }
+
+    private fun connect(nickName: String, useWebSocket: Boolean) {
         intentionalDisconnect = false
         loggedOut.value = false
         nick.value = nickName
         connectionState.value = ConnectionState.Connecting
         errorMessage.value = null
 
-        prefs.edit().putString("nick", nickName).putString("server", serverAddress.value).apply()
+        // Don't overwrite the saved nick with a Guest temp name when we're a
+        // DID-authenticated user — once that happens, every subsequent reconnect
+        // sends the Guest nick, SASL fails, and the user is stuck.
+        val shouldPersistNick = !(authenticatedDID.value != null
+                && nickName.startsWith("Guest", ignoreCase = true))
+        if (shouldPersistNick) {
+            prefs.edit().putString("nick", nickName).putString("server", serverAddress.value).apply()
+        } else {
+            prefs.edit().putString("server", serverAddress.value).apply()
+        }
 
         try {
             val handler = AndroidEventHandler(this)
             client = FreeqClient(serverAddress.value, nickName, handler)
             client?.setPlatform("freeq android")
+            // Prefer WebSocket on 443/wss like the iOS client; pass an empty
+            // string to disable WS and use the TCP `serverAddress` directly
+            // (the fallback path triggered by attemptTransportFallback below).
+            client?.setWebsocketUrl(if (useWebSocket) ServerConfig.wssServer else "")
 
             pendingWebToken?.let { token ->
                 client?.setWebToken(token)
@@ -298,6 +433,25 @@ class AppState(application: Application) : AndroidViewModel(application) {
             connectionState.value = ConnectionState.Disconnected
             errorMessage.value = "Connection failed: ${e.message}"
         }
+    }
+
+    /** If a Disconnected reason looks like a WS handshake / connect failure
+     *  and we haven't already swapped this attempt, retry on plain TCP once.
+     *  Returns true if a fallback was scheduled (caller should not also run
+     *  the standard auto-reconnect path). Mirrors iOS attemptTransportFallback. */
+    internal fun attemptTransportFallback(reason: String): Boolean {
+        if (!TransportFallback.shouldFallback(
+                reason = reason,
+                transportFallbackUsed = transportFallbackUsed,
+                hasSavedSession = hasSavedSession,
+                nickIsEmpty = nick.value.isEmpty(),
+            )) return false
+        transportFallbackUsed = true
+        Log.w("freeq.auth", "WS connect failed; falling back to TCP. reason=$reason")
+        client?.disconnect()
+        client = null
+        connect(nick.value, useWebSocket = false)
+        return true
     }
 
     fun disconnect() {
@@ -319,6 +473,13 @@ class AppState(application: Application) : AndroidViewModel(application) {
         cachedWebTokenExpiry = System.currentTimeMillis() + 25 * 60 * 1000L
         securePrefs.edit().putString("webToken", token).apply()
         prefs.edit().putLong("webTokenExpiry", cachedWebTokenExpiry).apply()
+    }
+
+    fun invalidateCachedWebToken() {
+        cachedWebToken = null
+        cachedWebTokenExpiry = 0L
+        securePrefs.edit().remove("webToken").apply()
+        prefs.edit().remove("webTokenExpiry").apply()
     }
 
     fun logout() {
@@ -365,6 +526,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
                 securePrefs.edit().putString("did", session.did).apply()
                 connect(session.nick)
             } catch (e: Exception) {
+                Log.w("freeq.auth", "reconnect: broker /session failed (retry ${brokerRetryCount + 1}): ${e.message}")
                 brokerRetryCount++
                 if (brokerRetryCount <= 4) {
                     val delayMs = 3000L * (1L shl (brokerRetryCount - 1)) // 3, 6, 12, 24s
@@ -380,9 +542,9 @@ class AppState(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private data class BrokerSessionResponse(val token: String, val nick: String, val did: String)
+    internal data class BrokerSessionResponse(val token: String, val nick: String, val did: String)
 
-    private fun fetchBrokerSession(brokerToken: String): BrokerSessionResponse {
+    internal fun fetchBrokerSession(brokerToken: String): BrokerSessionResponse {
         // Retry up to 3 times with backoff — DPoP nonce rotation causes the first call to fail
         for (attempt in 0..2) {
             val url = java.net.URL("$authBrokerBase/session")
@@ -401,11 +563,19 @@ class AppState(application: Application) : AndroidViewModel(application) {
                 Thread.sleep(if (attempt == 0) 500 else 1000)
                 continue
             }
-            // 401 = broker token may be invalid — require 3 consecutive 401s before nuking
-            // But keep users logged in for at least 14 days unless they explicitly log out
+            // 401 from /session means the broker doesn't recognize this
+            // broker_token at all — its session record is gone (broker DB
+            // wiped, token rotated, manual revoke). That's not a transient
+            // failure: no amount of retrying will recover. Clear the bad
+            // creds so hasSavedSession flips false and the UI falls back to
+            // ConnectScreen for re-OAuth, instead of spinning on
+            // ReconnectingScreen forever. We still wait for 3 consecutive
+            // 401s in case there's a brief broker glitch, but the 14-day
+            // "keep logged in" guard does not apply here — the broker has
+            // *explicitly* told us it doesn't know this token.
             if (status == 401) {
                 consecutive401Count++
-                if (consecutive401Count >= 3 && canAutoClearBrokerCredentials) {
+                if (consecutive401Count >= 3) {
                     consecutive401Count = 0
                     this.brokerToken = null
                     cachedWebToken = null
@@ -460,32 +630,36 @@ class AppState(application: Application) : AndroidViewModel(application) {
         sendRaw("@+typing=done TAGMSG $target")
         lastTypingSent = 0
 
-        val hasCodeBlock = text.contains("```")
+        // Edit + reply paths go through sendRaw because the FFI doesn't
+        // expose typed send_reply/send_edit yet. For those, encode `\n`
+        // as the legacy `+freeq.at/multiline` inline form so multi-line
+        // content survives a single PRIVMSG — receivers (web app, TUI,
+        // freeq-aware mobile) decode the tag on render.
+        val cleaned = text.replace("\r", "")
+        val hasNewline = cleaned.contains("\n")
+        val escaped = if (hasNewline) cleaned.replace("\n", "\\n") else cleaned
+        val multilineTag = if (hasNewline) ";+freeq.at/multiline" else ""
 
-        // Edit mode
         val editing = editingMessage.value
         if (editing != null) {
-            val escaped = if (hasCodeBlock) text.replace("\r", "").replace("\n", "\\n")
-                          else text.replace("\r", "").replace("\n", " ")
-            sendRaw("@+draft/edit=${editing.id} PRIVMSG $target :$escaped")
+            sendRaw("@+draft/edit=${editing.id}$multilineTag PRIVMSG $target :$escaped")
             editingMessage.value = null
             return
         }
 
-        // Reply mode
         val reply = replyingTo.value
         if (reply != null) {
-            val escaped = if (hasCodeBlock) text.replace("\r", "").replace("\n", "\\n")
-                          else text.replace("\r", "").replace("\n", " ")
-            sendRaw("@+reply=${reply.id} PRIVMSG $target :$escaped")
+            sendRaw("@+reply=${reply.id}$multilineTag PRIVMSG $target :$escaped")
             replyingTo.value = null
             return
         }
 
-        // Code block: encode newlines as literal \n and send as one message
-        val sendText = if (hasCodeBlock) text.replace("\r", "").replace("\n", "\\n") else text
+        // Plain send: pass text as-is. The FFI calls Rust SDK's privmsg,
+        // which auto-routes `\n`-bearing text to a draft/multiline BATCH
+        // when the server acked the cap — one logical message, msgid
+        // coherence for edits / reactions / replies.
         try {
-            client?.sendMessage(target, sendText)
+            client?.sendMessage(target, cleaned)
         } catch (_: Exception) {
             errorMessage.value = "Send failed"
         }
@@ -542,21 +716,17 @@ class AppState(application: Application) : AndroidViewModel(application) {
 
     fun markRead(channel: String) {
         unreadCounts[channel] = 0
-        val state = channels.firstOrNull { it.name == channel }
+        val buffer = channels.firstOrNull { it.name == channel }
             ?: dmBuffers.firstOrNull { it.name == channel }
-        // Prefer the last real message (has a sender) — system messages use random UUIDs
-        // that don't survive CHATHISTORY replay
-        val lastMsg = state?.messages?.lastOrNull { it.from.isNotEmpty() }
-            ?: state?.messages?.lastOrNull()
-        lastMsg?.let {
-            lastReadMessageIds[channel] = it.id
-            lastReadTimestamps[channel] = it.timestamp.time
+        UnreadTracker.anchorMessage(buffer?.messages ?: emptyList())?.let { anchor ->
+            lastReadMessageIds[channel] = anchor.id
+            lastReadTimestamps[channel] = anchor.timestamp.time
             persistReadPositions()
         }
     }
 
     fun incrementUnread(channel: String) {
-        if (activeChannel.value != channel && !isMuted(channel)) {
+        if (UnreadTracker.shouldIncrement(channel, activeChannel.value, isMuted(channel))) {
             unreadCounts[channel] = (unreadCounts[channel] ?: 0) + 1
         }
     }
@@ -583,23 +753,120 @@ class AppState(application: Application) : AndroidViewModel(application) {
         prefs.edit().putStringSet("mutedChannels", mutedChannels.toSet()).apply()
     }
 
+    // ── Safety: block & report ──
+
+    fun isBlocked(nick: String, did: String? = null): Boolean =
+        (did != null && did in blockedDids) || nick.lowercase() in blockedNicks
+
+    fun blockUser(nick: String, did: String? = null) {
+        val n = nick.trim().lowercase()
+        if (n.isNotEmpty() && n !in blockedNicks) blockedNicks.add(n)
+        if (!did.isNullOrEmpty() && did !in blockedDids) blockedDids.add(did)
+        persistBlockLists()
+    }
+
+    fun unblockUser(nick: String? = null, did: String? = null) {
+        nick?.let { n -> blockedNicks.removeAll { it.equals(n, ignoreCase = true) } }
+        did?.let { blockedDids.remove(it) }
+        persistBlockLists()
+    }
+
+    /** Report = local audit-trail log + block. The log line is the record
+     *  until a server-side report endpoint exists; abuse@freeq.at handles
+     *  escalation (surfaced in Settings → Safety). */
+    fun reportUser(nick: String, did: String? = null, reason: String) {
+        Log.w("freeq.safety", "user report: nick=$nick did=${did ?: "unknown"} reason=$reason")
+        blockUser(nick, did)
+    }
+
+    private fun persistBlockLists() {
+        prefs.edit()
+            .putStringSet("blockedNicks", blockedNicks.toSet())
+            .putStringSet("blockedDids", blockedDids.toSet())
+            .apply()
+    }
+
+    // ── DID identity helpers ──
+
+    /** Server-bound DID for a nick: channel member entries first, then the
+     *  account-tag map. Never derived from the nick itself (impersonation). */
+    fun didForNick(nick: String): String? {
+        for (ch in channels) {
+            ch.members.firstOrNull { it.nick.equals(nick, ignoreCase = true) }
+                ?.did?.let { return it }
+        }
+        return knownDids[nick.lowercase()]
+    }
+
+    /** Record a server-verified DID (from a message account-tag) on the
+     *  nick's channel member entries. NAMES carries no DID over the FFI, so
+     *  this is what makes DID-gated UI (verified badge, profile sheet) work. */
+    fun recordUserDid(nick: String, did: String) {
+        knownDids[nick.lowercase()] = did
+        didDisplayNames[did] = nick
+        for (ch in channels) {
+            val idx = ch.members.indexOfFirst { it.nick.equals(nick, ignoreCase = true) }
+            if (idx >= 0 && ch.members[idx].did != did) {
+                ch.members[idx] = ch.members[idx].copy(did = did)
+            }
+        }
+    }
+
+    // ── Custom status (IRC AWAY) ──
+
+    fun setCustomStatus(status: String) {
+        val trimmed = status.trim()
+        customStatus.value = trimmed
+        prefs.edit().putString("customStatus", trimmed).apply()
+        sendCustomStatus()
+    }
+
+    /** Push the persisted status to the server: `AWAY :<text>`, bare `AWAY`
+     *  to clear. No-op while unregistered — the Registered handler re-sends
+     *  a non-empty status after every (re)connect. */
+    internal fun sendCustomStatus() {
+        if (connectionState.value != ConnectionState.Registered) return
+        val s = customStatus.value
+        sendRaw(if (s.isEmpty()) "AWAY" else "AWAY :$s")
+    }
+
     // ── Channel helpers ──
 
     fun getOrCreateChannel(name: String): ChannelState {
-        channels.firstOrNull { it.name.equals(name, ignoreCase = true) }?.let { return it }
-        val channel = ChannelState(name)
-        channels.add(channel)
-        return channel
+        val trimmed = name.trim()
+        return when (BufferRouter.classify(trimmed)) {
+            // A bare nick handed to getOrCreateChannel must NOT be appended
+            // to `channels` — it'd render in the Channels pane styled like a
+            // channel and shadow real channels of the same letters.
+            BufferRouter.Target.DM -> getOrCreateDM(trimmed)
+            BufferRouter.Target.INVALID -> ChannelState("_empty")
+            BufferRouter.Target.CHANNEL -> {
+                channels.firstOrNull { it.name.equals(trimmed, ignoreCase = true) }
+                    ?.let { return it }
+                val channel = ChannelState(trimmed)
+                channels.add(channel)
+                channel
+            }
+        }
     }
 
     fun getOrCreateDM(nick: String): ChannelState {
-        if (nick.isEmpty()) return ChannelState("")
-        dmBuffers.firstOrNull { it.name.equals(nick, ignoreCase = true) }?.let { return it }
-        val dm = ChannelState(nick)
-        dm.lastActivityTime.value = 0L // Don't appear as recent until a message arrives
-        dmBuffers.add(dm)
-        requestHistory(nick)
-        return dm
+        val trimmed = nick.trim()
+        return when (BufferRouter.classify(trimmed)) {
+            // Caller handed us a channel-prefixed name; route to channels
+            // instead. Same anti-shadowing reason as in getOrCreateChannel.
+            BufferRouter.Target.CHANNEL -> getOrCreateChannel(trimmed)
+            BufferRouter.Target.INVALID -> ChannelState("_empty")
+            BufferRouter.Target.DM -> {
+                dmBuffers.firstOrNull { it.name.equals(trimmed, ignoreCase = true) }
+                    ?.let { return it }
+                val dm = ChannelState(trimmed)
+                dm.lastActivityTime.value = 0L // Don't appear as recent until a message arrives.
+                dmBuffers.add(dm)
+                requestHistory(trimmed)
+                dm
+            }
+        }
     }
 
     // ── Persistence ──
@@ -647,6 +914,10 @@ class AppState(application: Application) : AndroidViewModel(application) {
         if (nick.value.equals(oldNick, ignoreCase = true)) {
             nick.value = newNick
         }
+        knownDids.remove(oldNick.lowercase())?.let { did ->
+            knownDids[newNick.lowercase()] = did
+            didDisplayNames[did] = newNick
+        }
     }
 
     fun awayMessage(nick: String): String? {
@@ -688,6 +959,11 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 if (state.authenticatedDID.value != null
                     && event.nick.startsWith("Guest", ignoreCase = true)) {
                     state.disconnect()
+                    // The cached web-token we just sent is single-use and the
+                    // server consumed it on the failed SASL attempt. Wipe it
+                    // so reconnectSavedSession falls through to broker
+                    // /session for a fresh token (matches iOS).
+                    state.invalidateCachedWebToken()
                     state.scope.launch {
                         delay(2000)
                         if (state.connectionState.value == ConnectionState.Disconnected
@@ -708,10 +984,20 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 if (state.authenticatedDID.value != null) {
                     state.sendRaw("CHATHISTORY TARGETS * * 50")
                 }
+                // Re-assert persisted custom status (AWAY) on every
+                // (re)registration — the server forgets it across connections.
+                if (state.customStatus.value.isNotEmpty()) {
+                    state.sendCustomStatus()
+                }
             }
 
             is FreeqEvent.Authenticated -> {
                 state.authenticatedDID.value = event.did
+                state.securePrefs.edit().putString("did", event.did).apply()
+                // Refresh login timestamp on every successful auth so
+                // hasSavedSession's grace window doesn't expire on a
+                // long-lived registered user (matches iOS).
+                state.prefs.edit().putLong("lastLoginTime", System.currentTimeMillis()).apply()
             }
 
             is FreeqEvent.AuthFailed -> {
@@ -726,7 +1012,10 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 }
                 // Add joiner to members if not already present
                 if (ch.members.none { it.nick.equals(event.nick, ignoreCase = true) }) {
-                    ch.members.add(MemberInfo(nick = event.nick, isOp = false, isVoiced = false))
+                    ch.members.add(MemberInfo(
+                        nick = event.nick, isOp = false, isVoiced = false,
+                        did = state.knownDids[event.nick.lowercase()]
+                    ))
                 }
                 if (event.nick.equals(state.nick.value, ignoreCase = true)) {
                     // Navigate if this was a user-initiated join
@@ -779,6 +1068,22 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 val ircMsg = event.msg
                 val isSelf = ircMsg.fromNick.equals(state.nick.value, ignoreCase = true)
 
+                // Prefetch avatar using DID if available (from account-tag),
+                // and record the server-bound DID on member entries so the
+                // verified badge / profile sheet gate on real identity.
+                ircMsg.account?.let { did ->
+                    AvatarCache.prefetch(ircMsg.fromNick, did)
+                    state.recordUserDid(ircMsg.fromNick, did)
+                }
+
+                // Blocked sender: message is still stored (hidden at render
+                // so unblocking restores history) but must not notify or
+                // count as unread.
+                val fromBlocked = !isSelf && state.isBlocked(
+                    ircMsg.fromNick,
+                    ircMsg.account ?: state.didForNick(ircMsg.fromNick)
+                )
+
                 // Handle pin/unpin sync broadcasts
                 if (ircMsg.pinMsgid != null && ircMsg.target.startsWith("#")) {
                     PinCache.addPin(ircMsg.target, ircMsg.pinMsgid!!)
@@ -805,14 +1110,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                     return
                 }
 
-                val msg = ChatMessage(
-                    id = ircMsg.msgid ?: UUID.randomUUID().toString(),
-                    from = ircMsg.fromNick,
-                    text = ircMsg.text,
-                    isAction = ircMsg.isAction,
-                    timestamp = Date(ircMsg.timestampMs),
-                    replyTo = ircMsg.replyTo
-                )
+                val msg = MessageMapper.fromIrc(ircMsg)
 
                 // Handle edits (prefer editOf, fall back to replacesMsgid)
                 val editTarget = ircMsg.editOf ?: ircMsg.replacesMsgid
@@ -850,21 +1148,25 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 if (ircMsg.target.startsWith("#")) {
                     val ch = state.getOrCreateChannel(ircMsg.target)
                     ch.appendIfNew(msg)
-                    state.incrementUnread(ircMsg.target)
+                    if (!fromBlocked) state.incrementUnread(ircMsg.target)
                     ch.typingUsers.remove(ircMsg.fromNick)
 
-                    if (!isSelf && !state.isMuted(ircMsg.target) && ircMsg.text.contains(state.nick.value, ignoreCase = true)) {
+                    if (!isSelf && !fromBlocked && !state.isMuted(ircMsg.target) && ircMsg.text.contains(state.nick.value, ignoreCase = true)) {
                         state.notificationManager.sendMessageNotification(
                             from = ircMsg.fromNick, text = ircMsg.text, channel = ircMsg.target
                         )
                     }
                 } else {
-                    val bufferName = if (isSelf) ircMsg.target else ircMsg.fromNick
+                    // The SDK's canonical conversation key (peer DID when
+                    // known, else nick) — one person, one thread. Fallback
+                    // preserves behavior against an older SDK.
+                    val bufferName = ircMsg.dmKey
+                        ?: (if (isSelf) ircMsg.target else ircMsg.fromNick)
                     val dm = state.getOrCreateDM(bufferName)
                     dm.appendIfNew(msg)
-                    state.incrementUnread(bufferName)
+                    if (!fromBlocked) state.incrementUnread(bufferName)
 
-                    if (!isSelf) {
+                    if (!isSelf && !fromBlocked) {
                         state.notificationManager.sendMessageNotification(
                             from = ircMsg.fromNick, text = ircMsg.text, channel = bufferName
                         )
@@ -886,7 +1188,11 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                             awayMsg = m.awayMsg ?: ch.members[idx].awayMsg
                         )
                     } else {
-                        ch.members.add(MemberInfo(nick = m.nick, isOp = m.isOp, isHalfop = m.isHalfop, isVoiced = m.isVoiced, awayMsg = m.awayMsg))
+                        ch.members.add(MemberInfo(
+                            nick = m.nick, isOp = m.isOp, isHalfop = m.isHalfop,
+                            isVoiced = m.isVoiced, awayMsg = m.awayMsg,
+                            did = state.knownDids[m.nick.lowercase()]
+                        ))
                     }
                 }
                 AvatarCache.prefetchAll(event.members.map { it.nick })
@@ -980,10 +1286,15 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 if (event.reason.isNotEmpty() && !state.intentionalDisconnect) {
                     state.errorMessage.value = "Disconnected: ${event.reason}"
                 }
+                // If the WS handshake failed on this attempt, swap to plain
+                // TCP once before falling through to broker-session retry.
+                if (!state.intentionalDisconnect && state.attemptTransportFallback(event.reason)) {
+                    return
+                }
                 // Auto-reconnect: prefer broker session restore, fall back to plain reconnect
                 if (state.nick.value.isNotEmpty() && !state.intentionalDisconnect) {
                     state.reconnectAttempts++
-                    val delay = minOf(1L shl minOf(state.reconnectAttempts, 5), 30L)
+                    val delay = ReconnectBackoff.delaySeconds(state.reconnectAttempts)
                     state.scope.launch {
                         kotlinx.coroutines.delay(delay * 1000)
                         if (state.connectionState.value == ConnectionState.Disconnected
@@ -1002,43 +1313,35 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 val tags = event.msg.tags.associate { it.key to it.value }
                 val target = event.msg.target
                 val from = event.msg.from
-                // Typing indicators (ignore self)
+                fun lookupBuffer(name: String): ChannelState? =
+                    if (name.startsWith("#"))
+                        state.channels.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                    else
+                        state.dmBuffers.firstOrNull { it.name.equals(name, ignoreCase = true) }
+
+                // Typing indicators
                 tags["+typing"]?.let { typing ->
-                    if (!from.equals(state.nick.value, ignoreCase = true)) {
-                        val bufferName = if (target.startsWith("#")) target else from
-                        val ch = if (bufferName.startsWith("#"))
-                            state.channels.firstOrNull { it.name.equals(bufferName, ignoreCase = true) }
-                        else
-                            state.dmBuffers.firstOrNull { it.name.equals(bufferName, ignoreCase = true) }
-                        ch?.let {
-                            if (typing == "active") it.typingUsers[from] = Date()
-                            else if (typing == "done") it.typingUsers.remove(from)
-                        }
+                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value, event.msg.dmKey) ?: return@let
+                    lookupBuffer(bufferName)?.let { ch ->
+                        if (typing == "active") ch.typingUsers[from] = Date()
+                        else if (typing == "done") ch.typingUsers.remove(from)
                     }
                 }
 
-                // Message deletion (ignore self — already handled optimistically by deleteMessage)
+                // Message deletion (self-echo already applied optimistically by deleteMessage)
                 tags["+draft/delete"]?.let { deleteId ->
-                    if (!from.equals(state.nick.value, ignoreCase = true)) {
-                        val bufferName = if (target.startsWith("#")) target else from
-                        val ch = if (bufferName.startsWith("#"))
-                            state.channels.firstOrNull { it.name.equals(bufferName, ignoreCase = true) }
-                        else
-                            state.dmBuffers.firstOrNull { it.name.equals(bufferName, ignoreCase = true) }
-                        ch?.applyDelete(deleteId)
-                    }
+                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value, event.msg.dmKey) ?: return@let
+                    lookupBuffer(bufferName)?.applyDelete(deleteId)
                 }
 
-                // Reactions (ignore self — already handled optimistically by sendReaction)
+                // Reactions (self-echo already applied optimistically by sendReaction)
                 val emoji = tags["+react"]
                 val replyId = tags["+reply"]
-                if (emoji != null && replyId != null && !from.equals(state.nick.value, ignoreCase = true)) {
-                    val bufferName = if (target.startsWith("#")) target else from
-                    val ch = if (bufferName.startsWith("#"))
-                        state.channels.firstOrNull { it.name.equals(bufferName, ignoreCase = true) }
-                    else
-                        state.dmBuffers.firstOrNull { it.name.equals(bufferName, ignoreCase = true) }
-                    ch?.applyReaction(replyId, emoji, from)
+                if (emoji != null && replyId != null) {
+                    val bufferName = TagMsgRouter.routeTo(target, from, state.nick.value, event.msg.dmKey)
+                    if (bufferName != null) {
+                        lookupBuffer(bufferName)?.applyReaction(replyId, emoji, from)
+                    }
                 }
             }
 
@@ -1051,30 +1354,55 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
             }
 
             is FreeqEvent.BatchStart -> {
-                state.batches[event.id] = AppState.BatchBuffer(target = event.target, batchType = event.batchType)
+                state.batches[event.id] = BatchBuffer(target = event.target, batchType = event.batchType)
             }
 
             is FreeqEvent.BatchEnd -> {
                 val batch = state.batches.remove(event.id) ?: return
                 if (batch.target.isEmpty()) return
-                val sorted = batch.messages.sortedBy { it.timestamp }
                 val ch = if (batch.target.startsWith("#"))
                     state.getOrCreateChannel(batch.target)
                 else
                     state.getOrCreateDM(batch.target)
-                sorted.forEach { ch.appendIfNew(it) }
-                if (batch.batchType == "chathistory" && batch.messages.isEmpty()) {
+                BatchFlush.flushInto(batch, ch)
+                if (BatchFlush.isExhaustedHistory(batch)) {
                     ch.hasMoreHistory.value = false
                 }
             }
 
             is FreeqEvent.ChatHistoryTarget -> {
-                // Create DM buffer for each conversation partner
-                state.getOrCreateDM(event.nick)
+                // Create a DM buffer for each conversation partner and seed
+                // its last-activity from the server-time tag so the chat
+                // list orders correctly on cold launch before per-DM
+                // history backfills (matches iOS 70c4ae3/6dff8b2).
+                // Key by the conversation's stable identity when the server
+                // names it (freeq.at/partner-did); the display nick renders
+                // via displayNameForKey.
+                val key = event.partnerDid ?: event.nick
+                event.partnerDid?.let { state.didDisplayNames[it] = event.nick }
+                state.getOrCreateDM(key).seedActivityFromTarget(event.timestamp)
+            }
+
+            is FreeqEvent.MemberDid -> {
+                // A nick↔DID binding was learned (join/whois/account tag).
+                // Record it and fold any nick-keyed DM thread into the
+                // DID-keyed one — a cold first DM keys by nick until now.
+                state.recordUserDid(event.nick, event.did)
+                if (DidDisplay.mergeDmBuffers(
+                        state.dmBuffers, state.unreadCounts, event.nick, event.did
+                    ) && state.activeChannel.value.equals(event.nick, ignoreCase = true)
+                ) {
+                    state.activeChannel.value = event.did
+                }
             }
 
             is FreeqEvent.WhoisReply -> {
                 // No-op for now
+            }
+
+            is FreeqEvent.ReadMarker -> {
+                // draft/read-marker (cross-device read state). No UI effect yet
+                // — mirrors iOS/macOS, which just store the latest marker.
             }
         }
     }

@@ -57,13 +57,16 @@ struct ImagePreviewSheet: View {
     let channel: String
 
     @State private var caption: String = ""
-    @State private var crossPost = false
+    // Private to the channel/DM by default. Two opt-in toggles are the only
+    // way bytes leave freeq. Posting to the feed implies the PDS copy.
+    @State private var sharePds = false
+    @State private var shareBluesky = false
     @State private var uploading = false
     @State private var uploadError: String? = nil
     @FocusState private var captionFocused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -76,19 +79,44 @@ struct ImagePreviewSheet: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                         .padding(16)
 
-                    // Cross-post toggle
+                    // Sharing toggles — private to the channel by default.
                     if appState.authenticatedDID != nil {
-                        Toggle(isOn: $crossPost) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "arrow.up.right.circle.fill")
-                                    .font(.system(size: 16))
-                                    .foregroundColor(Color(hex: "0085ff"))
-                                Text("Also post to Bluesky")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(Theme.textPrimary)
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "lock.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Theme.textMuted)
+                                Text("Private to \(channel) by default")
+                                    .font(.fqCaption)
+                                    .foregroundColor(Theme.textMuted)
                             }
+                            Toggle(isOn: Binding(
+                                get: { sharePds || shareBluesky },
+                                set: { sharePds = $0 }
+                            )) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "icloud.and.arrow.up.fill")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(Color(hex: "0085ff"))
+                                    Text("Save a public copy to my PDS")
+                                        .font(.fqFootnote.weight(.medium))
+                                        .foregroundColor(Theme.textPrimary)
+                                }
+                            }
+                            .tint(Color(hex: "0085ff"))
+                            .disabled(shareBluesky)
+                            Toggle(isOn: $shareBluesky) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "arrow.up.right.circle.fill")
+                                        .font(.system(size: 16))
+                                        .foregroundColor(Color(hex: "0085ff"))
+                                    Text("Also post to Bluesky feed")
+                                        .font(.fqFootnote.weight(.medium))
+                                        .foregroundColor(Theme.textPrimary)
+                                }
+                            }
+                            .tint(Color(hex: "0085ff"))
                         }
-                        .tint(Color(hex: "0085ff"))
                         .padding(.horizontal, 20)
                         .padding(.vertical, 8)
                     }
@@ -106,7 +134,7 @@ struct ImagePreviewSheet: View {
                                     .font(.system(size: 12))
                                     .foregroundColor(Theme.danger)
                                 Text(error)
-                                    .font(.system(size: 13))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.danger)
                                     .lineLimit(2)
                                 Spacer()
@@ -114,7 +142,7 @@ struct ImagePreviewSheet: View {
                                     uploadError = nil
                                     upload()
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.accent)
                             }
                             .padding(.horizontal, 16)
@@ -127,13 +155,13 @@ struct ImagePreviewSheet: View {
                                 ProgressView()
                                     .tint(Theme.accent)
                                 Text("Uploading \(ByteCountFormatter.string(fromByteCount: Int64(imageData.count), countStyle: .file))...")
-                                    .font(.system(size: 14))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                                 Spacer()
                                 Button("Cancel") {
                                     uploading = false
                                 }
-                                .font(.system(size: 13, weight: .medium))
+                                .font(.fqFootnote.weight(.medium))
                                 .foregroundColor(Theme.textMuted)
                             }
                             .padding(.horizontal, 16)
@@ -143,7 +171,7 @@ struct ImagePreviewSheet: View {
                             HStack(alignment: .bottom, spacing: 10) {
                                 TextField("Add a caption...", text: $caption, axis: .vertical)
                                     .foregroundColor(Theme.textPrimary)
-                                    .font(.system(size: 16))
+                                    .font(.fqCallout)
                                     .lineLimit(1...4)
                                     .focused($captionFocused)
                                     .tint(Theme.accent)
@@ -168,7 +196,7 @@ struct ImagePreviewSheet: View {
             }
             .navigationTitle("Send Photo")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -218,9 +246,14 @@ struct ImagePreviewSheet: View {
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
             body.append("Content-Disposition: form-data; name=\"channel\"\r\n\r\n\(channel)\r\n".data(using: .utf8)!)
 
-            if crossPost {
+            // share_bluesky implies share_pds (the feed embed references the blob).
+            if sharePds || shareBluesky {
                 body.append("--\(boundary)\r\n".data(using: .utf8)!)
-                body.append("Content-Disposition: form-data; name=\"cross_post\"\r\n\r\ntrue\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"share_pds\"\r\n\r\ntrue\r\n".data(using: .utf8)!)
+            }
+            if shareBluesky {
+                body.append("--\(boundary)\r\n".data(using: .utf8)!)
+                body.append("Content-Disposition: form-data; name=\"share_bluesky\"\r\n\r\ntrue\r\n".data(using: .utf8)!)
             }
 
             body.append("--\(boundary)\r\n".data(using: .utf8)!)
@@ -234,38 +267,45 @@ struct ImagePreviewSheet: View {
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
 
-            do {
-                let (responseData, response) = try await URLSession.shared.data(for: request)
-                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-
-                if statusCode == 200 {
-                    let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any]
-                    if let url = json?["url"] as? String {
-                        await MainActor.run {
-                            // Send image URL, then caption if provided
-                            let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if text.isEmpty {
-                                appState.sendMessage(target: channel, text: url)
-                            } else {
-                                appState.sendMessage(target: channel, text: "\(url) \(text)")
-                            }
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            dismiss()
-                        }
-                    }
-                } else {
-                    let responseText = String(data: responseData, encoding: .utf8) ?? ""
-                    await MainActor.run {
-                        uploading = false
-                        uploadError = "Upload failed: \(responseText.prefix(80))"
-                    }
-                }
-            } catch {
+            // Step-up if the server says blob_upload needs a fresh PDS-grant.
+            let result = await StepUpAuth.uploadWithStepUp(
+                request: request, did: did, appState: appState
+            )
+            guard let (responseData, response) = result else {
                 await MainActor.run {
                     uploading = false
-                    uploadError = error.localizedDescription.contains("timed out")
-                        ? "Upload timed out — tap Retry"
-                        : "Error: \(error.localizedDescription)"
+                    uploadError = "Upload failed"
+                }
+                return
+            }
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+
+            if statusCode == 200 {
+                let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any]
+                if let url = json?["url"] as? String {
+                    await MainActor.run {
+                        let text = caption.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if text.isEmpty {
+                            appState.sendMessage(target: channel, text: url)
+                        } else {
+                            appState.sendMessage(target: channel, text: "\(url) \(text)")
+                        }
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        dismiss()
+                    }
+                }
+            } else if StepUpAuth.detectStepUpRequired(status: statusCode, body: responseData) != nil {
+                // Step-up was offered and the user declined / cancelled —
+                // surface that state instead of a generic upload error.
+                await MainActor.run {
+                    uploading = false
+                    uploadError = "Image upload needs Bluesky permission. Tap Retry to try again."
+                }
+            } else {
+                let responseText = String(data: responseData, encoding: .utf8) ?? ""
+                await MainActor.run {
+                    uploading = false
+                    uploadError = "Upload failed: \(responseText.prefix(80))"
                 }
             }
         }

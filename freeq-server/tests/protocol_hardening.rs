@@ -258,6 +258,66 @@ async fn privmsg_multiple_spaces() {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// 3b. Oversize single-line PRIVMSG — the RFC-paste truncation repro
+// ══════════════════════════════════════════════════════════════════════
+
+/// Reproduces the observed truncation: pasting a long multi-paragraph
+/// message into the web client, when `draft/multiline` is NOT active on
+/// the connection, sends it via the legacy path — every `\n` escaped to
+/// the two chars `\\n`, collapsing the whole doc into ONE wire line. The
+/// server's 8192-byte line reader then decides its fate. We assert the
+/// recipient either gets the WHOLE thing or a clean rejection — never a
+/// silent mid-word truncation (which is what a user saw: cut at
+/// "explicitly best-" ~7963 body bytes into an ~14k-char paste).
+#[tokio::test]
+async fn oversize_single_line_privmsg_is_not_silently_truncated() {
+    run(|addr| {
+        let mut a = C::new(addr, "rfc_a");
+        a.reg();
+        a.drain();
+        let mut b = C::new(addr, "rfc_b");
+        b.reg();
+        b.drain();
+        a.tx("JOIN #rfc");
+        a.num("366");
+        a.drain();
+        b.tx("JOIN #rfc");
+        b.num("366");
+        b.drain();
+
+        // ~14 KiB body with markers at both ends, well past MAX_LINE_LEN
+        // (8192). If the server truncates near 8 KiB, the tail marker is
+        // gone; if it delivers whole, both markers survive; if it rejects,
+        // nothing is delivered and the sender should see a 417.
+        let body = format!("HEAD_MARKER{}TAIL_MARKER_END", "x".repeat(14000));
+        a.tx(&format!("PRIVMSG #rfc :{body}"));
+
+        let delivered = b.maybe(|l| l.contains("PRIVMSG") && l.contains("HEAD_MARKER"), 1500);
+        let got_417 = a
+            .maybe(|l| l.split_whitespace().nth(1) == Some("417"), 500)
+            .is_some();
+
+        match delivered {
+            Some(line) => assert!(
+                line.contains("TAIL_MARKER_END"),
+                "RECIPIENT GOT A TRUNCATED MESSAGE: wire line was {} bytes, \
+                 tail marker missing (cut near MAX_LINE_LEN). 417-to-sender={}. \
+                 head: {:.90}",
+                line.len(),
+                got_417,
+                line,
+            ),
+            None => assert!(
+                got_417,
+                "message was silently dropped — recipient got nothing AND \
+                 sender got no 417",
+            ),
+        }
+    })
+    .await;
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // 4. INVITE user who is already in the channel
 // ══════════════════════════════════════════════════════════════════════
 
@@ -307,7 +367,7 @@ async fn nick_no_param() {
         // NICK with no argument
         c.tx("NICK");
         // Should get 431 ERR_NONICKNAMEGIVEN
-        let result = c.maybe(
+        let _ = c.maybe(
             |l| {
                 let n = l.split_whitespace().nth(1).unwrap_or("");
                 n == "431"
@@ -735,7 +795,7 @@ async fn nick_empty_string() {
         // Try changing to empty nick via trailing colon
         c.tx("NICK :");
         // Should get 431 ERR_NONICKNAMEGIVEN or 432 ERR_ERRONEUSNICKNAME
-        let result = c.maybe(
+        let _ = c.maybe(
             |l| {
                 let n = l.split_whitespace().nth(1).unwrap_or("");
                 n == "431" || n == "432"
@@ -757,7 +817,7 @@ async fn nick_empty_string() {
 async fn per_ip_connection_limit() {
     run(|addr| {
         // Open 20 connections (the per-IP limit)
-        let mut clients: Vec<C> = (0..20)
+        let clients: Vec<C> = (0..20)
             .map(|i| {
                 let mut c = C::new(addr, &format!("iplim{i:02}"));
                 c.reg();
@@ -881,7 +941,7 @@ async fn userhost_command() {
         c.drain();
         c.tx("USERHOST uhtest");
         // Should get 302 RPL_USERHOST or be silently dropped
-        let result = c.maybe(
+        let _ = c.maybe(
             |l| {
                 let n = l.split_whitespace().nth(1).unwrap_or("");
                 n == "302" || n == "421" // 421 = ERR_UNKNOWNCOMMAND
@@ -967,7 +1027,7 @@ async fn nick_change_multi_channel_broadcast() {
         );
 
         // Carol (in both channels) should see it exactly once
-        let first = c.rx(
+        c.rx(
             |l| l.contains("NICK") && l.contains("mc_alice_new"),
             "Carol sees nick change",
         );

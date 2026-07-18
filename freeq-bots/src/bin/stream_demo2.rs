@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
         tls: true,
         tls_insecure: false,
         web_token: None,
+        websocket_url: None,
     };
 
     let conn = client::establish_connection(&config).await?;

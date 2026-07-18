@@ -27,7 +27,7 @@ import com.freeq.model.ChatMessage
 import com.freeq.ui.components.UserAvatar
 import com.freeq.ui.theme.FreeqColors
 import com.freeq.ui.theme.Theme
-import java.text.SimpleDateFormat
+import java.text.DateFormat
 import java.util.*
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,7 +42,12 @@ fun ChatsTab(
 
     val allConversations by remember {
         derivedStateOf {
-            (appState.channels + appState.dmBuffers.filter { it.name.isNotEmpty() && it.messages.isNotEmpty() })
+            // Blocked users' DM conversations are hidden (safety layer);
+            // unblocking in Settings → Safety brings them back.
+            (appState.channels + appState.dmBuffers.filter {
+                it.name.isNotEmpty() && it.messages.isNotEmpty() &&
+                    !appState.isBlocked(it.name, appState.didForNick(it.name))
+            })
                 .sortedByDescending { it.lastActivityTime.value }
         }
     }
@@ -207,7 +212,8 @@ fun ChatsTab(
                                     ChatRow(
                                         conversation = conversation,
                                         unreadCount = appState.unreadCounts[conversation.name] ?: 0,
-                                        onClick = { onChannelClick(conversation.name) }
+                                        onClick = { onChannelClick(conversation.name) },
+                                        displayName = appState.displayNameForKey(conversation.name)
                                     )
                                 }
                             }
@@ -215,7 +221,8 @@ fun ChatsTab(
                             ChatRow(
                                 conversation = conversation,
                                 unreadCount = appState.unreadCounts[conversation.name] ?: 0,
-                                onClick = { onChannelClick(conversation.name) }
+                                onClick = { onChannelClick(conversation.name) },
+                                displayName = appState.displayNameForKey(conversation.name)
                             )
                         }
                         HorizontalDivider(
@@ -241,7 +248,8 @@ fun ChatsTab(
 private fun ChatRow(
     conversation: ChannelState,
     unreadCount: Int,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    displayName: String = conversation.name,
 ) {
     val isChannel = conversation.name.startsWith("#")
     val lastMessage = conversation.messages.lastOrNull { it.from.isNotEmpty() && !it.isDeleted }
@@ -273,7 +281,7 @@ private fun ChatRow(
                 )
             }
         } else {
-            UserAvatar(nick = conversation.name, size = 50.dp)
+            UserAvatar(nick = displayName, size = 50.dp)
         }
 
         // Content
@@ -284,7 +292,7 @@ private fun ChatRow(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = conversation.name,
+                    text = displayName,
                     fontSize = 16.sp,
                     fontWeight = if (unreadCount > 0) FontWeight.Bold else FontWeight.Normal,
                     color = MaterialTheme.colorScheme.onBackground,
@@ -447,14 +455,14 @@ private fun formatTime(date: Date): String {
     return when {
         cal.get(Calendar.YEAR) == today.get(Calendar.YEAR) &&
                 cal.get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR) -> {
-            SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+            DateFormat.getTimeInstance(DateFormat.SHORT, Locale.getDefault()).format(date)
         }
         cal.get(Calendar.YEAR) == today.get(Calendar.YEAR) &&
                 cal.get(Calendar.DAY_OF_YEAR) == today.get(Calendar.DAY_OF_YEAR) - 1 -> {
             "Yesterday"
         }
         else -> {
-            SimpleDateFormat("dd/MM/yy", Locale.getDefault()).format(date)
+            DateFormat.getDateInstance(DateFormat.SHORT, Locale.getDefault()).format(date)
         }
     }
 }

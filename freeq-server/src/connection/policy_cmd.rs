@@ -1,9 +1,11 @@
 //! IRC POLICY command handler.
 //!
-//! POLICY <channel> SET <rules_text>                   — Create/update ACCEPT-only policy
+//! POLICY <channel> SET <rules_text>                   — Set an ACCEPT join gate (rules), preserving roles
+//! POLICY <channel> OPEN                               — Open join gate (no rules), preserving roles
 //! POLICY <channel> SET-ROLE <role> <requirement_json> — Add role escalation requirement
 //! POLICY <channel> VERIFY github <username> <org>     — Verify GitHub org membership
 //! POLICY <channel> INFO                               — Show current policy
+//! POLICY <channel> RULES                              — Show the human-readable rules text
 //! POLICY <channel> ACCEPT                             — Accept policy + present credentials
 //! POLICY <channel> CLEAR                              — Remove policy (ops only)
 
@@ -46,7 +48,7 @@ pub(super) fn handle_policy(
             "NOTICE",
             vec![
                 nick,
-                "Usage: POLICY <channel> SET|SET-ROLE|VERIFY|INFO|ACCEPT|CLEAR",
+                "Usage: POLICY <channel> SET|OPEN|SET-ROLE|REQUIRE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
             ],
         );
         send_fn(state, session_id, format!("{reply}\r\n"));
@@ -99,16 +101,30 @@ pub(super) fn handle_policy(
 
             let rules_hash = canonical::sha256_hex(rules_text.as_bytes());
 
+            // Persist the plaintext rules keyed by their hash so they can be
+            // read back later (POLICY <ch> RULES / GET .../rules). The hash
+            // remains the verification source of truth; this is additive.
+            // NOTE: rules text is stored only on the setting server — it is not
+            // propagated over S2S, so peers that receive this policy get only
+            // the hash and their RULES command reports "text not available".
+            if let Err(e) = engine.store_rules_text(&rules_hash, &rules_text) {
+                tracing::warn!(channel = %channel, error = %e, "Failed to store policy rules text");
+            }
+
             // Check if channel already has a policy
             let result = match engine.get_policy(channel) {
-                Ok(Some(_)) => {
-                    // Update existing
-                    engine.update_channel_policy(
+                Ok(Some(current)) => {
+                    // Update the join gate to the new rules, but PRESERVE any
+                    // existing role requirements (e.g. op → github credential)
+                    // and credential endpoints. Changing the rules text must not
+                    // silently drop op-gating.
+                    engine.update_channel_policy_with_endpoints(
                         channel,
                         Requirement::Accept {
                             hash: rules_hash.clone(),
                         },
-                        BTreeMap::new(),
+                        current.role_requirements.clone(),
+                        current.credential_endpoints.clone(),
                     )
                 }
                 Ok(None) => {
@@ -401,7 +417,27 @@ pub(super) fn handle_policy(
                 );
                 send_fn(state, session_id, format!("{reply}\r\n"));
             } else {
-                // No OAuth configured — fall back to public membership check
+                // No OAuth configured. The public-API fallback below can NOT
+                // prove the caller owns the GitHub account they name — anyone
+                // can claim any public org member's username — yet it stores a
+                // `github_membership` credential that satisfies PRESENT
+                // requirements and role escalation exactly like the OAuth-
+                // verified one. Fail closed unless the operator explicitly
+                // opts into the spoofable check (dev/demo only).
+                let allow_unverified = std::env::var("FREEQ_ALLOW_UNVERIFIED_GITHUB")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if !allow_unverified {
+                    for line in [
+                        "GitHub verification is not available: no GitHub OAuth app is configured.",
+                        "Ask the operator to set GITHUB_CLIENT_ID/GITHUB_CLIENT_SECRET (the public-API fallback cannot prove account ownership and is disabled; FREEQ_ALLOW_UNVERIFIED_GITHUB=1 enables it for dev/demo).",
+                    ] {
+                        let reply = Message::from_server(server_name, "NOTICE", vec![nick, line]);
+                        send_fn(state, session_id, format!("{reply}\r\n"));
+                    }
+                    return;
+                }
+                // Fall back to public membership check (opt-in, unverified).
                 // This requires the user to also provide their GitHub username
                 if msg.params.len() < 5 {
                     let reply = Message::from_server(
@@ -527,6 +563,73 @@ pub(super) fn handle_policy(
                     for (role, req) in &policy.role_requirements {
                         let desc = format!("  Role '{}': {}", role, describe_requirement(req));
                         let reply = Message::from_server(server_name, "NOTICE", vec![nick, &desc]);
+                        send_fn(state, session_id, format!("{reply}\r\n"));
+                    }
+                }
+            }
+            Ok(None) => {
+                let reply = Message::from_server(
+                    server_name,
+                    "NOTICE",
+                    vec![nick, &format!("{channel} has no policy (open join)")],
+                );
+                send_fn(state, session_id, format!("{reply}\r\n"));
+            }
+            Err(e) => {
+                let reply = Message::from_server(
+                    server_name,
+                    "NOTICE",
+                    vec![nick, &format!("Policy error: {e}")],
+                );
+                send_fn(state, session_id, format!("{reply}\r\n"));
+            }
+        },
+
+        "RULES" => match engine.get_policy(channel) {
+            Ok(Some(policy)) => {
+                // Pull the ACCEPT hash out of the requirement tree, then look
+                // up the plaintext we stored at SET time. The hash is included
+                // in the output so the reader can independently verify the text.
+                let hash = extract_accept_hash(&policy.requirements).into_iter().next();
+                match hash {
+                    Some(h) => match engine.get_rules_text(&h) {
+                        Ok(Some(text)) => {
+                            let header = format!("Rules for {channel} (rules_hash={h}):");
+                            let reply =
+                                Message::from_server(server_name, "NOTICE", vec![nick, &header]);
+                            send_fn(state, session_id, format!("{reply}\r\n"));
+                            // One NOTICE per line, like the INFO arm.
+                            for line in text.split('\n') {
+                                let reply =
+                                    Message::from_server(server_name, "NOTICE", vec![nick, line]);
+                                send_fn(state, session_id, format!("{reply}\r\n"));
+                            }
+                        }
+                        Ok(None) => {
+                            let msg = format!(
+                                "Rules text isn't available for this policy (rules_hash={h}; set before rules were stored, or received over S2S). Ask an op to re-run POLICY {channel} SET <rules>."
+                            );
+                            let reply =
+                                Message::from_server(server_name, "NOTICE", vec![nick, &msg]);
+                            send_fn(state, session_id, format!("{reply}\r\n"));
+                        }
+                        Err(e) => {
+                            let reply = Message::from_server(
+                                server_name,
+                                "NOTICE",
+                                vec![nick, &format!("Policy error: {e}")],
+                            );
+                            send_fn(state, session_id, format!("{reply}\r\n"));
+                        }
+                    },
+                    None => {
+                        // Policy exists but has no ACCEPT requirement (e.g. a
+                        // pure PRESENT/PROVE policy) — there are no rules to read.
+                        let reply = Message::from_server(
+                            server_name,
+                            "NOTICE",
+                            vec![nick, "This policy has no rules text (no ACCEPT requirement)"],
+                        );
                         send_fn(state, session_id, format!("{reply}\r\n"));
                     }
                 }
@@ -695,6 +798,85 @@ pub(super) fn handle_policy(
                         server_name,
                         "NOTICE",
                         vec![nick, &format!("Failed to remove policy: {e}")],
+                    );
+                    send_fn(state, session_id, format!("{reply}\r\n"));
+                }
+            }
+        }
+
+        "OPEN" => {
+            // POLICY <channel> OPEN — set the join gate to Open (no rules to
+            // accept, anyone may join) while PRESERVING any role requirements
+            // (e.g. op → github credential) and credential endpoints. Use this
+            // when you want an open channel that still gates op/roles.
+            if !is_channel_op(
+                state,
+                channel,
+                session_id,
+                conn.authenticated_did.as_deref(),
+            ) {
+                let reply = Message::from_server(
+                    server_name,
+                    "482",
+                    vec![nick, channel, "You're not channel operator"],
+                );
+                send_fn(state, session_id, format!("{reply}\r\n"));
+                return;
+            }
+
+            let result = match engine.get_policy(channel) {
+                Ok(Some(current)) => engine.update_channel_policy_with_endpoints(
+                    channel,
+                    Requirement::Open,
+                    current.role_requirements.clone(),
+                    current.credential_endpoints.clone(),
+                ),
+                Ok(None) => engine
+                    .create_channel_policy(channel, Requirement::Open, BTreeMap::new())
+                    .map(|(p, _)| p),
+                Err(e) => {
+                    let reply = Message::from_server(
+                        server_name,
+                        "NOTICE",
+                        vec![nick, &format!("Policy error: {e}")],
+                    );
+                    send_fn(state, session_id, format!("{reply}\r\n"));
+                    return;
+                }
+            };
+
+            match result {
+                Ok(policy) => {
+                    let notice = format!(
+                        "Join gate for {channel} set to OPEN (version {}) — anyone may join; role requirements preserved",
+                        policy.version
+                    );
+                    let reply = Message::from_server(server_name, "NOTICE", vec![nick, &notice]);
+                    send_fn(state, session_id, format!("{reply}\r\n"));
+
+                    let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
+                    let auth_set_json = engine
+                        .store()
+                        .get_authority_set(&policy.authority_set_hash)
+                        .ok()
+                        .flatten()
+                        .and_then(|a| serde_json::to_string(&a).ok());
+                    s2s_broadcast(
+                        state,
+                        crate::s2s::S2sMessage::PolicySync {
+                            event_id: s2s_next_event_id(state),
+                            channel: channel.to_string(),
+                            policy_json: serde_json::to_string(&policy).ok(),
+                            authority_set_json: auth_set_json,
+                            origin,
+                        },
+                    );
+                }
+                Err(e) => {
+                    let reply = Message::from_server(
+                        server_name,
+                        "NOTICE",
+                        vec![nick, &format!("Failed to set open join gate: {e}")],
                     );
                     send_fn(state, session_id, format!("{reply}\r\n"));
                 }
@@ -890,7 +1072,7 @@ pub(super) fn handle_policy(
                 "NOTICE",
                 vec![
                     nick,
-                    "Usage: POLICY <channel> SET|SET-ROLE|REQUIRE|VERIFY|INFO|ACCEPT|CLEAR",
+                    "Usage: POLICY <channel> SET|OPEN|SET-ROLE|REQUIRE|VERIFY|INFO|RULES|ACCEPT|CLEAR",
                 ],
             );
             send_fn(state, session_id, format!("{reply}\r\n"));
@@ -963,6 +1145,7 @@ fn extract_accept_hash(req: &Requirement) -> HashSet<String> {
 /// Human-readable description of a requirement.
 fn describe_requirement(req: &Requirement) -> String {
     match req {
+        Requirement::Open => "OPEN (no join gate — anyone may join)".to_string(),
         Requirement::Accept { hash } => format!("ACCEPT({}...)", &hash[..12.min(hash.len())]),
         Requirement::Present {
             credential_type,

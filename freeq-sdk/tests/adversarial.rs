@@ -3,9 +3,6 @@
 //!
 //! Each test targets a specific security property boundary, not just "didn't crash."
 
-use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
 // ═══════════════════════════════════════════════════════════════
 // CRYPTO: CROSS-ALGORITHM CONFUSION (10 tests)
 // Prove ed25519 and secp256k1 can NEVER be confused.
@@ -351,7 +348,7 @@ mod ssrf_real {
 // ═══════════════════════════════════════════════════════════════
 
 mod ratchet_adversarial {
-    use freeq_sdk::ratchet::{Header, RatchetError, Session};
+    use freeq_sdk::ratchet::{Header, Session};
     use x25519_dalek::{PublicKey, StaticSecret};
 
     fn pair() -> (Session, Session) {
@@ -520,7 +517,6 @@ mod ratchet_adversarial {
 
 mod irc_canonical {
     use freeq_sdk::irc::Message;
-    use std::collections::HashMap;
 
     #[test]
     fn serialize_strips_crlf_from_trailing() {

@@ -6,6 +6,59 @@ use crate::irc::{self, Message};
 use crate::server::SharedState;
 use std::sync::Arc;
 
+/// How long a probed session has to answer the liveness PING before it is
+/// presumed to be a zombie socket and evicted.
+const LIVENESS_PROBE_SECS: u64 = 10;
+
+/// Send a liveness PING to every existing session of a DID that just gained
+/// a new session, and evict any that have not answered with PONG after
+/// [`LIVENESS_PROBE_SECS`]. Eviction notifies the session's kill signal, so
+/// teardown runs the session's own cleanup path (QUIT broadcast, membership
+/// removal, ghost-session grace) exactly as a ping timeout would.
+fn probe_sibling_liveness(
+    state: &Arc<SharedState>,
+    siblings: &[String],
+    new_session_id: &str,
+    send: &impl Fn(&Arc<SharedState>, &str, String),
+) {
+    if siblings.is_empty() {
+        return;
+    }
+    {
+        let now = std::time::Instant::now();
+        let mut probes = state.liveness_probes.lock();
+        for sid in siblings {
+            // entry(): never extend an already-running probe's deadline.
+            probes.entry(sid.clone()).or_insert(now);
+        }
+    }
+    for sid in siblings {
+        send(state, sid, "PING :liveness-probe\r\n".to_string());
+    }
+
+    let state = Arc::clone(state);
+    let siblings = siblings.to_vec();
+    let trigger = new_session_id.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(LIVENESS_PROBE_SECS)).await;
+        for sid in &siblings {
+            // Still pending = no PONG arrived; the PONG handler removes the
+            // entry, so remove() doubles as the answered/unanswered check.
+            if state.liveness_probes.lock().remove(sid).is_none() {
+                continue;
+            }
+            let kill = state.session_kill.lock().get(sid).cloned();
+            if let Some(kill) = kill {
+                tracing::info!(
+                    zombie = %sid, trigger = %trigger,
+                    "Liveness probe unanswered — evicting zombie session"
+                );
+                kill.notify_one();
+            }
+        }
+    });
+}
+
 /// Attach a new session to existing sessions with the same DID.
 /// Instead of ghosting (killing) old sessions, this enables multi-device:
 /// - The new session shares the same nick
@@ -116,11 +169,43 @@ pub(super) fn attach_same_did(
     };
 
     if existing_sessions.is_empty() {
-        // First session for this DID — normal registration
-        // Ensure nick is in nick_to_session
+        // First session for this DID — normal registration.
+        //
+        // Ensure nick is in nick_to_session. The previous version skipped
+        // when contains_nick(nick) was true, which is wrong: the existing
+        // entry can be a stale mapping pointing to a dead session_id (e.g.
+        // a previous connection that closed without proper cleanup, or
+        // surfaced after a server restart in some other path). Skipping
+        // the insert leaves us with `online: true` (session_dids has us)
+        // but `nick: None` (nick_to_session does not), which silently
+        // breaks WHOIS, NAMES, and DM routing.
+        //
+        // Safe-to-claim rule:
+        //   - free nick → claim
+        //   - held by a session with the SAME authenticated DID as us
+        //     → claim (multi-device sibling, NickMap.insert preserves siblings)
+        //   - held by a session with no DID in session_dids → stale dead
+        //     entry → claim (overwrite)
+        //   - held by a session with a DIFFERENT live DID → leave alone;
+        //     try_complete_registration's ownership check renames us to
+        //     a Guest nick before the connection finishes registering.
         if let Some(ref nick) = conn.nick {
             let mut nts = state.nick_to_session.lock();
-            if !nts.contains_nick(nick) {
+            let safe_to_claim = match nts.get_session(nick) {
+                None => true,
+                Some(other_sid) => {
+                    let other_sid_owned = other_sid.to_string();
+                    drop(nts);
+                    let session_dids = state.session_dids.lock();
+                    let conflict = matches!(
+                        session_dids.get(&other_sid_owned),
+                        Some(other_did) if other_did != &did,
+                    );
+                    nts = state.nick_to_session.lock();
+                    !conflict
+                }
+            };
+            if safe_to_claim {
                 nts.insert(nick, session_id);
                 tracing::info!(nick = %nick, "Registered nick for DID {did}");
             }
@@ -147,6 +232,14 @@ pub(super) fn attach_same_did(
     tracing::info!(did = %did, session = %session_id, existing = ?existing_sessions.len(),
                    "Attaching additional session for DID");
 
+    // Probe the existing sessions for liveness. A frozen-then-resumed agent
+    // VM (boxd pause/resume) leaves a zombie TCP session that would otherwise
+    // hold nick + channel state until the ping timeout (~90s) and crash-loop
+    // the reconnecting agent. Healthy multi-device siblings answer the PING
+    // immediately and are untouched; sessions that stay silent past the
+    // deadline are evicted through their normal cleanup path.
+    probe_sibling_liveness(state, &existing_sessions, session_id, send);
+
     // Find the canonical nick from existing sessions
     let canonical_nick = {
         let nts = state.nick_to_session.lock();
@@ -171,6 +264,18 @@ pub(super) fn attach_same_did(
         // For multi-device, multiple sessions share the same nick. NickMap.insert()
         // now supports this: it adds sid→nick without evicting other sessions.
         nts.insert(canon, session_id);
+    } else if let Some(ref nick) = conn.nick {
+        // Fallback: existing sessions for this DID exist but NONE has a
+        // nick_to_session mapping. That can happen if a prior session
+        // landed in the half-registered state (the original bug). We can
+        // self-heal here: insert our session under the nick we asked for.
+        // NickMap.insert is multi-device safe.
+        let mut nts = state.nick_to_session.lock();
+        nts.insert(nick, session_id);
+        tracing::warn!(
+            did = %did, nick = %nick, session = %session_id,
+            "Multi-device attach found no canonical nick — recovering by inserting requested nick"
+        );
     }
 
     // Find all channels the DID is in via existing sessions
@@ -287,31 +392,56 @@ pub(super) fn try_complete_registration(
     // Enforce nick ownership at registration time.
     // If the user claimed a registered nick during CAP negotiation
     // but didn't authenticate as the owner, force-rename them.
-    if let Some(ref nick) = conn.nick {
+    if let Some(nick) = conn.nick.clone() {
         let nick_lower = nick.to_lowercase();
         let owner_did = state.nick_owners.lock().get(&nick_lower).cloned();
         if let Some(owner) = owner_did {
-            let is_owner = conn.authenticated_did.as_ref().is_some_and(|d| d == &owner);
+            let auth_did = conn.authenticated_did.clone();
+            let is_owner = auth_did.as_deref() == Some(owner.as_str());
             if !is_owner {
-                // Nick is registered to a DID — rename to a temp nick.
-                // The web client detects Guest rename and disconnects (no ghost).
-                // The iOS client continues with the temp nick and auto-joins channels.
-                let guest_id: u32 = rand::random::<u32>() % 100000;
-                let guest_nick = format!("Guest{guest_id}");
-                let notice = Message::from_server(
-                    server_name,
-                    "NOTICE",
-                    vec![
-                        "*",
-                        &format!(
-                            "Nick {nick} is registered — renamed to {guest_nick}. Authenticate to reclaim."
-                        ),
-                    ],
-                );
-                send(state, session_id, format!("{notice}\r\n"));
-                state.nick_to_session.lock().remove_by_nick(nick);
-                state.nick_to_session.lock().insert(&guest_nick, session_id);
-                conn.nick = Some(guest_nick);
+                if let Some(did) = auth_did {
+                    // Authenticated as a different DID than the nick's
+                    // owner: assign a deterministic, durably-persisted
+                    // derived nick (stable across reconnects/restarts)
+                    // rather than a throwaway Guest. They are NOT being
+                    // asked to "authenticate" — they already did; the
+                    // name simply belongs to another identity.
+                    let assigned = state.bind_identity_with_fallback(&did, &nick_lower);
+                    let notice = Message::from_server(
+                        server_name,
+                        "NOTICE",
+                        vec![
+                            "*",
+                            &format!(
+                                "{nick} is registered to another identity. You are {assigned} (tied to your account)."
+                            ),
+                        ],
+                    );
+                    send(state, session_id, format!("{notice}\r\n"));
+                    state.nick_to_session.lock().remove_by_nick(&nick);
+                    state.nick_to_session.lock().insert(&assigned, session_id);
+                    conn.nick = Some(assigned);
+                } else {
+                    // Unauthenticated squatter — temp Guest nick.
+                    // The web client detects Guest rename and disconnects (no ghost).
+                    // The iOS client continues with the temp nick and auto-joins channels.
+                    let guest_id: u32 = rand::random::<u32>() % 100000;
+                    let guest_nick = format!("Guest{guest_id}");
+                    let notice = Message::from_server(
+                        server_name,
+                        "NOTICE",
+                        vec![
+                            "*",
+                            &format!(
+                                "Nick {nick} is registered — renamed to {guest_nick}. Authenticate to reclaim."
+                            ),
+                        ],
+                    );
+                    send(state, session_id, format!("{notice}\r\n"));
+                    state.nick_to_session.lock().remove_by_nick(&nick);
+                    state.nick_to_session.lock().insert(&guest_nick, session_id);
+                    conn.nick = Some(guest_nick);
+                }
             }
         }
     }
@@ -320,6 +450,20 @@ pub(super) fn try_complete_registration(
     // This catch-all covers edge cases where registration completes
     // without going through the SASL path.
     attach_same_did(conn, state, session_id, send);
+
+    // Refuse guest (unauthenticated) connections when the instance requires
+    // authentication (opt-in --no-guest). Server operators are DID-authenticated
+    // anyway, so this only turns away truly anonymous connections.
+    if conn.authenticated_did.is_none() && state.config.no_guest {
+        send(
+            state,
+            session_id,
+            "ERROR :This server requires authentication (guest connections disabled)\r\n"
+                .to_string(),
+        );
+        tracing::info!(%session_id, "guest connection refused (--no-guest)");
+        return;
+    }
 
     conn.registered = true;
     let nick = conn.nick.as_deref().unwrap();

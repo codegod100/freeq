@@ -426,9 +426,13 @@ async fn cloaked_hostname_guest() {
         c.drain();
         c.send("WHOIS cloaktest");
         let l = c.expect_num("311");
-        // Server uses generic "host" for WHOIS 311; cloaking is visible in hostmask
-        // on JOIN/PRIVMSG, not necessarily in WHOIS 311 (which uses a static placeholder).
+        // WHOIS 311 carries the same cloak JOIN/PRIVMSG hostmasks show —
+        // the guest cloak here, a DID-derived one for authenticated users.
         assert!(l.contains("cloaktest"), "WHOIS should contain nick: {l}");
+        assert!(
+            l.contains("freeq/guest"),
+            "guest WHOIS 311 must carry the guest cloak, not a placeholder: {l}"
+        );
     })
     .await;
 }

@@ -7,7 +7,7 @@ struct JoinChannelSheet: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -15,18 +15,18 @@ struct JoinChannelSheet: View {
                     // Input
                     VStack(alignment: .leading, spacing: 8) {
                         Text("CHANNEL NAME")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.fqCaption2.weight(.bold))
                             .foregroundColor(Theme.textMuted)
                             .kerning(1)
 
                         HStack(spacing: 8) {
                             Text("#")
-                                .font(.system(size: 20, weight: .medium, design: .monospaced))
+                                .font(.fqMono.weight(.medium))
                                 .foregroundColor(Theme.textMuted)
 
                             TextField("", text: $channelName, prompt: Text("general").foregroundColor(Theme.textMuted))
                                 .foregroundColor(Theme.textPrimary)
-                                .font(.system(size: 17))
+                                .font(.fqBody)
                                 .autocapitalization(.none)
                                 .disableAutocorrection(true)
                                 .focused($focused)
@@ -45,7 +45,7 @@ struct JoinChannelSheet: View {
                     // Quick suggestions
                     VStack(alignment: .leading, spacing: 8) {
                         Text("POPULAR CHANNELS")
-                            .font(.system(size: 11, weight: .bold))
+                            .font(.fqCaption2.weight(.bold))
                             .foregroundColor(Theme.textMuted)
                             .kerning(1)
 
@@ -57,10 +57,10 @@ struct JoinChannelSheet: View {
                                 }) {
                                     HStack(spacing: 4) {
                                         Text("#")
-                                            .font(.system(size: 13, design: .monospaced))
+                                            .font(.fqMono)
                                             .foregroundColor(Theme.textMuted)
                                         Text(name)
-                                            .font(.system(size: 14, weight: .medium))
+                                            .font(.fqFootnote.weight(.medium))
                                             .foregroundColor(Theme.textPrimary)
                                     }
                                     .frame(maxWidth: .infinity)
@@ -80,7 +80,7 @@ struct JoinChannelSheet: View {
                     // Join button
                     Button(action: join) {
                         Text("Join Channel")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.fqCallout.weight(.semibold))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 14)
                             .background(
@@ -105,7 +105,7 @@ struct JoinChannelSheet: View {
                         .foregroundColor(Theme.accent)
                 }
             }
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .onAppear { focused = true }

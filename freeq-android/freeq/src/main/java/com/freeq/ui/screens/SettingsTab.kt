@@ -33,7 +33,9 @@ fun SettingsTab(appState: AppState) {
     val serverAddress by appState.serverAddress
     val connectionState by appState.connectionState
     val isDarkTheme by appState.isDarkTheme
+    val customStatus by appState.customStatus
     var showDisconnectDialog by remember { mutableStateOf(false) }
+    var showStatusDialog by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -113,6 +115,41 @@ fun SettingsTab(appState: AppState) {
                                 )
                             }
                         }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+                    // Custom status — shipped as the IRC AWAY message
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showStatusDialog = true },
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.EmojiEmotions,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Status",
+                                fontSize = 15.sp,
+                                color = MaterialTheme.colorScheme.onBackground
+                            )
+                            Text(
+                                if (customStatus.isEmpty()) "Set a status" else customStatus,
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Icon(
+                            Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
@@ -263,6 +300,65 @@ fun SettingsTab(appState: AppState) {
                 }
             }
 
+            // ── Safety section ──
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+            ) {
+                Column(
+                    modifier = Modifier.padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "SAFETY",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                        letterSpacing = 1.sp
+                    )
+
+                    Text(
+                        "Blocked users",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+
+                    if (appState.blockedNicks.isEmpty() && appState.blockedDids.isEmpty()) {
+                        Text(
+                            "No blocked users",
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        appState.blockedNicks.forEach { blockedNick ->
+                            BlockedUserRow(
+                                label = blockedNick,
+                                onUnblock = { appState.unblockUser(nick = blockedNick) }
+                            )
+                        }
+                        appState.blockedDids.forEach { blockedDid ->
+                            BlockedUserRow(
+                                label = blockedDid,
+                                onUnblock = { appState.unblockUser(did = blockedDid) }
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
+
+                    Text(
+                        "freeq has zero tolerance for objectionable content or " +
+                            "abusive behavior. Blocking hides a user's messages and " +
+                            "conversations on this device; reporting a message or " +
+                            "profile also blocks the user. To report serious abuse, " +
+                            "contact abuse@freeq.at.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
             // ── About section ──
             Card(
                 shape = RoundedCornerShape(16.dp),
@@ -378,6 +474,18 @@ fun SettingsTab(appState: AppState) {
         }
     }
 
+    // Status editor
+    if (showStatusDialog) {
+        StatusEditorDialog(
+            currentStatus = customStatus,
+            onSave = { status ->
+                appState.setCustomStatus(status)
+                showStatusDialog = false
+            },
+            onDismiss = { showStatusDialog = false }
+        )
+    }
+
     // Disconnect confirmation
     if (showDisconnectDialog) {
         AlertDialog(
@@ -401,4 +509,96 @@ fun SettingsTab(appState: AppState) {
             }
         )
     }
+}
+
+@Composable
+private fun BlockedUserRow(label: String, onUnblock: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            label,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        TextButton(onClick = onUnblock) {
+            Text("Unblock", color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+private fun StatusEditorDialog(
+    currentStatus: String,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var draft by remember { mutableStateOf(currentStatus) }
+    val presets = listOf(
+        "🟢 Available",
+        "🍔 Lunch",
+        "🎧 Focusing",
+        "✈️ Traveling",
+        "🌙 Do not disturb"
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set Status") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("What's your status?") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(10.dp)
+                )
+
+                Text(
+                    "Presets",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    presets.forEach { preset ->
+                        Text(
+                            preset,
+                            fontSize = 15.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { draft = preset }
+                                .padding(vertical = 6.dp)
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(draft) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            Row {
+                if (currentStatus.isNotEmpty()) {
+                    TextButton(onClick = { onSave("") }) {
+                        Text("Clear", color = FreeqColors.danger)
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Cancel")
+                }
+            }
+        }
+    )
 }

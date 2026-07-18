@@ -1,4 +1,31 @@
-name = 'freeq-auth-broker-v2'
-post_import = ''
-env = []
-include = []
+name = "freeq-auth-broker"
+
+[services.web]
+port = 8081
+
+[services.web.concurrency]
+mode = "fixed"
+num_instances = 1
+
+[[services.web.disks]]
+name = "broker-data"
+mount_path = "/data"
+size_gb = 2
+
+[[services.web.env]]
+key = "BROKER_SHARED_SECRET"
+required = true
+sensitive = true
+description = "Shared secret with freeq-server (matches reth .env.secrets)"
+
+[[services.web.env]]
+key = "BROKER_PUBLIC_URL"
+value = "https://auth.freeq.at"
+
+[[services.web.env]]
+key = "FREEQ_SERVER_URL"
+value = "https://irc.freeq.at"
+
+[[services.web.env]]
+key = "BROKER_DB_PATH"
+value = "/data/broker.db"

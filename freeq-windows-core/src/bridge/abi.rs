@@ -192,6 +192,7 @@ pub unsafe extern "C" fn freeq_win_connect(handle: u64) -> i32 {
                 tls: core.tls,
                 tls_insecure: false,
                 web_token,
+                websocket_url: None,
             };
 
             let (client_handle, mut event_rx) = freeq_sdk::client::connect(config, None);
@@ -222,34 +223,28 @@ pub unsafe extern "C" fn freeq_win_connect(handle: u64) -> i32 {
                     crate::event::DomainEvent::Joined {
                         channel,
                         nick: join_nick,
-                    } => {
-                        if join_nick.eq_ignore_ascii_case(&*core.nick.lock()) {
-                            let mut chans = core.channels.lock();
-                            if !chans.iter().any(|c| c.eq_ignore_ascii_case(channel)) {
-                                chans.push(channel.clone());
-                            }
+                    } if join_nick.eq_ignore_ascii_case(&core.nick.lock()) => {
+                        let mut chans = core.channels.lock();
+                        if !chans.iter().any(|c| c.eq_ignore_ascii_case(channel)) {
+                            chans.push(channel.clone());
                         }
                     }
                     crate::event::DomainEvent::Parted {
                         channel,
                         nick: part_nick,
-                    } => {
-                        if part_nick.eq_ignore_ascii_case(&*core.nick.lock()) {
-                            core.channels
-                                .lock()
-                                .retain(|c| !c.eq_ignore_ascii_case(channel));
-                        }
+                    } if part_nick.eq_ignore_ascii_case(&core.nick.lock()) => {
+                        core.channels
+                            .lock()
+                            .retain(|c| !c.eq_ignore_ascii_case(channel));
                     }
                     crate::event::DomainEvent::Kicked {
                         channel,
                         nick: kick_nick,
                         ..
-                    } => {
-                        if kick_nick.eq_ignore_ascii_case(&*core.nick.lock()) {
-                            core.channels
-                                .lock()
-                                .retain(|c| !c.eq_ignore_ascii_case(channel));
-                        }
+                    } if kick_nick.eq_ignore_ascii_case(&core.nick.lock()) => {
+                        core.channels
+                            .lock()
+                            .retain(|c| !c.eq_ignore_ascii_case(channel));
                     }
                     _ => {}
                 }

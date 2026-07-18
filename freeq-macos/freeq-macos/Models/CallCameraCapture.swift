@@ -1,0 +1,554 @@
+import AppKit
+import AVFoundation
+import Foundation
+import ScreenCaptureKit
+
+/// Drives the macOS camera via `AVCaptureSession` and pumps tightly-packed
+/// BGRA frames to the Rust AV pipeline via `pushVideoFrame`.
+///
+/// Capture is Swift-driven because iroh-live's `capture` backend is stubbed on
+/// Apple platforms (the camera is owned by AVFoundation here, not Rust). A
+/// low-latency `AVCaptureVideoPreviewLayer` is exposed for the local self-view
+/// so the local tile never freezes if the encoder stalls.
+///
+/// Quality: captures 1280×720 (the SDK encodes a 720p H.264 track — the old
+/// VGA preset was upscaled by the encoder) at ≤30 fps, supports selecting any
+/// connected camera (sticky UID via `MediaDeviceSelection`), and recovers
+/// when the active camera is unplugged by falling back to the default.
+final class CallCameraCapture: NSObject {
+    /// Fires with a tightly-packed BGRA frame on a background queue (the
+    /// capture queue with no effect, the effects queue when an effect is
+    /// active) — never the main thread. Keep fast; don't retain the pointer.
+    /// (pointer, byteLength, width, height, timestampUs)
+    var onFrame: ((UnsafePointer<UInt8>, Int, Int, Int, UInt64) -> Void)?
+    /// Camera permission was denied — surface UI guidance.
+    var onPermissionDenied: (() -> Void)?
+
+    let session = AVCaptureSession()
+    let previewLayer: AVCaptureVideoPreviewLayer
+    /// Background effects (blur / custom image). Set `.effect` to toggle.
+    let effects = CameraEffectsProcessor()
+    /// Self-view when effects are active: shows the *processed* frames the
+    /// call actually sends (the raw `previewLayer` would lie).
+    let processedPreviewLayer = AVSampleBufferDisplayLayer()
+
+    private let output = AVCaptureVideoDataOutput()
+    private let queue = DispatchQueue(label: "at.freeq.macos.camera")
+    /// Background-effect segmentation + composite runs here, OFF the capture
+    /// queue, so the expensive Vision pass never stalls the capture pipeline
+    /// (which drives the low-latency hardware self-preview) and can't let
+    /// latency accumulate. `effectSlot` is a drop-if-busy gate: if a frame is
+    /// still being processed, newer frames are skipped rather than queued —
+    /// the self-view stays current instead of falling progressively behind.
+    private let effectsQueue = DispatchQueue(label: "at.freeq.macos.camera.effects")
+    private let effectSlot = DispatchSemaphore(value: 1)
+    private var configured = false
+    private var preferredUniqueID: String?
+    private var currentInput: AVCaptureDeviceInput?
+    private var disconnectObserver: NSObjectProtocol?
+
+    override init() {
+        previewLayer = AVCaptureVideoPreviewLayer(session: session)
+        previewLayer.videoGravity = .resizeAspectFill
+        super.init()
+    }
+
+    /// All connected cameras for the picker (built-in, USB, Continuity).
+    static func availableCameras() -> [MediaDevice] {
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.builtInWideAngleCamera, .external, .continuityCamera],
+            mediaType: .video,
+            position: .unspecified
+        )
+        return MediaDeviceSelection.displayList(
+            discovery.devices.map { MediaDevice(id: $0.uniqueID, name: $0.localizedName) }
+        )
+    }
+
+    /// Switch camera (nil = default). Applies live when running; sticky
+    /// either way.
+    func setPreferredDevice(uniqueID: String?) {
+        preferredUniqueID = uniqueID
+        queue.async { [weak self] in
+            guard let self, self.configured else { return }
+            self.reconfigureInput()
+        }
+    }
+
+    /// Configure (once) and start the capture session. Idempotent.
+    func start() {
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+            guard let self else { return }
+            guard granted else {
+                print("[cam] permission denied")
+                DispatchQueue.main.async { self.onPermissionDenied?() }
+                return
+            }
+            self.queue.async { self.configureAndRun() }
+        }
+    }
+
+    private func resolveDevice() -> AVCaptureDevice? {
+        if let preferredUniqueID,
+           let preferred = AVCaptureDevice(uniqueID: preferredUniqueID) {
+            return preferred
+        }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+            ?? AVCaptureDevice.default(for: .video)
+    }
+
+    private func configureAndRun() {
+        if !configured {
+            session.beginConfiguration()
+            // 720p matches the SDK's H.264 preset; fall back for cameras
+            // that can't do it.
+            session.sessionPreset = session.canSetSessionPreset(.hd1280x720)
+                ? .hd1280x720 : .vga640x480
+
+            guard let device = resolveDevice(),
+                  let input = try? AVCaptureDeviceInput(device: device),
+                  session.canAddInput(input) else {
+                print("[cam] no usable camera input")
+                session.commitConfiguration()
+                return
+            }
+            session.addInput(input)
+            currentInput = input
+
+            output.videoSettings = [
+                kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+            ]
+            output.alwaysDiscardsLateVideoFrames = true
+            output.setSampleBufferDelegate(self, queue: queue)
+            if session.canAddOutput(output) {
+                session.addOutput(output)
+            }
+            session.commitConfiguration()
+            // Cap AFTER commit: applying the session preset can change the
+            // device's activeFormat, and the cap must validate against the
+            // format that will actually run.
+            if let device = currentInput?.device { capFrameRate(device) }
+            configured = true
+            observeDisconnects()
+        }
+        if !session.isRunning {
+            session.startRunning()
+            print("[cam] capture started (\(currentInput?.device.localizedName ?? "?"))")
+        }
+    }
+
+    /// 30 fps cap: sending faster than the encoder consumes just burns FFI
+    /// copies. Best-effort — not all devices allow it. The duration must
+    /// come from CameraFrameRatePolicy: an out-of-range value makes
+    /// AVFoundation throw an ObjC exception Swift cannot catch (SIGABRT —
+    /// this crashed live on a fixed/fractional-rate camera).
+    private func capFrameRate(_ device: AVCaptureDevice) {
+        let ranges = device.activeFormat.videoSupportedFrameRateRanges
+            .map { (min: $0.minFrameDuration, max: $0.maxFrameDuration) }
+        guard let target = CameraFrameRatePolicy.targetMinFrameDuration(
+            desiredFps: 30, ranges: ranges) else { return }
+        do {
+            try device.lockForConfiguration()
+            device.activeVideoMinFrameDuration = target
+            device.unlockForConfiguration()
+        } catch {
+            print("[cam] frame-rate cap failed: \(error)")
+        }
+    }
+
+    /// Swap the session input to the (re)resolved device.
+    private func reconfigureInput() {
+        session.beginConfiguration()
+        if let currentInput { session.removeInput(currentInput) }
+        currentInput = nil
+        if let device = resolveDevice(),
+           let input = try? AVCaptureDeviceInput(device: device),
+           session.canAddInput(input) {
+            session.addInput(input)
+            currentInput = input
+            print("[cam] switched to \(device.localizedName)")
+        } else {
+            print("[cam] no usable camera after reconfigure")
+        }
+        session.commitConfiguration()
+        // After commit, so the cap validates the final activeFormat.
+        if let device = currentInput?.device { capFrameRate(device) }
+    }
+
+    /// Unplug of the active camera: fall back to the default device instead
+    /// of freezing the outbound track.
+    private func observeDisconnects() {
+        guard disconnectObserver == nil else { return }
+        disconnectObserver = NotificationCenter.default.addObserver(
+            forName: AVCaptureDevice.wasDisconnectedNotification,
+            object: nil, queue: nil
+        ) { [weak self] note in
+            guard let self,
+                  let gone = note.object as? AVCaptureDevice,
+                  gone.uniqueID == self.currentInput?.device.uniqueID else { return }
+            print("[cam] active camera disconnected — falling back")
+            self.queue.async { self.reconfigureInput() }
+        }
+    }
+
+    /// Stop the capture session. Idempotent.
+    func stop() {
+        if let disconnectObserver {
+            NotificationCenter.default.removeObserver(disconnectObserver)
+            self.disconnectObserver = nil
+        }
+        queue.async { [weak self] in
+            guard let self, self.session.isRunning else { return }
+            self.session.stopRunning()
+            print("[cam] capture stopped")
+        }
+    }
+}
+
+/// A shareable screen source for the picker: a whole display or one window.
+struct ScreenShareTarget: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case display(CGDirectDisplayID)
+        case window(CGWindowID)
+    }
+    let kind: Kind
+    let title: String
+
+    var id: String {
+        switch kind {
+        case .display(let id): return "display-\(id)"
+        case .window(let id): return "window-\(id)"
+        }
+    }
+}
+
+/// Captures a display or window through ScreenCaptureKit and emits tightly-
+/// packed BGRA frames through the same closure shape as `CallCameraCapture`.
+/// This lets macOS screen sharing use the existing native AV video path while
+/// the SDK grows a dedicated `/screen` broadcast.
+///
+/// Quality: Retina-aware capture sized by the unit-tested `ScreenShareConfig`
+/// (fit real pixel dimensions into 1920×1080, no upscale, even dims) at
+/// 30 fps (the old path captured points at 15 fps — blurry AND choppy).
+@available(macOS 12.3, *)
+final class CallScreenCapture: NSObject {
+    /// Fires on ScreenCaptureKit's sample queue with a tightly-packed BGRA frame.
+    /// (pointer, byteLength, width, height, timestampUs)
+    var onFrame: ((UnsafePointer<UInt8>, Int, Int, Int, UInt64) -> Void)?
+    var onStopped: (() -> Void)?
+    /// Capture failed to start or died — user-presentable message.
+    var onError: ((String) -> Void)?
+    /// What to share; nil = primary display. Ignored when `filter` is set.
+    var target: ScreenShareTarget?
+    /// A filter handed to us by the system SCContentSharingPicker — the
+    /// preferred path: user-mediated (no Screen Recording pre-grant needed)
+    /// and the user explicitly chose what to share.
+    var pickedFilter: SCContentFilter?
+
+    private let queue = DispatchQueue(label: "at.freeq.macos.screen")
+    private var stream: SCStream?
+
+    /// Enumerate pickable sources: every display, then on-screen windows
+    /// (skipping tiny/untitled ones — palettes, tooltips, our own overlay).
+    static func availableTargets() async -> [ScreenShareTarget] {
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+            false, onScreenWindowsOnly: true) else { return [] }
+
+        let displays = content.displays.enumerated().map { i, d in
+            ScreenShareTarget(
+                kind: .display(d.displayID),
+                title: content.displays.count == 1 ? "Entire Screen" : "Display \(i + 1) (\(d.width)×\(d.height))"
+            )
+        }
+        let windows = content.windows.compactMap { w -> ScreenShareTarget? in
+            guard let title = w.title, !title.isEmpty,
+                  w.frame.width >= 200, w.frame.height >= 150,
+                  w.windowLayer == 0  // normal app windows only
+            else { return nil }
+            let app = w.owningApplication?.applicationName ?? ""
+            return ScreenShareTarget(
+                kind: .window(w.windowID),
+                title: app.isEmpty ? title : "\(app) — \(title)"
+            )
+        }
+        return displays + windows
+    }
+
+    func start() {
+        Task { [weak self] in
+            await self?.startAsync()
+        }
+    }
+
+    @MainActor
+    private func startAsync() async {
+        // System-picker path: the filter carries its own geometry, and no
+        // Screen Recording TCC pre-grant is required.
+        if #available(macOS 14.0, *), let picked = pickedFilter {
+            let scale = CGFloat(picked.pointPixelScale)
+            let sourcePixels = (
+                width: Int(picked.contentRect.width * scale),
+                height: Int(picked.contentRect.height * scale)
+            )
+            await startStream(filter: picked, sourcePixels: sourcePixels)
+            return
+        }
+
+        do {
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+
+            let filter: SCContentFilter
+            let sourcePixels: (width: Int, height: Int)
+
+            switch target?.kind {
+            case .window(let windowID):
+                guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                    print("[screen] window \(windowID) no longer shareable")
+                    onStopped?()
+                    return
+                }
+                filter = SCContentFilter(desktopIndependentWindow: window)
+                let scale = Self.scaleFactor(forWindowFrame: window.frame)
+                sourcePixels = (Int(window.frame.width * scale), Int(window.frame.height * scale))
+
+            case .display(let displayID):
+                guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                    print("[screen] display \(displayID) no longer shareable")
+                    onStopped?()
+                    return
+                }
+                filter = SCContentFilter(display: display, excludingWindows: [])
+                let scale = Self.scaleFactor(forDisplay: displayID)
+                sourcePixels = (Int(CGFloat(display.width) * scale), Int(CGFloat(display.height) * scale))
+
+            case nil:
+                guard let display = content.displays.first else {
+                    print("[screen] no shareable display")
+                    onStopped?()
+                    return
+                }
+                filter = SCContentFilter(display: display, excludingWindows: [])
+                let scale = Self.scaleFactor(forDisplay: display.displayID)
+                sourcePixels = (Int(CGFloat(display.width) * scale), Int(CGFloat(display.height) * scale))
+            }
+
+            await startStream(filter: filter, sourcePixels: sourcePixels)
+        } catch {
+            print("[screen] shareable-content enumeration failed: \(error)")
+            // The classic cause: Screen Recording permission. Guide the user
+            // instead of failing silently.
+            onError?("Screen sharing couldn't start. If you haven't granted "
+                + "Screen Recording access, enable it in System Settings → "
+                + "Privacy & Security → Screen Recording, then try again.")
+            onStopped?()
+        }
+    }
+
+    @MainActor
+    private func startStream(filter: SCContentFilter, sourcePixels: (width: Int, height: Int)) async {
+        let size = ScreenShareConfig.outputSize(
+            sourceWidth: sourcePixels.width, sourceHeight: sourcePixels.height)
+
+        let config = SCStreamConfiguration()
+        config.width = size.width
+        config.height = size.height
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.minimumFrameInterval = CMTime(
+            value: 1, timescale: CMTimeScale(ScreenShareConfig.framesPerSecond))
+        config.queueDepth = 4
+        config.showsCursor = true
+
+        do {
+            let stream = SCStream(filter: filter, configuration: config, delegate: self)
+            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+            self.stream = stream
+            try await stream.startCapture()
+            print("[screen] capture started \(size.width)×\(size.height)@\(ScreenShareConfig.framesPerSecond)")
+        } catch {
+            print("[screen] capture failed: \(error)")
+            onError?("Screen sharing failed to start: \(error.localizedDescription)")
+            onStopped?()
+        }
+    }
+
+    private static func scaleFactor(forDisplay displayID: CGDirectDisplayID) -> CGFloat {
+        NSScreen.screens.first {
+            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID) == displayID
+        }?.backingScaleFactor ?? 2
+    }
+
+    private static func scaleFactor(forWindowFrame frame: CGRect) -> CGFloat {
+        NSScreen.screens.first { $0.frame.intersects(frame) }?.backingScaleFactor ?? 2
+    }
+
+    func stop() {
+        guard let stream else { return }
+        self.stream = nil
+        Task {
+            do {
+                try await stream.stopCapture()
+                print("[screen] capture stopped")
+            } catch {
+                print("[screen] stop failed: \(error)")
+            }
+        }
+    }
+}
+
+@available(macOS 12.3, *)
+extension CallScreenCapture: SCStreamOutput, SCStreamDelegate {
+    func stream(
+        _ stream: SCStream,
+        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
+        of type: SCStreamOutputType
+    ) {
+        guard type == .screen,
+              sampleBuffer.isValid,
+              let onFrame,
+              let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(pb)
+        let height = CVPixelBufferGetHeight(pb)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
+
+        let expectedRow = width * 4
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let tsUs = pts.isValid
+            ? UInt64(max(0, CMTimeGetSeconds(pts)) * 1_000_000)
+            : UInt64(Date().timeIntervalSince1970 * 1_000_000)
+
+        var packed = [UInt8](repeating: 0, count: width * height * 4)
+        packed.withUnsafeMutableBytes { dst in
+            guard let dstBase = dst.baseAddress else { return }
+            if rowBytes == expectedRow {
+                memcpy(dstBase, base, width * height * 4)
+            } else {
+                for y in 0..<height {
+                    let srcRow = base.advanced(by: y * rowBytes)
+                    let dstRow = dstBase.advanced(by: y * expectedRow)
+                    memcpy(dstRow, srcRow, expectedRow)
+                }
+            }
+        }
+        packed.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            onFrame(base, buf.count, width, height, tsUs)
+        }
+    }
+
+    func stream(_ stream: SCStream, didStopWithError error: Error) {
+        print("[screen] capture stopped with error: \(error)")
+        DispatchQueue.main.async { [weak self] in
+            self?.onStopped?()
+        }
+    }
+}
+
+extension CallCameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let onFrame, let rawPb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let tsUs = UInt64(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1_000_000)
+
+        guard effects.effect.isActive else {
+            // Fast path — no effect. The hardware `previewLayer` renders the
+            // raw feed at zero latency; we only need to pack + send. Stays on
+            // the capture queue, unchanged.
+            packAndSend(rawPb, tsUs: tsUs, onFrame: onFrame)
+            return
+        }
+
+        // Effect path — hand the frame to the effects queue and return
+        // immediately so the capture pipeline never blocks on segmentation.
+        // Drop-if-busy: if the previous frame is still processing, skip this
+        // one (bounded latency, current self-view) instead of queueing behind
+        // it. Capturing `sampleBuffer` retains the pixel buffer across the hop.
+        guard effectSlot.wait(timeout: .now()) == .success else { return }
+        effectsQueue.async { [weak self] in
+            defer { self?.effectSlot.signal() }
+            guard let self,
+                  let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            // Composite person-over-styled-background; fall back to the raw
+            // frame if segmentation yields nothing.
+            let processed = self.effects.process(pb) ?? pb
+            if processed !== pb {
+                Self.enqueue(pixelBuffer: processed, on: self.processedPreviewLayer)
+            }
+            self.packAndSend(processed, tsUs: tsUs, onFrame: onFrame)
+        }
+    }
+
+    /// Tightly pack a BGRA buffer (the SDK expects no row padding) and hand it
+    /// to `onFrame`. Runs on the capture queue (no-effect path) or the effects
+    /// queue (effect path) — never the main thread.
+    private func packAndSend(
+        _ pb: CVPixelBuffer,
+        tsUs: UInt64,
+        onFrame: (UnsafePointer<UInt8>, Int, Int, Int, UInt64) -> Void
+    ) {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+        let width = CVPixelBufferGetWidth(pb)
+        let height = CVPixelBufferGetHeight(pb)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
+
+        let expectedRow = width * 4
+        var packed = [UInt8](repeating: 0, count: width * height * 4)
+        packed.withUnsafeMutableBytes { dst in
+            let dstBase = dst.baseAddress!
+            if rowBytes == expectedRow {
+                memcpy(dstBase, base, width * height * 4)
+            } else {
+                for y in 0..<height {
+                    let srcRow = base.advanced(by: y * rowBytes)
+                    let dstRow = dstBase.advanced(by: y * expectedRow)
+                    memcpy(dstRow, srcRow, expectedRow)
+                }
+            }
+        }
+        packed.withUnsafeBufferPointer { buf in
+            onFrame(buf.baseAddress!, buf.count, width, height, tsUs)
+        }
+    }
+
+    /// Wrap a pixel buffer in a display-immediately CMSampleBuffer and
+    /// enqueue it (no pixel copy) — feeds the processed self-view.
+    static func enqueue(pixelBuffer pb: CVPixelBuffer, on layer: AVSampleBufferDisplayLayer) {
+        var formatDesc: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb,
+            formatDescriptionOut: &formatDesc) == noErr, let formatDesc else { return }
+
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: 30),
+            presentationTimeStamp: CMClockGetTime(CMClockGetHostTimeClock()),
+            decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault, imageBuffer: pb,
+            formatDescription: formatDesc, sampleTiming: &timing,
+            sampleBufferOut: &sample) == noErr, let sample else { return }
+
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(
+            sample, createIfNecessary: true) as? [CFMutableDictionary],
+           let first = attachments.first {
+            let key = Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque()
+            let value = Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+            CFDictionarySetValue(first, key, value)
+        }
+        if layer.status == .failed { layer.flush() }
+        layer.enqueue(sample)
+    }
+}

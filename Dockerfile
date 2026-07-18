@@ -1,27 +1,21 @@
 # ── Build stage ──
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.89-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
-COPY freeq-server/ freeq-server/
-COPY freeq-sdk/ freeq-sdk/
-COPY freeq-sdk-ffi/ freeq-sdk-ffi/
-COPY freeq-tui/ freeq-tui/
-COPY freeq-bots/ freeq-bots/
-COPY freeq-auth-broker/ freeq-auth-broker/
+COPY . .
 
 RUN cargo build --release -p freeq-server -p freeq-auth-broker
 
 # ── Web client build ──
 FROM node:20-slim AS web-builder
 
-WORKDIR /app
-COPY freeq-app/package.json freeq-app/package-lock.json ./
-RUN npm ci --ignore-scripts
-COPY freeq-app/ ./
-RUN npm run build
+WORKDIR /src
+COPY freeq-sdk-js/ freeq-sdk-js/
+COPY freeq-app/ freeq-app/
+WORKDIR /src/freeq-app
+RUN npm ci --ignore-scripts && npm run build
 
 # ── Runtime ──
 FROM debian:bookworm-slim
@@ -33,7 +27,7 @@ WORKDIR /app
 
 COPY --from=builder /src/target/release/freeq-server /usr/local/bin/
 COPY --from=builder /src/target/release/freeq-auth-broker /usr/local/bin/
-COPY --from=web-builder /app/dist /app/web
+COPY --from=web-builder /src/freeq-app/dist /app/web
 
 RUN mkdir -p /data && chown freeq:freeq /data
 VOLUME /data

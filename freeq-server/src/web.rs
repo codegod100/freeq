@@ -23,6 +23,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tower_http::cors::CorsLayer;
 
 use crate::server::SharedState;
+// OAuth primitives now live in the shared engine crate. `generate_random_string`
+// is re-exported because `crate::web::generate_random_string` is referenced from
+// connection::login; `urlencod` is the local alias for the engine's `urlencode`.
+pub use freeq_oauth::generate_random_string;
+use freeq_oauth::{ClientProvider, build_client_id, generate_pkce, urlencode as urlencod};
 
 // ── WebSocket ↔ IRC bridge ─────────────────────────────────────────────
 
@@ -174,25 +179,46 @@ pub fn router(state: Arc<SharedState>) -> Router {
         // OAuth endpoints for web client
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
+        // Phase-2 incremental authorization: drive a second OAuth flow
+        // for a specific purpose (image upload, Bluesky cross-post)
+        // without replacing the user's primary login session.
+        .route("/auth/step-up", get(auth_step_up))
         .route("/auth/broker/web-token", post(auth_broker_web_token))
         .route("/auth/broker/session", post(auth_broker_session))
         .route("/client-metadata.json", get(client_metadata))
         // REST API (read-only, v1)
         .route("/api/v1/health", get(api_health))
+        .route("/metrics", get(api_metrics))
         .route("/api/v1/channels", get(api_channels))
         .route("/api/v1/channels/{name}/history", get(api_channel_history))
+        .route("/api/v1/search", get(api_search))
+        .route("/api/v1/messages/{msgid}", get(api_message_by_id))
+        .route("/api/v1/channels/{name}/export", get(api_channel_export))
         .route("/api/v1/channels/{name}/topic", get(api_channel_topic))
         .route("/api/v1/channels/{name}/pins", get(api_channel_pins))
         .route("/api/v1/users/{nick}", get(api_user))
         .route("/api/v1/users/{nick}/whois", get(api_user_whois))
         .route("/api/v1/upload", axum::routing::post(api_upload))
         .route("/api/v1/blob", get(api_blob_proxy))
+        // Private media: serve an encrypted-at-rest blob via a signed capability
+        // URL. The trailing {filename} is cosmetic (preserves the extension so
+        // clients render it); only {id}/{sig} are authoritative.
+        .route("/api/v1/media/{id}/{sig}/{filename}", get(api_media_serve))
         .route("/api/v1/og", get(api_og_preview))
         .route("/api/v1/keys/{did}", get(api_get_keys))
         .route("/api/v1/keys", axum::routing::post(api_upload_keys))
+        .route(
+            "/api/v1/channels/{name}/groupkeys",
+            get(api_get_group_keys).post(api_put_group_keys),
+        )
         .route("/api/v1/signing-key", get(api_signing_key))
         .route("/api/v1/signing-keys/{did}", get(api_did_signing_key))
+        .route(
+            "/api/v1/signing-keys/{did}/{kid}",
+            get(api_did_signing_key_by_kid),
+        )
         .route("/api/v1/verify/{msgid}", get(api_verify_message))
+        .route("/api/v1/channels/{name}/evidence", get(api_channel_evidence))
         .route("/api/v1/actors/{did}", get(api_actor_identity))
         .route(
             "/api/v1/channels/{name}/agent-capabilities",
@@ -210,6 +236,25 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/api/v1/agents/spawned", get(api_spawned_agents))
         .route("/api/v1/channels/{name}/budget", get(api_channel_budget))
         .route("/api/v1/channels/{name}/spend", get(api_channel_spend))
+        // AV call page + assets (served here so it's accessible through Miren's HTTPS)
+        .route("/av/call", get(av_call_page))
+        .route("/av/call.html", get(av_call_page))
+        .route("/av/assets/{filename}", get(av_asset))
+        // AV SFU WebSocket endpoint (MoQ over WebSocket for browser/native clients)
+        .route("/av/moq", get(av_moq_ws_root))
+        .route("/av/moq/{*path}", get(av_moq_ws))
+        .route("/api/v1/av/sessions/{id}/token", get(api_av_session_token))
+        // AV sessions
+        .route("/api/v1/sessions", get(api_sessions_list))
+        .route("/api/v1/sessions/{id}", get(api_session_detail))
+        .route(
+            "/api/v1/sessions/{id}/artifacts",
+            get(api_session_artifacts).post(api_create_artifact),
+        )
+        .route(
+            "/api/v1/channels/{name}/sessions",
+            get(api_channel_sessions),
+        )
         .route("/auth/mobile", get(auth_mobile_redirect))
         .route("/join/{channel}", get(channel_invite_page))
         .layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)) // 12MB
@@ -240,6 +285,9 @@ pub fn router(state: Arc<SharedState>) -> Router {
     if state.policy_engine.is_some() {
         app = app.merge(crate::policy::api::routes());
     }
+
+    // Agent Assistance Interface (.well-known/agent.json + /agent/tools/*)
+    app = app.merge(crate::agent_assist::api::routes());
 
     // Build verifier router (stashed, merged after .with_state())
     let verifier_router = {
@@ -287,9 +335,34 @@ pub fn router(state: Arc<SharedState>) -> Router {
     }
 
     // Apply state, then merge verifier (which has its own state already applied)
-    let mut final_app = app.with_state(state);
+    let mut final_app = app.with_state(state.clone());
     if let Some(vr) = verifier_router {
         final_app = final_app.merge(vr);
+    }
+    // Embedded broker: with no separate broker configured (BROKER_SHARED_SECRET
+    // unset), serve the broker's /session + graph endpoints in-process, backed
+    // by an ephemeral in-memory store and a LocalWriter into our own state. A
+    // separate broker (secret set) uses the /auth/broker/* receiver path instead.
+    if let Some(store) = state.embedded_session_store.clone() {
+        let broker_state = Arc::new(freeq_auth_broker::BrokerState {
+            // client_id is stored per-session, so these are unused by the
+            // /session + graph paths.
+            config: freeq_auth_broker::BrokerConfig {
+                public_url: String::new(),
+                freeq_server_url: String::new(),
+                shared_secret: String::new(),
+            },
+            writer: Arc::new(LocalWriter {
+                state: state.clone(),
+            }),
+            // Same store instance auth_callback persists into.
+            store,
+            pending: tokio::sync::Mutex::new(Default::default()),
+            completed: tokio::sync::Mutex::new(Default::default()),
+            callback_locks: tokio::sync::Mutex::new(Default::default()),
+            refresh_locks: tokio::sync::Mutex::new(Default::default()),
+        });
+        final_app = final_app.merge(freeq_auth_broker::session_router(broker_state));
     }
     // Security headers as outermost layer so they apply to all responses
     // including static files served via fallback_service
@@ -341,6 +414,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<SharedState>, ip: std::net::IpA
 #[derive(Serialize)]
 struct HealthResponse {
     server_name: String,
+    version: &'static str,
+    git_commit: &'static str,
     connections: usize,
     channels: usize,
     uptime_secs: u64,
@@ -374,6 +449,14 @@ struct MessageResponse {
 
 #[derive(Deserialize)]
 struct HistoryQuery {
+    limit: Option<usize>,
+    before: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    channel: String,
+    q: String,
     limit: Option<usize>,
     before: Option<u64>,
 }
@@ -416,22 +499,55 @@ async fn api_signing_key(State(state): State<Arc<SharedState>>) -> Json<serde_js
     }))
 }
 
-/// Per-DID signing key: returns the client's registered session signing key.
+/// Per-DID signing key: the DID's latest registered signing key, from the
+/// durable store (the single source of truth — survives restart, covers every
+/// DID that ever registered). A specific historical key is fetched via
+/// `/{did}/{kid}`.
 async fn api_did_signing_key(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(did): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use base64::Engine;
     let did_decoded = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did));
-    if let Some(pubkey) = state.did_msg_keys.lock().get(did_decoded.as_ref()) {
-        Ok(Json(serde_json::json!({
+    match state
+        .with_db(|db| db.get_signing_key(did_decoded.as_ref()))
+        .flatten()
+    {
+        Some(pubkey) => Ok(Json(serde_json::json!({
             "did": did_decoded.as_ref(),
             "algorithm": "ed25519",
-            "public_key": pubkey,
+            "public_key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey),
             "encoding": "base64url",
-            "source": "client-session"
-        })))
-    } else {
-        Err(axum::http::StatusCode::NOT_FOUND)
+            "source": "key-store"
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
+    }
+}
+
+/// Per-DID, per-kid signing key: the exact historical key the DID registered
+/// under `kid`, from the durable store. This is the lookup a verifier uses when
+/// a signature names its kid — the key stays available after the signer's
+/// session ends, unlike `/{did}` which is the current one.
+async fn api_did_signing_key_by_kid(
+    State(state): State<Arc<SharedState>>,
+    axum::extract::Path((did, kid)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    use base64::Engine;
+    let did_decoded = urlencoding::decode(&did).unwrap_or(std::borrow::Cow::Borrowed(&did));
+    let kid_decoded = urlencoding::decode(&kid).unwrap_or(std::borrow::Cow::Borrowed(&kid));
+    match state
+        .with_db(|db| db.get_signing_key_by_kid(did_decoded.as_ref(), kid_decoded.as_ref()))
+        .flatten()
+    {
+        Some(pubkey) => Ok(Json(serde_json::json!({
+            "did": did_decoded.as_ref(),
+            "kid": kid_decoded.as_ref(),
+            "algorithm": "ed25519",
+            "public_key": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey),
+            "encoding": "base64url",
+            "source": "key-store"
+        }))),
+        None => Err(axum::http::StatusCode::NOT_FOUND),
     }
 }
 
@@ -863,12 +979,25 @@ async fn api_actor_identity(
         .find_map(|sid| state.session_actor_class.lock().get(sid).copied())
         .unwrap_or(crate::connection::ActorClass::Human);
 
-    // Nick
+    // Nick — prefer the live nick from an active session; fall back to
+    // the persistent `identities` table for offline DIDs so callers like
+    // the freeq-app provenance card can resolve e.g. a moderator's
+    // did:key to "lobot" even when the moderator process isn't running.
+    // Without this fallback, sub-agent provenance cards rendered the
+    // raw "did:key:z6Mk…" string for any creator whose process had
+    // exited since the sub-agent was spawned.
     let nick = {
         let nts = state.nick_to_session.lock();
-        sessions
+        let live = sessions
             .iter()
-            .find_map(|sid| nts.get_nick(sid).map(|n| n.to_string()))
+            .find_map(|sid| nts.get_nick(sid).map(|n| n.to_string()));
+        drop(nts);
+        live.or_else(|| {
+            state
+                .with_db(|db| db.get_identity_by_did(&did))
+                .flatten()
+                .map(|row| row.nick)
+        })
     };
 
     // Handle
@@ -976,6 +1105,102 @@ async fn api_actor_identity(
     Ok(Json(result))
 }
 
+/// GET /api/v1/channels/{name}/evidence?limit=&before=
+///
+/// Exports a self-contained, offline-verifiable evidence bundle for a channel:
+/// the message range, each message's `+freeq.at/sig`, the per-DID client
+/// signing keys and the server signing key needed to check them, and a
+/// server signature over the whole bundle. `freeq-verify` (the offline CLI)
+/// recomputes each message's canonical form
+/// (`{did}\0{channel}\0{text}\0{timestamp}`) and checks the signatures with no
+/// server contact — so a third party who trusts neither the participants nor
+/// the server can confirm nothing was altered.
+///
+/// Authorization mirrors CHATHISTORY/search: public channels export openly,
+/// restricted (+i/+k) channels require a member Bearer.
+async fn api_channel_evidence(
+    State(state): State<Arc<SharedState>>,
+    Path(name): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let channel = authorize_channel_read(&state, &name, &headers)
+        .map_err(|code| (code, "not authorized to read this channel".to_string()))?;
+
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(1000)
+        .min(5000);
+    let before = params.get("before").and_then(|s| s.parse::<u64>().ok());
+
+    let rows = state
+        .with_db(|db| db.get_messages(&channel, limit, before))
+        .unwrap_or_default();
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    // Collect the per-DID client signing keys referenced by these messages.
+    let mut did_keys = serde_json::Map::new();
+    {
+        let keys = state.did_msg_keys.lock();
+        for row in &rows {
+            if let Some(did) = &row.sender_did
+                && !did_keys.contains_key(did)
+                && let Some(pk) = keys.get(did)
+            {
+                did_keys.insert(did.clone(), serde_json::Value::String(pk.clone()));
+            }
+        }
+    }
+
+    let messages: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "msgid": r.msgid,
+                "channel": r.channel,
+                "sender": r.sender,
+                "sender_did": r.sender_did,
+                "text": r.text,
+                "timestamp": r.timestamp,
+                "signature": r.tags.get("+freeq.at/sig"),
+            })
+        })
+        .collect();
+
+    let server_pubkey = b64.encode(state.msg_signing_key.verifying_key().as_bytes());
+
+    // Everything except the signature, canonicalized, then server-signed so the
+    // bundle itself is tamper-evident.
+    let mut bundle = serde_json::json!({
+        "bundle_version": "1",
+        "server_name": state.server_name,
+        "server_public_key": server_pubkey,
+        "channel": channel,
+        "exported_at": chrono::Utc::now().to_rfc3339(),
+        "message_count": messages.len(),
+        "did_keys": did_keys,
+        "messages": messages,
+    });
+
+    let canonical = freeq_sdk::canonical::canonicalize(&bundle)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("canonicalize: {e}")))?;
+    let sig = {
+        use ed25519_dalek::Signer;
+        state.msg_signing_key.sign(canonical.as_bytes())
+    };
+    if let Some(obj) = bundle.as_object_mut() {
+        obj.insert(
+            "bundle_signature".to_string(),
+            serde_json::Value::String(b64.encode(sig.to_bytes())),
+        );
+    }
+
+    Ok(Json(bundle))
+}
+
 async fn api_verify_message(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(msgid): axum::extract::Path<String>,
@@ -999,20 +1224,19 @@ async fn api_verify_message(
     drop(channels);
 
     // Fall back to database if not in memory
-    if found.is_none() {
-        if let Some(row) = state
+    if found.is_none()
+        && let Some(row) = state
             .with_db(|db| db.find_message_by_msgid(&msgid))
             .flatten()
-        {
-            found = Some(crate::server::HistoryMessage {
-                from: row.sender,
-                text: row.text,
-                timestamp: row.timestamp,
-                tags: row.tags,
-                msgid: row.msgid,
-            });
-            found_channel = row.channel;
-        }
+    {
+        found = Some(crate::server::HistoryMessage {
+            from: row.sender,
+            text: row.text,
+            timestamp: row.timestamp,
+            tags: row.tags,
+            msgid: row.msgid,
+        });
+        found_channel = row.channel;
     }
 
     let msg = found.ok_or((
@@ -1135,6 +1359,8 @@ async fn api_health(State(state): State<Arc<SharedState>>) -> Json<HealthRespons
         .count();
     Json(HealthResponse {
         server_name: state.server_name.clone(),
+        version: env!("CARGO_PKG_VERSION"),
+        git_commit: env!("GIT_HASH"),
         connections,
         channels,
         uptime_secs: uptime,
@@ -1145,7 +1371,13 @@ async fn api_channels(State(state): State<Arc<SharedState>>) -> Json<Vec<Channel
     let channels = state.channels.lock();
     let mut list: Vec<ChannelInfo> = channels
         .iter()
-        .filter(|(_name, ch)| {
+        .filter(|(name, ch)| {
+            // This endpoint is UNAUTHENTICATED — only ever expose channels that
+            // carry no access restriction (+i/+k/+E/policy). Private channels
+            // must not leak their name/topic/count to the open internet.
+            if !state.channel_is_discoverable(name, ch) {
+                return false;
+            }
             // Show channels with members, or with a topic set
             let has_members = !ch.members.is_empty() || !ch.remote_members.is_empty();
             let has_topic = ch.topic.is_some();
@@ -1162,27 +1394,138 @@ async fn api_channels(State(state): State<Arc<SharedState>>) -> Json<Vec<Channel
     Json(list)
 }
 
-async fn api_channel_history(
+/// Resolve the authenticated caller DID from a `Bearer <session-id>` header.
+fn caller_did_from_bearer(
+    state: &crate::server::SharedState,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    let sid = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    state.session_dids.lock().get(sid).cloned()
+}
+
+/// POST /api/v1/channels/{name}/groupkeys — a channel steward (founder or
+/// DID-op) uploads group secrets sealed to each member's X25519 key. The server
+/// stores opaque `EGK1:` blobs; it can never open them (server-blind key
+/// distribution for VC-bootstrapped E2E channels). Body:
+/// `{ "epoch": <n>, "keys": { "<member_did>": "EGK1:...", ... } }`.
+async fn api_put_group_keys(
     Path(name): Path<String>,
-    Query(params): Query<HistoryQuery>,
     State(state): State<Arc<SharedState>>,
-) -> Result<Json<Vec<MessageResponse>>, StatusCode> {
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
     let channel = if name.starts_with('#') {
         name
     } else {
         format!("#{name}")
     };
 
-    // Restrict history for channels with access controls (+i, +k).
-    // These channels require membership to read history — use IRC CHATHISTORY instead.
+    let Some(caller) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+
+    // Steward authorization: only the channel founder or a DID-op may distribute
+    // group keys — the same DID authorities the policy layer already trusts.
     {
         let channels = state.channels.lock();
-        if let Some(ch) = channels.get(&channel.to_lowercase()) {
-            if ch.invite_only || ch.key.is_some() {
-                return Err(StatusCode::FORBIDDEN);
-            }
+        let Some(ch) = channels.get(&channel.to_lowercase()) else {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                axum::Json(serde_json::json!({ "error": "Unknown channel" })),
+            );
+        };
+        let is_authority =
+            ch.founder_did.as_deref() == Some(caller.as_str()) || ch.did_ops.contains(&caller);
+        if !is_authority {
+            return (
+                axum::http::StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": "Only the channel founder or a DID-op may distribute group keys"
+                })),
+            );
         }
     }
+
+    let (Some(epoch), Some(keys)) = (
+        body.get("epoch").and_then(|v| v.as_i64()),
+        body.get("keys").and_then(|v| v.as_object()),
+    ) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": "Expected { epoch: <n>, keys: { member_did: sealed } }"
+            })),
+        );
+    };
+
+    let mut stored = 0usize;
+    for (member_did, sealed) in keys {
+        if let Some(sealed_wire) = sealed.as_str() {
+            let (ch, md, sw) = (channel.clone(), member_did.clone(), sealed_wire.to_string());
+            state.with_db(|db| db.save_group_key(&ch, &md, epoch, &sw));
+            stored += 1;
+        }
+    }
+
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true, "epoch": epoch, "stored": stored })),
+    )
+}
+
+/// GET /api/v1/channels/{name}/groupkeys — a member fetches the group keys
+/// sealed to THEIR DID across all retained epochs (newest first), so they can
+/// read live traffic and decrypt history across rotations. Only blobs the
+/// caller can actually open are returned.
+async fn api_get_group_keys(
+    Path(name): Path<String>,
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> (axum::http::StatusCode, axum::Json<serde_json::Value>) {
+    let channel = if name.starts_with('#') {
+        name
+    } else {
+        format!("#{name}")
+    };
+
+    let Some(caller) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+
+    let rows = state
+        .with_db(|db| db.get_group_keys_for_member(&channel, &caller))
+        .unwrap_or_default();
+
+    let keys: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|(epoch, sealed)| serde_json::json!({ "epoch": epoch, "sealed": sealed }))
+        .collect();
+
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({ "channel": channel, "keys": keys })),
+    )
+}
+
+async fn api_channel_history(
+    Path(name): Path<String>,
+    Query(params): Query<HistoryQuery>,
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<MessageResponse>>, StatusCode> {
+    // Public channels read anonymously; restricted ones require a member Bearer.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
 
     let limit = params.limit.unwrap_or(50).min(200);
 
@@ -1191,27 +1534,15 @@ async fn api_channel_history(
 
     match messages {
         Some(rows) => {
-            let msgids: Vec<&str> = rows.iter().filter_map(|r| r.msgid.as_deref()).collect();
-            let reactions = state
-                .with_db(|db| db.get_reactions_for_messages(&msgids))
-                .unwrap_or_default();
             let resp: Vec<MessageResponse> = rows
                 .into_iter()
-                .map(|mut r| {
-                    if let Some(ref mid) = r.msgid
-                        && let Some(rows) = reactions.get(mid)
-                        && let Some(encoded) = crate::db::encode_reactions_tag(rows)
-                    {
-                        r.tags.insert("+freeq.at/reactions".to_string(), encoded);
-                    }
-                    MessageResponse {
-                        id: r.id,
-                        sender: r.sender,
-                        text: r.text,
-                        timestamp: r.timestamp,
-                        msgid: r.msgid,
-                        tags: r.tags,
-                    }
+                .map(|r| MessageResponse {
+                    id: r.id,
+                    sender: r.sender,
+                    text: r.text,
+                    timestamp: r.timestamp,
+                    msgid: r.msgid,
+                    tags: r.tags,
                 })
                 .collect();
             Ok(Json(resp))
@@ -1248,6 +1579,254 @@ async fn api_channel_history(
     }
 }
 
+/// Authorize a REST read of a channel's messages (history / search / export /
+/// permalink). Returns the normalized `#channel` on success.
+///
+/// - **Public** channels (no `+i`/`+k`/`+E`/policy restriction) are readable
+///   anonymously — same as before.
+/// - **Restricted** channels require an authenticated Bearer session whose DID
+///   is a member, DID-op, or founder. This replaces the old all-or-nothing
+///   `+i`/`+k` gate with real member-scoped access, matching IRC `CHATHISTORY`.
+/// - **Fails CLOSED**: a channel not resident in memory returns 404 rather than
+///   serving history openly (channels are loaded from the DB at boot, so a
+///   resident miss means we can't verify access controls). DM keys are refused.
+fn authorize_channel_read(
+    state: &SharedState,
+    name: &str,
+    headers: &axum::http::HeaderMap,
+) -> Result<String, StatusCode> {
+    let channel = if name.starts_with('#') {
+        name.to_string()
+    } else {
+        format!("#{name}")
+    };
+    let key = channel.to_lowercase();
+    if key.contains("dm:") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let caller = caller_did_from_bearer(state, headers);
+    // Snapshot what we need under the channels lock, then release it before
+    // touching session_dids (avoids nested lock-order coupling).
+    let (restricted, members, founder, did_ops) = {
+        let channels = state.channels.lock();
+        let Some(ch) = channels.get(&key) else {
+            return Err(StatusCode::NOT_FOUND); // fail closed
+        };
+        (
+            !state.channel_is_discoverable(&key, ch),
+            ch.members.clone(),
+            ch.founder_did.clone(),
+            ch.did_ops.clone(),
+        )
+    };
+
+    if !restricted {
+        return Ok(channel);
+    }
+    let Some(did) = caller else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if founder.as_deref() == Some(did.as_str()) || did_ops.contains(&did) {
+        return Ok(channel);
+    }
+    let session_dids = state.session_dids.lock();
+    let is_member = members
+        .iter()
+        .any(|sid| session_dids.get(sid).map(|d| d == &did).unwrap_or(false));
+    if is_member {
+        Ok(channel)
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// GET /api/v1/messages/{msgid} — permalink resolution. Returns the message
+/// plus its channel so clients can deep-link `irc.example.org/#/{channel}`
+/// scrolled to the msgid. Same access rules as channel history.
+async fn api_message_by_id(
+    Path(msgid): Path<String>,
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let row = state
+        .with_db(|db| db.find_message_by_msgid(&msgid))
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    authorize_channel_read(&state, &row.channel, &headers)?;
+    Ok(Json(serde_json::json!({
+        "channel": row.channel,
+        "msgid": row.msgid,
+        "sender": row.sender,
+        "sender_did": row.sender_did,
+        "text": row.text,
+        "timestamp": row.timestamp,
+        "tags": row.tags,
+        "replaces_msgid": row.replaces_msgid,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ExportQuery {
+    format: Option<String>,
+    limit: Option<usize>,
+    before: Option<u64>,
+}
+
+/// Render messages as a readable markdown transcript.
+fn format_export_markdown(channel: &str, rows: &[crate::db::MessageRow]) -> String {
+    let mut out = format!("# {channel} — exported transcript\n\n");
+    for r in rows {
+        let ts = chrono::DateTime::from_timestamp(r.timestamp as i64, 0)
+            .unwrap_or_default()
+            .format("%Y-%m-%d %H:%M:%S UTC");
+        let sender = r.sender.split('!').next().unwrap_or(&r.sender);
+        let msgid = r.msgid.as_deref().unwrap_or("-");
+        // Indent continuation lines so multiline messages stay readable.
+        let body = r.text.replace('\n', "\n    ");
+        out.push_str(&format!("- `{ts}` **{sender}** ({msgid}): {body}\n"));
+    }
+    out
+}
+
+/// GET /api/v1/channels/{name}/export?format=json|markdown — bulk export of
+/// a public channel's stored history, oldest-first. "The conversation is the
+/// commit": conversations must be extractable, not trapped in the database.
+async fn api_channel_export(
+    Path(name): Path<String>,
+    Query(params): Query<ExportQuery>,
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, StatusCode> {
+    use axum::response::IntoResponse as _;
+    let channel = authorize_channel_read(&state, &name, &headers)?;
+
+    let limit = params.limit.unwrap_or(1000).min(10_000);
+    let rows = state
+        .with_db(|db| db.get_messages(&channel, limit, params.before))
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    match params.format.as_deref().unwrap_or("json") {
+        "markdown" | "md" => Ok((
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8",
+            )],
+            format_export_markdown(&channel, &rows),
+        )
+            .into_response()),
+        _ => {
+            let resp: Vec<MessageResponse> = rows
+                .into_iter()
+                .map(|r| MessageResponse {
+                    id: r.id,
+                    sender: r.sender,
+                    text: r.text,
+                    timestamp: r.timestamp,
+                    msgid: r.msgid,
+                    tags: r.tags,
+                })
+                .collect();
+            Ok(Json(resp).into_response())
+        }
+    }
+}
+
+/// Render Prometheus text exposition format (version 0.0.4).
+fn format_metrics(
+    connections: usize,
+    channels: usize,
+    s2s_peers: usize,
+    messages_total: u64,
+    sasl_success_total: u64,
+    sasl_failure_total: u64,
+    uptime_seconds: u64,
+) -> String {
+    format!(
+        "# HELP freeq_connections Currently connected sessions\n\
+         # TYPE freeq_connections gauge\n\
+         freeq_connections {connections}\n\
+         # HELP freeq_channels Channels known to this server\n\
+         # TYPE freeq_channels gauge\n\
+         freeq_channels {channels}\n\
+         # HELP freeq_s2s_peers Authenticated federation peers\n\
+         # TYPE freeq_s2s_peers gauge\n\
+         freeq_s2s_peers {s2s_peers}\n\
+         # HELP freeq_messages_total PRIVMSG/NOTICE handled since start\n\
+         # TYPE freeq_messages_total counter\n\
+         freeq_messages_total {messages_total}\n\
+         # HELP freeq_sasl_success_total Successful SASL authentications since start\n\
+         # TYPE freeq_sasl_success_total counter\n\
+         freeq_sasl_success_total {sasl_success_total}\n\
+         # HELP freeq_sasl_failure_total Failed SASL authentications since start\n\
+         # TYPE freeq_sasl_failure_total counter\n\
+         freeq_sasl_failure_total {sasl_failure_total}\n\
+         # HELP freeq_uptime_seconds Seconds since process start\n\
+         # TYPE freeq_uptime_seconds gauge\n\
+         freeq_uptime_seconds {uptime_seconds}\n"
+    )
+}
+
+/// GET /metrics — Prometheus scrape endpoint.
+async fn api_metrics(State(state): State<Arc<SharedState>>) -> impl axum::response::IntoResponse {
+    use std::sync::atomic::Ordering::Relaxed;
+    let connections = state.connections.lock().len();
+    let channels = state.channels.lock().len();
+    let s2s = state.s2s_manager.lock().clone();
+    let s2s_peers = match s2s {
+        Some(mgr) => mgr.authenticated_peers.lock().await.len(),
+        None => 0,
+    };
+    let body = format_metrics(
+        connections,
+        channels,
+        s2s_peers,
+        state.metrics.messages_total.load(Relaxed),
+        state.metrics.sasl_success_total.load(Relaxed),
+        state.metrics.sasl_failure_total.load(Relaxed),
+        state.metrics.started_at.elapsed().as_secs(),
+    );
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        body,
+    )
+}
+
+/// GET /api/v1/search?channel=#name&q=terms — full-text history search.
+/// Channels only: DM search requires DID auth and goes through the IRC
+/// SEARCH command. Access rules mirror /channels/{name}/history: channels
+/// with +i or +k return 403.
+async fn api_search(
+    Query(params): Query<SearchQuery>,
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<Vec<MessageResponse>>, StatusCode> {
+    // Public channels search anonymously; restricted ones require a member
+    // Bearer (DM keys refused, non-resident channels fail closed).
+    let channel = authorize_channel_read(&state, &params.channel, &headers)?;
+
+    let limit = params.limit.unwrap_or(25).min(100);
+    let rows = state
+        .with_db(|db| db.search_messages(&channel, &params.q, limit, params.before))
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| MessageResponse {
+                id: r.id,
+                sender: r.sender,
+                text: r.text,
+                timestamp: r.timestamp,
+                msgid: r.msgid,
+                tags: r.tags,
+            })
+            .collect(),
+    ))
+}
+
 async fn api_channel_topic(
     Path(name): Path<String>,
     State(state): State<Arc<SharedState>>,
@@ -1279,36 +1858,56 @@ async fn api_channel_pins(
     } else {
         format!("#{name}")
     };
-    let channels = state.channels.lock();
-    match channels.get(&channel) {
-        Some(ch) => {
-            let pins: Vec<serde_json::Value> = ch
-                .pins
-                .iter()
-                .filter_map(|p| {
-                    // Look up current message content from history
-                    let msg = ch
-                        .history
-                        .iter()
-                        .find(|m| m.msgid.as_deref() == Some(&p.msgid))?;
-                    Some(serde_json::json!({
-                        "msgid": p.msgid,
-                        "from": msg.from,
-                        "text": msg.text,
-                        "timestamp": chrono::DateTime::from_timestamp(msg.timestamp as i64, 0)
-                            .map(|dt| dt.to_rfc3339())
-                            .unwrap_or_default(),
-                        "pinned_by": p.pinned_by,
-                        "pinned_at": p.pinned_at,
-                    }))
-                })
-                .collect();
-            Ok(Json(
-                serde_json::json!({ "channel": channel, "pins": pins }),
-            ))
+    let pin_list = {
+        let channels = state.channels.lock();
+        match channels.get(&channel) {
+            Some(ch) => ch.pins.clone(),
+            None => return Err(StatusCode::NOT_FOUND),
         }
-        None => Err(StatusCode::NOT_FOUND),
+    };
+
+    let mut pins: Vec<serde_json::Value> = Vec::new();
+    for p in &pin_list {
+        // Try in-memory history first, fall back to DB
+        let (from, text, timestamp) = {
+            let channels = state.channels.lock();
+            let ch = channels.get(&channel);
+            ch.and_then(|c| {
+                c.history
+                    .iter()
+                    .find(|m| m.msgid.as_deref() == Some(&p.msgid))
+                    .map(|msg| (msg.from.clone(), msg.text.clone(), msg.timestamp))
+            })
+        }
+        .or_else(|| {
+            state
+                .with_db(|db| db.find_message_by_msgid(&p.msgid))
+                .flatten()
+                .map(|row| (row.sender, row.text, row.timestamp))
+        })
+        .unwrap_or_else(|| {
+            (
+                "unknown".to_string(),
+                "[message not found]".to_string(),
+                p.pinned_at,
+            )
+        });
+
+        pins.push(serde_json::json!({
+            "msgid": p.msgid,
+            "from": from,
+            "text": text,
+            "timestamp": chrono::DateTime::from_timestamp(timestamp as i64, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_default(),
+            "pinned_by": p.pinned_by,
+            "pinned_at": p.pinned_at,
+        }));
     }
+
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "pins": pins }),
+    ))
 }
 
 async fn api_user(
@@ -1403,6 +2002,16 @@ struct BrokerSessionRequest {
     access_token: String,
     dpop_key_b64: String,
     dpop_nonce: Option<String>,
+    /// What the PDS actually granted (read from the token endpoint's `scope`
+    /// field). Defaults to `transition:generic` for backward compat with
+    /// older broker builds that don't send this field — those brokers
+    /// always asked for the legacy broad scope so this is conservative.
+    #[serde(default = "default_legacy_scope")]
+    granted_scope: String,
+}
+
+fn default_legacy_scope() -> String {
+    "atproto transition:generic".to_string()
 }
 
 #[derive(Serialize)]
@@ -1444,6 +2053,56 @@ async fn auth_broker_web_token(
     }))
 }
 
+/// [`freeq_auth_broker::SessionWriter`] that writes into this server's own
+/// in-process state — the embedded equivalent of the standalone broker's
+/// HMAC push. Mirrors the `/auth/broker/*` receiver bodies.
+pub struct LocalWriter {
+    pub state: Arc<SharedState>,
+}
+
+#[async_trait::async_trait]
+impl freeq_auth_broker::SessionWriter for LocalWriter {
+    async fn mint_web_token(
+        &self,
+        did: &str,
+        handle: &str,
+    ) -> Result<(String, String), anyhow::Error> {
+        let token = generate_random_string(32);
+        self.state.web_auth_tokens.lock().insert(
+            token.clone(),
+            (did.to_string(), handle.to_string(), std::time::Instant::now()),
+        );
+        Ok((token, mobile_nick_from_handle(handle)))
+    }
+
+    async fn push_session(
+        &self,
+        p: &freeq_auth_broker::SessionPush<'_>,
+    ) -> Result<(), anyhow::Error> {
+        self.state.web_sessions.lock().insert(
+            (p.did.to_string(), crate::server::OauthPurpose::Login),
+            crate::server::WebSession {
+                did: p.did.to_string(),
+                handle: p.handle.to_string(),
+                pds_url: p.pds_url.to_string(),
+                access_token: p.access_token.to_string(),
+                dpop_key_b64: p.dpop_key_b64.to_string(),
+                dpop_nonce: p.dpop_nonce.map(str::to_string),
+                created_at: std::time::Instant::now(),
+                granted_scope: p.granted_scope.to_string(),
+            },
+        );
+        // Upload token for mobile clients that can't prove session ownership
+        // via WebSocket session_dids (stored server-side, 5-min TTL).
+        let upload_token = generate_random_string(32);
+        self.state
+            .upload_tokens
+            .lock()
+            .insert(upload_token, (p.did.to_string(), std::time::Instant::now()));
+        Ok(())
+    }
+}
+
 async fn auth_broker_session(
     State(state): State<Arc<SharedState>>,
     headers: axum::http::HeaderMap,
@@ -1457,9 +2116,9 @@ async fn auth_broker_session(
     let req: BrokerSessionRequest = serde_json::from_slice(&body)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {e}")))?;
 
-    tracing::info!(did = %req.did, "Broker pushed web session");
+    tracing::info!(did = %req.did, scope = %req.granted_scope, "Broker pushed web session");
     state.web_sessions.lock().insert(
-        req.did.clone(),
+        (req.did.clone(), crate::server::OauthPurpose::Login),
         crate::server::WebSession {
             did: req.did.clone(),
             handle: req.handle.clone(),
@@ -1468,6 +2127,7 @@ async fn auth_broker_session(
             dpop_key_b64: req.dpop_key_b64.clone(),
             dpop_nonce: req.dpop_nonce.clone(),
             created_at: std::time::Instant::now(),
+            granted_scope: req.granted_scope.clone(),
         },
     );
 
@@ -1567,8 +2227,21 @@ async fn client_metadata(headers: axum::http::HeaderMap) -> Json<serde_json::Val
         "tos_uri": format!("{web_origin}"),
         "policy_uri": format!("{web_origin}"),
         "redirect_uris": [redirect_uri],
-        "scope": "atproto transition:generic",
-        "grant_types": ["authorization_code"],
+        // Advertise the union of scopes any flow may request. The AT
+        // Proto OAuth spec requires that scopes used at /authorize time
+        // appear here. Actual per-flow requests are narrower:
+        //   - Login (default sign-in)        → "atproto" only
+        //   - BlobUpload step-up             → "atproto blob:image/*"
+        //   - BlueskyPost step-up            → "atproto repo:app.bsky.feed.post"
+        //
+        // `transition:generic` is included for the grace-period: existing
+        // refresh tokens issued under the old wide grant must still be
+        // refreshable, and some PDSes verify that the original grant scope
+        // remains permitted by the current client metadata. We never ask
+        // for it on a fresh /authorize. Remove this entry once the PDS
+        // ecosystem has fully sunset transitional scopes.
+        "scope": "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic",
+        "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
         "application_type": "web",
@@ -1577,6 +2250,101 @@ async fn client_metadata(headers: axum::http::HeaderMap) -> Json<serde_json::Val
 }
 
 /// Derive web origin and scheme from Host header.
+/// Validate a URL we're about to fetch from on behalf of an OAuth flow.
+///
+/// Returns a DNS-pinned `reqwest::Client` and the parsed URL. Refuses
+/// URLs that:
+///   - aren't http/https,
+///   - have no host,
+///   - resolve to a loopback / private / link-local / metadata-service
+///     IP (per `freeq_sdk::ssrf::resolve_and_check`).
+///
+/// This is the SSRF guard for the OAuth chain: every URL after the
+/// first call (DID document → PDS URL → auth-server → token-endpoint)
+/// is fully attacker-controlled in the worst case, so we validate at
+/// every hop. Returns a generic error message that does NOT echo the
+/// host or IP back to the requester (info-leak hardening).
+async fn safe_outbound_client(
+    url_str: &str,
+    timeout: std::time::Duration,
+) -> Result<(url::Url, reqwest::Client), (StatusCode, &'static str)> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Refused: malformed URL"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Refused: URL scheme must be http or https",
+        ));
+    }
+    let host = parsed
+        .host_str()
+        .ok_or((StatusCode::BAD_REQUEST, "Refused: URL has no host"))?
+        .to_string();
+    let port = parsed
+        .port()
+        .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+    let addrs = freeq_sdk::ssrf::resolve_and_check(&host, port)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Refused: target is not publicly routable",
+            )
+        })?;
+
+    let mut builder = reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none());
+    for addr in &addrs {
+        builder = builder.resolve(&host, *addr);
+    }
+    let client = builder
+        .build()
+        .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "client build failed"))?;
+    Ok((parsed, client))
+}
+
+/// An outbound refusal carrying the exact `(status, message)`
+/// [`safe_outbound_client`] would have returned, so the engine's generic
+/// `anyhow` error can be mapped back to the original response at the handler
+/// boundary (preserving the CTF-07/08/09 4xx-fast-generic behavior).
+#[derive(Debug, thiserror::Error)]
+#[error("{msg}")]
+struct OutboundRefused {
+    status: StatusCode,
+    msg: &'static str,
+}
+
+/// [`freeq_oauth::ClientProvider`] backed by [`safe_outbound_client`]: SSRF
+/// validation + DNS pinning per URL. Used for OAuth discovery, where every hop
+/// (PDS → auth server) is attacker-influenced.
+struct SsrfClients {
+    timeout: std::time::Duration,
+}
+
+impl freeq_oauth::ClientProvider for SsrfClients {
+    async fn client_for(&self, url: &str) -> anyhow::Result<reqwest::Client> {
+        match safe_outbound_client(url, self.timeout).await {
+            Ok((_parsed, client)) => Ok(client),
+            Err((status, msg)) => Err(OutboundRefused { status, msg }.into()),
+        }
+    }
+}
+
+/// Map an engine discovery/validation error back to an HTTP response. An SSRF
+/// refusal keeps its original `(status, message)`; a metadata fetch/parse
+/// failure (which happens over an already-validated client) is a generic 502.
+fn map_outbound_err(e: anyhow::Error) -> (StatusCode, String) {
+    if let Some(r) = e.downcast_ref::<OutboundRefused>() {
+        (r.status, r.msg.to_string())
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            "Upstream metadata fetch failed".to_string(),
+        )
+    }
+}
+
 fn derive_web_origin(headers: &axum::http::HeaderMap) -> (String, String) {
     let raw_host = headers
         .get("host")
@@ -1604,26 +2372,6 @@ fn derive_web_origin_from_config(config: &crate::config::ServerConfig) -> (Strin
         "https"
     };
     (format!("{scheme}://{host}"), scheme.to_string())
-}
-
-/// Build OAuth client_id. Loopback uses http://localhost?... form;
-/// production uses {origin}/client-metadata.json.
-fn build_client_id(web_origin: &str, redirect_uri: &str) -> String {
-    if web_origin.starts_with("http://127.")
-        || web_origin.starts_with("http://192.168.")
-        || web_origin.starts_with("http://10.")
-    {
-        // Loopback client — use http://localhost form per AT Protocol spec
-        let scope = "atproto transition:generic";
-        format!(
-            "http://localhost?redirect_uri={}&scope={}",
-            urlencod(redirect_uri),
-            urlencod(scope),
-        )
-    } else {
-        // Production — client_id is the URL of the client-metadata.json document
-        format!("{web_origin}/client-metadata.json")
-    }
 }
 
 // ── OAuth endpoints for web client ─────────────────────────────────────
@@ -1712,8 +2460,11 @@ async fn auth_login(
     // Derive the origin from the Host header so redirect_uri matches what the browser sees
     let (web_origin, _scheme) = derive_web_origin(&headers);
 
-    // Resolve handle → DID → PDS
-    let resolver = freeq_sdk::did::DidResolver::http();
+    // Resolve handle → DID → PDS via the *configured* resolver so tests
+    // can swap implementations and so any future federation-aware
+    // resolver setting is honoured. (Was previously hardcoded to
+    // DidResolver::http().)
+    let resolver = state.did_resolver.clone();
     let did = resolver.resolve_handle(&handle).await.map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
@@ -1731,81 +2482,47 @@ async fn auth_login(
         )
     })?;
 
-    // Discover authorization server
-    let client = reqwest::Client::new();
-    let pr_url = format!(
-        "{}/.well-known/oauth-protected-resource",
-        pds_url.trim_end_matches('/')
-    );
-    let pr_meta: serde_json::Value = client
-        .get(&pr_url)
-        .send()
+    // Discover the authorization server through the shared engine. Every hop
+    // (PDS → auth server) is attacker-influenced via the DID document, so the
+    // provider SSRF-validates + DNS-pins a fresh client per URL. CTF-07/08/09
+    // regression tests pin this.
+    let provider = SsrfClients {
+        timeout: std::time::Duration::from_secs(8),
+    };
+    let auth_meta = freeq_oauth::discovery::discover_auth_server(&provider, &pds_url)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("PDS metadata fetch failed: {e}"),
-            )
-        })?
-        .json()
+        .map_err(map_outbound_err)?;
+    let authorization_endpoint = auth_meta.authorization_endpoint.as_str();
+    let token_endpoint = auth_meta.token_endpoint.as_str();
+    let par_endpoint = auth_meta
+        .pushed_authorization_request_endpoint
+        .as_deref()
+        .ok_or((StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
+    // Validate the endpoints the auth-server metadata named — these go straight
+    // from PDS-controlled JSON into URLs we redirect to / POST credentials to,
+    // so the SSRF surface extends past the metadata fetches.
+    provider
+        .client_for(authorization_endpoint)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("PDS metadata parse failed: {e}"),
-            )
-        })?;
-
-    let auth_server = pr_meta["authorization_servers"][0]
-        .as_str()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "No authorization server".to_string(),
-            )
-        })?;
-
-    let as_url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        auth_server.trim_end_matches('/')
-    );
-    let auth_meta: serde_json::Value = client
-        .get(&as_url)
-        .send()
+        .map_err(map_outbound_err)?;
+    provider
+        .client_for(token_endpoint)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Auth server metadata failed: {e}"),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Auth server metadata parse failed: {e}"),
-            )
-        })?;
+        .map_err(map_outbound_err)?;
+    let par_client = SsrfClients {
+        timeout: std::time::Duration::from_secs(10),
+    }
+    .client_for(par_endpoint)
+    .await
+    .map_err(map_outbound_err)?;
 
-    let authorization_endpoint = auth_meta["authorization_endpoint"]
-        .as_str()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "No authorization_endpoint".to_string(),
-            )
-        })?;
-    let token_endpoint = auth_meta["token_endpoint"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No token_endpoint".to_string()))?;
-    let par_endpoint = auth_meta["pushed_authorization_request_endpoint"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
-
-    // Build redirect URI and client_id
+    // Build redirect URI and client_id. Default purpose for `/auth/login`
+    // is `Login` — narrow `atproto` scope only. Phase-2 step-up flows
+    // (image upload, Bluesky cross-post) hit `/auth/step-up` instead and
+    // request additional scopes there.
     let redirect_uri = format!("{web_origin}/auth/callback");
-    let scope = "atproto transition:generic";
+    let purpose = crate::server::OauthPurpose::Login;
+    let scope = purpose.requested_scope();
     let client_id = build_client_id(&web_origin, &redirect_uri);
 
     // Generate PKCE + DPoP key + state
@@ -1813,86 +2530,23 @@ async fn auth_login(
     let (code_verifier, code_challenge) = generate_pkce();
     let oauth_state = generate_random_string(16);
 
-    // PAR request
-    let params = [
-        ("response_type", "code"),
-        ("client_id", &client_id),
-        ("redirect_uri", &redirect_uri),
-        ("code_challenge", &code_challenge),
-        ("code_challenge_method", "S256"),
-        ("scope", scope),
-        ("state", &oauth_state),
-        ("login_hint", &handle),
-    ];
-
-    // Try without nonce first
-    let dpop_proof = dpop_key
-        .proof("POST", par_endpoint, None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP proof failed: {e}"),
-            )
-        })?;
-    let resp = client
-        .post(par_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR failed: {e}")))?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let par_resp: serde_json::Value = if status.as_u16() == 400 && dpop_nonce.is_some() {
-        // Retry with nonce
-        let nonce = dpop_nonce.as_deref().unwrap();
-        let dpop_proof2 = dpop_key
-            .proof("POST", par_endpoint, Some(nonce), None)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DPoP retry failed: {e}"),
-                )
-            })?;
-        let resp2 = client
-            .post(par_endpoint)
-            .header("DPoP", &dpop_proof2)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR retry failed: {e}")))?;
-        if !resp2.status().is_success() {
-            let text = resp2.text().await.unwrap_or_default();
-            return Err((StatusCode::BAD_GATEWAY, format!("PAR failed: {text}")));
-        }
-        resp2
-            .json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR parse failed: {e}")))?
-    } else if status.is_success() {
-        resp.json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR parse failed: {e}")))?
-    } else {
-        let text = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("PAR failed ({status}): {text}"),
-        ));
-    };
-
-    let request_uri = par_resp["request_uri"].as_str().ok_or_else(|| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "No request_uri in PAR response".to_string(),
-        )
-    })?;
+    // Shared engine performs the PAR + DPoP nonce dance over the
+    // SSRF-validated par_client (DNS-pinned + timeout). The error is mapped to
+    // a generic string — the PDS body must not be reflected into our response.
+    let par = freeq_oauth::discovery::pushed_authorization_request(
+        &par_client,
+        par_endpoint,
+        &client_id,
+        &redirect_uri,
+        &code_challenge,
+        &oauth_state,
+        &handle,
+        scope,
+        &dpop_key,
+    )
+    .await
+    .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR failed".to_string()))?;
+    let request_uri = par.request_uri.as_str();
 
     // Store pending session
     let now = SystemTime::now()
@@ -1913,6 +2567,8 @@ async fn auth_login(
             created_at: now,
             mobile: q.mobile.as_deref() == Some("1"),
             irc_state: q.irc_state.clone(),
+            purpose,
+            requested_scope: scope.to_string(),
         },
     );
 
@@ -1925,6 +2581,170 @@ async fn auth_login(
     );
 
     tracing::info!(handle = %handle, did = %did, "OAuth login started, redirecting to auth server");
+    Ok(Redirect::temporary(&auth_url))
+}
+
+#[derive(Deserialize)]
+struct AuthStepUpQuery {
+    /// `blob_upload` or `bluesky_post` — see [`crate::server::OauthPurpose`].
+    purpose: String,
+    /// DID to step up. Must match an active Login session on this server,
+    /// otherwise the step-up is refused (we'd have nothing to "upgrade").
+    did: String,
+    /// If `1`, send a freeq:// custom-scheme redirect on completion (mobile).
+    mobile: Option<String>,
+}
+
+/// `GET /auth/step-up?purpose=blob_upload&did=did:plc:…`
+///
+/// Drives a second OAuth flow with a wider scope than the original login,
+/// without replacing the primary `Login` session. The callback at
+/// `/auth/callback` lands in the [`OauthPurpose::BlobUpload`] (or
+/// `BlueskyPost`) slot rather than overwriting `Login`, so the user can
+/// log out of media-upload permission later without losing their chat
+/// session.
+///
+/// Returns a temporary redirect to the PDS authorization endpoint.
+async fn auth_step_up(
+    headers: axum::http::HeaderMap,
+    Query(q): Query<AuthStepUpQuery>,
+    State(state): State<Arc<SharedState>>,
+) -> Result<Redirect, (StatusCode, String)> {
+    // Validate the requested purpose. Login is *not* a valid step-up
+    // purpose — that's what `/auth/login` is for.
+    let purpose = crate::server::OauthPurpose::parse(&q.purpose).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("Unknown purpose: {}", q.purpose),
+    ))?;
+    if matches!(purpose, crate::server::OauthPurpose::Login) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Use /auth/login for the primary login flow.".to_string(),
+        ));
+    }
+
+    // Require an existing Login session for this DID so step-up can't be
+    // used as a primary login backdoor by an unauthenticated caller.
+    let login_session = state
+        .web_sessions
+        .lock()
+        .get(&(q.did.clone(), crate::server::OauthPurpose::Login))
+        .cloned();
+    let login_session = login_session.ok_or((
+        StatusCode::UNAUTHORIZED,
+        "Step-up requires an active login session for this DID.".to_string(),
+    ))?;
+
+    let (web_origin, _) = derive_web_origin(&headers);
+
+    // Discover the PDS authorization server. Reuse the resolver path
+    // from auth_login — it's a couple of well-known fetches. Use the
+    // *configured* resolver so tests can swap implementations.
+    let resolver = state.did_resolver.clone();
+    let did_doc = resolver
+        .resolve(&q.did)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Cannot resolve DID: {e}")))?;
+    let pds_url = freeq_sdk::pds::pds_endpoint(&did_doc).ok_or((
+        StatusCode::BAD_REQUEST,
+        "No PDS in DID document".to_string(),
+    ))?;
+    // SSRF guard: validate every external URL before fetching, and use a
+    // DNS-pinned client with a hard timeout. The DID document is
+    // attacker-controlled (anyone can register a DID with whatever PDS
+    // URL they like), so without these the server happily fetches from
+    // 127.0.0.1, 169.254.169.254 (cloud metadata service), 10.x.x.x,
+    // etc. CTF-07 regression test pins this.
+    // Discover through the shared engine; the provider SSRF-validates + pins
+    // each attacker-influenced hop. Same path as auth_login. CTF-07 pins this.
+    let provider = SsrfClients {
+        timeout: std::time::Duration::from_secs(8),
+    };
+    let auth_meta = freeq_oauth::discovery::discover_auth_server(&provider, &pds_url)
+        .await
+        .map_err(map_outbound_err)?;
+    let authorization_endpoint = auth_meta.authorization_endpoint.as_str();
+    let token_endpoint = auth_meta.token_endpoint.as_str();
+    let par_endpoint = auth_meta
+        .pushed_authorization_request_endpoint
+        .as_deref()
+        .ok_or((StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
+    // The auth-server metadata is attacker-controlled too — validate the
+    // endpoints it named before we redirect a user to / POST credentials to them.
+    provider
+        .client_for(authorization_endpoint)
+        .await
+        .map_err(map_outbound_err)?;
+    provider
+        .client_for(token_endpoint)
+        .await
+        .map_err(map_outbound_err)?;
+    let par_client = SsrfClients {
+        timeout: std::time::Duration::from_secs(10),
+    }
+    .client_for(par_endpoint)
+    .await
+    .map_err(map_outbound_err)?;
+
+    let redirect_uri = format!("{web_origin}/auth/callback");
+    let scope = purpose.requested_scope();
+    let client_id = build_client_id(&web_origin, &redirect_uri);
+
+    let dpop_key = freeq_sdk::oauth::DpopKey::generate();
+    let (code_verifier, code_challenge) = generate_pkce();
+    let oauth_state = generate_random_string(16);
+
+    // Shared engine performs the PAR + DPoP nonce dance over the
+    // SSRF-validated par_client (DNS-pinned + timeout). The error is mapped to
+    // a generic string so we don't reflect attacker-controlled body/URLs back.
+    let par = freeq_oauth::discovery::pushed_authorization_request(
+        &par_client,
+        par_endpoint,
+        &client_id,
+        &redirect_uri,
+        &code_challenge,
+        &oauth_state,
+        &login_session.handle,
+        scope,
+        &dpop_key,
+    )
+    .await
+    .map_err(|_| (StatusCode::BAD_GATEWAY, "PAR failed".to_string()))?;
+    let request_uri = par.request_uri.as_str();
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    state.oauth_pending.lock().insert(
+        oauth_state.clone(),
+        crate::server::OAuthPending {
+            handle: login_session.handle.clone(),
+            did: q.did.clone(),
+            pds_url,
+            code_verifier,
+            redirect_uri: redirect_uri.clone(),
+            client_id: client_id.clone(),
+            token_endpoint: token_endpoint.to_string(),
+            dpop_key_b64: dpop_key.to_base64url(),
+            created_at: now,
+            mobile: q.mobile.as_deref() == Some("1"),
+            irc_state: None,
+            purpose,
+            requested_scope: scope.to_string(),
+        },
+    );
+
+    let auth_url = format!(
+        "{}?client_id={}&request_uri={}",
+        authorization_endpoint,
+        urlencod(&client_id),
+        urlencod(request_uri),
+    );
+    tracing::info!(
+        did = %q.did, purpose = purpose.as_str(), scope = %scope,
+        "OAuth step-up started, redirecting to auth server",
+    );
     Ok(Redirect::temporary(&auth_url))
 }
 
@@ -1971,12 +2791,20 @@ async fn auth_callback(
             )
         })?;
 
-    // Check expiry (5 minutes)
+    // Check expiry. Step-up flows live in a popup that the user might
+    // ignore briefly to read what Bluesky's consent screen says, so
+    // give them a longer window than primary login. Pre-existing
+    // primary-login behaviour (5 min) is preserved.
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    if now - pending.created_at > 300 {
+    let ttl = if matches!(pending.purpose, crate::server::OauthPurpose::Login) {
+        300
+    } else {
+        600
+    };
+    if now - pending.created_at > ttl {
         return Err((StatusCode::BAD_REQUEST, "OAuth session expired".to_string()));
     }
 
@@ -1989,115 +2817,118 @@ async fn auth_callback(
             )
         })?;
 
+    // Shared engine performs the code exchange + DPoP nonce-retry dance.
+    // No SSRF client here: the token_endpoint was already SSRF-validated in
+    // auth_login/auth_step_up before it was stored in `pending`. On failure
+    // render the OAuth result page (this handler has no mobile-redirect
+    // branch — that happens later, after the identity is known).
     let client = reqwest::Client::new();
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", pending.redirect_uri.as_str()),
-        ("client_id", pending.client_id.as_str()),
-        ("code_verifier", pending.code_verifier.as_str()),
-    ];
-
-    // Try without nonce
-    let dpop_proof = dpop_key
-        .proof("POST", &pending.token_endpoint, None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP proof failed: {e}"),
-            )
-        })?;
-    let resp = client
-        .post(&pending.token_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Token exchange failed: {e}"),
-            )
-        })?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let token_resp: serde_json::Value =
-        if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
-            let nonce = dpop_nonce.as_deref().unwrap();
-            let dpop_proof2 = dpop_key
-                .proof("POST", &pending.token_endpoint, Some(nonce), None)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("DPoP retry failed: {e}"),
-                    )
-                })?;
-            let resp2 = client
-                .post(&pending.token_endpoint)
-                .header("DPoP", &dpop_proof2)
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token retry failed: {e}")))?;
-            if !resp2.status().is_success() {
-                let text = resp2.text().await.unwrap_or_default();
-                return Ok(oauth_result_page(
-                    &format!("Token exchange failed: {text}"),
-                    None,
-                ));
-            }
-            resp2
-                .json()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-        } else if status.is_success() {
-            resp.json()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-        } else {
-            let text = resp.text().await.unwrap_or_default();
-            return Ok(oauth_result_page(
-                &format!("Token exchange failed ({status}): {text}"),
-                None,
-            ));
-        };
+    let exchanged = match freeq_oauth::flow::exchange_code(
+        &client,
+        &pending.token_endpoint,
+        code,
+        &pending.code_verifier,
+        &pending.redirect_uri,
+        &pending.client_id,
+        &dpop_key,
+        None,
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => return Ok(oauth_result_page(&e.to_string(), None)),
+    };
+    let token_resp = exchanged.token_response;
+    let dpop_nonce = exchanged.dpop_nonce;
 
     let access_token = token_resp["access_token"]
         .as_str()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No access_token".to_string()))?;
+    // The PDS reports back which scope it actually granted. May not match
+    // what we requested — older PDSes downgrade granular requests to
+    // `transition:generic`. Store it so per-purpose checks can be honest.
+    let granted_scope = token_resp["scope"]
+        .as_str()
+        .unwrap_or(pending.requested_scope.as_str())
+        .to_string();
 
-    // Generate a one-time web auth token for SASL
-    let web_token = generate_random_string(32);
-    state.web_auth_tokens.lock().insert(
-        web_token.clone(),
-        (
-            pending.did.clone(),
-            pending.handle.clone(),
-            std::time::Instant::now(),
-        ),
-    );
+    let is_step_up = !matches!(pending.purpose, crate::server::OauthPurpose::Login);
+
+    // Mint a one-time SASL web-token only for the primary login flow.
+    // Step-ups produce *additional* PDS grants for the same already-
+    // logged-in user — we don't want to issue a second SASL token and
+    // confuse the IRC layer into thinking the identity changed.
+    let web_token = if is_step_up {
+        None
+    } else {
+        let token = generate_random_string(32);
+        state.web_auth_tokens.lock().insert(
+            token.clone(),
+            (
+                pending.did.clone(),
+                pending.handle.clone(),
+                std::time::Instant::now(),
+            ),
+        );
+        Some(token)
+    };
+
+    // Embedded durable session (Login only): persist the broker session
+    // (refresh token + client_id) into the in-process store and issue a
+    // broker_token, so /session can silently refresh without a re-login.
+    let broker_token = match (is_step_up, state.embedded_session_store.as_ref()) {
+        (false, Some(store)) => {
+            if let Some(refresh_token) = token_resp["refresh_token"].as_str() {
+                let bt = generate_random_string(32);
+                let now = SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64;
+                let rec = freeq_auth_broker::BrokerSessionRecord {
+                    broker_token: bt.clone(),
+                    did: pending.did.clone(),
+                    handle: pending.handle.clone(),
+                    pds_url: pending.pds_url.clone(),
+                    token_endpoint: pending.token_endpoint.clone(),
+                    refresh_token: refresh_token.to_string(),
+                    dpop_key_b64: pending.dpop_key_b64.clone(),
+                    dpop_nonce: dpop_nonce.clone(),
+                    client_id: pending.client_id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                match store.insert(&rec).await {
+                    Ok(()) => Some(bt),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "embedded session persist failed");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
 
     let result = crate::server::OAuthResult {
         did: pending.did.clone(),
         handle: pending.handle.clone(),
         access_jwt: access_token.to_string(),
         pds_url: pending.pds_url.clone(),
-        web_token: Some(web_token),
+        web_token,
+        broker_token,
         created_at: SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
     };
 
-    // Store web session for server-proxied operations (media upload)
+    // Store web session for server-proxied operations under the purpose
+    // this OAuth flow was started for (Login, BlobUpload, etc.). A user
+    // with both Login and BlobUpload sessions has two independent grants.
     state.web_sessions.lock().insert(
-        pending.did.clone(),
+        (pending.did.clone(), pending.purpose),
         crate::server::WebSession {
             did: pending.did.clone(),
             handle: pending.handle.clone(),
@@ -2106,10 +2937,15 @@ async fn auth_callback(
             dpop_key_b64: pending.dpop_key_b64.clone(),
             dpop_nonce: dpop_nonce.clone(),
             created_at: std::time::Instant::now(),
+            granted_scope: granted_scope.clone(),
         },
     );
 
-    tracing::info!(did = %pending.did, handle = %pending.handle, mobile = pending.mobile, "OAuth callback: token obtained, session stored");
+    tracing::info!(
+        did = %pending.did, handle = %pending.handle, mobile = pending.mobile,
+        purpose = pending.purpose.as_str(), scope = %granted_scope,
+        "OAuth callback: token obtained, session stored",
+    );
 
     // IRC /login command — complete auth on the IRC connection
     if let Some(ref irc_state) = pending.irc_state {
@@ -2155,12 +2991,42 @@ p {{ color: #a0a0b0; margin: 8px 0; }}
         // If session not found (expired/disconnected), fall through to normal web flow
     }
 
+    // Step-up flow: don't post a new identity to the parent window.
+    // Just signal "step-up complete for purpose=X" so the web client
+    // can retry whatever it was doing (e.g. re-POST the upload).
+    if is_step_up {
+        // Mobile clients use ASWebAuthenticationSession with a freeq://
+        // callback — the BroadcastChannel HTML doesn't reach them. Send a
+        // custom-scheme redirect they can intercept and resume the upload.
+        if pending.mobile {
+            let redirect = format!(
+                "freeq://step-up?ok=1&purpose={}",
+                urlencod(pending.purpose.as_str()),
+            );
+            let html = format!(
+                r#"<!DOCTYPE html><html><head><meta http-equiv="refresh" content="0;url={redirect}"></head><body><script>window.location.href = "{redirect}";</script><p>Returning to freeq…</p></body></html>"#
+            );
+            return Ok((
+                [
+                    ("content-type", "text/html; charset=utf-8"),
+                    (
+                        "content-security-policy",
+                        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+                    ),
+                ],
+                html,
+            ));
+        }
+        return Ok(step_up_result_page(pending.purpose.as_str()));
+    }
+
     // Mobile apps get a redirect to freeq:// custom scheme
     if pending.mobile {
         let nick = mobile_nick_from_handle(&pending.handle);
         let redirect = format!(
-            "freeq://auth?token={}&nick={}&did={}&handle={}",
+            "freeq://auth?token={}&broker_token={}&nick={}&did={}&handle={}",
             urlencod(result.web_token.as_deref().unwrap_or("")),
+            urlencod(result.broker_token.as_deref().unwrap_or("")),
             urlencod(&nick),
             urlencod(&result.did),
             urlencod(&result.handle),
@@ -2185,6 +3051,50 @@ p {{ color: #a0a0b0; margin: 8px 0; }}
         "Authentication successful!",
         Some(&result),
     ))
+}
+
+/// HTML page returned to the popup at the end of a step-up OAuth flow.
+/// Carries no identity — only signals that the caller (the same logged-in
+/// user) gained the additional purpose's permission. The web app picks
+/// this up via `BroadcastChannel('freeq-oauth-step-up')` and retries
+/// whatever it was doing.
+fn step_up_result_page(purpose: &str) -> ([(&'static str, &'static str); 2], String) {
+    let html = format!(
+        r#"<!DOCTYPE html><html><head><meta charset="utf-8"/><title>freeq</title>
+<style>
+body {{ font-family: system-ui, sans-serif; background: #1a1a2e; color: #e0e0e0;
+       display: flex; justify-content: center; align-items: center;
+       min-height: 100vh; margin: 0; }}
+.card {{ background: #16162a; border: 1px solid #2a2a4a; border-radius: 16px;
+        padding: 32px; text-align: center; max-width: 380px; }}
+h1 {{ color: #6c63ff; font-size: 20px; margin: 0 0 12px 0; }}
+p {{ color: #a0a0b0; margin: 6px 0; font-size: 14px; }}
+</style></head><body>
+<div class="card">
+<h1>✓ Permission granted</h1>
+<p>You can close this window — freeq will continue automatically.</p>
+</div>
+<script>
+try {{
+  const msg = {{ type: 'freeq-oauth-step-up', purpose: '{purpose}' }};
+  try {{ const bc = new BroadcastChannel('freeq-oauth-step-up'); bc.postMessage(msg); bc.close(); }} catch(e) {{}}
+  if (window.opener) {{
+    try {{ window.opener.postMessage(msg, window.location.origin); }} catch(e) {{}}
+  }}
+  setTimeout(() => window.close(), 800);
+}} catch(e) {{}}
+</script></body></html>"#,
+    );
+    (
+        [
+            ("content-type", "text/html; charset=utf-8"),
+            (
+                "content-security-policy",
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+            ),
+        ],
+        html,
+    )
 }
 
 /// Generate the HTML page returned by the OAuth callback.
@@ -2248,6 +3158,29 @@ fn oauth_result_html(message: &str, result: Option<&crate::server::OAuthResult>)
         String::new()
     };
 
+    // SECURITY: HTML-escape the message before interpolating it into
+    // the page body. `message` may carry attacker-controlled content
+    // — most directly via /auth/callback?error=<script>… (anyone can
+    // land a victim on that URL), but also via PDS-controlled error
+    // bodies. The page's CSP allows inline scripts so any unescaped
+    // `<script>` would actually execute. CTF-11 regression test pins
+    // this.
+    fn html_escape(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '&' => out.push_str("&amp;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&#x27;"),
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+    let safe_message = html_escape(message);
+
     // Show different text depending on whether this is a popup or same-window flow
     let close_hint = if result.is_some() {
         "<p id=\"hint\" style=\"color:#6c7086\">Connecting...</p>\
@@ -2268,32 +3201,10 @@ body {{ font-family: system-ui; background: #1e1e2e; color: #cdd6f4; display: fl
 h1 {{ color: #89b4fa; font-size: 20px; }}
 p {{ color: #a6adc8; }}
 </style></head>
-<body><div class="box"><h1>freeq</h1><p>{message}</p>{close_hint}</div>
+<body><div class="box"><h1>freeq</h1><p>{safe_message}</p>{close_hint}</div>
 {script}
 </body></html>"#
     )
-}
-
-fn generate_pkce() -> (String, String) {
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-    let verifier = generate_random_string(32);
-    let hash = Sha256::digest(verifier.as_bytes());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
-    (verifier, challenge)
-}
-
-pub fn generate_random_string(len: usize) -> String {
-    use base64::Engine;
-    use rand::RngCore;
-    let mut bytes = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
-}
-
-fn urlencod(s: &str) -> String {
-    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
 }
 
 /// Derive an IRC nick from an AT Protocol handle.
@@ -2331,7 +3242,12 @@ async fn api_upload(
     let mut did = String::new();
     let mut alt = None::<String>;
     let mut channel = None::<String>;
-    let mut cross_post = false;
+    let mut filename = None::<String>;
+    // Two independent opt-in share toggles (default: private-only).
+    // `share_bluesky` (feed post) implies `share_pds` since the feed embed
+    // references the PDS blob. `cross_post` is the legacy alias for it.
+    let mut share_pds = false;
+    let mut share_bluesky = false;
 
     while let Some(field) = multipart
         .next_field()
@@ -2343,6 +3259,9 @@ async fn api_upload(
             "file" => {
                 if let Some(ct) = field.content_type() {
                     content_type = ct.to_string();
+                }
+                if let Some(fname) = field.file_name() {
+                    filename = Some(fname.to_string());
                 }
                 let bytes = field
                     .bytes()
@@ -2376,9 +3295,13 @@ async fn api_upload(
                         (StatusCode::BAD_REQUEST, format!("Channel read error: {e}"))
                     })?);
             }
-            "cross_post" => {
+            "share_pds" => {
                 let val = field.text().await.unwrap_or_default();
-                cross_post = val == "true" || val == "1";
+                share_pds = val == "true" || val == "1";
+            }
+            "share_bluesky" | "cross_post" => {
+                let val = field.text().await.unwrap_or_default();
+                share_bluesky = val == "true" || val == "1";
             }
             _ => {}
         }
@@ -2389,6 +3312,8 @@ async fn api_upload(
     if did.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "No DID provided".into()));
     }
+    // A Bluesky feed post needs the blob on the PDS, so it implies share_pds.
+    let share_pds = share_pds || share_bluesky;
 
     // ── Upload auth: verify the caller owns this DID ────────────────────
     // Accept either:
@@ -2417,72 +3342,193 @@ async fn api_upload(
         ));
     }
 
-    // Look up the user's web session (PDS credentials)
-    let session = state.web_sessions.lock().get(&did).cloned();
-    let session = match session {
-        Some(s) => s,
-        None => {
-            let count = state.web_sessions.lock().len();
-            tracing::warn!(did = %did, session_count = count, "Upload 401: no web session for DID");
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                "No active session for this DID — please re-authenticate".into(),
-            ));
+    // ── Opt-in PDS authorization ────────────────────────────────────────
+    // Private uploads (the default) never touch the PDS, so they need NO blob
+    // scope. Only when the user opts to share do we resolve a blob-upload
+    // session and, if absent, ask the client to step up. We check this BEFORE
+    // storing privately so a step-up retry doesn't leave an orphaned blob.
+    let pds_session = if share_pds {
+        // Prefer the dedicated BlobUpload session (Phase 2 step-up); fall back
+        // to the primary Login session only when its granted scope already
+        // covers blob upload (legacy wide grant).
+        let session = {
+            let sessions = state.web_sessions.lock();
+            let purpose = crate::server::OauthPurpose::BlobUpload;
+            if let Some(s) = sessions.get(&(did.clone(), purpose)) {
+                Some(s.clone())
+            } else if let Some(s) = sessions.get(&(did.clone(), crate::server::OauthPurpose::Login))
+                && crate::server::scope_satisfies_purpose(&s.granted_scope, purpose)
+            {
+                Some(s.clone())
+            } else {
+                None
+            }
+        };
+        match session {
+            Some(s) => Some(s),
+            None => {
+                let has_login = state
+                    .web_sessions
+                    .lock()
+                    .contains_key(&(did.clone(), crate::server::OauthPurpose::Login));
+                let body = if has_login {
+                    serde_json::json!({
+                        "error": "step_up_required",
+                        "purpose": "blob_upload",
+                        "step_up_url": "/auth/step-up?purpose=blob_upload",
+                        "message": "Sharing this file to your PDS needs an additional \
+                                    permission. Authorize once and we'll proceed.",
+                    })
+                } else {
+                    serde_json::json!({
+                        "error": "not_authenticated",
+                        "message": "No active session for this DID — please log in.",
+                    })
+                };
+                tracing::warn!(did = %did, has_login, "Share denied: no blob-upload-capable session");
+                return Err((
+                    if has_login {
+                        StatusCode::FORBIDDEN
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    },
+                    body.to_string(),
+                ));
+            }
         }
+    } else {
+        None
     };
 
-    // Upload to PDS using stored DPoP credentials
-    let dpop_key =
-        freeq_sdk::oauth::DpopKey::from_base64url(&session.dpop_key_b64).map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP key error: {e}"),
-            )
-        })?;
-
-    let result = freeq_sdk::media::upload_media_to_pds(
-        &session.pds_url,
-        &session.did,
-        &session.access_token,
-        Some(&dpop_key),
-        session.dpop_nonce.as_deref(),
-        &content_type,
-        &file_data,
-        alt.as_deref(),
-        channel.as_deref(),
-        cross_post,
-    )
-    .await
-    .map_err(|e| {
-        tracing::warn!(did = %did, error = %e, "Media upload failed");
-        (StatusCode::BAD_GATEWAY, format!("PDS upload failed: {e}"))
+    // ── Private storage (always) ────────────────────────────────────────
+    // Store the bytes encrypted-at-rest and mint a signed capability URL. The
+    // in-channel message always references this URL regardless of sharing, so
+    // the conversation renders consistently and nothing leaks publicly by
+    // default.
+    let (Some(store), Some(db)) = (state.media_store.as_ref(), state.db.as_ref()) else {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Private media storage is unavailable on this server".into(),
+        ));
+    };
+    let media_id = crate::media_store::new_id();
+    let stored_filename = pick_media_filename(filename.as_deref(), &content_type);
+    let size = file_data.len() as u64;
+    let scope = channel.clone().unwrap_or_default();
+    store.put(&media_id, &file_data).map_err(|e| {
+        tracing::error!(media_id = %media_id, error = %e, "Failed to write private media blob");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to store media".into(),
+        )
     })?;
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Err(e) = db.lock().insert_media(
+        &media_id,
+        &did,
+        &scope,
+        &content_type,
+        size,
+        alt.as_deref(),
+        &stored_filename,
+        created_at,
+    ) {
+        // Roll back the orphaned blob so we don't leave unreferenced bytes.
+        store.remove(&media_id);
+        tracing::error!(media_id = %media_id, error = %e, "Failed to record media metadata");
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to store media".into(),
+        ));
+    }
+    let (origin, _) = derive_web_origin(&headers);
+    let client_url = store.capability_url(&origin, &media_id, &stored_filename);
 
-    // Update stored DPoP nonce so subsequent uploads don't start stale
-    if let Some(ref new_nonce) = result.updated_nonce
-        && let Some(session) = state.web_sessions.lock().get_mut(&did)
-    {
-        session.dpop_nonce = Some(new_nonce.clone());
+    // ── Opt-in PDS / Bluesky share (best-effort) ────────────────────────
+    // A failure here does NOT fail the upload: the private copy already
+    // succeeded and the channel message will render. We only warn.
+    if let Some(session) = pds_session {
+        match freeq_sdk::oauth::DpopKey::from_base64url(&session.dpop_key_b64) {
+            Ok(dpop_key) => {
+                match freeq_sdk::media::upload_media_to_pds(
+                    &session.pds_url,
+                    &session.did,
+                    &session.access_token,
+                    Some(&dpop_key),
+                    session.dpop_nonce.as_deref(),
+                    &content_type,
+                    &file_data,
+                    alt.as_deref(),
+                    channel.as_deref(),
+                    share_bluesky,
+                )
+                .await
+                {
+                    Ok(result) => {
+                        // Persist the refreshed DPoP nonce for next time.
+                        if let Some(ref new_nonce) = result.updated_nonce {
+                            let mut sessions = state.web_sessions.lock();
+                            let blob_key = (did.clone(), crate::server::OauthPurpose::BlobUpload);
+                            if let Some(s) = sessions.get_mut(&blob_key) {
+                                s.dpop_nonce = Some(new_nonce.clone());
+                            } else if let Some(s) =
+                                sessions.get_mut(&(did.clone(), crate::server::OauthPurpose::Login))
+                            {
+                                s.dpop_nonce = Some(new_nonce.clone());
+                            }
+                        }
+                        tracing::info!(
+                            did = %did, share_bluesky,
+                            "Media also shared to PDS"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(did = %did, error = %format!("{e:#}"), "PDS share failed (private copy kept)");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(did = %did, error = %e, "PDS share skipped: bad DPoP key");
+            }
+        }
     }
 
-    // For non-image content, proxy through our server to avoid PDS
-    // Content-Disposition: attachment and sandbox CSP blocking playback
-    let client_url = if !result.mime_type.starts_with("image/") {
-        let encoded = urlencoding::encode(&result.url);
-        // Include mime hint so clients can render without HEAD request
-        let mime_encoded = urlencoding::encode(&result.mime_type);
-        format!("https://irc.freeq.at/api/v1/blob?url={encoded}&mime={mime_encoded}")
-    } else {
-        result.url.clone()
-    };
-
-    tracing::info!(did = %did, url = %client_url, size = result.size, "Media uploaded to PDS");
+    tracing::info!(did = %did, url = %client_url, size, share_pds, "Private media stored");
 
     Ok(Json(serde_json::json!({
         "url": client_url,
-        "content_type": result.mime_type,
-        "size": result.size,
+        "content_type": content_type,
+        "size": size,
+        "private": !share_pds,
     })))
+}
+
+/// Choose a stored filename that keeps a usable extension, so the capability
+/// URL's trailing segment lets clients detect the media type by extension.
+fn pick_media_filename(provided: Option<&str>, mime: &str) -> String {
+    let ext = match mime {
+        "image/jpeg" => ".jpg",
+        "image/png" => ".png",
+        "image/gif" => ".gif",
+        "image/webp" => ".webp",
+        "video/mp4" => ".mp4",
+        "video/quicktime" => ".mov",
+        "video/webm" => ".webm",
+        "audio/mpeg" => ".mp3",
+        "audio/mp4" | "audio/x-m4a" => ".m4a",
+        "audio/ogg" => ".ogg",
+        "audio/wav" | "audio/x-wav" => ".wav",
+        "application/pdf" => ".pdf",
+        _ => "",
+    };
+    match provided {
+        Some(n) if n.contains('.') => n.to_string(),
+        Some(n) if !n.is_empty() => format!("{n}{ext}"),
+        _ => format!("media{ext}"),
+    }
 }
 
 // ── Channel invite page ────────────────────────────────────────────────
@@ -2494,6 +3540,222 @@ fn html_escape(s: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#x27;")
+}
+
+/// WebSocket MoQ endpoint (root path) — upgrades to MoQ session through the SFU cluster.
+/// The `?jwt=` query param carries the session token (mirrors the QUIC
+/// transport, where `AuthParams::from_url` parses the same param).
+#[cfg(feature = "av-native")]
+async fn av_moq_ws_root(
+    ws: axum::extract::WebSocketUpgrade,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<crate::server::SharedState>>,
+) -> impl IntoResponse {
+    let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
+    let sfu = state.sfu_state.lock().clone();
+    match sfu {
+        // qmux requires "webtransport" subprotocol for MoQ framing over WebSocket
+        Some(sfu) => ws
+            .protocols(["webtransport"])
+            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, String::new(), jwt, socket))
+            .into_response(),
+        None => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "SFU not initialized",
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(not(feature = "av-native"))]
+async fn av_moq_ws_root() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "AV not enabled",
+    )
+}
+
+/// WebSocket MoQ endpoint with path — upgrades to MoQ session through the SFU cluster.
+/// Path format: {session_id}/{nick} for publish, {session_id} for subscribe.
+#[cfg(feature = "av-native")]
+async fn av_moq_ws(
+    ws: axum::extract::WebSocketUpgrade,
+    Path(path): Path<String>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+    State(state): State<Arc<crate::server::SharedState>>,
+) -> impl IntoResponse {
+    tracing::info!(path = %path, "MoQ WebSocket upgrade with path");
+
+    let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
+    let sfu = state.sfu_state.lock().clone();
+    match sfu {
+        Some(sfu) => ws
+            .protocols(["webtransport"])
+            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, jwt, socket))
+            .into_response(),
+        None => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "SFU not initialized",
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(not(feature = "av-native"))]
+async fn av_moq_ws() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "AV not enabled",
+    )
+}
+
+/// GET /api/v1/av/sessions/{id}/token — mint a MoQ access token for an AV
+/// session. Requires a Bearer IRC session whose DID is an active participant
+/// (clients av-join over IRC before dialing the SFU, so this always holds by
+/// the time they need a token). The same token is also pushed over IRC as a
+/// `+freeq.at/av-token` TAGMSG on av-start/av-join; this endpoint exists for
+/// clients that find request/response easier than tag parsing (the web app).
+#[cfg(feature = "av-native")]
+async fn api_av_session_token(
+    Path(id): Path<String>,
+    State(state): State<Arc<crate::server::SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let Some(caller) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+
+    let is_active_participant = {
+        let mgr = state.av_sessions.lock();
+        mgr.get(&id)
+            .map(|s| {
+                s.participants
+                    .values()
+                    .any(|p| p.did == caller && p.left_at.is_none())
+            })
+            .unwrap_or(false)
+    };
+    if !is_active_participant {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "not an active participant of this session" })),
+        );
+    }
+
+    let sfu = state.sfu_state.lock().clone();
+    let Some(token) = sfu.and_then(|sfu| sfu.mint_session_token(&id)) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "SFU token minting unavailable" })),
+        );
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "token": token,
+            "expires_in": crate::av_sfu::AV_TOKEN_TTL_SECS,
+        })),
+    )
+}
+
+#[cfg(not(feature = "av-native"))]
+async fn api_av_session_token() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        "AV not enabled",
+    )
+}
+
+/// Serve the AV call page (SFU web UI for browser audio).
+/// Sets its own CSP to allow inline scripts (the global middleware skips when CSP is already set).
+async fn av_call_page() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::OK,
+        [
+            ("content-type", "text/html; charset=utf-8"),
+            (
+                "content-security-policy",
+                "default-src 'self'; script-src 'self' 'unsafe-inline' blob:; style-src 'self' 'unsafe-inline'; connect-src 'self' wss: https:; media-src 'self' blob:; img-src 'self' data:; worker-src 'self' blob:",
+            ),
+        ],
+        include_str!("../static/av/call.html"),
+    )
+}
+
+/// Serve AV JS assets (moq-publish, moq-watch, etc).
+async fn av_asset(Path(filename): Path<String>) -> impl IntoResponse {
+    let files: &[(&str, &str)] = &[
+        // Rebuilt 2026-05-25 as component-only bundles (side-effect
+        // imports of @moq/publish/element and @moq/watch/element).
+        //
+        // Previous bundles (watch-DdXJRVCU.js / publish-CKcN3504.js)
+        // were built from iroh-live-relay/web's demo app — they
+        // include the demo wrapper that does
+        // `document.getElementById("publish")` and throws on missing
+        // element. That's why the browser console showed:
+        //   "missing <moq-publish> element"
+        //   "Cannot read properties of null (reading 'addEventListener')"
+        // No amount of placeholder elements in moq-loader.ts could
+        // satisfy the demo wrapper, because it looks for IDs
+        // ("publish", "watch", "landing", ...) not tag names.
+        //
+        // Build source: /tmp/moq-components-bundle (a minimal Vite
+        // project with src/{publish,watch}-elem.ts each containing
+        // just `import "@moq/{publish,watch}/element"`). Built with
+        // @moq/hang pinned to 0.2.5 because 0.2.6 transitively
+        // depends on @moq/loc which is unpublished on npm.
+        (
+            "watch-CTz_Tjt7.js",
+            include_str!("../static/av/assets/watch-CTz_Tjt7.js"),
+        ),
+        (
+            "publish-Du5ksDQe.js",
+            include_str!("../static/av/assets/publish-Du5ksDQe.js"),
+        ),
+        (
+            "time-D4Xqna_f.js",
+            include_str!("../static/av/assets/time-D4Xqna_f.js"),
+        ),
+        (
+            "main-DGBFe0O7-CIZu5tmC.js",
+            include_str!("../static/av/assets/main-DGBFe0O7-CIZu5tmC.js"),
+        ),
+        (
+            "main-DGBFe0O7-DQ8if_La.js",
+            include_str!("../static/av/assets/main-DGBFe0O7-DQ8if_La.js"),
+        ),
+        (
+            "libav-opus-af-BlMWboA7-B4GfDr9_.js",
+            include_str!("../static/av/assets/libav-opus-af-BlMWboA7-B4GfDr9_.js"),
+        ),
+        (
+            "libav-opus-af-BlMWboA7-CFTeN5TA.js",
+            include_str!("../static/av/assets/libav-opus-af-BlMWboA7-CFTeN5TA.js"),
+        ),
+    ];
+    for (name, body) in files {
+        if filename == *name {
+            return (
+                axum::http::StatusCode::OK,
+                [(
+                    "content-type",
+                    "application/javascript; charset=utf-8".to_string(),
+                )],
+                body.to_string(),
+            )
+                .into_response();
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        [("content-type", "text/plain".to_string())],
+        "not found".to_string(),
+    )
+        .into_response()
 }
 
 async fn channel_invite_page(
@@ -2702,6 +3964,120 @@ async fn api_blob_proxy(
     (status, resp_headers, bytes).into_response()
 }
 
+/// Serve a privately-stored media blob via a signed capability URL.
+///
+/// Path: `/api/v1/media/{id}/{sig}/{filename}`. The signature gates access —
+/// possession of a valid URL (which only reaches members of the conversation
+/// it was posted to) is the grant. Bytes are decrypted from disk and streamed
+/// with HTTP Range support for video/audio seeking.
+async fn api_media_serve(
+    axum::extract::ConnectInfo(addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path((id, sig, _filename)): axum::extract::Path<(String, String, String)>,
+) -> impl IntoResponse {
+    if !state.rest_rate_limiter.check(addr.ip()) {
+        return (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded").into_response();
+    }
+    let Some(store) = state.media_store.as_ref() else {
+        return (StatusCode::NOT_FOUND, "media storage unavailable").into_response();
+    };
+    // Capability check first — never reveal whether an id exists to callers
+    // without a valid signature.
+    if !store.verify(&id, &sig) {
+        return (StatusCode::FORBIDDEN, "invalid capability").into_response();
+    }
+    // Look up live (non-deleted) metadata.
+    let row = match state.db.as_ref() {
+        Some(db) => match db.lock().get_media(&id) {
+            Ok(Some(r)) => r,
+            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+            Err(e) => {
+                tracing::warn!(media_id = %id, error = %e, "media metadata lookup failed");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
+            }
+        },
+        None => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    let bytes = match store.get(&id) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(media_id = %id, error = %e, "media blob read failed");
+            return (StatusCode::NOT_FOUND, "not found").into_response();
+        }
+    };
+
+    let content_type: axum::http::HeaderValue = row
+        .mime
+        .parse()
+        .unwrap_or_else(|_| "application/octet-stream".parse().unwrap());
+    let total = bytes.len() as u64;
+
+    // Optional HTTP Range (single range only — sufficient for media players).
+    if let Some(range) = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        && let Some((start, end)) = parse_single_range(range, total)
+    {
+        let slice = bytes[start as usize..=end as usize].to_vec();
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::CONTENT_TYPE, content_type);
+        h.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+        h.insert(
+            axum::http::header::CACHE_CONTROL,
+            "private, max-age=31536000, immutable".parse().unwrap(),
+        );
+        if let Ok(cr) = format!("bytes {start}-{end}/{total}").parse() {
+            h.insert(axum::http::header::CONTENT_RANGE, cr);
+        }
+        return (StatusCode::PARTIAL_CONTENT, h, slice).into_response();
+    }
+
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(axum::http::header::CONTENT_TYPE, content_type);
+    h.insert(axum::http::header::ACCEPT_RANGES, "bytes".parse().unwrap());
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        "private, max-age=31536000, immutable".parse().unwrap(),
+    );
+    (StatusCode::OK, h, bytes).into_response()
+}
+
+/// Parse a single-range `Range: bytes=start-end` header against a known total
+/// length. Returns an inclusive `(start, end)` byte range, or None if the
+/// header is absent/unsatisfiable/multi-range.
+fn parse_single_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    if total == 0 {
+        return None;
+    }
+    let spec = header.strip_prefix("bytes=")?;
+    if spec.contains(',') {
+        return None; // multi-range not supported
+    }
+    let (s, e) = spec.split_once('-')?;
+    let (start, end) = match (s.trim(), e.trim()) {
+        ("", "") => return None,
+        ("", suffix) => {
+            // `-N` → last N bytes
+            let n: u64 = suffix.parse().ok()?;
+            if n == 0 {
+                return None;
+            }
+            (total.saturating_sub(n), total - 1)
+        }
+        (start, "") => (start.parse().ok()?, total - 1),
+        (start, end) => {
+            let st: u64 = start.parse().ok()?;
+            let en: u64 = end.parse().ok()?;
+            (st, en.min(total - 1))
+        }
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
+}
+
 /// Fetch OpenGraph metadata from a URL and return as JSON.
 /// Avoids clients leaking browsing data to third-party proxy services.
 async fn api_og_preview(
@@ -2884,42 +4260,55 @@ async fn api_get_keys(
 /// called after SASL authentication when the client generates encryption keys.
 async fn api_upload_keys(
     State(state): State<Arc<crate::server::SharedState>>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> impl axum::response::IntoResponse {
     let did = body.get("did").and_then(|v| v.as_str());
     let bundle = body.get("bundle");
 
-    match (did, bundle) {
-        (Some(did), Some(bundle)) => {
-            // Verify the requester is authenticated as this DID
-            let did_is_authenticated = {
-                let session_dids = state.session_dids.lock();
-                session_dids.values().any(|d| d == did)
-            };
-            if !did_is_authenticated {
-                return (
-                    axum::http::StatusCode::FORBIDDEN,
-                    axum::Json(serde_json::json!({ "error": "DID not authenticated" })),
-                );
-            }
-            state
-                .prekey_bundles
-                .lock()
-                .insert(did.to_string(), bundle.clone());
-            // Persist to DB so bundles survive server restart
-            let bundle_json = serde_json::to_string(bundle).unwrap_or_default();
-            let did_owned = did.to_string();
-            state.with_db(|db| db.save_prekey_bundle(&did_owned, &bundle_json));
-            (
-                axum::http::StatusCode::OK,
-                axum::Json(serde_json::json!({ "ok": true })),
-            )
-        }
-        _ => (
+    let (Some(did), Some(bundle)) = (did, bundle) else {
+        return (
             axum::http::StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({ "error": "Missing 'did' or 'bundle'" })),
-        ),
+        );
+    };
+
+    // SECURITY (CTF-19): the requester must prove they OWN the named
+    // DID, not just that the DID is logged in somewhere on this server.
+    // Previously this endpoint accepted any anonymous request as long
+    // as the named DID had any active session — letting an unauth'd
+    // attacker overwrite the victim's pre-key bundle and decrypt the
+    // victim's next DMs. Require a Bearer session id whose DID matches
+    // the body's `did`.
+    let bearer_session = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let caller_did = bearer_session.and_then(|sid| state.session_dids.lock().get(sid).cloned());
+    let owned = caller_did.as_deref() == Some(did);
+    if !owned {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({
+                "error": "Pre-key upload requires Bearer auth as the named DID."
+            })),
+        );
     }
+
+    state
+        .prekey_bundles
+        .lock()
+        .insert(did.to_string(), bundle.clone());
+    // Persist to DB so bundles survive server restart
+    let bundle_json = serde_json::to_string(bundle).unwrap_or_default();
+    let did_owned = did.to_string();
+    state.with_db(|db| db.save_prekey_bundle(&did_owned, &bundle_json));
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
 }
 
 // ── Per-IP rate limiting ──────────────────────────────────────────────
@@ -2961,6 +4350,12 @@ impl IpRateLimiter {
     pub fn window_secs(&self) -> u64 {
         self.window_secs
     }
+
+    /// Evict entries older than 1 hour to prevent unbounded growth.
+    pub fn prune(&self, now_secs: u64) {
+        let mut map = self.state.lock();
+        map.retain(|_, (ts, _)| now_secs.saturating_sub(*ts) < 3600);
+    }
 }
 
 /// Security headers middleware.
@@ -2986,8 +4381,338 @@ async fn security_headers(
     if !headers.contains_key("content-security-policy") {
         headers.insert(
             "Content-Security-Policy",
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' wss: https:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'".parse().unwrap(),
+            "default-src 'self'; script-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' https: data: blob:; media-src 'self' https: blob:; connect-src 'self' wss: https:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'".parse().unwrap(),
         );
     }
     resp
+}
+
+// ── AV Sessions REST API ────────────────────────────────────────────
+
+/// GET /api/v1/sessions — list all active sessions.
+async fn api_sessions_list(State(state): State<Arc<SharedState>>) -> Json<serde_json::Value> {
+    let mgr = state.av_sessions.lock();
+    let sessions: Vec<serde_json::Value> = mgr
+        .active_sessions()
+        .into_iter()
+        .map(|s| session_to_json(s, &mgr))
+        .collect();
+    Json(serde_json::json!({ "sessions": sessions }))
+}
+
+/// GET /api/v1/sessions/{id} — session details.
+async fn api_session_detail(
+    State(state): State<Arc<SharedState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    let mgr = state.av_sessions.lock();
+    let session = mgr.get(&id).ok_or((
+        axum::http::StatusCode::NOT_FOUND,
+        "Session not found".to_string(),
+    ))?;
+    Ok(Json(session_to_json(session, &mgr)))
+}
+
+/// GET /api/v1/sessions/{id}/artifacts — list session artifacts.
+async fn api_session_artifacts(
+    State(state): State<Arc<SharedState>>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let artifacts = state
+        .with_db(|db| db.list_av_artifacts(&id))
+        .unwrap_or_default();
+    let items: Vec<serde_json::Value> = artifacts
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id,
+                "session_id": a.session_id,
+                "kind": a.kind,
+                "created_at": a.created_at,
+                "created_by": a.created_by,
+                "content_ref": a.content_ref,
+                "content_type": a.content_type,
+                "visibility": a.visibility,
+                "title": a.title,
+            })
+        })
+        .collect();
+    Json(serde_json::json!({ "artifacts": items }))
+}
+
+/// POST /api/v1/sessions/{id}/artifacts — attach an artifact to a session.
+async fn api_create_artifact(
+    State(state): State<Arc<SharedState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    // Verify session exists
+    {
+        let mgr = state.av_sessions.lock();
+        if mgr.get(&id).is_none() {
+            return Err((
+                axum::http::StatusCode::NOT_FOUND,
+                "Session not found".to_string(),
+            ));
+        }
+    }
+
+    let kind_str = body["kind"].as_str().unwrap_or("summary");
+    let kind: crate::av::ArtifactKind = serde_json::from_str(&format!("\"{kind_str}\""))
+        .unwrap_or(crate::av::ArtifactKind::Summary);
+    let content_ref = body["content_ref"].as_str().ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "content_ref required".to_string(),
+    ))?;
+    let content_type = body["content_type"].as_str().unwrap_or("text/plain");
+    let visibility_str = body["visibility"].as_str().unwrap_or("participants");
+    let visibility: crate::av::ArtifactVisibility =
+        serde_json::from_str(&format!("\"{visibility_str}\""))
+            .unwrap_or(crate::av::ArtifactVisibility::Participants);
+    let title = body["title"].as_str();
+    let created_by = body["created_by"].as_str();
+
+    let artifact = crate::av::AvArtifact {
+        id: ulid::Ulid::new().to_string(),
+        session_id: id.clone(),
+        kind,
+        created_at: chrono::Utc::now().timestamp(),
+        created_by: created_by.map(|s| s.to_string()),
+        content_ref: content_ref.to_string(),
+        content_type: content_type.to_string(),
+        visibility,
+        title: title.map(|s| s.to_string()),
+    };
+
+    state.with_db(|db| db.save_av_artifact(&artifact));
+
+    // If session is bound to a channel, post a notice about the new artifact
+    let channel = {
+        let mgr = state.av_sessions.lock();
+        mgr.get(&id).and_then(|s| s.channel.clone())
+    };
+    if let Some(channel) = channel {
+        let kind_label = kind_str;
+        let title_display = title.unwrap_or(kind_label);
+        crate::connection::messaging::broadcast_av_notice(
+            &state,
+            &channel,
+            &format!("Session artifact available: {title_display} ({kind_label})"),
+        );
+    }
+
+    Ok(Json(serde_json::json!({
+        "id": artifact.id,
+        "session_id": artifact.session_id,
+        "kind": artifact.kind,
+        "created_at": artifact.created_at,
+    })))
+}
+
+/// GET /api/v1/channels/{name}/sessions — sessions in a channel (active + recent).
+async fn api_channel_sessions(
+    State(state): State<Arc<SharedState>>,
+    Path(name): Path<String>,
+) -> Json<serde_json::Value> {
+    let mgr = state.av_sessions.lock();
+
+    // Active session (if any)
+    let active = mgr
+        .active_session_for_channel(&name)
+        .map(|s| session_to_json(s, &mgr));
+
+    // Recent ended sessions from DB
+    let recent = state
+        .with_db(|db| db.list_channel_av_sessions(&name, 20))
+        .unwrap_or_default();
+    let recent_json: Vec<serde_json::Value> = recent
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "id": s.id,
+                "created_by": s.created_by,
+                "created_at": s.created_at,
+                "state": s.state,
+                "title": s.title,
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "active": active,
+        "recent": recent_json,
+    }))
+}
+
+fn session_to_json(
+    s: &crate::av::AvSession,
+    mgr: &crate::av::AvSessionManager,
+) -> serde_json::Value {
+    let participants: Vec<serde_json::Value> = s
+        .participants
+        .values()
+        .filter(|p| p.left_at.is_none())
+        .map(|p| {
+            serde_json::json!({
+                "did": p.did,
+                "nick": p.nick,
+                "role": p.role,
+                "joined_at": p.joined_at,
+                // Per-device suffix; required by the web client to build the
+                // MoQ broadcast path `{session_id}/{nick}~{instance_id}` so
+                // two devices on one DID get distinct watch subscriptions.
+                "instance_id": p.instance_id,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "id": s.id,
+        "channel": s.channel,
+        "created_by": s.created_by,
+        "created_by_nick": s.created_by_nick,
+        "created_at": s.created_at,
+        "state": s.state,
+        "title": s.title,
+        "participants": participants,
+        "participant_count": mgr.active_participant_count(&s.id),
+        "media_backend": s.media_backend,
+        "recording_enabled": s.recording_enabled,
+        "iroh_ticket": s.iroh_ticket,
+    })
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::format_export_markdown;
+    use std::collections::HashMap;
+
+    fn row(sender: &str, text: &str, ts: u64, msgid: &str) -> crate::db::MessageRow {
+        crate::db::MessageRow {
+            id: 1,
+            channel: "#x".into(),
+            sender: sender.into(),
+            text: text.into(),
+            timestamp: ts,
+            tags: HashMap::new(),
+            msgid: Some(msgid.into()),
+            replaces_msgid: None,
+            deleted_at: None,
+            sender_did: None,
+        }
+    }
+
+    #[test]
+    fn markdown_export_renders_transcript() {
+        let rows = vec![
+            row("alice!a@h", "hello world", 1750000000, "01A"),
+            row("bob!b@h", "line one\nline two", 1750000060, "01B"),
+        ];
+        let md = format_export_markdown("#dev", &rows);
+        assert!(md.starts_with("# #dev — exported transcript\n"));
+        assert!(md.contains("**alice** (01A): hello world\n"));
+        // Hostmask stripped to nick; multiline bodies indented, not split
+        // into separate top-level entries.
+        assert!(md.contains("**bob** (01B): line one\n    line two\n"));
+    }
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::format_metrics;
+
+    #[test]
+    fn exposition_format_is_well_formed() {
+        let out = format_metrics(3, 7, 2, 100, 5, 1, 42);
+        assert!(out.contains("freeq_connections 3\n"));
+        assert!(out.contains("freeq_channels 7\n"));
+        assert!(out.contains("freeq_s2s_peers 2\n"));
+        assert!(out.contains("freeq_messages_total 100\n"));
+        assert!(out.contains("freeq_sasl_success_total 5\n"));
+        assert!(out.contains("freeq_sasl_failure_total 1\n"));
+        assert!(out.contains("freeq_uptime_seconds 42\n"));
+        // Every metric line is preceded by HELP + TYPE comments.
+        for name in [
+            "freeq_connections",
+            "freeq_channels",
+            "freeq_s2s_peers",
+            "freeq_messages_total",
+            "freeq_sasl_success_total",
+            "freeq_sasl_failure_total",
+            "freeq_uptime_seconds",
+        ] {
+            assert!(
+                out.contains(&format!("# HELP {name} ")),
+                "missing HELP for {name}"
+            );
+            assert!(
+                out.contains(&format!("# TYPE {name} ")),
+                "missing TYPE for {name}"
+            );
+        }
+        assert!(out.ends_with('\n'));
+    }
+}
+
+#[cfg(test)]
+mod signing_key_endpoint_tests {
+    use super::{api_did_signing_key, api_did_signing_key_by_kid};
+    use crate::server::test_state_with_db;
+    use axum::extract::{Path, State};
+    use base64::Engine;
+
+    fn b64(b: &[u8]) -> String {
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+    }
+
+    /// The `/api/v1/signing-keys/{did}` and `/{did}/{kid}` endpoints serve the
+    /// durable key store: `/{did}` returns the latest, `/{did}/{kid}` returns a
+    /// specific historical key, and misses are 404. Drives the real handlers.
+    #[tokio::test]
+    async fn endpoints_serve_the_durable_store() {
+        let state = test_state_with_db();
+        let did = "did:plc:endpoint";
+        let (k1, k2) = ([1u8; 32], [2u8; 32]);
+        let kid1 = freeq_sdk::act::derive_kid_bytes(&k1);
+        let kid2 = freeq_sdk::act::derive_kid_bytes(&k2);
+        state
+            .with_db(|db| {
+                db.save_signing_key(did, &k1)?;
+                db.save_signing_key(did, &k2)?;
+                Ok(())
+            })
+            .expect("db present");
+
+        // /{did} → latest (k2), from the key store.
+        let latest = api_did_signing_key(State(state.clone()), Path(did.to_string()))
+            .await
+            .expect("200");
+        assert_eq!(latest.0["public_key"], b64(&k2));
+        assert_eq!(latest.0["source"], "key-store");
+
+        // /{did}/{kid} → each specific historical key.
+        let by1 =
+            api_did_signing_key_by_kid(State(state.clone()), Path((did.to_string(), kid1.clone())))
+                .await
+                .expect("200 kid1");
+        assert_eq!(by1.0["public_key"], b64(&k1));
+        assert_eq!(by1.0["kid"], kid1);
+
+        let by2 = api_did_signing_key_by_kid(State(state.clone()), Path((did.to_string(), kid2)))
+            .await
+            .expect("200 kid2");
+        assert_eq!(by2.0["public_key"], b64(&k2));
+
+        // Unknown kid → 404.
+        let miss_kid = api_did_signing_key_by_kid(
+            State(state.clone()),
+            Path((did.to_string(), "nope".to_string())),
+        )
+        .await;
+        assert_eq!(miss_kid.unwrap_err(), axum::http::StatusCode::NOT_FOUND);
+
+        // Unknown DID → 404.
+        let miss_did =
+            api_did_signing_key(State(state), Path("did:plc:nobody".to_string())).await;
+        assert_eq!(miss_did.unwrap_err(), axum::http::StatusCode::NOT_FOUND);
+    }
 }

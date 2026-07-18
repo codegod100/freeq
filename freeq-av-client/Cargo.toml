@@ -1,0 +1,29 @@
+[package]
+name = "freeq-av-client"
+version = "0.1.0"
+edition = "2024"
+description = "Native audio client for freeq AV sessions"
+
+[[bin]]
+name = "freeq-av"
+path = "src/main.rs"
+
+[dependencies]
+iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = ["opus", "h264"] }
+freeq-av = { path = "../freeq-av" }
+iroh = { workspace = true }
+moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, features = ["noq", "websocket", "aws-lc-rs"] }
+moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main" }
+hang = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main" }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+url = "2"
+bytes = "1"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+http = "1"
+reqwest = { workspace = true }

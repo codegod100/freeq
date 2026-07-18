@@ -50,8 +50,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.freeq.model.AppState
-import com.freeq.model.AvatarCache
 import com.freeq.model.ChannelState
+import com.freeq.model.UnreadBoundary
 import com.freeq.model.PinCache
 import com.freeq.model.ChatMessage
 import com.freeq.model.MemberInfo
@@ -65,11 +65,16 @@ import java.util.*
 fun MessageList(
     appState: AppState,
     channelState: ChannelState,
-    onProfileClick: ((String) -> Unit)? = null,
+    onProfileClick: ((String, String?) -> Unit)? = null,
     scrollToMessageId: String? = null,
     modifier: Modifier = Modifier
 ) {
-    val messages = channelState.messages
+    // Safety: hide blocked users' messages at render time. Messages stay in
+    // the buffer so unblocking restores history. System messages (empty
+    // `from`) always render.
+    val messages = channelState.messages.filter { msg ->
+        msg.from.isEmpty() || !appState.isBlocked(msg.from, appState.didForNick(msg.from))
+    }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val clipboardManager = LocalClipboardManager.current
@@ -90,7 +95,7 @@ fun MessageList(
         val targetId = scrollToMessageId ?: return@LaunchedEffect
         val idx = messages.indexOfFirst { it.id == targetId }
         if (idx >= 0) {
-            listState.animateScrollToItem(idx)
+            listState.animateScrollToItem(idx + 1)
             highlightedMessageId = targetId
         }
     }
@@ -105,11 +110,15 @@ fun MessageList(
         }
     }
 
-    // On first load, scroll to last-read position (or bottom if none)
+    // On first load, scroll to last-read position (or bottom if none).
+    //
+    // The LazyColumn has a `__load_older__` header at slot 0, so message i
+    // lives at LazyColumn slot i + 1. Forgetting this offset lands one
+    // short of the bottom and leaves the scroll-to-bottom FAB visible.
     var initialScrollDone by remember { mutableStateOf(false) }
     LaunchedEffect(messages.size) {
         if (!initialScrollDone && messages.isNotEmpty()) {
-            val targetIdx = if (lastReadId != null) {
+            val msgIdx = if (lastReadId != null) {
                 val idx = messages.indexOfFirst { it.id == lastReadId }
                 if (idx >= 0) idx else messages.size - 1
             } else if (lastReadTimestamp > 0) {
@@ -118,13 +127,13 @@ fun MessageList(
             } else {
                 messages.size - 1
             }
-            listState.scrollToItem(targetIdx)
+            listState.scrollToItem(msgIdx + 1)
             initialScrollDone = true
         } else if (initialScrollDone && messages.isNotEmpty() && scrollToMessageId == null) {
             val lastMsg = messages.lastOrNull()
             val isOwnMessage = lastMsg?.from?.equals(appState.nick.value, ignoreCase = true) == true
             if (isOwnMessage || (isNearBottom && !listState.isScrollInProgress)) {
-                listState.animateScrollToItem(messages.size - 1)
+                listState.animateScrollToItem(messages.size)
             }
         }
     }
@@ -215,7 +224,7 @@ fun MessageList(
                 }
             }
 
-            val unreadSeparatorMsgId = findUnreadBoundary(
+            val unreadSeparatorMsgId = UnreadBoundary.find(
                 messages, lastReadId, lastReadTimestamp, appState.nick.value
             )
 
@@ -250,11 +259,15 @@ fun MessageList(
                     return@itemsIndexed
                 }
 
-                // Show header if sender changes, >5 min gap, or after date/system/deleted boundary
+                // Show header if sender changes, >5 min gap, or after date/system/deleted boundary.
+                // Also break across a provenance boundary: a federated message (msg.origin
+                // set) must not collapse under a local sender's header, or it loses its
+                // "via {origin}" and inherits the local verified/signed context.
                 val showHeader = prevMsg == null
                     || msg.from != prevMsg.from
                     || prevMsg.from.isEmpty()
                     || prevMsg.isDeleted
+                    || msg.origin != prevMsg.origin
                     || timeDiff > 5 * 60 * 1000
                     || currentDate != prevDate
 
@@ -280,9 +293,19 @@ fun MessageList(
             }
         }
 
-        // Scroll-to-bottom FAB
+        // Scroll-to-bottom FAB — only when newer content has arrived from
+        // someone else. If the latest message is the user's own, the auto-
+        // scroll on send already puts them at the bottom; surfacing their
+        // own message here would just occlude the message they're reading
+        // or editing.
+        val ownIsLatest by remember {
+            derivedStateOf {
+                messages.lastOrNull { it.from.isNotEmpty() }
+                    ?.from?.equals(appState.nick.value, ignoreCase = true) == true
+            }
+        }
         AnimatedVisibility(
-            visible = !isNearBottom && messages.isNotEmpty(),
+            visible = !isNearBottom && messages.isNotEmpty() && !ownIsLatest,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 12.dp),
@@ -293,7 +316,7 @@ fun MessageList(
             Surface(
                 onClick = {
                     scope.launch {
-                        listState.animateScrollToItem(messages.size - 1)
+                        listState.animateScrollToItem(messages.size)
                     }
                 },
                 shape = RoundedCornerShape(14.dp),
@@ -384,14 +407,22 @@ private fun MessageBubble(
     appState: AppState,
     channelState: ChannelState,
     clipboardManager: androidx.compose.ui.platform.ClipboardManager,
-    onNickClick: ((String) -> Unit)? = null,
+    onNickClick: ((String, String?) -> Unit)? = null,
     onImageClick: ((String) -> Unit)? = null,
     onThreadClick: ((ChatMessage) -> Unit)? = null
 ) {
     var showMenu by remember { mutableStateOf(false) }
     var showEmojiPicker by remember { mutableStateOf(false) }
+    var showReportDialog by remember { mutableStateOf(false) }
+    var showProof by remember { mutableStateOf(false) }
     val haptic = LocalHapticFeedback.current
     val isOwn = msg.from.equals(appState.nick.value, ignoreCase = true)
+    // Sender identity: the server-bound DID from the channel member entry
+    // (same source UserProfileSheet uses), with the account-tag map as
+    // fallback for DMs where the buffer has no member list.
+    val senderMember = channelState.members
+        .firstOrNull { it.nick.equals(msg.from, ignoreCase = true) }
+    val senderDid = senderMember?.did ?: appState.didForNick(msg.from)
     val isMention = !isOwn && appState.nick.value.isNotEmpty() &&
             msg.text.contains(appState.nick.value, ignoreCase = true)
     // Read directly from pins map so Compose tracks the state change
@@ -519,7 +550,7 @@ private fun MessageBubble(
                 UserAvatar(
                     nick = msg.from,
                     size = 36.dp,
-                    modifier = Modifier.clickable { onNickClick?.invoke(msg.from) }
+                    modifier = Modifier.clickable { onNickClick?.invoke(msg.from, msg.origin) }
                 )
             } else {
                 Spacer(modifier = Modifier.width(36.dp))
@@ -540,9 +571,7 @@ private fun MessageBubble(
             ) {
                 // Header: nick + time
                 if (showHeader) {
-                    val memberPrefix = channelState.members
-                        .firstOrNull { it.nick.equals(msg.from, ignoreCase = true) }
-                        ?.prefix ?: ""
+                    val memberPrefix = senderMember?.prefix ?: ""
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -552,14 +581,33 @@ private fun MessageBubble(
                             fontSize = 14.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Theme.nickColor(msg.from),
-                            modifier = Modifier.clickable { onNickClick?.invoke(msg.from) }
+                            modifier = Modifier.clickable { onNickClick?.invoke(msg.from, msg.origin) }
                         )
-                        if (AvatarCache.avatarUrl(msg.from) != null) {
+                        // Verified = the sender's server-bound DID (never the
+                        // "has a cached avatar" proxy, which false-negatives
+                        // before the avatar fetch lands). did:key = guest /
+                        // session key, not a verified AT identity. Federated
+                        // messages (origin set) stay suppressed — peer-vouched,
+                        // not verified here.
+                        if (msg.origin == null && !senderDid.isNullOrEmpty()
+                            && !senderDid.startsWith("did:key:")) {
                             Icon(
                                 Icons.Default.CheckCircle,
-                                contentDescription = "Verified",
+                                contentDescription = "Verified — tap for proof",
                                 tint = FreeqColors.accent,
-                                modifier = Modifier.size(14.dp)
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clickable { showProof = true }
+                            )
+                        }
+                        // Federated: relayed from another server — peer-vouched,
+                        // not verified here. Show provenance instead of the local
+                        // verified/signed badges (which would overstate trust).
+                        if (msg.origin != null) {
+                            Text(
+                                text = "via ${msg.origin}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                             )
                         }
                         Text(
@@ -567,6 +615,14 @@ private fun MessageBubble(
                             fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
                         )
+                        if (msg.origin == null && msg.isSigned) {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = "Signed by sender",
+                                tint = FreeqColors.success,
+                                modifier = Modifier.size(10.dp)
+                            )
+                        }
                         if (msg.isEdited) {
                             Text(
                                 text = "(edited)",
@@ -742,6 +798,61 @@ private fun MessageBubble(
                     }
                 )
             }
+            if (!isOwn) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+                DropdownMenuItem(
+                    text = { Text("Report…") },
+                    onClick = {
+                        showMenu = false
+                        showReportDialog = true
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Flag,
+                            contentDescription = null,
+                            tint = FreeqColors.danger
+                        )
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Block ${msg.from}") },
+                    onClick = {
+                        appState.blockUser(msg.from, senderDid)
+                        appState.errorMessage.value = "Blocked ${msg.from}"
+                        showMenu = false
+                    },
+                    leadingIcon = {
+                        Icon(
+                            Icons.Default.Block,
+                            contentDescription = null,
+                            tint = FreeqColors.danger
+                        )
+                    }
+                )
+            }
+        }
+
+        // Report reason picker — on choice: report (log) + block + snackbar
+        // Honest signature verification — the real proof behind the seal.
+        if (showProof && !senderDid.isNullOrEmpty()) {
+            VerifiedProofSheet(
+                did = senderDid,
+                handle = msg.from,
+                msgId = msg.id,
+                onDismiss = { showProof = false }
+            )
+        }
+
+        if (showReportDialog) {
+            ReportReasonDialog(
+                nick = msg.from,
+                onReport = { reason ->
+                    appState.reportUser(msg.from, senderDid, reason)
+                    appState.errorMessage.value = "Reported ${msg.from} — user blocked"
+                    showReportDialog = false
+                },
+                onDismiss = { showReportDialog = false }
+            )
         }
 
         // Emoji picker dialog
@@ -973,43 +1084,6 @@ private fun TypingIndicator(typers: List<String>) {
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
         )
     }
-}
-
-/**
- * Find the first unread message ID to place the "New messages" separator before.
- * Tries matching by message ID first, falls back to timestamp for cross-session reliability.
- * Returns null if there are no unread messages or the user has already sent a message.
- */
-private fun findUnreadBoundary(
-    messages: List<ChatMessage>,
-    lastReadId: String?,
-    lastReadTimestamp: Long,
-    nick: String
-): String? {
-    // Primary: find lastReadId in messages
-    if (lastReadId != null) {
-        val idx = messages.indexOfFirst { it.id == lastReadId }
-        if (idx >= 0 && idx < messages.size - 1) {
-            val tail = messages.subList(idx + 1, messages.size)
-            val hasRealUnread = tail.any { it.from.isNotEmpty() }
-            val userCaughtUp = tail.any { it.from.equals(nick, ignoreCase = true) }
-            if (hasRealUnread && !userCaughtUp) return messages[idx + 1].id
-        }
-    }
-
-    // Fallback: find first real message after lastReadTimestamp
-    if (lastReadTimestamp > 0) {
-        val idx = messages.indexOfFirst {
-            it.timestamp.time > lastReadTimestamp && it.from.isNotEmpty()
-        }
-        if (idx >= 0) {
-            val tail = messages.subList(idx, messages.size)
-            val userCaughtUp = tail.any { it.from.equals(nick, ignoreCase = true) }
-            if (!userCaughtUp) return messages[idx].id
-        }
-    }
-
-    return null
 }
 
 private fun formatTime(date: Date): String {

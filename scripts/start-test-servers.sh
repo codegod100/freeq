@@ -69,8 +69,9 @@ echo ""
 rm -rf "$DIR_A" "$DIR_B"
 mkdir -p "$DIR_A" "$DIR_B"
 
-# ── Start Server A ──
-echo "═══ Starting Server A on :$PORT_A ═══"
+# ── Phase 1: Start both servers without peering to get iroh IDs ──
+
+echo "═══ Starting Server A on :$PORT_A (discovery) ═══"
 RUST_LOG=freeq_server=info "$BINARY" \
     --listen-addr "127.0.0.1:$PORT_A" \
     --server-name "server-a.test" \
@@ -80,35 +81,63 @@ RUST_LOG=freeq_server=info "$BINARY" \
     >> "$DIR_A/server.log" 2>&1 &
 echo $! > "$PID_FILE_A"
 PID_A=$(cat "$PID_FILE_A")
-echo "  PID: $PID_A"
 
-# Wait for iroh endpoint
-echo "  Waiting for iroh..."
+echo "═══ Starting Server B on :$PORT_B (discovery) ═══"
+RUST_LOG=freeq_server=info "$BINARY" \
+    --listen-addr "127.0.0.1:$PORT_B" \
+    --server-name "server-b.test" \
+    --data-dir "$DIR_B" \
+    --db-path "$DIR_B/irc.db" \
+    --iroh \
+    >> "$DIR_B/server.log" 2>&1 &
+echo $! > "$PID_FILE_B"
+PID_B=$(cat "$PID_FILE_B")
+
+# Wait for both iroh endpoints
 IROH_ID_A=""
+IROH_ID_B=""
 for i in $(seq 1 30); do
-    if ! kill -0 "$PID_A" 2>/dev/null; then
-        echo "  ERROR: Server A died on startup"
-        cat "$DIR_A/server.log"
-        exit 1
+    if [ -z "$IROH_ID_A" ] && grep -q "Iroh endpoint ID" "$DIR_A/server.log" 2>/dev/null; then
+        IROH_ID_A=$(grep "Iroh endpoint ID" "$DIR_A/server.log" | grep -oE '[0-9a-f]{64}' | head -1)
     fi
-    if grep -q "Iroh ready" "$DIR_A/server.log" 2>/dev/null; then
-        IROH_ID_A=$(grep "Iroh ready" "$DIR_A/server.log" | grep -oE '[0-9a-f]{64}' | head -1)
+    if [ -z "$IROH_ID_B" ] && grep -q "Iroh endpoint ID" "$DIR_B/server.log" 2>/dev/null; then
+        IROH_ID_B=$(grep "Iroh endpoint ID" "$DIR_B/server.log" | grep -oE '[0-9a-f]{64}' | head -1)
+    fi
+    if [ -n "$IROH_ID_A" ] && [ -n "$IROH_ID_B" ]; then
         break
     fi
     sleep 0.5
 done
 
-if [ -z "$IROH_ID_A" ]; then
-    echo "  ERROR: Server A failed to start iroh (timeout)"
-    cat "$DIR_A/server.log"
+if [ -z "$IROH_ID_A" ] || [ -z "$IROH_ID_B" ]; then
+    echo "ERROR: Failed to get iroh IDs (A=$IROH_ID_A, B=$IROH_ID_B)"
     stop_servers
     exit 1
 fi
-echo "  Iroh ID: ${IROH_ID_A:0:16}..."
-echo ""
 
-# ── Start Server B (peered with A) ──
-echo "═══ Starting Server B on :$PORT_B (peered with A) ═══"
+echo "  Server A iroh: ${IROH_ID_A:0:16}..."
+echo "  Server B iroh: ${IROH_ID_B:0:16}..."
+
+# ── Phase 2: Restart both with mutual peering ──
+
+echo ""
+echo "═══ Restarting with mutual S2S peering ═══"
+kill "$PID_A" "$PID_B" 2>/dev/null
+sleep 1
+rm -f "$DIR_A/server.log" "$DIR_B/server.log"
+
+RUST_LOG=freeq_server=info "$BINARY" \
+    --listen-addr "127.0.0.1:$PORT_A" \
+    --server-name "server-a.test" \
+    --data-dir "$DIR_A" \
+    --db-path "$DIR_A/irc.db" \
+    --iroh \
+    --s2s-peers "$IROH_ID_B" \
+    --s2s-allowed-peers "$IROH_ID_B" \
+    >> "$DIR_A/server.log" 2>&1 &
+echo $! > "$PID_FILE_A"
+PID_A=$(cat "$PID_FILE_A")
+
 RUST_LOG=freeq_server=info "$BINARY" \
     --listen-addr "127.0.0.1:$PORT_B" \
     --server-name "server-b.test" \
@@ -116,20 +145,14 @@ RUST_LOG=freeq_server=info "$BINARY" \
     --db-path "$DIR_B/irc.db" \
     --iroh \
     --s2s-peers "$IROH_ID_A" \
+    --s2s-allowed-peers "$IROH_ID_A" \
     >> "$DIR_B/server.log" 2>&1 &
 echo $! > "$PID_FILE_B"
 PID_B=$(cat "$PID_FILE_B")
-echo "  PID: $PID_B"
 
 # Wait for S2S link
 echo "  Waiting for S2S link..."
 for i in $(seq 1 30); do
-    if ! kill -0 "$PID_B" 2>/dev/null; then
-        echo "  ERROR: Server B died on startup"
-        cat "$DIR_B/server.log"
-        stop_servers
-        exit 1
-    fi
     if grep -q "S2S link established" "$DIR_B/server.log" 2>/dev/null; then
         break
     fi
@@ -140,6 +163,8 @@ done
 for port in $PORT_A $PORT_B; do
     if ! nc -z 127.0.0.1 "$port" 2>/dev/null; then
         echo "ERROR: Server on port $port not accepting connections"
+        cat "$DIR_A/server.log"
+        cat "$DIR_B/server.log"
         stop_servers
         exit 1
     fi
@@ -164,7 +189,7 @@ echo "    tail -f $DIR_B/server.log"
 echo ""
 echo "  Run tests:"
 echo "    ./scripts/run-local-tests.sh"
-echo "    ./scripts/run-local-tests.sh s2s_inv10"
+echo "    ./scripts/run-local-tests.sh s2s_react1"
 echo ""
 echo "  Stop:"
 echo "    Ctrl-C  or  ./scripts/start-test-servers.sh stop"

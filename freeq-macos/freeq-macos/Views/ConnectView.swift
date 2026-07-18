@@ -99,10 +99,14 @@ struct ConnectView: View {
                     brokerBase: appState.authBrokerBase,
                     handle: handle
                 )
+                // broker_token is only present on the standalone broker; it
+                // drives reconnect (re-minting web tokens). The embedded
+                // broker omits it, so persist only when we actually got one.
                 appState.brokerToken = brokerToken
-                KeychainHelper.save(key: "brokerToken", value: brokerToken)
+                if let brokerToken {
+                    KeychainHelper.save(key: "brokerToken", value: brokerToken)
+                }
                 appState.pendingWebToken = session.token
-                appState.authenticatedDID = session.did
                 KeychainHelper.save(key: "did", value: session.did)
                 appState.connect(nick: session.nick)
             } catch {
@@ -113,7 +117,31 @@ struct ConnectView: View {
     }
 
     private func connectGuest() {
-        guard !guestNick.isEmpty else { return }
-        appState.connect(nick: guestNick)
+        // Validate up front so a typo (space, leading digit, dot in a
+        // handle-like nick) surfaces a precise message instead of an
+        // opaque server "Invalid nick" round-trip later.
+        switch Validation.validateIrcNick(guestNick) {
+        case .success(let cleaned):
+            guestNick = cleaned
+            appState.errorMessage = nil
+            appState.connect(nick: cleaned)
+        case .failure(let err):
+            appState.errorMessage = Self.nickErrorMessage(err)
+        }
+    }
+
+    static func nickErrorMessage(_ err: Validation.NickError) -> String {
+        switch err {
+        case .empty:
+            return "Pick a nick."
+        case .tooLong(let max):
+            return "Nick can be at most \(max) characters."
+        case .containsWhitespace:
+            return "Nick can't contain spaces."
+        case .startsWithDigit:
+            return "Nick can't start with a digit."
+        case .invalidCharacter(let scalar):
+            return "“\(scalar)” isn't allowed in a nick. Use letters, digits, or _-[]\\{}^|."
+        }
     }
 }

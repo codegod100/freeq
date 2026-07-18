@@ -123,7 +123,7 @@ This document catalogs every feature implemented in Freeq, organized by category
 |---------|--------|-------|
 | `away-notify` | ✅ | Broadcasts AWAY changes to shared channel members |
 | `msgid` (message IDs) | ✅ | 🆕 ULID on every PRIVMSG/NOTICE, stored in DB, included in history replay |
-| `account-tag` | ❌ | |
+| `account-tag` | ✅ | Outbound PRIVMSG/NOTICE include `account=<did>` for authenticated senders, gated on cap |
 | `labeled-response` | ❌ | |
 | `invite-notify` | ❌ | |
 | `chghost` | ❌ | |

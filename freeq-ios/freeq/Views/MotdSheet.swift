@@ -14,7 +14,7 @@ struct MotdSheet: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -26,14 +26,14 @@ struct MotdSheet: View {
 
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Welcome to ")
-                                    .font(.system(size: 20, weight: .bold))
+                                    .font(.fqTitle3.weight(.bold))
                                     .foregroundColor(Theme.textPrimary)
                                 + Text("freeq")
-                                    .font(.system(size: 20, weight: .bold))
+                                    .font(.fqTitle3.weight(.bold))
                                     .foregroundColor(Theme.accent)
 
                                 Text("Message of the Day")
-                                    .font(.system(size: 13))
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textMuted)
                             }
                         }
@@ -57,7 +57,7 @@ struct MotdSheet: View {
                         // Action button
                         Button(action: { dismissAndSave() }) {
                             Text("Let's go")
-                                .font(.system(size: 16, weight: .bold))
+                                .font(.fqCallout.weight(.bold))
                                 .foregroundColor(.white)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 14)
@@ -85,7 +85,7 @@ struct MotdSheet: View {
                     }
                 }
             }
-            .toolbarBackground(Theme.bgPrimary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .preferredColorScheme(.dark)
@@ -101,15 +101,15 @@ struct MotdSheet: View {
                 ForEach(Array(splitMotdLine(text).enumerated()), id: \.offset) { _, part in
                     if part.hasPrefix("#") && part.count > 1 {
                         Text(part)
-                            .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                            .font(.fqMono.weight(.semibold))
                             .foregroundColor(Theme.accent)
                     } else if part.hasPrefix("http") {
                         Link(part, destination: URL(string: part) ?? URL(string: "https://freeq.at")!)
-                            .font(.system(size: 15, design: .monospaced))
+                            .font(.fqMono)
                             .foregroundColor(Theme.accent)
                     } else {
                         Text(part)
-                            .font(.system(size: 15, design: .monospaced))
+                            .font(.fqMono)
                             .foregroundColor(Theme.textSecondary)
                     }
                 }
@@ -121,15 +121,15 @@ struct MotdSheet: View {
                 ForEach(Array(splitMotdLine(text).enumerated()), id: \.offset) { _, part in
                     if part.hasPrefix("#") && part.count > 1 {
                         Text(part)
-                            .font(.system(size: 15, weight: .semibold, design: .monospaced))
+                            .font(.fqMono.weight(.semibold))
                             .foregroundColor(Theme.accent)
                     } else if part.hasPrefix("http") {
                         Link(part, destination: URL(string: part) ?? URL(string: "https://freeq.at")!)
-                            .font(.system(size: 15, design: .monospaced))
+                            .font(.fqMono)
                             .foregroundColor(Theme.accent)
                     } else {
                         Text(part)
-                            .font(.system(size: 15, design: .monospaced))
+                            .font(.fqMono)
                             .foregroundColor(Theme.textSecondary)
                     }
                 }

@@ -22,6 +22,7 @@ const COMMANDS: Command[] = [
   { name: 'whois', args: 'nick', desc: 'Look up user info', category: 'user' },
   { name: 'away', args: '[reason]', desc: 'Set away status (no reason = back)', category: 'user' },
   { name: 'policy', args: '#ch SET|INFO|ACCEPT|VERIFY|REQUIRE|CLEAR', desc: 'Channel policy management', category: 'policy' },
+  { name: 'pins', args: '', desc: 'List pinned messages', category: 'channel' },
   { name: 'raw', args: 'IRC_LINE', desc: 'Send raw IRC command', category: 'system' },
   { name: 'help', args: '', desc: 'Show all commands', category: 'system' },
 ];

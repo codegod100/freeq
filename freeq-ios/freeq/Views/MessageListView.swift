@@ -5,13 +5,44 @@ struct MessageListView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var channel: ChannelState
     @State private var emojiPickerMessage: ChatMessage? = nil
-    @State private var profileNick: String? = nil
+    @State private var profileTarget: ProfileNickTarget? = nil
+    @State private var proofTarget: ProofTarget? = nil
+    @State private var reportSource: ReportTarget? = nil
     @State private var threadMessage: ChatMessage? = nil
     @StateObject private var avatarCache = AvatarCache.shared
 
     @State private var showScrollButton = false
     @State private var lastReadId: String? = nil
     @State private var isNearBottom = true
+    /// Throttle so a rapid scroll-up doesn't spam CHATHISTORY requests.
+    @State private var lastHistoryFetch: Date = .distantPast
+    /// Celebratory reaction burst — set when you add a positive reaction.
+    @State private var reactionBurst: ReactionBurstEvent? = nil
+    /// Channels whose "while you were away" card the user dismissed this view.
+    @State private var awayCardDismissed: Set<String> = []
+
+    /// Show the on-device catch-up card when you open a channel with a real
+    /// backlog and on-device intelligence is available.
+    private var showAwayCard: Bool {
+        (appState.awayCardCounts[channel.name] ?? 0) >= 4
+            && !awayCardDismissed.contains(channel.name)
+            && IntelligenceService.shared.isAvailable
+    }
+
+    private func dismissAwayCard() {
+        awayCardDismissed.insert(channel.name)
+        appState.awayCardCounts[channel.name] = 0
+    }
+
+    /// Emoji that get a floating particle burst when you react with them.
+    private static let celebratoryReactions: Set<String> = ["❤️", "🎉", "🔥", "😂", "👍"]
+
+    /// Fire a particle burst if `emoji` is celebratory (called from every
+    /// reaction-add path). Reduce Motion suppresses the visual in the view.
+    private func celebrate(_ emoji: String) {
+        guard Self.celebratoryReactions.contains(emoji) else { return }
+        reactionBurst = ReactionBurstEvent(emoji: emoji)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -30,17 +61,25 @@ struct MessageListView: View {
                 }
 
                 ScrollView {
+                    // Auto-fetch older messages when the top of the list scrolls into view.
+                    // The button below is kept as a manual fallback (errors, or for users
+                    // who want to pull more without scrolling all the way up).
+                    Color.clear
+                        .frame(height: 1)
+                        .onAppear { autoFetchOlder() }
+
                     // Pull to load older messages
                     Button(action: {
                         let oldest = channel.messages.first?.timestamp
                         appState.requestHistory(channel: channel.name, before: oldest)
+                        lastHistoryFetch = Date()
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }) {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.up.circle")
                                 .font(.system(size: 13))
                             Text("Load older messages")
-                                .font(.system(size: 13))
+                                .font(.fqFootnote)
                         }
                         .foregroundColor(Theme.textMuted)
                         .frame(maxWidth: .infinity)
@@ -66,6 +105,9 @@ struct MessageListView: View {
 
                             if msg.from.isEmpty {
                                 systemMessage(msg)
+                            } else if appState.isBlocked(nick: msg.from, did: channel.memberInfo(for: msg.from)?.did) {
+                                // Hidden — you blocked this person.
+                                EmptyView()
                             } else if msg.isDeleted {
                                 deletedMessage(msg, showHeader: showHeader)
                             } else {
@@ -141,10 +183,10 @@ struct MessageListView: View {
                                     UserAvatar(nick: last.from, size: 22)
                                     VStack(alignment: .leading, spacing: 1) {
                                         Text(last.from)
-                                            .font(.system(size: 11, weight: .bold))
+                                            .font(.fqCaption2.weight(.bold))
                                             .foregroundColor(Theme.nickColor(for: last.from))
                                         Text(last.text.prefix(60) + (last.text.count > 60 ? "…" : ""))
-                                            .font(.system(size: 12))
+                                            .font(.fqCaption)
                                             .foregroundColor(Theme.textSecondary)
                                             .lineLimit(1)
                                     }
@@ -152,7 +194,7 @@ struct MessageListView: View {
                                     let unread = appState.unreadCounts[channel.name] ?? 0
                                     if unread > 0 {
                                         Text("\(unread)")
-                                            .font(.system(size: 11, weight: .bold))
+                                            .font(.fqCaption2.weight(.bold))
                                             .foregroundColor(.white)
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
@@ -170,7 +212,7 @@ struct MessageListView: View {
                                     Image(systemName: "chevron.down")
                                         .font(.system(size: 12, weight: .bold))
                                     Text("Scroll to bottom")
-                                        .font(.system(size: 13, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                 }
                                 .foregroundColor(Theme.accent)
                                 .padding(.horizontal, 16)
@@ -181,12 +223,43 @@ struct MessageListView: View {
                         .cornerRadius(14)
                         .shadow(color: .black.opacity(0.25), radius: 10, y: 4)
                     }
+                    .accessibilityLabel("Scroll to latest messages")
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
                     .animation(.spring(response: 0.3), value: showScrollButton)
                 }
+
+                // Celebratory reaction burst — floats up from the bottom.
+                if let burst = reactionBurst {
+                    ReactionBurstView(emoji: burst.emoji)
+                        .id(burst.id)
+                        .allowsHitTesting(false)
+                        .onAppear {
+                            // Clear after the animation so it can retrigger.
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                                if reactionBurst?.id == burst.id { reactionBurst = nil }
+                            }
+                        }
+                }
+
+                // "While you were away" — a floating, on-device catch-up card
+                // pinned to the top when you open a channel with a backlog.
+                if showAwayCard {
+                    VStack {
+                        WhileYouWereAwayCard(
+                            channel: channel,
+                            missed: appState.awayCardCounts[channel.name] ?? 0,
+                            onDismiss: { withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) { dismissAwayCard() } }
+                        )
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+                        Spacer()
+                    }
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
+            .animation(.spring(response: 0.45, dampingFraction: 0.85), value: showAwayCard)
             .onChange(of: channel.messages.count) {
                 onNewMessages(proxy: proxy)
             }
@@ -211,18 +284,25 @@ struct MessageListView: View {
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
         }
-        .sheet(item: Binding(
-            get: { profileNick.map { ProfileNickTarget(nick: $0) } },
-            set: { profileNick = $0?.nick }
-        )) { target in
-            UserProfileSheet(nick: target.nick)
+        .sheet(item: $profileTarget) { target in
+            UserProfileSheet(nick: target.nick, origin: target.origin)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
+        // Intercept in-app freeq:// links from message text (nick → profile,
+        // #channel → switch/join); real URLs fall through to the browser.
+        .environment(\.openURL, OpenURLAction(handler: handleMessageURL))
         .sheet(item: $threadMessage) { msg in
             ThreadView(rootMessage: msg, channelName: channel.name)
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(item: $proofTarget) { target in
+            VerifiedProofSheet(did: target.did, handle: target.handle, msgId: target.msgId)
+        }
+        .reportDialog($reportSource) { target, reason in
+            appState.reportUser(nick: target.nick, did: target.did, reason: reason)
+            ToastManager.shared.show("Reported & blocked", icon: "flag.fill")
         }
     }
 
@@ -288,6 +368,7 @@ struct MessageListView: View {
         // Quick reactions
         ForEach(["👍", "❤️", "😂", "🎉"], id: \.self) { emoji in
             Button(action: {
+                celebrate(emoji)
                 appState.sendReaction(target: channel.name, msgId: msg.id, emoji: emoji)
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
             }) {
@@ -295,7 +376,10 @@ struct MessageListView: View {
             }
         }
 
-        if msg.from.lowercased() == appState.nick.lowercased() {
+        let isAuthor = msg.from.lowercased() == appState.nick.lowercased()
+        let selfIsOp = channel.memberInfo(for: appState.nick)?.isOp ?? false
+
+        if isAuthor {
             Divider()
 
             Button(action: {
@@ -303,12 +387,17 @@ struct MessageListView: View {
             }) {
                 Label("Edit", systemImage: "pencil")
             }
+        }
 
+        // Author may always delete their own; an op may delete anyone's
+        // (moderation). Single source of truth: MessageActions.canDelete.
+        if MessageActions.canDelete(msg, by: appState.nick, isOp: selfIsOp) {
+            if !isAuthor { Divider() }
             Button(role: .destructive, action: {
                 appState.deleteMessage(target: channel.name, msgId: msg.id)
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             }) {
-                Label("Delete", systemImage: "trash")
+                Label(isAuthor ? "Delete" : "Delete (mod)", systemImage: "trash")
             }
         }
 
@@ -336,31 +425,60 @@ struct MessageListView: View {
         }) {
             Label("Copy Message ID", systemImage: "number")
         }
+
+        // Safety — not for your own messages.
+        if msg.from.lowercased() != appState.nick.lowercased() {
+            Divider()
+            Button(role: .destructive, action: {
+                reportSource = ReportTarget(nick: msg.from,
+                                            did: channel.memberInfo(for: msg.from)?.did,
+                                            text: msg.text)
+            }) {
+                Label("Report…", systemImage: "flag")
+            }
+            Button(role: .destructive, action: {
+                appState.blockUser(nick: msg.from, did: channel.memberInfo(for: msg.from)?.did)
+                ToastManager.shared.show("Blocked \(msg.from)", icon: "hand.raised.fill")
+            }) {
+                Label("Block \(msg.from)", systemImage: "hand.raised")
+            }
+        }
     }
 
     // MARK: - Typing Indicator
 
     private var typingIndicator: some View {
-        HStack(spacing: 8) {
+        let typers = channel.activeTypers
+        return HStack(spacing: 8) {
+            // Whoever's actually typing, as overlapping avatars — the indicator
+            // feels human when you can see who it is, not anonymous dots.
+            HStack(spacing: -8) {
+                ForEach(Array(typers.prefix(3)), id: \.self) { nick in
+                    UserAvatar(nick: nick, size: 22)
+                        .overlay(Circle().strokeBorder(Theme.bgPrimary, lineWidth: 2))
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+
             // Animated bouncing dots
             TypingDots()
 
-            let typers = channel.activeTypers
             if typers.count == 1 {
-                Text("\(typers[0]) is typing...")
-                    .font(.system(size: 12))
+                Text("\(typers[0]) is typing…")
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             } else if typers.count == 2 {
-                Text("\(typers[0]) and \(typers[1]) are typing...")
-                    .font(.system(size: 12))
+                Text("\(typers[0]) and \(typers[1]) are typing…")
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             } else if typers.count > 2 {
-                Text("\(typers.count) people are typing...")
-                    .font(.system(size: 12))
+                Text("\(typers.count) people are typing…")
+                    .font(.fqCaption)
                     .foregroundColor(Theme.textMuted)
             }
         }
-        .padding(.leading, 68)
+        .padding(.leading, 20)
+        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: typers)
     }
 
     // MARK: - Unread Separator
@@ -369,13 +487,28 @@ struct MessageListView: View {
         HStack(spacing: 8) {
             Rectangle().fill(Color.red.opacity(0.4)).frame(height: 1)
             Text("NEW")
-                .font(.system(size: 10, weight: .heavy))
+                .font(.fqCaption2.weight(.heavy))
                 .foregroundColor(.red.opacity(0.7))
                 .tracking(1)
             Rectangle().fill(Color.red.opacity(0.4)).frame(height: 1)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
+    }
+
+    // MARK: - History
+
+    /// Fire a CHATHISTORY BEFORE request when the top of the message list comes into
+    /// view, throttled to once every 2 seconds so a fast scroll-up doesn't spam the server.
+    /// Skip when the channel has no messages — there's nothing to anchor the request on
+    /// and the initial CHATHISTORY LATEST will populate it.
+    private func autoFetchOlder() {
+        guard !channel.messages.isEmpty else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastHistoryFetch) > 2.0 else { return }
+        lastHistoryFetch = now
+        let oldest = channel.messages.first?.timestamp
+        appState.requestHistory(channel: channel.name, before: oldest)
     }
 
     // MARK: - Message Grouping
@@ -386,6 +519,10 @@ struct MessageListView: View {
         let curr = channel.messages[idx]
         if curr.from.isEmpty || prev.from.isEmpty { return true }
         if prev.from != curr.from { return true }
+        // Break across a provenance boundary: a federated message (origin set)
+        // must not collapse under a local sender's header, or it loses its
+        // "via {origin}" and inherits the local verified/signed context.
+        if prev.origin != curr.origin { return true }
         return curr.timestamp.timeIntervalSince(prev.timestamp) > 300
     }
 
@@ -403,7 +540,7 @@ struct MessageListView: View {
         HStack {
             Rectangle().fill(Theme.border).frame(height: 1)
             Text(formatDate(date))
-                .font(.system(size: 11, weight: .semibold))
+                .font(.fqCaption2.weight(.semibold))
                 .foregroundColor(Theme.textMuted)
                 .padding(.horizontal, 8)
             Rectangle().fill(Theme.border).frame(height: 1)
@@ -418,7 +555,7 @@ struct MessageListView: View {
                 .font(.system(size: 9))
                 .foregroundColor(Theme.textMuted)
             Text(msg.text)
-                .font(.system(size: 12))
+                .font(.fqCaption)
                 .foregroundColor(Theme.textMuted)
         }
         .padding(.horizontal, 20)
@@ -436,7 +573,7 @@ struct MessageListView: View {
                 .font(.system(size: 11))
                 .foregroundColor(Theme.textMuted)
             Text("Message deleted")
-                .font(.system(size: 13))
+                .font(.fqFootnote)
                 .foregroundColor(Theme.textMuted)
                 .italic()
         }
@@ -456,8 +593,16 @@ struct MessageListView: View {
 
     @ViewBuilder
     private func messageRow(_ msg: ChatMessage, showHeader: Bool) -> some View {
-        let mention = isMention(msg) && msg.from.lowercased() != appState.nick.lowercased()
+        let isSelf = msg.from.lowercased() == appState.nick.lowercased()
+        let mention = isMention(msg) && !isSelf
         let pinned = channel.pins.contains(msg.id)
+        // Resolve the sender's member entry once — it was previously scanned
+        // three times per header row (verified badge, name prefix, signed
+        // proof), each an O(members) lowercased linear search.
+        let member = channel.memberInfo(for: msg.from)
+        // Verification is DID-anchored (identity we resolved), not "has an
+        // avatar" — one consistent definition of verified across the app.
+        let verified = msg.origin == nil && member?.did != nil
 
         VStack(alignment: .leading, spacing: 0) {
             // Reply context — tap to open thread
@@ -480,31 +625,61 @@ struct MessageListView: View {
 
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
-                            Button(action: { profileNick = msg.from }) {
+                            Button(action: { profileTarget = ProfileNickTarget(nick: msg.from, origin: msg.origin) }) {
                                 HStack(spacing: 4) {
-                                    Text((channel.memberInfo(for: msg.from)?.prefix ?? "") + msg.from)
-                                        .font(.system(size: 15, weight: .bold))
+                                    Text((member?.prefix ?? "") + msg.from)
+                                        .font(.fqSubheadline.weight(.bold))
                                         .foregroundColor(Theme.nickColor(for: msg.from))
+                                        // A DID-verified person just spoke — sweep the
+                                        // name with the signal glow once, so freeq's
+                                        // "provably a real person" is felt, not just read.
+                                        // Only for live arrivals, never history scroll-in.
+                                        .signalShimmer(active: verified && msg.timestamp.timeIntervalSinceNow > -8)
 
-                                    if avatarCache.avatarURL(for: msg.from.lowercased()) != nil {
+                                    if verified {
                                         VerifiedBadge(size: 12)
                                     }
                                 }
                             }
                             .buttonStyle(.plain)
 
+                            // Federated: relayed from another server — peer-vouched,
+                            // not verified here. Show provenance instead of the local
+                            // verified/signed badges (which would overstate trust).
+                            if let origin = msg.origin {
+                                Text("via \(origin)")
+                                    .font(.fqMonoCaption)
+                                    .foregroundColor(Theme.textMuted)
+                            }
+
                             Text(formatTime(msg.timestamp))
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
+
+                            if msg.origin == nil && msg.isSigned {
+                                let senderDID = member?.did
+                                Button {
+                                    if let did = senderDID {
+                                        UIImpactFeedbackGenerator(style: .rigid).impactOccurred()
+                                        proofTarget = ProofTarget(did: did, handle: nil, msgId: msg.id)
+                                    }
+                                } label: {
+                                    Image(systemName: "lock.fill")
+                                        .font(.system(size: 9, weight: .semibold))
+                                        .foregroundColor(Theme.verify)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(senderDID == nil)
+                            }
 
                             if msg.isEdited {
                                 Text("edited")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(.fqCaption2.weight(.semibold))
                                     .foregroundColor(Theme.accent)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
                                     .background(Theme.accent.opacity(0.12))
-                                    .cornerRadius(6)
+                                    .clipShape(Capsule())
                             }
                         }
 
@@ -518,12 +693,13 @@ struct MessageListView: View {
                 .padding(.bottom, 2)
             } else {
                 HStack(alignment: .top, spacing: 0) {
-                    // Subtle timestamp for continuation messages
+                    // Subtle timestamp for continuation messages, revealed on the
+                    // row (kept faint so the transcript reads as one voice).
                     Text(shortTime(msg.timestamp))
-                        .font(.system(size: 9))
+                        .font(.fqMonoCaption)
                         .foregroundColor(Theme.textMuted.opacity(0.5))
                         .frame(width: 56, alignment: .center)
-                        .padding(.top, 4)
+                        .padding(.top, 3)
 
                     messageBody(msg)
                         .padding(.trailing, 16)
@@ -539,17 +715,27 @@ struct MessageListView: View {
                     .padding(.top, 4)
             }
         }
-        // Mention/pin highlight
-        .background(mention || pinned ? Theme.accent.opacity(0.08) : Color.clear)
+        // Row emphasis, in priority order: pin > mention > your own message.
+        // Own messages get a whisper-quiet signal tint so you can find your
+        // voice in a busy channel without breaking the scannable left rail.
+        .background(
+            pinned ? Theme.warning.opacity(0.08)
+            : mention ? Theme.accent.opacity(0.10)
+            : isSelf ? Theme.accent.opacity(0.045)
+            : Color.clear
+        )
         .overlay(alignment: .leading) {
             if pinned {
-                Rectangle().fill(Color.orange).frame(width: 3)
+                Rectangle().fill(Theme.warning).frame(width: 3)
             } else if mention {
                 Rectangle().fill(Theme.accent).frame(width: 3)
+            } else if isSelf {
+                Rectangle().fill(Theme.accent.opacity(0.5)).frame(width: 2)
             }
         }
         // Double-tap to react with ❤️
         .onTapGesture(count: 2) {
+            celebrate("❤️")
             appState.sendReaction(target: channel.name, msgId: msg.id, emoji: "❤️")
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
         }
@@ -564,27 +750,26 @@ struct MessageListView: View {
 
     private func replyContext(_ original: ChatMessage) -> some View {
         HStack(spacing: 6) {
-            Rectangle()
+            Capsule()
                 .fill(Theme.accent)
                 .frame(width: 2)
 
             Image(systemName: "arrowshape.turn.up.left.fill")
-                .font(.system(size: 9))
+                .font(.fqCaption2)
                 .foregroundColor(Theme.textMuted)
 
             Text(original.from)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.fqCaption.weight(.semibold))
                 .foregroundColor(Theme.nickColor(for: original.from))
 
             Text(original.text)
-                .font(.system(size: 12))
+                .font(.fqCaption)
                 .foregroundColor(Theme.textMuted)
                 .lineLimit(1)
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 8)
-        .background(Theme.bgTertiary.opacity(0.5))
-        .cornerRadius(4)
+        .padding(.vertical, 5)
+        .padding(.horizontal, 9)
+        .background(Theme.bgTertiary.opacity(0.6), in: RoundedRectangle(cornerRadius: Theme.Radius.sm, style: .continuous))
     }
 
     // MARK: - Reactions
@@ -596,28 +781,39 @@ struct MessageListView: View {
                 let isMine = nicks.contains(where: { $0.lowercased() == appState.nick.lowercased() })
 
                 Button(action: {
-                    appState.sendReaction(target: channel.name, msgId: msg.id, emoji: emoji)
+                    // Optimistic local update so the pill flips immediately;
+                    // the inbound TAGMSG echo will reconcile with the server's view.
+                    if isMine {
+                        channel.removeReaction(msgId: msg.id, emoji: emoji, from: appState.nick)
+                    } else {
+                        celebrate(emoji)
+                        channel.applyReaction(msgId: msg.id, emoji: emoji, from: appState.nick)
+                    }
+                    appState.toggleReaction(target: channel.name, msgId: msg.id, emoji: emoji, currentlyMine: isMine)
                     UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 }) {
                     HStack(spacing: 3) {
                         Text(emoji)
-                            .font(.system(size: 14))
+                            .font(.fqFootnote)
                         if nicks.count > 1 {
                             Text("\(nicks.count)")
-                                .font(.system(size: 11, weight: .medium))
+                                .font(.fqCaption2.weight(.semibold))
                                 .foregroundColor(isMine ? Theme.accent : Theme.textSecondary)
+                                .contentTransition(.numericText())
                         }
                     }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(isMine ? Theme.accent.opacity(0.15) : Theme.bgTertiary)
-                    .cornerRadius(6)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(isMine ? Theme.accent.opacity(0.15) : Theme.bgTertiary, in: Capsule())
                     .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(isMine ? Theme.accent.opacity(0.4) : Color.clear, lineWidth: 1)
+                        Capsule().strokeBorder(isMine ? Theme.accent.opacity(0.45) : Theme.border, lineWidth: 1)
                     )
+                    .animation(.spring(response: 0.3, dampingFraction: 0.6), value: nicks.count)
                 }
                 .buttonStyle(.plain)
+                .sensoryFeedback(.impact(weight: .light), trigger: isMine)
+                .accessibilityLabel("\(emoji) reaction, \(nicks.count)")
+                .accessibilityHint(isMine ? "Double-tap to remove your reaction" : "Double-tap to react")
             }
         }
     }
@@ -633,11 +829,23 @@ struct MessageListView: View {
         pattern: #"(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})"#
     )
 
+    // Markdown inline patterns — compiled once (they were being recompiled on
+    // every render of every visible row; NSRegularExpression construction is
+    // expensive). Mirrors the cached bsky/yt patterns above.
+    private static let mdCodeBlock = try! NSRegularExpression(pattern: #"```(?:\w*\n?)?([\s\S]*?)```"#)
+    private static let mdBold = try! NSRegularExpression(pattern: #"\*\*(.+?)\*\*"#)
+    private static let mdItalic = try! NSRegularExpression(pattern: #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#)
+    private static let mdStrike = try! NSRegularExpression(pattern: #"~~(.+?)~~"#)
+    private static let mdInlineCode = try! NSRegularExpression(pattern: #"(?<!`)`(?!`)([^`\n]+)(?<!`)`(?!`)"#)
+    private static let mdURL = try! NSRegularExpression(pattern: #"https?://[^\s<>\]\)]+"#)
+    private static let mdMention = try! NSRegularExpression(pattern: #"@([A-Za-z0-9][A-Za-z0-9._-]*)"#)
+    private static let mdChannel = try! NSRegularExpression(pattern: #"(?<![\w/#])#[A-Za-z0-9][A-Za-z0-9._-]*"#)
+
     @ViewBuilder
     private func messageBody(_ msg: ChatMessage) -> some View {
         if msg.isAction {
             Text("*\(msg.from) \(msg.text)*")
-                .font(.system(size: 15))
+                .font(.fqSubheadline)
                 .italic()
                 .foregroundColor(Theme.textSecondary)
         } else if let (url, durationLabel) = extractVoiceMessage(msg.text) {
@@ -717,7 +925,7 @@ struct MessageListView: View {
     private func styledText(_ text: String) -> some View {
         let isMention = text.lowercased().contains(appState.nick.lowercased())
         return Text(attributedMessage(text))
-            .font(.system(size: 15))
+            .font(.fqSubheadline)
             .foregroundColor(Theme.textPrimary)
             .textSelection(.enabled)
             .padding(.horizontal, isMention ? 4 : 0)
@@ -732,7 +940,7 @@ struct MessageListView: View {
                 Image(systemName: "link")
                     .font(.system(size: 11))
                 Text(url.host ?? url.absoluteString)
-                    .font(.system(size: 13))
+                    .font(.fqFootnote)
                     .lineLimit(1)
             }
             .foregroundColor(Theme.accent)
@@ -852,73 +1060,111 @@ struct MessageListView: View {
         var result = AttributedString(text)
         let nsRange = NSRange(text.startIndex..., in: text)
 
+        // Fonts use Dynamic-Type text styles (not fixed .system(size:)) so
+        // formatted message text scales with the user's content-size setting.
+
         // Code blocks: ```text``` (must be before inline code)
-        let codeBlockPattern = #"```(?:\w*\n?)?([\s\S]*?)```"#
-        if let regex = try? NSRegularExpression(pattern: codeBlockPattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 13, design: .monospaced)
-                    result[range].backgroundColor = Theme.bgTertiary
-                }
+        for match in Self.mdCodeBlock.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.callout, design: .monospaced)
+                result[range].backgroundColor = Theme.bgTertiary
             }
         }
 
         // Bold: **text**
-        let boldPattern = #"\*\*(.+?)\*\*"#
-        if let regex = try? NSRegularExpression(pattern: boldPattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 15, weight: .bold)
-                }
+        for match in Self.mdBold.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.body, weight: .bold)
             }
         }
 
         // Italic: *text* (but not **text**)
-        let italicPattern = #"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)"#
-        if let regex = try? NSRegularExpression(pattern: italicPattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 15).italic()
-                }
+        for match in Self.mdItalic.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.body).italic()
             }
         }
 
         // Strikethrough: ~~text~~
-        let strikePattern = #"~~(.+?)~~"#
-        if let regex = try? NSRegularExpression(pattern: strikePattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].strikethroughStyle = .single
-                    result[range].foregroundColor = Theme.textMuted
-                }
+        for match in Self.mdStrike.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].strikethroughStyle = .single
+                result[range].foregroundColor = Theme.textMuted
             }
         }
 
         // Inline code: `text` (skip if inside code block)
-        let codePattern = #"(?<!`)`(?!`)([^`\n]+)(?<!`)`(?!`)"#
-        if let regex = try? NSRegularExpression(pattern: codePattern) {
-            for match in regex.matches(in: text, range: nsRange).reversed() {
-                if let range = Range(match.range, in: result) {
-                    result[range].font = .system(size: 14, design: .monospaced)
-                    result[range].backgroundColor = Theme.bgTertiary
-                }
+        for match in Self.mdInlineCode.matches(in: text, range: nsRange).reversed() {
+            if let range = Range(match.range, in: result) {
+                result[range].font = .system(.body, design: .monospaced)
+                result[range].backgroundColor = Theme.bgTertiary
             }
         }
 
         // Clickable URLs
-        let urlPattern = #"https?://[^\s<>\]\)]+"#
-        if let regex = try? NSRegularExpression(pattern: urlPattern) {
-            for match in regex.matches(in: text, range: nsRange) {
-                if let swiftRange = Range(match.range, in: text),
-                   let attrRange = Range(match.range, in: result),
-                   let url = URL(string: String(text[swiftRange])) {
-                    result[attrRange].link = url
-                    result[attrRange].foregroundColor = Theme.accent
-                }
+        for match in Self.mdURL.matches(in: text, range: nsRange) {
+            if let swiftRange = Range(match.range, in: text),
+               let attrRange = Range(match.range, in: result),
+               let url = URL(string: String(text[swiftRange])) {
+                result[attrRange].link = url
+                result[attrRange].foregroundColor = Theme.accent
+            }
+        }
+
+        // Tappable @mentions → freeq://mention/<token> (opens the profile).
+        let ns = text as NSString
+        for match in Self.mdMention.matches(in: text, range: nsRange) {
+            // Skip emails: require a boundary before '@'.
+            let at = match.range.location
+            if at > 0, let s = UnicodeScalar(UInt32(ns.character(at: at - 1))),
+               CharacterSet.alphanumerics.contains(s) { continue }
+            guard let attrRange = Range(match.range, in: result),
+                  result[attrRange].link == nil else { continue }
+            let token = ns.substring(with: match.range(at: 1))
+            let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? token
+            if let url = URL(string: "freeq://mention/\(encoded)") {
+                result[attrRange].link = url
+                result[attrRange].foregroundColor = Theme.accent
+                result[attrRange].font = .system(.body, weight: .semibold)
+            }
+        }
+
+        // Tappable #channels → freeq://channel/<name> (switch/join).
+        for match in Self.mdChannel.matches(in: text, range: nsRange) {
+            guard let attrRange = Range(match.range, in: result),
+                  result[attrRange].link == nil else { continue }
+            let name = ns.substring(with: match.range) // "#channel"
+            let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+            if let url = URL(string: "freeq://channel/\(encoded)") {
+                result[attrRange].link = url
+                result[attrRange].foregroundColor = Theme.accent
+                result[attrRange].font = .system(.body, weight: .semibold)
             }
         }
 
         return result
+    }
+
+    /// Intercept in-app links from message text. `freeq://mention/<token>`
+    /// opens the profile; `freeq://channel/<name>` switches to (or joins) the
+    /// channel; everything else opens in the browser.
+    private func handleMessageURL(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "freeq" else { return .systemAction }
+        switch url.host {
+        case "mention":
+            let token = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+            profileTarget = ProfileNickTarget(nick: token, origin: nil)
+            return .handled
+        case "channel":
+            let name = url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+            if !appState.channels.contains(where: { $0.name.lowercased() == name.lowercased() }) {
+                appState.joinChannel(name)
+            }
+            appState.navigate(toBuffer: name)
+            return .handled
+        default:
+            return .systemAction
+        }
     }
 
     // MARK: - Formatting
@@ -971,17 +1217,17 @@ struct EmojiPickerSheet: View {
     var body: some View {
         VStack(spacing: 16) {
             Text("React to message")
-                .font(.system(size: 15, weight: .semibold))
+                .font(.fqSubheadline.weight(.semibold))
                 .foregroundColor(Theme.textPrimary)
                 .padding(.top, 8)
 
             // Original message preview
             HStack(spacing: 8) {
                 Text(message.from)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.fqFootnote.weight(.bold))
                     .foregroundColor(Theme.nickColor(for: message.from))
                 Text(message.text)
-                    .font(.system(size: 13))
+                    .font(.fqFootnote)
                     .foregroundColor(Theme.textSecondary)
                     .lineLimit(2)
             }
@@ -1017,6 +1263,7 @@ struct EmojiPickerSheet: View {
 
 struct TypingDots: View {
     @State private var animating = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         HStack(spacing: 3) {
@@ -1024,9 +1271,10 @@ struct TypingDots: View {
                 Circle()
                     .fill(Theme.textMuted)
                     .frame(width: 6, height: 6)
-                    .offset(y: animating ? -4 : 2)
+                    .offset(y: (animating && !reduceMotion) ? -4 : 2)
                     .animation(
-                        .easeInOut(duration: 0.4)
+                        reduceMotion ? nil :
+                            .easeInOut(duration: 0.4)
                             .repeatForever(autoreverses: true)
                             .delay(Double(i) * 0.15),
                         value: animating
@@ -1034,13 +1282,23 @@ struct TypingDots: View {
             }
         }
         .onAppear { animating = true }
+        .accessibilityLabel("Typing")
     }
 }
 
 // Helper for profile sheet binding
 private struct ProfileNickTarget: Identifiable {
     let nick: String
+    let origin: String?
     var id: String { nick }
+}
+
+// Helper for the verified-identity proof sheet binding
+private struct ProofTarget: Identifiable {
+    let did: String
+    let handle: String?
+    let msgId: String?
+    var id: String { (msgId ?? "") + did }
 }
 
 // Preference key for scroll offset detection
@@ -1099,7 +1357,7 @@ struct InlineVideoPlayer: View {
                                 .font(.system(size: 24))
                                 .foregroundColor(.white)
                             Text("Tap to retry")
-                                .font(.system(size: 12))
+                                .font(.fqCaption)
                                 .foregroundColor(.white.opacity(0.8))
                         }
                         .frame(width: 80, height: 64)
@@ -1229,6 +1487,8 @@ struct InlineAudioPlayer: View {
                 }
             }
             .disabled(isDownloading)
+            .accessibilityLabel(loadError ? "Voice message failed to load"
+                                 : isPlaying ? "Pause voice message" : "Play voice message")
 
             VStack(alignment: .leading, spacing: 6) {
                 // Label
@@ -1237,7 +1497,7 @@ struct InlineAudioPlayer: View {
                         .font(.system(size: 11))
                         .foregroundColor(Theme.accent)
                     Text("Voice message")
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.fqFootnote.weight(.medium))
                         .foregroundColor(Theme.textPrimary)
                 }
 
@@ -1258,11 +1518,11 @@ struct InlineAudioPlayer: View {
                 // Duration
                 HStack {
                     Text(formatTime(isPlaying ? progress : 0))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.fqMonoCaption)
                         .foregroundColor(Theme.textMuted)
                     Spacer()
                     Text(label ?? formatTime(duration))
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.fqMonoCaption)
                         .foregroundColor(Theme.textMuted)
                 }
             }
@@ -1462,26 +1722,32 @@ extension MessageListView {
 
 struct ShimmerModifier: ViewModifier {
     @State private var phase: CGFloat = -1.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         content
             .overlay(
                 GeometryReader { geo in
-                    Rectangle()
-                        .fill(
-                            LinearGradient(
-                                colors: [.clear, .white.opacity(0.08), .clear],
-                                startPoint: .leading,
-                                endPoint: .trailing
+                    // Reduce Motion: skip the sweeping highlight (a static
+                    // placeholder tint stands in) so loading skeletons don't
+                    // animate for users who've asked the system not to.
+                    if !reduceMotion {
+                        Rectangle()
+                            .fill(
+                                LinearGradient(
+                                    colors: [.clear, .white.opacity(0.08), .clear],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
                             )
-                        )
-                        .frame(width: geo.size.width * 0.6)
-                        .offset(x: geo.size.width * phase)
-                        .onAppear {
-                            withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
-                                phase = 1.5
+                            .frame(width: geo.size.width * 0.6)
+                            .offset(x: geo.size.width * phase)
+                            .onAppear {
+                                withAnimation(.linear(duration: 1.5).repeatForever(autoreverses: false)) {
+                                    phase = 1.5
+                                }
                             }
-                        }
+                    }
                 }
                 .clipped()
             )
@@ -1491,5 +1757,181 @@ struct ShimmerModifier: ViewModifier {
 extension View {
     func shimmering() -> some View {
         modifier(ShimmerModifier())
+    }
+
+    /// One-time signal-glow sweep across the content when `active` — used to
+    /// make a verified identity's arrival feel special. No-op under Reduce
+    /// Motion.
+    func signalShimmer(active: Bool) -> some View {
+        modifier(SignalShimmerOnce(active: active))
+    }
+}
+
+/// On-device "while you were away" catch-up card. Streams a one-sentence
+/// summary of the backlog in, Apple-Intelligence style, then sits until
+/// dismissed. Private + on-device — no other IRC client can do this.
+struct WhileYouWereAwayCard: View {
+    let channel: ChannelState
+    let missed: Int
+    let onDismiss: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var summary = ""
+    @State private var loading = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Theme.signalGradient)
+                    .symbolEffect(.pulse, isActive: loading && !reduceMotion)
+                Text("While you were away")
+                    .font(.fqFootnote.weight(.semibold))
+                    .foregroundColor(Theme.textPrimary)
+                Spacer()
+                Text("\(missed)")
+                    .font(.fqCaption2.weight(.bold))
+                    .foregroundColor(Theme.accent)
+                    .padding(.horizontal, 7).padding(.vertical, 2)
+                    .background(Theme.accent.opacity(0.15), in: Capsule())
+                Button(action: onDismiss) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Theme.textMuted)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss summary")
+            }
+
+            if loading && summary.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.7).tint(Theme.accent)
+                    Text("Summarizing on-device…")
+                        .font(.fqCaption).foregroundColor(Theme.textMuted)
+                }
+            } else {
+                Text(summary.isEmpty ? "Nothing much — you're basically caught up." : summary)
+                    .font(.fqCallout)
+                    .foregroundColor(Theme.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .animation(.easeOut(duration: 0.15), value: summary)
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 4)
+        .task {
+            // Summarize the backlog that arrived while away (API caps at 40).
+            let msgs = Array(channel.messages.suffix(min(missed + 2, 40)))
+            let result = await IntelligenceService.shared.summarizeStreaming(msgs, in: channel.name) { partial in
+                summary = partial
+                loading = false
+            }
+            loading = false
+            if summary.isEmpty, let result { summary = result }
+        }
+    }
+}
+
+/// Identifies a single reaction burst so the overlay retriggers on each react.
+struct ReactionBurstEvent: Identifiable {
+    let id = UUID()
+    let emoji: String
+}
+
+/// A short burst of the reacted emoji that floats up and fades — iMessage-style
+/// screen joy for a celebratory reaction. One particle system, ~1.2s, then
+/// gone. No-op under Reduce Motion.
+struct ReactionBurstView: View {
+    let emoji: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var animate = false
+
+    private let count = 14
+
+    var body: some View {
+        GeometryReader { geo in
+            if !reduceMotion {
+                ZStack {
+                    ForEach(0..<count, id: \.self) { i in
+                        Particle(emoji: emoji, index: i, count: count, size: geo.size, animate: animate)
+                    }
+                }
+                .onAppear {
+                    withAnimation(.easeOut(duration: 1.2)) { animate = true }
+                }
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private struct Particle: View {
+        let emoji: String
+        let index: Int
+        let count: Int
+        let size: CGSize
+        let animate: Bool
+
+        // Deterministic pseudo-random spread from the index so we don't need a
+        // random source (which SwiftUI would re-roll on every re-render).
+        private var seed: Double { Double((index * 2654435761) % 1000) / 1000.0 }
+        private var seed2: Double { Double((index * 40503) % 1000) / 1000.0 }
+
+        var body: some View {
+            let startX = size.width * (0.2 + 0.6 * seed)
+            let drift = CGFloat((seed2 - 0.5) * 120)
+            let rise = size.height * CGFloat(0.45 + 0.35 * seed2)
+            let scale = 0.7 + 0.9 * seed
+
+            Text(emoji)
+                .font(.system(size: 26))
+                .scaleEffect(animate ? scale : 0.2)
+                .position(
+                    x: startX + (animate ? drift : 0),
+                    y: size.height - 90 - (animate ? rise : 0)
+                )
+                .rotationEffect(.degrees(animate ? Double((seed - 0.5) * 90) : 0))
+                .opacity(animate ? 0 : 1)
+        }
+    }
+}
+
+/// A single left-to-right highlight sweep, masked to the content's shape, that
+/// plays once when it appears. Distinct from `ShimmerModifier` (which loops for
+/// loading skeletons) — this is a one-shot celebratory glint.
+struct SignalShimmerOnce: ViewModifier {
+    let active: Bool
+    @State private var phase: CGFloat = -1.0
+    @State private var done = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if active && !reduceMotion && !done {
+                    GeometryReader { geo in
+                        LinearGradient(
+                            colors: [.clear, Theme.accentLight, Theme.accent, .clear],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                        .frame(width: geo.size.width * 0.55)
+                        .offset(x: geo.size.width * phase)
+                        .blendMode(.plusLighter)
+                        .mask(content)
+                        .allowsHitTesting(false)
+                        .onAppear {
+                            withAnimation(.easeInOut(duration: 0.85)) { phase = 1.7 }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) { done = true }
+                        }
+                    }
+                }
+            }
     }
 }

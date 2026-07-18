@@ -73,26 +73,26 @@ struct LinkPreviewCard: View {
                     VStack(alignment: .leading, spacing: 2) {
                         if let siteName = ogData?.siteName {
                             Text(siteName)
-                                .font(.system(size: 10, weight: .medium))
+                                .font(.fqCaption2.weight(.medium))
                                 .foregroundColor(Theme.textMuted)
                                 .textCase(.uppercase)
                         }
 
                         Text(ogData?.title ?? domain)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.fqFootnote.weight(.semibold))
                             .foregroundColor(Theme.accent)
                             .lineLimit(2)
 
                         if let desc = ogData?.description {
                             Text(desc)
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
                                 .lineLimit(2)
                         }
 
                         if ogData == nil && loaded {
                             Text(url.path.count > 1 ? String(url.path.prefix(50)) : domain)
-                                .font(.system(size: 11))
+                                .font(.fqCaption2)
                                 .foregroundColor(Theme.textMuted)
                                 .lineLimit(1)
                         }

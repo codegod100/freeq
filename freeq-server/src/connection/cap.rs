@@ -23,8 +23,16 @@ pub(super) fn handle_cap(
             conn.cap_negotiating = true;
             // Build capability list, including iroh endpoint ID if available
             let mut caps = String::from(
-                "sasl message-tags multi-prefix echo-message server-time batch draft/chathistory account-notify extended-join away-notify",
+                "sasl message-tags multi-prefix echo-message server-time batch draft/chathistory account-notify account-tag extended-join away-notify draft/read-marker",
             );
+            // Advertise draft/multiline with our policy limits (spec requires
+            // max-bytes; max-lines is recommended). See `draft_multiline` module
+            // for the actual enforcement.
+            caps.push_str(&format!(
+                " draft/multiline=max-bytes={},max-lines={}",
+                crate::connection::draft_multiline::MAX_BYTES,
+                crate::connection::draft_multiline::MAX_LINES,
+            ));
             if let Some(ref iroh_id) = *state.server_iroh_id.lock() {
                 caps.push_str(&format!(" iroh={iroh_id}"));
             }
@@ -69,6 +77,21 @@ pub(super) fn handle_cap(
                             state.cap_batch.lock().insert(session_id.to_string());
                             acked.push("batch");
                         }
+                        "draft/multiline" => {
+                            // Per spec, `draft/multiline` depends on `batch`.
+                            // The spec doesn't strictly require us to enforce
+                            // negotiation order, but we soft-warn: if the client
+                            // hasn't also requested batch in the same REQ
+                            // (or earlier), they can ACK multiline but it
+                            // won't work until batch is also negotiated. We
+                            // still ACK it so the client knows we support it.
+                            conn.cap_draft_multiline = true;
+                            state
+                                .cap_draft_multiline
+                                .lock()
+                                .insert(session_id.to_string());
+                            acked.push("draft/multiline");
+                        }
                         "draft/chathistory" => {
                             conn.cap_chathistory = true;
                             acked.push("draft/chathistory");
@@ -80,6 +103,11 @@ pub(super) fn handle_cap(
                                 .lock()
                                 .insert(session_id.to_string());
                             acked.push("account-notify");
+                        }
+                        "account-tag" => {
+                            conn.cap_account_tag = true;
+                            state.cap_account_tag.lock().insert(session_id.to_string());
+                            acked.push("account-tag");
                         }
                         "extended-join" => {
                             conn.cap_extended_join = true;
@@ -93,6 +121,11 @@ pub(super) fn handle_cap(
                             conn.cap_away_notify = true;
                             state.cap_away_notify.lock().insert(session_id.to_string());
                             acked.push("away-notify");
+                        }
+                        "draft/read-marker" => {
+                            conn.cap_read_marker = true;
+                            state.cap_read_marker.lock().insert(session_id.to_string());
+                            acked.push("draft/read-marker");
                         }
                         _ => {
                             all_ok = false;
@@ -195,6 +228,26 @@ pub(super) async fn handle_authenticate(
                         .await
                     };
                     match verify_result {
+                        // Connect-time allowlist (opt-in): reject verified DIDs
+                        // that aren't permitted on this instance. Handle isn't
+                        // resolved on the challenge path, so domain-only
+                        // allowlists gate here by DID only — use the OAuth flow
+                        // for handle-domain matching.
+                        Ok(did) if !state.did_is_allowed(&did, None) => {
+                            conn.sasl_in_progress = false;
+                            conn.sasl_failures += 1;
+                            crate::server::Metrics::bump(&state.metrics.sasl_failure_total);
+                            let fail = Message::from_server(
+                                server_name,
+                                irc::ERR_SASLFAIL,
+                                vec![
+                                    conn.nick_or_star(),
+                                    "Not authorized to connect to this server",
+                                ],
+                            );
+                            send(state, session_id, format!("{fail}\r\n"));
+                            tracing::warn!(%did, "connection denied by connect allowlist (challenge SASL)");
+                        }
                         Ok(did) => {
                             conn.authenticated_did = Some(did.clone());
                             conn.sasl_in_progress = false;
@@ -207,24 +260,33 @@ pub(super) async fn handle_authenticate(
                             // If no existing sessions, this just registers the nick normally.
                             super::registration::attach_same_did(conn, state, session_id, send);
 
-                            // Bind nick to DID (persistent identity-nick)
+                            // Bind nick to DID (in-memory + persistent),
+                            // ownership-preserving. A nick stashed during the
+                            // CAP/SASL negotiation window may be owned by a
+                            // different DID; bind_identity refuses that case
+                            // so the in-memory maps + DB stay consistent and
+                            // the existing registration force-rename handles
+                            // the session.
                             if let Some(ref nick) = conn.nick {
-                                let nick_lower = nick.to_lowercase();
-                                state
-                                    .did_nicks
-                                    .lock()
-                                    .insert(did.clone(), nick_lower.clone());
-                                state
-                                    .nick_owners
-                                    .lock()
-                                    .insert(nick_lower.clone(), did.clone());
-                                let nick_l = nick_lower.clone();
-                                let did_c = did.clone();
-                                let state_c = Arc::clone(state);
-                                tokio::spawn(async move {
-                                    state_c.crdt_set_nick_owner(&nick_l, &did_c).await;
-                                });
-                                state.with_db(|db| db.save_identity(&did, &nick.to_lowercase()));
+                                match state.bind_identity(&did, nick) {
+                                    crate::server::BindOutcome::Bound => {
+                                        let nick_l = nick.to_lowercase();
+                                        let did_c = did.clone();
+                                        let state_c = Arc::clone(state);
+                                        tokio::spawn(async move {
+                                            state_c.crdt_set_nick_owner(&nick_l, &did_c).await;
+                                        });
+                                    }
+                                    crate::server::BindOutcome::ConflictOwnedByOther {
+                                        owner_did,
+                                    } => {
+                                        tracing::warn!(
+                                            %session_id, %did, nick = %nick,
+                                            %owner_did,
+                                            "SASL bind refused: nick owned by another DID (will be force-renamed at registration)"
+                                        );
+                                    }
+                                }
                             }
 
                             // Resolve handle from DID document for WHOIS display,
@@ -306,6 +368,26 @@ pub(super) async fn handle_authenticate(
                             );
                             send(state, session_id, format!("{success}\r\n"));
                             tracing::info!(%session_id, %did, nick = %nick, "SASL authentication successful");
+                            crate::server::Metrics::bump(&state.metrics.sasl_success_total);
+
+                            // Surface the API bearer for this connection so the
+                            // bot can hit /agent/tools/* with the same identity
+                            // it just authenticated to IRC with. Without this,
+                            // bots have no way to discover their own session_id
+                            // and every diagnostic call comes in as anonymous.
+                            //
+                            // Format: `NOTICE * :API-BEARER <session_id>` — chosen
+                            // so it's a single greppable line that doesn't collide
+                            // with any standard IRC numeric or NOTICE format.
+                            // Clients that don't need the bearer can ignore it
+                            // (their pre-existing notice handling will display
+                            // it as a server message; harmless).
+                            let bearer_notice = Message::from_server(
+                                server_name,
+                                "NOTICE",
+                                vec!["*", &format!("API-BEARER {session_id}")],
+                            );
+                            send(state, session_id, format!("{bearer_notice}\r\n"));
 
                             // Broadcast account-notify to shared channels
                             broadcast_account_notify(state, session_id, &nick, &did);
@@ -316,6 +398,7 @@ pub(super) async fn handle_authenticate(
                                 tracing::warn!(%session_id, retries = conn.dpop_retries, "DPoP nonce retry limit exceeded");
                                 conn.sasl_in_progress = false;
                                 conn.sasl_failures += 1;
+                                crate::server::Metrics::bump(&state.metrics.sasl_failure_total);
                                 let fail = Message::from_server(
                                     server_name,
                                     irc::ERR_SASLFAIL,
@@ -358,6 +441,7 @@ pub(super) async fn handle_authenticate(
                             tracing::warn!(%session_id, "SASL auth failed: {reason}");
                             conn.sasl_in_progress = false;
                             conn.sasl_failures += 1;
+                            crate::server::Metrics::bump(&state.metrics.sasl_failure_total);
                             let fail = Message::from_server(
                                 server_name,
                                 irc::ERR_SASLFAIL,

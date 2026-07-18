@@ -194,7 +194,7 @@ async fn self_invite_bypass_invite_only() {
         // because INVITE requires being in the channel (and op if +i).
         out.tx("INVITE invout2 #secret");
         // Should get error (442 not on channel, or 482 not op)
-        let err = out.rx(
+        out.rx(
             |l| {
                 let n = l.split_whitespace().nth(1).unwrap_or("");
                 n == "442" || n == "482" || n == "443"
@@ -279,7 +279,7 @@ async fn kick_yourself() {
         c.tx("KICK #selfkick selfkick :bye myself");
         // Should either get KICK echo (you kicked yourself) or an error.
         // Either way, server must not crash.
-        let result = c.maybe(
+        let _ = c.maybe(
             |l| {
                 l.contains("KICK")
                     || l.split_whitespace()
@@ -375,7 +375,7 @@ async fn cap_ls_after_registration() {
         // Send CAP LS after registration
         c.tx("CAP LS 302");
         // Should either get a CAP LS response or an error — not crash
-        let result = c.maybe(|l| l.contains("CAP") || l.contains("ERROR"), 1000);
+        let _ = c.maybe(|l| l.contains("CAP") || l.contains("ERROR"), 1000);
         // Regardless, server should still work
         c.tx("JOIN #postcap");
         c.num("366");
@@ -771,7 +771,7 @@ async fn rapid_connect_disconnect_reconnect() {
             c.drain();
             c.tx("JOIN #flap");
             c.num("366");
-            c.tx("QUIT :round {i}");
+            c.tx(&format!("QUIT :round {i}"));
             // Small delay for cleanup
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -835,7 +835,7 @@ async fn bare_hash_channel() {
         // Try to join just "#" — should fail or create a weird channel
         c.tx("JOIN #");
         // Should get an error or silently fail — must not crash
-        let result = c.maybe(
+        let _ = c.maybe(
             |l| {
                 let n = l.split_whitespace().nth(1).unwrap_or("");
                 n == "479" || n == "403" || l.contains("JOIN")

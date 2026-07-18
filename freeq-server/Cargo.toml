@@ -16,6 +16,9 @@ path = "src/main.rs"
 [dependencies]
 aes-gcm = { workspace = true }
 freeq-sdk = { path = "../freeq-sdk" }
+freeq-oauth = { workspace = true }
+freeq-auth-broker = { path = "../freeq-auth-broker" }
+async-trait = "0.1"
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
@@ -46,10 +49,29 @@ percent-encoding = { workspace = true }
 iroh-quinn = { workspace = true }
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 automerge = { workspace = true }
+ulid = "1"
+iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = ["opus"], optional = true }
+moq-relay = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, optional = true }
+moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, features = ["noq", "iroh", "aws-lc-rs"], optional = true }
+moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", optional = true }
+moq-token = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", optional = true }
+qmux = { version = "0.0.5", default-features = false, features = ["ws"], optional = true }
+futures = { version = "0.3", optional = true }
+rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false, optional = true }
 toml = "0.8"
+# OIDC ID-token signature verification (JWKS). `aws_lc_rs` matches
+# moq-token's backend choice — enabling BOTH jsonwebtoken backends makes
+# the crate panic at runtime until a provider is installed manually.
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+
+[features]
+default = []
+av-native = ["iroh-live", "moq-relay", "moq-native", "moq-lite", "moq-token", "qmux", "futures", "rustls"]  # Enable iroh-live + SFU (QUIC + WebSocket)
 
 [dev-dependencies]
 freeq-sdk = { path = "../freeq-sdk" }
+iroh = { workspace = true }
+serde_urlencoded = "0.7"
 rcgen = "0.13"
 tempfile = "3"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
@@ -57,6 +79,7 @@ aes-gcm = "0.10"
 base64 = "0.22"
 sha2 = "0.10"
 hmac = "0.12"
+rusqlite = { workspace = true }
 
 [lints]
 workspace = true

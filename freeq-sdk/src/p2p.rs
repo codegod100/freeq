@@ -115,7 +115,7 @@ pub async fn start() -> Result<(P2pHandle, mpsc::Receiver<P2pEvent>)> {
     let (event_tx, event_rx) = mpsc::channel(256);
     let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
 
-    let endpoint = iroh::Endpoint::builder()
+    let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .alpns(vec![P2P_ALPN.to_vec()])
         .bind()
         .await?;
@@ -278,8 +278,8 @@ async fn handle_peer_connection_outgoing(
 /// Run a bidirectional message session with a peer.
 async fn run_peer_session(
     peer_id: String,
-    mut send: iroh_quinn::SendStream,
-    recv: iroh_quinn::RecvStream,
+    mut send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
     peers: Arc<tokio::sync::Mutex<HashMap<String, mpsc::Sender<String>>>>,
     event_tx: mpsc::Sender<P2pEvent>,
 ) {

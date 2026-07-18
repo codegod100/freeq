@@ -55,7 +55,7 @@ async fn guest(addr: &str, nick: &str) -> (ClientHandle, mpsc::Receiver<Event>) 
         realname: format!("S2S Adversarial ({nick})"),
         tls: false,
         tls_insecure: false,
-        web_token: None,
+        ..Default::default()
     })
     .await
     .unwrap_or_else(|e| panic!("Connect {nick}→{addr}: {e}"));
@@ -69,7 +69,7 @@ async fn guest(addr: &str, nick: &str) -> (ClientHandle, mpsc::Receiver<Event>) 
             realname: format!("S2S Adversarial ({nick})"),
             tls: false,
             tls_insecure: false,
-            web_token: None,
+            ..Default::default()
         },
         None,
     )
@@ -224,7 +224,7 @@ async fn s2s_remote_nick_does_not_collide_with_local() {
 
     // Remote user with same nick — server should rename or handle
     let (h_remote, mut rx_remote) = guest(&remote, &shared_nick).await;
-    let remote_nick = registered(&mut rx_remote).await;
+    registered(&mut rx_remote).await;
     h_remote.join(&ch).await.unwrap();
     joined(&mut rx_remote, &ch).await;
 
@@ -275,7 +275,7 @@ async fn s2s_remote_joiner_does_not_get_auto_ops() {
     // Remote user joins same channel via S2S
     let (h_remote, mut rx_remote) =
         guest(&remote, &format!("ops_r{}", rand::random::<u16>())).await;
-    let remote_nick = registered(&mut rx_remote).await;
+    registered(&mut rx_remote).await;
     h_remote.join(&ch).await.unwrap();
     joined(&mut rx_remote, &ch).await;
 
@@ -288,7 +288,7 @@ async fn s2s_remote_joiner_does_not_get_auto_ops() {
         .unwrap();
 
     // Should fail — remote user shouldn't have ops
-    let err = maybe_wait(
+    let _ = maybe_wait(
         &mut rx_remote,
         |e| matches!(e, Event::ServerNotice { .. } | Event::RawLine(_)),
         Duration::from_secs(5),
@@ -640,7 +640,7 @@ async fn single_server_ops_not_granted_on_existing_channel() {
 
     // Second user joins (should NOT get ops)
     let (h2, mut rx2) = guest(&addr, &format!("so2{}", rand::random::<u16>())).await;
-    let nick2 = registered(&mut rx2).await;
+    registered(&mut rx2).await;
     h2.join(&ch).await.unwrap();
     joined(&mut rx2, &ch).await;
 

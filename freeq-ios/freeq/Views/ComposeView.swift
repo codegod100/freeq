@@ -3,6 +3,7 @@ import AVFoundation
 
 struct ComposeView: View {
     @EnvironmentObject var appState: AppState
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var text: String = ""
     @FocusState private var isFocused: Bool
     @State private var completions: [String] = []
@@ -18,6 +19,9 @@ struct ComposeView: View {
     @State private var holdTimer: Timer? = nil
     @State private var isUploadingVoice = false
 
+    // On-device Apple Intelligence: suggested replies to the latest message.
+    @State private var smartReplies: [String] = []
+
     var body: some View {
         VStack(spacing: 0) {
             Rectangle()
@@ -31,7 +35,7 @@ struct ComposeView: View {
                         .progressViewStyle(CircularProgressViewStyle(tint: Theme.accent))
                         .scaleEffect(0.7)
                     Text("Sending voice message…")
-                        .font(.system(size: 13))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textMuted)
                     Spacer()
                 }
@@ -49,7 +53,7 @@ struct ComposeView: View {
                                 HStack(spacing: 4) {
                                     UserAvatar(nick: nick, size: 20)
                                     Text(nick)
-                                        .font(.system(size: 13, weight: .medium))
+                                        .font(.fqFootnote.weight(.medium))
                                         .foregroundColor(Theme.textPrimary)
                                 }
                                 .padding(.horizontal, 10)
@@ -89,6 +93,12 @@ struct ComposeView: View {
                 .onAppear { text = edit.text }
             }
 
+            // On-device smart replies — offered only when the last message isn't
+            // yours and you haven't started typing. Tapping fills the field.
+            if !smartReplies.isEmpty && text.isEmpty && appState.editingMessage == nil {
+                smartReplyBar
+            }
+
             // Use ZStack with opacity to keep mic button gesture alive during recording
             ZStack {
                 // Normal compose bar — hidden (not removed) during recording
@@ -109,7 +119,7 @@ struct ComposeView: View {
                             axis: .vertical
                         )
                         .foregroundColor(Theme.textPrimary)
-                        .font(.system(size: 16))
+                        .font(.fqCallout)
                         .lineLimit(1...6)
                         .focused($isFocused)
                         .submitLabel(.return)
@@ -123,20 +133,29 @@ struct ComposeView: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    .background(Theme.bgTertiary)
-                    .cornerRadius(20)
+                    .background(Theme.bgTertiary, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(Theme.border, lineWidth: 1)
+                    )
 
                     if canSend {
                         Button(action: send) {
                             ZStack {
                                 Circle()
-                                    .fill(Theme.accent)
+                                    .fill(Theme.signalGradient)
                                     .frame(width: 36, height: 36)
+                                    .shadow(color: Theme.accent.opacity(0.4), radius: 8, y: 2)
                                 Image(systemName: appState.editingMessage != nil ? "checkmark" : "arrow.up")
                                     .font(.system(size: 15, weight: .bold))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(Color(hex: "04121a"))
                             }
+                            .frame(width: 44, height: 44)  // 44pt hit target
+                            .contentShape(Circle())
                         }
+                        .accessibilityLabel(appState.editingMessage != nil ? "Save edit" : "Send message")
+                        .keyboardShortcut(.return, modifiers: .command)  // ⌘↩ send (hardware keyboard / iPad)
+                        .transition(.scale.combined(with: .opacity))
                     } else if appState.authenticatedDID != nil {
                         micButton
                             .accessibilityLabel("Hold to record voice message")
@@ -153,7 +172,9 @@ struct ComposeView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(Theme.bgSecondary)
+                .animation(.spring(response: 0.32, dampingFraction: 0.7), value: canSend)
+                .modifier(ComposeBarBackground())
+                .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
                 .opacity(isRecording ? 0 : 1)
 
                 // Recording bar overlaid on top when recording
@@ -163,6 +184,60 @@ struct ComposeView: View {
                 }
             }
         }
+        .task(id: smartReplyKey) { await refreshSmartReplies() }
+        .onChange(of: text) { if !text.isEmpty { smartReplies = [] } }
+    }
+
+    // MARK: - Smart replies (on-device Apple Intelligence)
+
+    /// Recompute when the conversation or its latest message changes.
+    private var smartReplyKey: String {
+        let ch = appState.activeChannelState
+        return "\(ch?.name ?? "")|\(ch?.messages.last?.id ?? "")|\(ch?.messages.count ?? 0)"
+    }
+
+    @MainActor
+    private func refreshSmartReplies() async {
+        guard IntelligenceService.shared.isAvailable,
+              appState.editingMessage == nil,
+              let ch = appState.activeChannelState else {
+            smartReplies = []
+            return
+        }
+        let suggestions = await IntelligenceService.shared.smartReplies(ch.messages, myNick: appState.nick)
+        // Only surface if the user still hasn't typed anything.
+        if text.isEmpty { smartReplies = suggestions }
+    }
+
+    private var smartReplyBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.signalGradient)
+                    .accessibilityHidden(true)
+                ForEach(smartReplies, id: \.self) { suggestion in
+                    Button {
+                        text = suggestion
+                        smartReplies = []
+                        isFocused = true
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    } label: {
+                        Text(suggestion)
+                            .font(.fqFootnote.weight(.medium))
+                            .foregroundColor(Theme.textPrimary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .background(.ultraThinMaterial, in: Capsule())
+                            .overlay(Capsule().strokeBorder(Theme.accent.opacity(0.35), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .transition(.opacity)
     }
 
     // MARK: - Mic Button (hold to record)
@@ -283,7 +358,7 @@ struct ComposeView: View {
                 Image(systemName: "arrow.up.circle.fill")
                     .font(.system(size: 22))
                     .foregroundColor(Theme.accent)
-                    .symbolEffect(.pulse, isActive: true)
+                    .symbolEffect(.pulse, isActive: !reduceMotion)
             }
         }
         .padding(.horizontal, 12)
@@ -371,12 +446,19 @@ struct ComposeView: View {
         // Send the voice message
         guard let data = try? Data(contentsOf: recorder.url) else { return }
         let duration = formatDuration(recordingTime)
+        let recordedURL = recorder.url
 
         guard let target = appState.activeChannel else { return }
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         isUploadingVoice = true
 
         Task {
+            // Kick off on-device transcription in parallel with the audio
+            // upload — by the time the upload finishes we usually have a
+            // transcript ready to attach. If transcription fails (unauth /
+            // unsupported / silent clip) we fall back to audio-only.
+            async let transcript: String? = VoiceTranscriber.transcribe(recordedURL)
+
             defer {
                 Task { @MainActor in
                     isUploadingVoice = false
@@ -412,22 +494,41 @@ struct ComposeView: View {
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
 
-            do {
-                let (responseData, response) = try await URLSession.shared.data(for: request)
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                if status == 200,
-                   let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-                   let url = json["url"] as? String {
-                    await MainActor.run {
-                        appState.sendMessage(target: target, text: "🎤 Voice message (\(duration)) \(url)")
-                        ToastManager.shared.show("Voice message sent", icon: "checkmark.circle")
-                    }
-                } else {
-                    await MainActor.run {
-                        ToastManager.shared.show("Upload failed", icon: "exclamationmark.triangle")
-                    }
+            // Funnel through StepUpAuth so a `step_up_required` 403 drives
+            // the ASWebAuthenticationSession permission prompt and retries
+            // the upload once when the user grants.
+            let result = await StepUpAuth.uploadWithStepUp(
+                request: request, did: did, appState: appState
+            )
+
+            guard let (responseData, response) = result else {
+                await MainActor.run {
+                    ToastManager.shared.show("Upload failed", icon: "exclamationmark.triangle")
                 }
-            } catch {
+                return
+            }
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status == 200,
+               let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+               let url = json["url"] as? String {
+                let trimmedTranscript = (await transcript)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let body: String
+                if let t = trimmedTranscript, !t.isEmpty {
+                    body = "🎤 Voice message (\(duration)) \(url)\n💬 \(t)"
+                } else {
+                    body = "🎤 Voice message (\(duration)) \(url)"
+                }
+                await MainActor.run {
+                    appState.sendMessage(target: target, text: body)
+                    ToastManager.shared.show("Voice message sent", icon: "checkmark.circle")
+                }
+            } else if StepUpAuth.detectStepUpRequired(status: status, body: responseData) != nil {
+                // User declined or cancelled the step-up — surface clearly.
+                await MainActor.run {
+                    ToastManager.shared.show("Permission needed for upload", icon: "lock.shield")
+                }
+            } else {
                 await MainActor.run {
                     ToastManager.shared.show("Upload failed", icon: "exclamationmark.triangle")
                 }
@@ -513,16 +614,25 @@ struct ComposeView: View {
 
         completions = []
 
+        let succeeded: Bool
         if trimmed.hasPrefix("/") {
             handleCommand(trimmed)
-            text = ""
+            succeeded = true
         } else {
-            if appState.sendMessage(target: target, text: trimmed) {
-                text = ""
-            } else {
-                UINotificationFeedbackGenerator().notificationOccurred(.error)
-                return
-            }
+            succeeded = appState.sendMessage(target: target, text: trimmed)
+        }
+
+        guard succeeded else {
+            UINotificationFeedbackGenerator().notificationOccurred(.error)
+            return
+        }
+
+        // Clear the buffer. Dispatch async so the assignment runs after the
+        // button-tap + any in-flight IME composition settle — assigning ""
+        // synchronously while the field is focused is a SwiftUI quirk that
+        // leaves stale text visible in TextField(axis: .vertical).
+        DispatchQueue.main.async {
+            text = ""
         }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
@@ -566,5 +676,17 @@ struct ComposeView: View {
         let mins = Int(t) / 60
         let secs = Int(t) % 60
         return String(format: "%d:%02d", mins, secs)
+    }
+}
+
+/// Compose-bar chrome: genuine iOS 26 Liquid Glass where available, the
+/// ultra-thin material as a graceful fallback on iOS 18–25.
+private struct ComposeBarBackground: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content.glassEffect(.regular, in: Rectangle())
+        } else {
+            content.background(.ultraThinMaterial)
+        }
     }
 }

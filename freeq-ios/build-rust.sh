@@ -22,14 +22,37 @@ fi
 
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 
-echo "==> Building for iOS device (aarch64-apple-ios)..."
-cargo build -p freeq-sdk-ffi --lib --release --target aarch64-apple-ios
+FEATURES="--features av"
 
-echo "==> Building for iOS simulator (aarch64-apple-ios-sim)..."
-cargo build -p freeq-sdk-ffi --lib --release --target aarch64-apple-ios-sim
+# Whether to build the simulator slice WITH the AV feature. `openh264-sys2`
+# (transitively pulled in by iroh-live's h264 feature) panics on the
+# `aarch64-apple-ios-sim` target env ("Unknown target env: sim"), so the AV
+# feature must be off for the sim slice. BUILD_SIM_AV=1 tries anyway.
+#
+# BUILD_SIM=1 (the new default) builds an AV-stub simulator slice — every
+# FreeqAv method returns NotConnected/no-op. This is enough to let the
+# XCTest target link and run unit tests on Simulator destinations; real
+# AV behavior is only exercised on-device.
+BUILD_SIM="${BUILD_SIM:-1}"
+BUILD_SIM_AV="${BUILD_SIM_AV:-0}"
+
+echo "==> Building for iOS device (aarch64-apple-ios)..."
+IPHONEOS_DEPLOYMENT_TARGET=18.0 cargo rustc -p freeq-sdk-ffi $FEATURES --release --target aarch64-apple-ios --lib --crate-type staticlib
+
+if [ "$BUILD_SIM" = "1" ]; then
+    if [ "$BUILD_SIM_AV" = "1" ]; then
+        echo "==> Building for iOS simulator WITH AV (aarch64-apple-ios-sim)..."
+        IPHONEOS_DEPLOYMENT_TARGET=18.0 cargo rustc -p freeq-sdk-ffi $FEATURES --release --target aarch64-apple-ios-sim --lib --crate-type staticlib
+    else
+        echo "==> Building for iOS simulator WITHOUT AV (aarch64-apple-ios-sim) — stub FreeqAv lets the test target link"
+        IPHONEOS_DEPLOYMENT_TARGET=18.0 cargo rustc -p freeq-sdk-ffi --release --target aarch64-apple-ios-sim --lib --crate-type staticlib
+    fi
+else
+    echo "==> Skipping simulator slice (BUILD_SIM=0)"
+fi
 
 echo "==> Building host binary for bindgen..."
-cargo build -p freeq-sdk-ffi --lib --release
+cargo build -p freeq-sdk-ffi $FEATURES --lib --release
 cargo build -p freeq-sdk-ffi --bin uniffi-bindgen
 
 echo "==> Generating Swift bindings..."
@@ -41,19 +64,23 @@ cargo run -p freeq-sdk-ffi --bin uniffi-bindgen -- generate \
 echo "==> Assembling xcframework..."
 rm -rf freeq-ios/FreeqSDK.xcframework
 mkdir -p freeq-ios/FreeqSDK.xcframework/ios-arm64/Headers
-mkdir -p freeq-ios/FreeqSDK.xcframework/ios-arm64_x86_64-simulator/Headers
 
 # Headers
 cp freeq-ios/Generated/freeqFFI.h freeq-ios/FreeqSDK.xcframework/ios-arm64/Headers/
 cp freeq-ios/Generated/freeqFFI.modulemap freeq-ios/FreeqSDK.xcframework/ios-arm64/Headers/module.modulemap
-cp freeq-ios/Generated/freeqFFI.h freeq-ios/FreeqSDK.xcframework/ios-arm64_x86_64-simulator/Headers/
-cp freeq-ios/Generated/freeqFFI.modulemap freeq-ios/FreeqSDK.xcframework/ios-arm64_x86_64-simulator/Headers/module.modulemap
 
 # Static libs
 cp target/aarch64-apple-ios/release/libfreeq_sdk_ffi.a freeq-ios/FreeqSDK.xcframework/ios-arm64/
-cp target/aarch64-apple-ios-sim/release/libfreeq_sdk_ffi.a freeq-ios/FreeqSDK.xcframework/ios-arm64_x86_64-simulator/
 
-# Info.plist
+if [ "$BUILD_SIM" = "1" ]; then
+    mkdir -p freeq-ios/FreeqSDK.xcframework/ios-arm64-simulator/Headers
+    cp freeq-ios/Generated/freeqFFI.h freeq-ios/FreeqSDK.xcframework/ios-arm64-simulator/Headers/
+    cp freeq-ios/Generated/freeqFFI.modulemap freeq-ios/FreeqSDK.xcframework/ios-arm64-simulator/Headers/module.modulemap
+    cp target/aarch64-apple-ios-sim/release/libfreeq_sdk_ffi.a freeq-ios/FreeqSDK.xcframework/ios-arm64-simulator/
+fi
+
+# Info.plist — listing only the slices we actually built.
+if [ "$BUILD_SIM" = "1" ]; then
 cat > freeq-ios/FreeqSDK.xcframework/Info.plist << 'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -79,7 +106,7 @@ cat > freeq-ios/FreeqSDK.xcframework/Info.plist << 'EOF'
 			<key>HeadersPath</key>
 			<string>Headers</string>
 			<key>LibraryIdentifier</key>
-			<string>ios-arm64_x86_64-simulator</string>
+			<string>ios-arm64-simulator</string>
 			<key>LibraryPath</key>
 			<string>libfreeq_sdk_ffi.a</string>
 			<key>SupportedArchitectures</key>
@@ -99,6 +126,43 @@ cat > freeq-ios/FreeqSDK.xcframework/Info.plist << 'EOF'
 </dict>
 </plist>
 EOF
+else
+cat > freeq-ios/FreeqSDK.xcframework/Info.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>AvailableLibraries</key>
+	<array>
+		<dict>
+			<key>HeadersPath</key>
+			<string>Headers</string>
+			<key>LibraryIdentifier</key>
+			<string>ios-arm64</string>
+			<key>LibraryPath</key>
+			<string>libfreeq_sdk_ffi.a</string>
+			<key>SupportedArchitectures</key>
+			<array>
+				<string>arm64</string>
+			</array>
+			<key>SupportedPlatform</key>
+			<string>ios</string>
+		</dict>
+	</array>
+	<key>CFBundlePackageType</key>
+	<string>XFWK</string>
+	<key>XCFrameworkFormatVersion</key>
+	<string>1.0</string>
+</dict>
+</plist>
+EOF
+fi
+
+# Stamp the FFI source fingerprint so the app's "Check Rust FFI freshness"
+# build phase can detect a stale xcframework vs regenerated bindings.
+echo "==> Stamping Rust FFI source fingerprint..."
+"$REPO_ROOT/freeq-ios/scripts/ffi-source-fingerprint.sh" \
+    > "$REPO_ROOT/freeq-ios/FreeqSDK.xcframework/ios-arm64/ffi-source.sha256"
 
 echo "==> Done! xcframework at freeq-ios/FreeqSDK.xcframework"
 echo "    Swift bindings at freeq-ios/Generated/freeq.swift"

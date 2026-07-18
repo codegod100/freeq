@@ -38,12 +38,40 @@ shift 2>/dev/null || true
 
 case "$MODE" in
     all)
-        echo "▶ Running ALL acceptance tests"
-        echo "  Server A: $LOCAL_SERVER"
-        echo "  Server B: $REMOTE_SERVER"
+        echo "▶ Running S2S tests first: $LOCAL_SERVER ↔ $REMOTE_SERVER"
         echo ""
         cargo test -p freeq-server --test s2s_acceptance -- \
-            --nocapture --test-threads=1
+            --nocapture --test-threads=1 s2s_
+        S2S_EXIT=$?
+
+        # Restart servers between suites — the S2S suite creates many channels
+        # and connections which can exhaust the server's event loop.
+        echo ""
+        echo "▶ Restarting servers for single-server tests..."
+        "$(dirname "$0")/start-test-servers.sh" stop 2>/dev/null
+        sleep 2
+        # start-test-servers.sh blocks, so run in background
+        "$(dirname "$0")/start-test-servers.sh" > /dev/null 2>&1 &
+        # Wait for servers to be ready
+        for i in $(seq 1 120); do
+            if nc -z 127.0.0.1 "$PORT_A" 2>/dev/null && nc -z 127.0.0.1 "$PORT_B" 2>/dev/null; then
+                sleep 3  # extra settle time for S2S link
+                break
+            fi
+            sleep 1
+        done
+
+        echo "▶ Running single-server tests against $SERVER"
+        echo ""
+        cargo test -p freeq-server --test s2s_acceptance -- \
+            --nocapture --test-threads=1 single_server
+        SS_EXIT=$?
+
+        if [ $S2S_EXIT -ne 0 ] || [ $SS_EXIT -ne 0 ]; then
+            echo ""
+            echo "⚠ Some tests failed (S2S exit=$S2S_EXIT, single_server exit=$SS_EXIT)"
+            exit 1
+        fi
         ;;
     single|single_server)
         echo "▶ Running single-server tests against $SERVER"

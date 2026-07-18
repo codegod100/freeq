@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>freeq call</title>
+  <script type="module" crossorigin src="/av/assets/publish-0_tfMLVg.js"></script>
+  <script type="module" crossorigin src="/av/assets/watch-CQEo0ml-.js"></script>
+  <link rel="modulepreload" crossorigin href="/av/assets/time-Do1uKez-.js">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: #111; color: #eee;
+      display: flex; flex-direction: column;
+      align-items: center; padding: 1.5rem; gap: 1rem;
+      min-height: 100vh;
+    }
+    h1 { color: #58a6ff; font-size: 1.2rem; }
+    .status { color: #8b949e; font-size: 0.85rem; text-align: center; }
+    .status.error { color: #f85149; }
+    .controls { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
+    button {
+      padding: 0.5rem 1.2rem; border: none; border-radius: 6px;
+      font-size: 0.9rem; cursor: pointer; color: white;
+    }
+    .btn-mute { background: #238636; }
+    .btn-mute.muted { background: #da3633; }
+    .btn-leave { background: #6e7681; }
+    .btn-leave:hover { background: #da3633; }
+    .hidden { display: none; }
+    #landing { display: flex; flex-direction: column; align-items: center; gap: 1rem; }
+    #landing input {
+      padding: 0.5rem 0.8rem; border: 1px solid #444; border-radius: 6px;
+      background: #222; color: #eee; font-size: 0.9rem; width: 200px;
+    }
+    #landing button { background: #238636; }
+    .audio-indicator {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.5rem 1rem; border-radius: 8px; background: #1a1a2e;
+    }
+    .audio-indicator .dot {
+      width: 8px; height: 8px; border-radius: 50%; background: #238636;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    .participants { font-size: 0.8rem; color: #8b949e; text-align: center; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  </style>
+</head>
+<body>
+  <h1>freeq call</h1>
+
+  <!-- Landing: enter name to join -->
+  <div id="landing">
+    <p class="status">Enter your name to join the call</p>
+    <form id="join-form" style="display:flex;gap:0.5rem;">
+      <input id="nick-input" placeholder="Your name" autofocus />
+      <button type="submit">Join</button>
+    </form>
+  </div>
+
+  <!-- Call: active -->
+  <div id="call" class="hidden">
+    <p class="status" id="call-status">Connecting...</p>
+    <div class="audio-indicator hidden" id="audio-indicator">
+      <span class="dot"></span>
+      <span id="audio-label">Audio active</span>
+    </div>
+    <div class="participants" id="participants"></div>
+    <div class="controls">
+      <button class="btn-mute" id="btn-mute">Mute</button>
+      <button class="btn-leave" id="btn-leave">Leave</button>
+    </div>
+  </div>
+
+  <!-- MoQ publish element — source set dynamically after join -->
+  <moq-publish id="publish" style="display:none"></moq-publish>
+  <!-- Watch elements created dynamically per participant -->
+  <div id="watchers" style="display:none"></div>
+
+  <script type="module">
+    const params = new URLSearchParams(window.location.search);
+    const session = params.get('session') || 'default';
+    const presetNick = params.get('nick') || '';
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const moqOrigin = `${wsProtocol}//${window.location.host}/av/moq`;
+
+    const landing = document.getElementById('landing');
+    const call = document.getElementById('call');
+    const callStatus = document.getElementById('call-status');
+    const nickInput = document.getElementById('nick-input');
+    const publish = document.getElementById('publish');
+    const btnMute = document.getElementById('btn-mute');
+    const btnLeave = document.getElementById('btn-leave');
+    const audioIndicator = document.getElementById('audio-indicator');
+    const audioLabel = document.getElementById('audio-label');
+    const participantsEl = document.getElementById('participants');
+    const watchersDiv = document.getElementById('watchers');
+
+    // Track active watch elements by nick
+    const activeWatchers = new Map();
+    let myNick = '';
+    let pollTimer = null;
+
+    if (presetNick) nickInput.value = presetNick;
+    if (presetNick) joinCall(presetNick);
+
+    document.getElementById('join-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const nick = nickInput.value.trim();
+      if (nick) joinCall(nick);
+    });
+
+    async function joinCall(nick) {
+      myNick = nick;
+      landing.classList.add('hidden');
+      call.classList.remove('hidden');
+      callStatus.textContent = `Joining as ${nick}...`;
+      callStatus.classList.remove('error');
+
+      // Request microphone
+      try {
+        await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        console.error('Could not get microphone:', e);
+        const reason = e.name === 'NotAllowedError' ? 'permission denied — allow microphone access and retry'
+          : e.name === 'NotFoundError' ? 'no microphone found'
+          : e.message;
+        callStatus.textContent = `Microphone error: ${reason}`;
+        callStatus.classList.add('error');
+        return;
+      }
+
+      // Publish our audio — broadcast name is session/nick
+      const pubName = `${session}/${nick}`;
+      publish.setAttribute('url', moqOrigin);
+      publish.setAttribute('name', pubName);
+      publish.setAttribute('source', 'camera');
+      console.log('[call] Publishing:', pubName, 'to', moqOrigin);
+
+      callStatus.textContent = `Connected as ${nick}`;
+      audioIndicator.classList.remove('hidden');
+
+      // Poll for other participants and create watch elements for each
+      pollParticipants();
+      pollTimer = setInterval(pollParticipants, 3000);
+    }
+
+    async function pollParticipants() {
+      try {
+        const resp = await fetch(`/api/v1/sessions/${encodeURIComponent(session)}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.participants) return;
+
+        const nicks = data.participants
+          .map(p => p.nick)
+          .filter(n => n.toLowerCase() !== myNick.toLowerCase());
+
+        // Add/refresh watch elements for participants.
+        // moq-watch doesn't retry on RESET_STREAM errors, so we recreate
+        // failed elements every poll cycle until the bridge forwards the broadcast.
+        for (const nick of nicks) {
+          if (!activeWatchers.has(nick)) {
+            const broadcastName = `${session}/${nick}`;
+            console.log('[call] Subscribing to:', broadcastName);
+
+            const watchEl = document.createElement('moq-watch');
+            watchEl.setAttribute('jitter', '100');
+            const canvas = document.createElement('canvas');
+            canvas.style.display = 'none';
+            watchEl.appendChild(canvas);
+            watchersDiv.appendChild(watchEl);
+            watchEl.setAttribute('url', moqOrigin);
+            watchEl.setAttribute('name', broadcastName);
+
+            // Retry on error: recreate the element after a delay
+            watchEl.addEventListener('error', () => {
+              console.log('[call] Watch error for', nick, '— will retry on next poll');
+              activeWatchers.delete(nick);
+              watchEl.setAttribute('url', '');
+              watchEl.remove();
+            });
+
+            activeWatchers.set(nick, watchEl);
+          }
+        }
+
+        // Remove watch elements for participants who left
+        for (const [nick, el] of activeWatchers) {
+          if (!nicks.includes(nick)) {
+            console.log('[call] Removing watcher for:', nick);
+            el.setAttribute('url', '');
+            el.remove();
+            activeWatchers.delete(nick);
+          }
+        }
+
+        // Update UI
+        const allNicks = [myNick, ...nicks];
+        participantsEl.textContent = allNicks.length > 1
+          ? `In call: ${allNicks.join(', ')}`
+          : 'Waiting for others...';
+
+      } catch (e) {
+        console.warn('[call] Failed to poll participants:', e);
+      }
+    }
+
+    let muted = false;
+    btnMute.addEventListener('click', () => {
+      muted = !muted;
+      if (muted) {
+        publish.muted = true;
+        btnMute.textContent = 'Unmute';
+        btnMute.classList.add('muted');
+        audioLabel.textContent = 'Muted';
+      } else {
+        publish.muted = false;
+        btnMute.textContent = 'Mute';
+        btnMute.classList.remove('muted');
+        audioLabel.textContent = 'Audio active';
+      }
+    });
+
+    btnLeave.addEventListener('click', () => {
+      if (pollTimer) clearInterval(pollTimer);
+      publish.setAttribute('source', '');
+      publish.setAttribute('url', '');
+      for (const [, el] of activeWatchers) {
+        el.setAttribute('url', '');
+        el.remove();
+      }
+      activeWatchers.clear();
+      window.close();
+    });
+  </script>
+</body>
+</html>

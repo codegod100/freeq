@@ -13,10 +13,42 @@ class ChannelState: Identifiable {
     var typingUsers: [String: Date] = [:]
     var lastActivity: Date = Date()
     var isEncrypted: Bool = false
+    var accessDeniedReason: String?
 
     var id: String { name }
     var isChannel: Bool { name.hasPrefix("#") }
     var isDM: Bool { !name.hasPrefix("#") }
+
+    /// Members collapsed to one row per account (same DID). Multi-session or
+    /// nick-collision twins (e.g. chadfowler.com / chadfowlercom, or a bot that
+    /// reconnected N times) count once. DID resolves from the roster or the
+    /// profile cache; guests (no resolvable DID) are kept. Prefers the fuller
+    /// (dotted) handle for display. Single source for member lists + counts.
+    /// `resolveDid` supplies a DID for members whose `MemberInfo.did` is nil
+    /// (on macOS the roster leaves it nil and the DID lives in ProfileCache).
+    /// Kept as an injected closure so this model stays free of the app-only
+    /// ProfileCache and remains unit-testable in FreeqMacosCore.
+    func uniqueMembers(resolveDid: (String) -> String? = { _ in nil }) -> [MemberInfo] {
+        var indexByDid: [String: Int] = [:]
+        var out: [MemberInfo] = []
+        for m in members {
+            guard let did = m.did ?? resolveDid(m.nick) else {
+                out.append(m); continue
+            }
+            if let idx = indexByDid[did] {
+                if m.nick.contains("."), !out[idx].nick.contains(".") { out[idx] = m }
+            } else {
+                indexByDid[did] = out.count
+                out.append(m)
+            }
+        }
+        return out
+    }
+
+    func uniqueMemberCount(resolveDid: (String) -> String? = { _ in nil }) -> Int {
+        uniqueMembers(resolveDid: resolveDid).count
+    }
+    var hasVisibleMessages: Bool { messages.contains { !$0.isDeleted } }
 
     var activeTypers: [String] {
         let cutoff = Date().addingTimeInterval(-5)
@@ -85,5 +117,31 @@ class ChannelState: Identifiable {
             }
             messages[idx].reactions = reactions
         }
+    }
+
+    func addReaction(msgId: String, emoji: String, from: String) {
+        guard !emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let idx = findMessage(byId: msgId) else { return }
+        var reactions = messages[idx].reactions
+        var nicks = reactions[emoji] ?? Set()
+        nicks.insert(from)
+        reactions[emoji] = nicks
+        messages[idx].reactions = reactions
+    }
+
+    func removeReaction(msgId: String, emoji: String, from: String) {
+        guard let idx = findMessage(byId: msgId),
+              var nicks = messages[idx].reactions[emoji] else { return }
+        nicks.remove(from)
+        if nicks.isEmpty {
+            messages[idx].reactions.removeValue(forKey: emoji)
+        } else {
+            messages[idx].reactions[emoji] = nicks
+        }
+    }
+
+    func hasReaction(msgId: String, emoji: String, from: String) -> Bool {
+        guard let idx = findMessage(byId: msgId) else { return false }
+        return messages[idx].reactions[emoji]?.contains(from) ?? false
     }
 }

@@ -1,0 +1,10 @@
+{
+  "name": "freeq-full-validation-bot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Flagship demo: did:key SASL + every /agent/tools/* diagnostic call wired into the bot lifecycle.",
+  "scripts": { "start": "tsx index.ts" },
+  "dependencies": { "@freeq/sdk": "file:../../freeq-sdk-js" },
+  "devDependencies": { "tsx": "^4.19.2", "@types/node": "^24.0.0" }
+}

@@ -13,6 +13,11 @@ targets:
         excludes:
           - Info.plist
       - path: Generated/freeq.swift
+      - path: freeqShared
+    preBuildScripts:
+      - name: Check Rust FFI freshness
+        script: '"$SRCROOT/scripts/check-ffi-source-fresh.sh"'
+        basedOnDependencyAnalysis: false
     info:
       path: freeq/Info.plist
       properties:
@@ -21,6 +26,22 @@ targets:
         LSRequiresIPhoneOS: true
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: false
+        # Keep call audio alive when the screen locks / app backgrounds.
+        UIBackgroundModes:
+          - audio
+        NSCameraUsageDescription: "freeq needs camera access to take photos and videos to share in chat."
+        NSMicrophoneUsageDescription: "freeq needs microphone access to record voice messages and video with audio."
+        NSPhotoLibraryUsageDescription: "freeq needs photo library access to share photos and videos in chat."
+        NSSpeechRecognitionUsageDescription: "freeq transcribes your voice messages on-device so they're searchable and accessible. The audio never leaves your phone for transcription."
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        # Handoff — continue an open conversation on another device.
+        NSUserActivityTypes:
+          - at.freeq.channel
+        CFBundleURLTypes:
+          - CFBundleURLName: at.freeq.auth
+            CFBundleURLSchemes:
+              - freeq
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: at.freeq.ios
@@ -29,8 +50,86 @@ targets:
         DEVELOPMENT_TEAM: 3DT7XF7L4R
         CODE_SIGN_IDENTITY: "Apple Development"
         CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: freeq/freeq.entitlements
         OTHER_LDFLAGS:
           - "-ObjC"
+          - "-lc++"   # libfreeq_sdk_ffi.a transitively links openh264 (C++)
     dependencies:
       - framework: FreeqSDK.xcframework
         embed: false
+      - sdk: AVFAudio.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: Network.framework
+      - sdk: Security.framework
+      - sdk: WatchConnectivity.framework
+      - target: freeqLiveActivity
+        embed: true
+      # - target: freeqWatch
+      #   embed: true
+
+  freeqLiveActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: freeqLiveActivity
+      - path: freeqShared
+    info:
+      path: freeqLiveActivity/Info.plist
+      properties:
+        CFBundleDisplayName: freeq Live Activity
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: at.freeq.ios.liveactivity
+        DEVELOPMENT_TEAM: 3DT7XF7L4R
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: freeqLiveActivity/freeqLiveActivity.entitlements
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        SWIFT_EMIT_LOC_STRINGS: "YES"
+    dependencies:
+      - sdk: SwiftUI.framework
+      - sdk: WidgetKit.framework
+      - sdk: ActivityKit.framework
+      - sdk: AppIntents.framework
+
+  freeqWatch:
+    type: application
+    platform: watchOS
+    deploymentTarget: "10.0"
+    sources:
+      - path: freeqWatch
+      - path: freeqShared
+    info:
+      path: freeqWatch/Info.plist
+      properties:
+        CFBundleDisplayName: freeq
+        WKApplication: true
+        WKWatchOnly: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: at.freeq.ios.watchkitapp
+        DEVELOPMENT_TEAM: 3DT7XF7L4R
+        CODE_SIGN_STYLE: Automatic
+        WATCHOS_DEPLOYMENT_TARGET: "10.0"
+        TARGETED_DEVICE_FAMILY: "4"
+    dependencies:
+      - sdk: SwiftUI.framework
+      - sdk: WatchKit.framework
+      - sdk: WatchConnectivity.framework
+
+  freeqTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: freeqTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: at.freeq.ios.tests
+        DEVELOPMENT_TEAM: 3DT7XF7L4R
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    dependencies:
+      - target: freeq

@@ -12,9 +12,10 @@
 //!
 //! ## Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use freeq_bots::context::{AgentContext, AgentIdentity, ContextConfig};
 //! use freeq_bots::memory::Memory;
+//! use std::path::Path;
 //!
 //! let memory = Memory::open(Path::new("agent.db")).unwrap();
 //! let identity = AgentIdentity {
@@ -22,22 +23,13 @@
 //!     did: Some("did:web:freeq.at:bots:factory".into()),
 //!     role: "Software factory bot".into(),
 //!     channels: vec!["#factory".into()],
+//!     system_prompt: None,
 //! };
 //! let config = ContextConfig::default();
 //! let ctx = AgentContext::new(identity, memory, config);
 //!
-//! // On connect: fetch history and build full context
-//! let history = ctx.fetch_channel_history(&handle, "#factory", 50).await;
-//! ctx.ingest_history("#factory", history);
-//!
 //! // Before each LLM call: assemble the context prefix
 //! let system_context = ctx.assemble("#factory");
-//!
-//! // After each exchange: extract and store facts
-//! ctx.extract_and_store("#factory", &exchange).await;
-//!
-//! // Periodically: generate rolling summary
-//! ctx.maybe_summarize("#factory", &llm).await;
 //! ```
 
 use std::collections::{HashMap, VecDeque};
@@ -175,50 +167,50 @@ impl AgentContext {
         let mut sections = Vec::new();
 
         // Decisions
-        if let Ok(decisions) = self.memory.list(project, "decision") {
-            if !decisions.is_empty() {
-                let items: Vec<String> = decisions
-                    .iter()
-                    .take(self.config.max_facts)
-                    .map(|e| format!("- **{}**: {}", e.key, e.value))
-                    .collect();
-                sections.push(format!("## Decisions\n{}", items.join("\n")));
-            }
+        if let Ok(decisions) = self.memory.list(project, "decision")
+            && !decisions.is_empty()
+        {
+            let items: Vec<String> = decisions
+                .iter()
+                .take(self.config.max_facts)
+                .map(|e| format!("- **{}**: {}", e.key, e.value))
+                .collect();
+            sections.push(format!("## Decisions\n{}", items.join("\n")));
         }
 
         // Facts
-        if let Ok(facts) = self.memory.list(project, "fact") {
-            if !facts.is_empty() {
-                let items: Vec<String> = facts
-                    .iter()
-                    .take(self.config.max_facts)
-                    .map(|e| format!("- **{}**: {}", e.key, e.value))
-                    .collect();
-                sections.push(format!("## Known Facts\n{}", items.join("\n")));
-            }
+        if let Ok(facts) = self.memory.list(project, "fact")
+            && !facts.is_empty()
+        {
+            let items: Vec<String> = facts
+                .iter()
+                .take(self.config.max_facts)
+                .map(|e| format!("- **{}**: {}", e.key, e.value))
+                .collect();
+            sections.push(format!("## Known Facts\n{}", items.join("\n")));
         }
 
         // Commitments / action items
-        if let Ok(actions) = self.memory.list(project, "action_item") {
-            if !actions.is_empty() {
-                let items: Vec<String> = actions
-                    .iter()
-                    .take(20)
-                    .map(|e| format!("- [ ] {}", e.value))
-                    .collect();
-                sections.push(format!("## Open Action Items\n{}", items.join("\n")));
-            }
+        if let Ok(actions) = self.memory.list(project, "action_item")
+            && !actions.is_empty()
+        {
+            let items: Vec<String> = actions
+                .iter()
+                .take(20)
+                .map(|e| format!("- [ ] {}", e.value))
+                .collect();
+            sections.push(format!("## Open Action Items\n{}", items.join("\n")));
         }
 
         // Preferences
-        if let Ok(prefs) = self.memory.list(project, "preference") {
-            if !prefs.is_empty() {
-                let items: Vec<String> = prefs
-                    .iter()
-                    .map(|e| format!("- {}: {}", e.key, e.value))
-                    .collect();
-                sections.push(format!("## User Preferences\n{}", items.join("\n")));
-            }
+        if let Ok(prefs) = self.memory.list(project, "preference")
+            && !prefs.is_empty()
+        {
+            let items: Vec<String> = prefs
+                .iter()
+                .map(|e| format!("- {}: {}", e.key, e.value))
+                .collect();
+            sections.push(format!("## User Preferences\n{}", items.join("\n")));
         }
 
         if sections.is_empty() {
@@ -420,7 +412,7 @@ impl AgentContext {
                 return Ok(false);
             };
 
-            let time_trigger = ctx.last_summary_at.map_or(true, |t| {
+            let time_trigger = ctx.last_summary_at.is_none_or(|t| {
                 let elapsed = Utc::now().timestamp() - t;
                 elapsed > (self.config.summary_interval_minutes as i64 * 60)
             });

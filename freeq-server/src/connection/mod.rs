@@ -18,11 +18,14 @@
 
 mod cap;
 mod channel;
+pub(crate) mod draft_multiline;
 pub mod helpers;
 pub(crate) mod login;
-mod messaging;
+pub(crate) mod messaging;
 mod policy_cmd;
+mod provenance;
 mod queries;
+pub(crate) mod read_marker;
 mod registration;
 pub(crate) mod routing;
 
@@ -43,7 +46,7 @@ use channel::{
     handle_topic,
 };
 use helpers::{normalize_channel, s2s_broadcast, s2s_next_event_id};
-use messaging::{handle_chathistory, handle_privmsg, handle_tagmsg};
+use messaging::{handle_chathistory, handle_privmsg, handle_search, handle_tagmsg};
 use policy_cmd::handle_policy;
 use queries::{handle_away, handle_lusers, handle_who, handle_whois};
 use registration::try_complete_registration;
@@ -54,16 +57,12 @@ use registration::try_complete_registration;
 /// Actor class — distinguishes humans from agents in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ActorClass {
+    #[default]
     Human,
     Agent,
     ExternalAgent,
-}
-
-impl Default for ActorClass {
-    fn default() -> Self {
-        ActorClass::Human
-    }
 }
 
 impl std::fmt::Display for ActorClass {
@@ -158,10 +157,20 @@ pub struct Connection {
     pub(crate) cap_echo_message: bool,
     pub(crate) cap_server_time: bool,
     pub(crate) cap_batch: bool,
+    /// Client supports IRCv3 `draft/multiline` for sending and receiving
+    /// logical messages split across multiple PRIVMSG/NOTICE lines, grouped
+    /// inside a BATCH frame. Required for the agent debate flow where LLM
+    /// openings/rebuttals routinely exceed the single-PRIVMSG ceiling.
+    /// Spec: https://ircv3.net/specs/extensions/multiline
+    pub(crate) cap_draft_multiline: bool,
     pub(crate) cap_chathistory: bool,
     pub(crate) cap_account_notify: bool,
     pub(crate) cap_extended_join: bool,
     pub(crate) cap_away_notify: bool,
+    pub(crate) cap_account_tag: bool,
+    /// Client supports IRCv3 `draft/read-marker` — cross-device read markers
+    /// via MARKREAD. See https://ircv3.net/specs/extensions/read-marker.
+    pub(crate) cap_read_marker: bool,
     /// Client understands E2EE messages (won't get synthetic notices instead).
     #[allow(dead_code)]
     pub(crate) cap_e2ee: bool,
@@ -196,10 +205,13 @@ impl Connection {
             cap_echo_message: false,
             cap_server_time: false,
             cap_batch: false,
+            cap_draft_multiline: false,
             cap_chathistory: false,
             cap_account_notify: false,
             cap_extended_join: false,
             cap_away_notify: false,
+            cap_account_tag: false,
+            cap_read_marker: false,
             cap_e2ee: false,
             is_oper: false,
             client_info: None,
@@ -225,21 +237,129 @@ impl Connection {
     /// Authenticated users: shortened DID (e.g. "did/plc/4qsy..xmns")
     /// Guests: "freeq/guest"
     pub(crate) fn cloaked_host(&self) -> String {
-        if let Some(ref did) = self.authenticated_did {
-            // e.g. did:plc:4qsyxmnsblo4luuycm3572bq → plc/4qsyxmns
-            let short = did.strip_prefix("did:").unwrap_or(did);
-            let parts: Vec<&str> = short.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                let method = parts[0];
-                let id = &parts[1][..parts[1].len().min(8)];
-                format!("freeq/{method}/{id}")
-            } else {
-                "freeq/did".to_string()
-            }
-        } else {
-            "freeq/guest".to_string()
-        }
+        cloak_for_did(self.authenticated_did.as_deref())
     }
+}
+
+/// The cloaked hostname for a DID (or a guest, when `None`) — the single
+/// derivation shared by live-connection hostmasks and lookups (WHOIS/WHO)
+/// that only have a target session's DID in hand.
+pub(crate) fn cloak_for_did(did: Option<&str>) -> String {
+    if let Some(did) = did {
+        // e.g. did:plc:4qsyxmnsblo4luuycm3572bq → freeq/plc/4qsyxmns
+        let short = did.strip_prefix("did:").unwrap_or(did);
+        let parts: Vec<&str> = short.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let method = parts[0];
+            let id = &parts[1][..parts[1].len().min(8)];
+            format!("freeq/{method}/{id}")
+        } else {
+            "freeq/did".to_string()
+        }
+    } else {
+        "freeq/guest".to_string()
+    }
+}
+
+fn is_draft_multiline_rate_exempt(
+    msg: &Message,
+    state: &Arc<SharedState>,
+    session_id: &str,
+) -> bool {
+    match msg.command.as_str() {
+        "BATCH" => is_draft_multiline_batch_rate_exempt(msg, state, session_id),
+        "PRIVMSG" | "NOTICE" => is_draft_multiline_chunk_rate_exempt(msg, state, session_id),
+        _ => false,
+    }
+}
+
+fn is_draft_multiline_batch_rate_exempt(
+    msg: &Message,
+    state: &Arc<SharedState>,
+    session_id: &str,
+) -> bool {
+    let Some(reference) = msg.params.first() else {
+        return false;
+    };
+
+    if let Some(batch_id) = reference.strip_prefix('+') {
+        return is_draft_multiline_batch_open_rate_exempt(msg, state, session_id, batch_id);
+    }
+
+    if let Some(batch_id) = reference.strip_prefix('-') {
+        return !batch_id.is_empty()
+            && state
+                .open_batches
+                .lock()
+                .get(&(session_id.to_string(), batch_id.to_string()))
+                .is_some_and(|batch| batch.batch_type == "draft/multiline");
+    }
+
+    false
+}
+
+fn is_draft_multiline_batch_open_rate_exempt(
+    msg: &Message,
+    state: &Arc<SharedState>,
+    session_id: &str,
+    batch_id: &str,
+) -> bool {
+    if batch_id.is_empty() {
+        return false;
+    }
+    if msg.params.get(1).map(String::as_str) != Some("draft/multiline") {
+        return false;
+    }
+    if msg.params.get(2).is_none_or(|target| target.is_empty()) {
+        return false;
+    }
+
+    let has_batch = state.cap_batch.lock().contains(session_id);
+    let has_multiline = state.cap_draft_multiline.lock().contains(session_id);
+    if !has_batch || !has_multiline {
+        return false;
+    }
+
+    let key = (session_id.to_string(), batch_id.to_string());
+    let open = state.open_batches.lock();
+    if open.contains_key(&key) {
+        return false;
+    }
+
+    draft_multiline::count_session_open_batches(&open, session_id)
+        < draft_multiline::MAX_CONCURRENT_BATCHES_PER_SESSION
+}
+
+fn is_draft_multiline_chunk_rate_exempt(
+    msg: &Message,
+    state: &Arc<SharedState>,
+    session_id: &str,
+) -> bool {
+    let Some(batch_id) = msg.tags.get("batch") else {
+        return false;
+    };
+    // A real chunk carries a body param; require its presence (matching the
+    // PRIVMSG/NOTICE dispatch) without binding it.
+    let (Some(target), Some(_)) = (msg.params.first(), msg.params.get(1)) else {
+        return false;
+    };
+    let target = if target.starts_with('#') || target.starts_with('&') {
+        normalize_channel(target)
+    } else {
+        target.clone()
+    };
+
+    state
+        .open_batches
+        .lock()
+        .get(&(session_id.to_string(), batch_id.to_string()))
+        .is_some_and(|batch| {
+            let command_matches = batch
+                .first_command
+                .as_deref()
+                .is_none_or(|seen| seen == msg.command);
+            batch.batch_type == "draft/multiline" && batch.target == target && command_matches
+        })
 }
 
 /// Handle a plain TCP connection.
@@ -297,6 +417,53 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     handle_io_with_meta(reader, writer, session_id, state, None).await
+}
+
+/// Broadcast the presence change for one left/ended AV slot, close the media
+/// room + bridge when the session ended, and persist. Shared by immediate
+/// disconnect teardown and the deferred (grace) teardown so both do exactly
+/// the same thing. `instance` is the actor's per-device id (empty for legacy).
+fn finish_av_slot_teardown(
+    state: &Arc<SharedState>,
+    av_sid: &str,
+    channel: &Option<String>,
+    av_nick: &str,
+    should_end: bool,
+    instance: &str,
+) {
+    if let Some(ch) = channel {
+        let participant_count = state.av_sessions.lock().active_participant_count(av_sid);
+        if should_end {
+            messaging::broadcast_av_state_pub(state, ch, av_sid, "ended", av_nick, "", 0, "");
+            // Clean up bridge and Room when the session ends.
+            #[cfg(feature = "av-native")]
+            {
+                state.av_bridges.lock().remove(av_sid);
+            }
+            let backend = state.av_media.lock().clone();
+            let sid = av_sid.to_string();
+            if let Some(backend) = backend {
+                tokio::spawn(async move {
+                    let _ = crate::av_media::MediaBackend::close_room(backend.as_ref(), &sid).await;
+                });
+            }
+        } else {
+            messaging::broadcast_av_state_pub(
+                state,
+                ch,
+                av_sid,
+                "left",
+                av_nick,
+                instance,
+                participant_count,
+                "",
+            );
+        }
+    }
+    if let Some(s) = state.av_sessions.lock().get(av_sid) {
+        let s = s.clone();
+        state.with_db(|db| db.save_av_session(&s));
+    }
 }
 
 async fn handle_io_with_meta<R, W>(
@@ -376,6 +543,17 @@ where
     let ping_timeout = tokio::time::Duration::from_secs(60);
     let mut awaiting_pong = false;
 
+    // Eviction signal: the liveness reaper (registration::probe_sibling_liveness)
+    // notifies this to force the loop to exit and run normal cleanup.
+    let kill_signal = {
+        let n = std::sync::Arc::new(tokio::sync::Notify::new());
+        state
+            .session_kill
+            .lock()
+            .insert(session_id.clone(), n.clone());
+        n
+    };
+
     // Rate limiting: max 10 commands per second, token bucket
     let mut rate_tokens: f64 = 10.0;
     let mut rate_last = tokio::time::Instant::now();
@@ -395,7 +573,7 @@ where
         // is fully buffered, preventing OOM from clients sending gigabytes
         // without a newline.
         const MAX_LINE_LEN: usize = 8192;
-        let read_result = tokio::time::timeout(ping_interval, async {
+        let read_fut = tokio::time::timeout(ping_interval, async {
             use tokio::io::AsyncBufReadExt as _;
             loop {
                 let buf = reader.fill_buf().await?;
@@ -425,9 +603,24 @@ where
                     return Ok(line_buf.len());
                 }
             }
-        })
-        .await;
-        if line_buf.len() > MAX_LINE_LEN {
+        });
+        let read_result = tokio::select! {
+            r = read_fut => r,
+            _ = kill_signal.notified() => {
+                tracing::info!(%session_id, "Session evicted (liveness probe unanswered)");
+                break;
+            }
+        };
+        // A completed read whose buffer does NOT end in a newline means the
+        // line filled to MAX_LINE_LEN without terminating — it's too long.
+        // Checking `ends_with('\n')` (not `len() > MAX_LINE_LEN`) closes an
+        // off-by-one: the `BufReader` capacity equals MAX_LINE_LEN, so an
+        // oversized line fills to *exactly* the cap, which the old `>` guard
+        // let slip through — the line was then parsed and delivered silently
+        // truncated instead of rejected. Gate on a completed read (`Ok(Ok(n>0))`)
+        // so a slow client's partial line at a ping timeout isn't misread as
+        // too long.
+        if !line_buf.ends_with('\n') && matches!(&read_result, Ok(Ok(n)) if *n > 0) {
             tracing::warn!(%session_id, len = line_buf.len(), "Line too long, dropping");
             let reply =
                 Message::from_server(&server_name, "417", vec!["*", "Input line was too long"]);
@@ -488,7 +681,7 @@ where
         let exempt_from_rate_limit = matches!(
             msg.command.as_str(),
             "JOIN" | "CHATHISTORY" | "WHOIS" | "PING" | "PONG" | "MODE" | "WHO" | "NAMES" | "LOGIN"
-        );
+        ) || is_draft_multiline_rate_exempt(&msg, &state, &session_id);
         if conn.registered && !exempt_from_rate_limit {
             let now = tokio::time::Instant::now();
             let elapsed = now.duration_since(rate_last).as_secs_f64();
@@ -513,11 +706,16 @@ where
         tracing::debug!(%session_id, "<- {}", line_buf.trim());
 
         // Check for pending LOGIN completion (from browser OAuth callback)
-        if conn.authenticated_did.is_none() {
-            if let Some(completion) = state.login_completions.lock().remove(&session_id) {
-                conn.authenticated_did = Some(completion.did.clone());
-                // Trigger auto-op etc. in channels (already handled by complete_irc_login)
+        if conn.authenticated_did.is_none()
+            && let Some(completion) = state.login_completions.lock().remove(&session_id)
+        {
+            conn.authenticated_did = Some(completion.did.clone());
+            // complete_irc_login may have assigned a derived nick on
+            // collision; apply it to the connection.
+            if let Some(rn) = completion.renamed_nick {
+                conn.nick = Some(rn);
             }
+            // Trigger auto-op etc. in channels (already handled by complete_irc_login)
         }
 
         match msg.command.as_str() {
@@ -720,6 +918,8 @@ where
             }
             "PONG" => {
                 awaiting_pong = false;
+                // Answering any PING proves liveness — clear a pending probe.
+                state.liveness_probes.lock().remove(&session_id);
             }
             "JOIN" => {
                 if !conn.registered {
@@ -917,24 +1117,64 @@ where
                             // Cap at 50 pins
                             ch.pins.truncate(50);
                             drop(channels);
+                            // Persist to DB (ensure channel exists first)
+                            let ch_name = channel.clone();
+                            let mid = msgid.to_string();
+                            let pinner = nick.to_string();
+                            {
+                                let channels = state.channels.lock();
+                                if let Some(ch) = channels.get(&ch_name) {
+                                    let ch_clone = ch.clone();
+                                    state.with_db(|db| db.save_channel(&ch_name, &ch_clone));
+                                }
+                            }
+                            state.with_db(|db| db.store_pin(&ch_name, &mid, &pinner, now));
                             // Notify channel with tag for clients to update cache
                             let notice = format!(
                                 "@+freeq.at/pin={} :{nick}!~u@host NOTICE {channel} :\x01ACTION pinned a message\x01\r\n",
                                 irc::escape_tag_value(msgid)
                             );
                             helpers::broadcast_to_channel(&state, &channel, &notice);
+                            // Broadcast to S2S peers
+                            helpers::s2s_broadcast(
+                                &state,
+                                crate::s2s::S2sMessage::Pin {
+                                    event_id: helpers::s2s_next_event_id(&state),
+                                    channel: channel.clone(),
+                                    msgid: msgid.to_string(),
+                                    pinned_by: nick.to_string(),
+                                    adding: true,
+                                    origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
+                                },
+                            );
                         }
                     } else {
                         let before = ch.pins.len();
                         ch.pins.retain(|p| p.msgid != *msgid);
                         if ch.pins.len() < before {
                             drop(channels);
+                            // Persist to DB
+                            let ch_name = channel.clone();
+                            let mid = msgid.to_string();
+                            state.with_db(|db| db.remove_pin(&ch_name, &mid));
                             // Notify channel with tag for clients to update cache
                             let notice = format!(
                                 "@+freeq.at/unpin={} :{nick}!~u@host NOTICE {channel} :\x01ACTION unpinned a message\x01\r\n",
                                 irc::escape_tag_value(msgid)
                             );
                             helpers::broadcast_to_channel(&state, &channel, &notice);
+                            // Broadcast to S2S peers
+                            helpers::s2s_broadcast(
+                                &state,
+                                crate::s2s::S2sMessage::Pin {
+                                    event_id: helpers::s2s_next_event_id(&state),
+                                    channel: channel.clone(),
+                                    msgid: msgid.to_string(),
+                                    pinned_by: nick.to_string(),
+                                    adding: false,
+                                    origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
+                                },
+                            );
                         } else {
                             let reply = Message::from_server(
                                 &server_name,
@@ -1044,6 +1284,14 @@ where
                                             .did_msg_keys
                                             .lock()
                                             .insert(did.clone(), pubkey_b64.clone());
+                                        // Persist to DB so the key survives server restarts
+                                        // and is available when the registering DID is offline
+                                        // (used by FreeqBotDelegation/v1 cert verification).
+                                        let did_for_db = did.clone();
+                                        let key_bytes = bytes.clone();
+                                        state.with_db(|db| {
+                                            db.save_signing_key(&did_for_db, &key_bytes)
+                                        });
                                     }
                                     tracing::info!(
                                         session = %session_id,
@@ -1092,14 +1340,63 @@ where
                     } else {
                         target.clone()
                     };
-                    handle_privmsg(&conn, &msg.command, &target, text, &msg.tags, &state);
+                    // First: if this message claims membership in an
+                    // open `draft/multiline` batch on this connection,
+                    // route it into the batch instead of dispatching
+                    // immediately. Phase 2 will plug in the on-close
+                    // assembly + dispatch.
+                    let concat = msg.tags.contains_key("draft/multiline-concat");
+                    let routed = draft_multiline::try_route_to_batch(
+                        &state,
+                        &session_id,
+                        &msg.tags,
+                        &msg.command,
+                        &target,
+                        text,
+                        concat,
+                    );
+                    match routed {
+                        draft_multiline::RouteOutcome::Absorbed => continue,
+                        draft_multiline::RouteOutcome::Error(err) => {
+                            draft_multiline::send_batch_error(
+                                &state,
+                                &server_name,
+                                &session_id,
+                                &send,
+                                &err,
+                            );
+                            continue;
+                        }
+                        draft_multiline::RouteOutcome::NotInBatch => {
+                            handle_privmsg(&conn, &msg.command, &target, text, &msg.tags, &state);
+                        }
+                    }
                 }
+            }
+            "BATCH" => {
+                if !conn.registered {
+                    continue;
+                }
+                draft_multiline::handle_batch_command(
+                    &conn,
+                    &msg,
+                    &state,
+                    &server_name,
+                    &session_id,
+                    &send,
+                );
             }
             "TAGMSG" => {
                 if !conn.registered {
                     continue;
                 }
                 if let Some(target) = msg.params.first() {
+                    tracing::info!(
+                        nick = %conn.nick_or_star(),
+                        target = %target,
+                        tags = ?msg.tags.keys().collect::<Vec<_>>(),
+                        "TAGMSG received"
+                    );
                     handle_tagmsg(&conn, target, &msg.tags, &state);
                 }
             }
@@ -1122,6 +1419,12 @@ where
                 }
                 let away_msg = msg.params.first().map(|s| s.as_str());
                 handle_away(&conn, away_msg, &state, &server_name, &session_id, &send);
+            }
+            "MARKREAD" => {
+                if !conn.registered {
+                    continue;
+                }
+                read_marker::handle_markread(&conn, &msg, &state, &server_name, &session_id, &send);
             }
             "MOTD" => {
                 if !conn.registered {
@@ -1164,6 +1467,12 @@ where
                 }
                 handle_chathistory(&conn, &msg, &state, &server_name, &session_id, &send);
             }
+            "SEARCH" => {
+                if !conn.registered {
+                    continue;
+                }
+                handle_search(&conn, &msg, &state, &server_name, &session_id, &send);
+            }
             "VERSION" => {
                 if !conn.registered {
                     continue;
@@ -1174,7 +1483,7 @@ where
                     irc::RPL_VERSION,
                     vec![
                         nick,
-                        "freeq-0.1.0",
+                        &format!("freeq-{}-{}", env!("CARGO_PKG_VERSION"), env!("GIT_HASH")),
                         &server_name,
                         "AT Protocol SASL, IRCv3, iroh QUIC, S2S federation",
                     ],
@@ -2205,10 +2514,10 @@ where
                 if let Some((cap, rest)) = raw_params.split_once(';') {
                     capability = cap;
                     for part in rest.split(';') {
-                        if let Some((k, v)) = part.split_once('=') {
-                            if k.trim() == "resource" {
-                                resource = Some(v.trim().to_string());
-                            }
+                        if let Some((k, v)) = part.split_once('=')
+                            && k.trim() == "resource"
+                        {
+                            resource = Some(v.trim().to_string());
                         }
                     }
                 }
@@ -2332,54 +2641,47 @@ where
                     let budget_json = state
                         .with_db(|db| Ok(db.get_budget(&channel, Some(did))))
                         .flatten();
-                    if let Some(ref bj) = budget_json {
-                        if let Ok(budget) =
+                    if let Some(ref bj) = budget_json
+                        && let Ok(budget) =
                             serde_json::from_str::<crate::policy::types::BudgetPolicy>(bj)
-                        {
-                            let period_start = budget_period_start(&budget.period);
-                            let total_spent = state
-                                .with_db(|db| {
-                                    Ok(db.sum_spend(
-                                        &channel,
-                                        Some(did),
-                                        &budget.unit,
-                                        period_start,
-                                    ))
-                                })
-                                .unwrap_or(0.0);
-                            let ratio = total_spent / budget.max_amount;
-                            let prev_ratio = (total_spent - amount) / budget.max_amount;
+                    {
+                        let period_start = budget_period_start(&budget.period);
+                        let total_spent = state
+                            .with_db(|db| {
+                                Ok(db.sum_spend(&channel, Some(did), &budget.unit, period_start))
+                            })
+                            .unwrap_or(0.0);
+                        let ratio = total_spent / budget.max_amount;
+                        let prev_ratio = (total_spent - amount) / budget.max_amount;
 
-                            // Warn at threshold (first crossing)
-                            if ratio >= budget.warn_threshold && prev_ratio < budget.warn_threshold
-                            {
-                                let warn = format!(
-                                    ":{server_name} NOTICE {channel} :⚠ Budget {:.0}% used by {nick} ({:.2}/{:.2} {unit})\r\n",
-                                    ratio * 100.0,
-                                    total_spent,
-                                    budget.max_amount
-                                );
-                                helpers::broadcast_to_channel(&state, &channel, &warn);
-                                tracing::info!(channel = %channel, agent = %nick, pct = ratio * 100.0, "Budget warning threshold hit");
-                            }
+                        // Warn at threshold (first crossing)
+                        if ratio >= budget.warn_threshold && prev_ratio < budget.warn_threshold {
+                            let warn = format!(
+                                ":{server_name} NOTICE {channel} :⚠ Budget {:.0}% used by {nick} ({:.2}/{:.2} {unit})\r\n",
+                                ratio * 100.0,
+                                total_spent,
+                                budget.max_amount
+                            );
+                            helpers::broadcast_to_channel(&state, &channel, &warn);
+                            tracing::info!(channel = %channel, agent = %nick, pct = ratio * 100.0, "Budget warning threshold hit");
+                        }
 
-                            // Block at limit
-                            if ratio >= 1.0 && budget.hard_limit {
-                                let block = format!(
-                                    ":{server_name} NOTICE {channel} :🛑 {nick} blocked: budget exceeded ({:.2}/{:.2} {unit})\r\n",
-                                    total_spent, budget.max_amount
-                                );
-                                helpers::broadcast_to_channel(&state, &channel, &block);
+                        // Block at limit
+                        if ratio >= 1.0 && budget.hard_limit {
+                            let block = format!(
+                                ":{server_name} NOTICE {channel} :🛑 {nick} blocked: budget exceeded ({:.2}/{:.2} {unit})\r\n",
+                                total_spent, budget.max_amount
+                            );
+                            helpers::broadcast_to_channel(&state, &channel, &block);
 
-                                // Send governance signal to agent
-                                let gov_line = format!(
-                                    "@+freeq.at/governance=budget_exceeded;+freeq.at/spent={:.2};+freeq.at/limit={:.2};+freeq.at/unit={} :{server_name} TAGMSG {nick}\r\n",
-                                    total_spent,
-                                    budget.max_amount,
-                                    irc::escape_tag_value(&unit)
-                                );
-                                send(&state, &session_id, gov_line);
-                            }
+                            // Send governance signal to agent
+                            let gov_line = format!(
+                                "@+freeq.at/governance=budget_exceeded;+freeq.at/spent={:.2};+freeq.at/limit={:.2};+freeq.at/unit={} :{server_name} TAGMSG {nick}\r\n",
+                                total_spent,
+                                budget.max_amount,
+                                irc::escape_tag_value(&unit)
+                            );
+                            send(&state, &session_id, gov_line);
                         }
                     }
 
@@ -2575,19 +2877,73 @@ where
                     .or_else(|| serde_json::from_str::<serde_json::Value>(encoded).ok());
 
                 match json_result {
-                    Some(provenance) => {
+                    Some(mut provenance) => {
                         if let Some(ref did) = conn.authenticated_did {
-                            state
-                                .provenance_declarations
-                                .lock()
-                                .insert(did.clone(), provenance);
-                            let reply = Message::from_server(
-                                &server_name,
-                                "NOTICE",
-                                vec![&nick, "Provenance declaration stored"],
-                            );
-                            send(&state, &session_id, format!("{reply}\r\n"));
-                            tracing::info!(nick = %nick, did = %did, "Provenance declaration stored");
+                            // Run synchronous verification. For FreeqBotDelegation/v1
+                            // certs this checks the ed25519 sig against the creator's
+                            // registered MSGSIG key (db.get_signing_key). Other shapes
+                            // pass through as unverified.
+                            //
+                            // Hard-reject only on cert/session DID mismatch (the agent
+                            // is presenting a cert that doesn't belong to its session).
+                            let did_clone = did.clone();
+                            let outcome_result = state
+                                .with_db(|db| {
+                                    Ok::<_, rusqlite::Error>(provenance::verify_provenance(
+                                        &provenance,
+                                        &did_clone,
+                                        Some(db),
+                                    ))
+                                })
+                                .unwrap_or_else(|| {
+                                    // No DB attached — verify will report "no DB" reason.
+                                    provenance::verify_provenance(&provenance, &did_clone, None)
+                                });
+
+                            match outcome_result {
+                                Err(reject_reason) => {
+                                    let reply = Message::from_server(
+                                        &server_name,
+                                        "NOTICE",
+                                        vec![
+                                            &nick,
+                                            &format!("Provenance rejected: {reject_reason}"),
+                                        ],
+                                    );
+                                    send(&state, &session_id, format!("{reply}\r\n"));
+                                    tracing::warn!(
+                                        nick = %nick, did = %did, reason = %reject_reason,
+                                        "Provenance declaration rejected"
+                                    );
+                                }
+                                Ok(outcome) => {
+                                    provenance::annotate(&mut provenance, &outcome);
+                                    state
+                                        .provenance_declarations
+                                        .lock()
+                                        .insert(did.clone(), provenance);
+                                    let status = if outcome.verified {
+                                        "verified"
+                                    } else {
+                                        "stored (unverified)"
+                                    };
+                                    let reply = Message::from_server(
+                                        &server_name,
+                                        "NOTICE",
+                                        vec![
+                                            &nick,
+                                            &format!("Provenance {status}: {}", outcome.reason),
+                                        ],
+                                    );
+                                    send(&state, &session_id, format!("{reply}\r\n"));
+                                    tracing::info!(
+                                        nick = %nick, did = %did,
+                                        verified = outcome.verified,
+                                        reason = %outcome.reason,
+                                        "Provenance declaration stored"
+                                    );
+                                }
+                            }
                         } else {
                             let reply = Message::from_server(
                                 &server_name,
@@ -2864,6 +3220,106 @@ where
         true // Guest sessions are always "last"
     };
 
+    // Clean up AV sessions: leave only THIS connection's instance slots —
+    // not every slot for the DID (the user may have other tabs/devices in
+    // the same call). When the user wasn't using per-instance tags (older
+    // clients), fall back to the legacy whole-DID cleanup.
+    {
+        let did_for_av = conn
+            .authenticated_did
+            .clone()
+            .unwrap_or_else(|| format!("guest:{}", conn.nick.as_deref().unwrap_or("*")));
+
+        let instances: Vec<String> = state
+            .av_instances_per_conn
+            .lock()
+            .remove(&session_id)
+            .map(|set| set.into_iter().collect())
+            .unwrap_or_default();
+
+        // A DID user's *last* connection gets an AV grace window so a brief
+        // network blip + reconnect doesn't end their call. Guests, multi-device
+        // users (another live session remains), and legacy clients with no
+        // per-instance bookkeeping tear down immediately.
+        let defer = crate::av::av_disconnect_deferred(
+            conn.authenticated_did.is_some(),
+            is_last_session_for_did,
+        ) && !instances.is_empty();
+
+        if defer {
+            // Grace period for AV, aligned with the channel-membership grace.
+            const AV_GRACE_SECS: u64 = QUIT_GRACE_SECS;
+            tracing::info!(
+                did = %did_for_av, instances = instances.len(),
+                "AV: deferring teardown ({}s grace for blip/reconnect)", AV_GRACE_SECS
+            );
+            let state2 = state.clone();
+            let did2 = did_for_av.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(AV_GRACE_SECS)).await;
+                for inst in &instances {
+                    // If the instance reappeared on any live connection, the
+                    // user reconnected and rejoined — keep the slot untouched.
+                    // Otherwise tear it down exactly like the immediate path.
+                    // This self-heals: a reconnect that does NOT rejoin the
+                    // call still gets its stale slot cleaned up here.
+                    if crate::av::instance_claimed_by_live_conn(
+                        &state2.av_instances_per_conn.lock(),
+                        inst,
+                    ) {
+                        tracing::info!(instance = %inst, did = %did2, "AV: grace — rejoined, call kept");
+                        continue;
+                    }
+                    let left: Vec<(String, Option<String>, String, bool)> = {
+                        let mut mgr = state2.av_sessions.lock();
+                        mgr.leave_for_did_instance(&did2, Some(inst))
+                    };
+                    for (av_sid, channel, av_nick, should_end) in &left {
+                        finish_av_slot_teardown(&state2, av_sid, channel, av_nick, *should_end, inst);
+                    }
+                    if !left.is_empty() {
+                        tracing::info!(instance = %inst, did = %did2, "AV: grace expired — not rejoined, torn down");
+                    }
+                }
+            });
+        } else {
+            // Immediate teardown. Each entry carries the per-device instance so
+            // the `left` signal names the exact device that dropped — clients
+            // key teardown on the instance (matches the media path), not nick.
+            let left_sessions: Vec<(String, Option<String>, String, bool, Option<String>)> = {
+                let mut mgr = state.av_sessions.lock();
+                if instances.is_empty() {
+                    // Legacy path — no per-instance bookkeeping for this
+                    // connection, so mark all DID slots left.
+                    mgr.leave_all_for_did(&did_for_av)
+                        .into_iter()
+                        .map(|(sid, ch, nick, end)| (sid, ch, nick, end, None))
+                        .collect()
+                } else {
+                    let mut out = Vec::new();
+                    for inst in &instances {
+                        for (sid, ch, nick, end) in mgr.leave_for_did_instance(&did_for_av, Some(inst))
+                        {
+                            out.push((sid, ch, nick, end, Some(inst.clone())));
+                        }
+                    }
+                    out
+                }
+            };
+
+            for (av_sid, channel, av_nick, should_end, instance) in &left_sessions {
+                finish_av_slot_teardown(
+                    &state,
+                    av_sid,
+                    channel,
+                    av_nick,
+                    *should_end,
+                    instance.as_deref().unwrap_or(""),
+                );
+            }
+        }
+    }
+
     // Grace period for DID users: hold channel membership for 30s before broadcasting QUIT.
     // If they reconnect within that window, suppress the quit/join churn entirely.
     const QUIT_GRACE_SECS: u64 = 30;
@@ -2952,7 +3408,17 @@ where
                                 }
                                 drop(conns);
                                 drop(channels);
-                                state_clone.nick_to_session.lock().remove_by_nick(&nick_clone);
+                                // Remove only THIS (ghost) session's nick binding, not every
+                                // session sharing the nick. remove_by_nick wipes the sid→nick
+                                // reverse mapping for ALL sessions with this nick, so if the
+                                // user reconnected another device during the grace window, that
+                                // live device would keep its channel membership but vanish from
+                                // NAMES (can chat, invisible in the member list). remove_by_session
+                                // removes just the ghost and promotes a live sibling as primary.
+                                state_clone
+                                    .nick_to_session
+                                    .lock()
+                                    .remove_by_session(&ghost.session_id);
                                 // Evict the ghost's stale session_id from ch.members.
                                 // cleanup_session_state (called at disconnect) intentionally
                                 // skips cleanup_channel_membership to preserve ghost membership
@@ -2984,7 +3450,8 @@ where
                 // Guest user — immediate QUIT (no grace period)
                 let hostmask = conn.hostmask();
                 broadcast_quit(&state, &session_id, &hostmask);
-                state.nick_to_session.lock().remove_by_nick(nick);
+                // Remove only this session (multi-device safe — see the ghost path).
+                state.nick_to_session.lock().remove_by_session(&session_id);
                 broadcast_quit_s2s(&state, nick);
                 cleanup_session_state(&state, &session_id);
                 cleanup_channel_membership(&state, &session_id);
@@ -2997,6 +3464,12 @@ where
             );
             cleanup_session_state(&state, &session_id);
             cleanup_channel_membership(&state, &session_id);
+            // Drop this session_id from the NickMap. If it was the primary
+            // for the nick, NickMap.remove_by_session promotes a sibling
+            // session that still holds the nick. Without this, the nick→sid
+            // pointer can be left dangling at a dead session_id, breaking
+            // WHOIS/PRIVMSG routing for the still-online sibling.
+            state.nick_to_session.lock().remove_by_session(&session_id);
         }
     } else {
         cleanup_session_state(&state, &session_id);
@@ -3119,6 +3592,8 @@ fn broadcast_quit_s2s(state: &Arc<SharedState>, nick: &str) {
 /// Clean up per-session state (connections, caps, etc.) but NOT channel membership.
 fn cleanup_session_state(state: &Arc<SharedState>, session_id: &str) {
     state.connections.lock().remove(session_id);
+    state.session_kill.lock().remove(session_id);
+    state.liveness_probes.lock().remove(session_id);
     state.session_dids.lock().remove(session_id);
     state.session_handles.lock().remove(session_id);
     state.session_iroh_ids.lock().remove(session_id);
@@ -3131,9 +3606,19 @@ fn cleanup_session_state(state: &Arc<SharedState>, session_id: &str) {
     state.cap_echo_message.lock().remove(session_id);
     state.cap_server_time.lock().remove(session_id);
     state.cap_batch.lock().remove(session_id);
+    state.cap_draft_multiline.lock().remove(session_id);
+    // Drop any open BATCH state for this session — the client is gone,
+    // those batches will never be closed.
+    state
+        .open_batches
+        .lock()
+        .retain(|(sid, _bid), _| sid != session_id);
     state.cap_account_notify.lock().remove(session_id);
     state.cap_extended_join.lock().remove(session_id);
     state.cap_away_notify.lock().remove(session_id);
+    state.cap_account_tag.lock().remove(session_id);
+    state.cap_read_marker.lock().remove(session_id);
+    state.session_read_markers.lock().remove(session_id);
     state.server_opers.lock().remove(session_id);
     state.session_actor_class.lock().remove(session_id);
     state.agent_presence.lock().remove(session_id);

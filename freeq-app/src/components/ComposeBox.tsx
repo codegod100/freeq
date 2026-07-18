@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useMemo, type KeyboardEvent, type DragEvent } from 'react';
 import { useStore } from '../store';
 import { sendMessage, sendReply, sendEdit, sendMarkdown, joinChannel, partChannel, setTopic, setMode, kickUser, inviteUser, setAway, rawCommand, sendWhois } from '../irc/client';
+import { detectStepUpRequired, requestStepUp } from '../lib/oauth-step-up';
+import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker, EMOJI_DATA } from './EmojiPicker';
 import { SlashCommands, getCommandCount } from './SlashCommands';
 import { FormatToolbar } from './FormatToolbar';
@@ -42,7 +44,11 @@ export function ComposeBox() {
     });
   };
   const [pendingUpload, setPendingUpload] = useState<PendingUpload | null>(null);
-  const [crossPost, setCrossPost] = useState(false);
+  // Media is private to this channel/DM by default. These two opt-in toggles
+  // are the only way bytes leave freeq: save a public copy to the user's PDS,
+  // and/or also post it to their Bluesky feed (which implies the PDS copy).
+  const [sharePds, setSharePds] = useState(false);
+  const [shareBluesky, setShareBluesky] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const emojiRef = useRef<HTMLButtonElement>(null);
@@ -181,6 +187,8 @@ export function ComposeBox() {
   const cancelUpload = () => {
     if (pendingUpload?.preview) URL.revokeObjectURL(pendingUpload.preview);
     setPendingUpload(null);
+    setSharePds(false);
+    setShareBluesky(false);
   };
 
   const doUpload = useCallback(async () => {
@@ -188,20 +196,41 @@ export function ComposeBox() {
     setPendingUpload((p) => p ? { ...p, uploading: true, error: undefined } : null);
 
     try {
-      const form = new FormData();
-      form.append('file', pendingUpload.file);
-      form.append('did', authDid);
-      if (activeChannel !== 'server' && activeChannel.startsWith('#')) {
-        form.append('channel', activeChannel);
-      }
-      if (text.trim()) {
-        form.append('alt', text.trim());
-      }
-      if (crossPost) {
-        form.append('cross_post', 'true');
-      }
+      const buildForm = () => {
+        const f = new FormData();
+        f.append('file', pendingUpload.file);
+        f.append('did', authDid);
+        if (activeChannel !== 'server' && activeChannel.startsWith('#')) f.append('channel', activeChannel);
+        if (text.trim()) f.append('alt', text.trim());
+        // share_bluesky implies share_pds (feed embed references the PDS blob).
+        if (sharePds || shareBluesky) f.append('share_pds', 'true');
+        if (shareBluesky) f.append('share_bluesky', 'true');
+        return f;
+      };
 
-      let resp = await fetch('/api/v1/upload', { method: 'POST', body: form });
+      let resp = await fetch('/api/v1/upload', { method: 'POST', body: buildForm() });
+
+      // 403 step_up_required: the user has a Login session but hasn't
+      // granted blob upload yet. Drive the step-up popup, then retry
+      // once with a fresh form. This is the Phase 2 incremental-auth
+      // path — we never asked for blob upload at sign-in time.
+      const purpose = await detectStepUpRequired(resp);
+      if (purpose === 'blob_upload') {
+        const outcome = await requestStepUp('blob_upload', authDid);
+        if (outcome.ok) {
+          resp = await fetch('/api/v1/upload', { method: 'POST', body: buildForm() });
+        } else {
+          // Tailor the message to *why* it failed so the user knows
+          // whether to allow popups, retry, or wait less next time.
+          const msg =
+            outcome.reason === 'popup_blocked'
+              ? 'Allow popups for this site so freeq can request the image-upload permission, then retry.'
+              : outcome.reason === 'timeout'
+                ? 'The Bluesky permission popup timed out. Try the upload again.'
+                : 'Image upload needs one extra Bluesky permission. Try again and complete the popup.';
+          throw new Error(msg);
+        }
+      }
 
       // If session expired, try to refresh via broker and retry once
       if (resp.status === 401) {
@@ -227,13 +256,7 @@ export function ComposeBox() {
             console.log('[upload] broker refresh response:', refreshResp.status);
             if (refreshResp.ok) {
               // Broker pushed fresh OAuth session to server — retry upload
-              const retryForm = new FormData();
-              retryForm.append('file', pendingUpload.file);
-              retryForm.append('did', authDid);
-              if (activeChannel !== 'server' && activeChannel.startsWith('#')) retryForm.append('channel', activeChannel);
-              if (text.trim()) retryForm.append('alt', text.trim());
-              if (crossPost) retryForm.append('cross_post', 'true');
-              resp = await fetch('/api/v1/upload', { method: 'POST', body: retryForm });
+              resp = await fetch('/api/v1/upload', { method: 'POST', body: buildForm() });
               console.log('[upload] retry response:', resp.status);
             }
           } catch (e) {
@@ -260,10 +283,12 @@ export function ComposeBox() {
       if (pendingUpload.preview) URL.revokeObjectURL(pendingUpload.preview);
       setPendingUpload(null);
       setText('');
+      setSharePds(false);
+      setShareBluesky(false);
     } catch (e: any) {
       setPendingUpload((p) => p ? { ...p, uploading: false, error: e.message || 'Upload failed' } : null);
     }
-  }, [pendingUpload, authDid, activeChannel, text, ch]);
+  }, [pendingUpload, authDid, activeChannel, text, ch, sharePds, shareBluesky]);
 
   // ── Drag & drop ──
 
@@ -331,20 +356,16 @@ export function ComposeBox() {
       handleCommand(trimmed, activeChannel);
     } else if (activeChannel !== 'server') {
       const target = ch?.name || activeChannel;
-      const isMultiline = trimmed.includes('\n');
       if (markdownMode) {
-        // Markdown mode: send with mime tag (handles multiline internally)
         sendMarkdown(target, trimmed);
       } else if (editingMsg && editingMsg.channel.toLowerCase() === activeChannel.toLowerCase()) {
-        const encoded = isMultiline ? trimmed.replace(/\n/g, '\\n') : trimmed;
-        sendEdit(target, editingMsg.msgId, encoded, isMultiline);
+        sendEdit(target, editingMsg.msgId, trimmed);
         useStore.getState().setEditingMsg(null);
       } else if (replyTo && replyTo.channel.toLowerCase() === activeChannel.toLowerCase()) {
-        const encoded = isMultiline ? trimmed.replace(/\n/g, '\\n') : trimmed;
-        sendReply(target, replyTo.msgId, encoded, isMultiline);
+        sendReply(target, replyTo.msgId, trimmed);
         useStore.getState().setReplyTo(null);
       } else {
-        sendMessage(target, trimmed, isMultiline);
+        sendMessage(target, trimmed);
       }
     }
     setText('');
@@ -394,7 +415,7 @@ export function ComposeBox() {
           e.preventDefault();
           // Get the filtered list and pick the selected one
           const filter = slashCmd.filter.toLowerCase();
-          const COMMANDS = ['join','part','topic','invite','kick','op','deop','voice','mode','msg','me','md','whois','away','encrypt','decrypt','policy','raw','help'];
+          const COMMANDS = ['join','part','topic','invite','kick','op','deop','voice','mode','msg','me','md','whois','away','encrypt','decrypt','pins','policy','raw','help'];
           const filtered = filter ? COMMANDS.filter(c => c.startsWith(filter)) : COMMANDS;
           if (filtered[slashCmd.selected]) {
             setText(`/${filtered[slashCmd.selected]} `);
@@ -583,16 +604,32 @@ export function ComposeBox() {
               <div className="text-xs text-danger mt-0.5">{pendingUpload.error}</div>
             )}
             {authDid && (
-              <label className="flex items-center gap-1.5 mt-1 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={crossPost}
-                  onChange={(e) => setCrossPost(e.target.checked)}
-                  className="w-3 h-3 rounded accent-blue"
-                />
-                <span className="text-sm text-fg-dim">Also post to Bluesky</span>
-                <span className="text-[10px]">🦋</span>
-              </label>
+              <div className="mt-1 space-y-0.5">
+                <div className="flex items-center gap-1 text-[11px] text-fg-dim">
+                  <span>🔒</span>
+                  <span>Private to {ch?.name || activeChannel} by default</span>
+                </div>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={sharePds || shareBluesky}
+                    disabled={shareBluesky}
+                    onChange={(e) => setSharePds(e.target.checked)}
+                    className="w-3 h-3 rounded accent-blue"
+                  />
+                  <span className="text-sm text-fg-dim">Save a public copy to my PDS</span>
+                </label>
+                <label className="flex items-center gap-1.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={shareBluesky}
+                    onChange={(e) => setShareBluesky(e.target.checked)}
+                    className="w-3 h-3 rounded accent-blue"
+                  />
+                  <span className="text-sm text-fg-dim">Also post to Bluesky feed</span>
+                  <span className="text-[10px]">🦋</span>
+                </label>
+              </div>
             )}
           </div>
           {pendingUpload.uploading ? (
@@ -739,7 +776,7 @@ export function ComposeBox() {
           <div className="flex items-end">
           <textarea
             data-testid="compose-input"
-            aria-label={`Message ${activeChannel}`}
+            aria-label={`Message ${displayNameForKey(activeChannel)}`}
             ref={inputRef}
             value={text}
             onChange={(e) => { setText(e.target.value); onInput(); }}
@@ -751,8 +788,8 @@ export function ComposeBox() {
                 : activeChannel === 'server'
                   ? 'Type /help for commands...'
                   : ch?.isEncrypted
-                    ? `🔒 Message ${ch?.name || activeChannel} (encrypted)`
-                    : `Message ${ch?.name || activeChannel}`
+                    ? `🔒 Message ${displayNameForKey(ch?.name || activeChannel)} (encrypted)`
+                    : `Message ${displayNameForKey(ch?.name || activeChannel)}`
             }
             rows={1}
             className="flex-1 bg-transparent px-3 py-2.5 text-base text-fg outline-none placeholder:text-fg-dim resize-none min-h-[44px] max-h-[200px] leading-relaxed"
@@ -846,6 +883,25 @@ function handleCommand(text: string, activeChannel: string) {
     case 'md': case 'markdown':
       if (args && target) sendMarkdown(target, args);
       break;
+    case 'pins': {
+      if (!target) break;
+      const chanName = target.startsWith('#') ? target.slice(1) : target;
+      fetch(`${window.location.origin}/api/v1/channels/${encodeURIComponent(chanName)}/pins`)
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+          const pins = data?.pins || [];
+          if (pins.length === 0) {
+            store.addSystemMessage(activeChannel, `No pinned messages in ${target}`);
+          } else {
+            store.addSystemMessage(activeChannel, `── Pinned messages in ${target} (${pins.length}) ──`);
+            for (const p of pins) {
+              store.addSystemMessage(activeChannel, `📌 ${p.from}: ${p.text}`);
+            }
+          }
+        })
+        .catch(() => store.addSystemMessage(activeChannel, `Failed to fetch pins for ${target}`));
+      break;
+    }
     case 'me': case 'action':
       if (target) rawCommand(`PRIVMSG ${target} :\x01ACTION ${args}\x01`);
       break;
@@ -856,6 +912,7 @@ function handleCommand(text: string, activeChannel: string) {
       store.addSystemMessage(activeChannel, '── Commands ──');
       store.addSystemMessage(activeChannel, '/join #channel  ·  /part  ·  /topic text');
       store.addSystemMessage(activeChannel, '/kick user  ·  /op user  ·  /voice user  ·  /invite user');
+      store.addSystemMessage(activeChannel, '/pins  — list pinned messages');
       store.addSystemMessage(activeChannel, '/whois user  ·  /away reason  ·  /me action');
       store.addSystemMessage(activeChannel, '/msg user text  ·  /mode +o user  ·  /raw IRC_LINE');
       store.addSystemMessage(activeChannel, '/md **bold** text  — send as rendered markdown');

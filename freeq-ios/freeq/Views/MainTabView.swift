@@ -9,27 +9,35 @@ struct MainTabView: View {
     var body: some View {
         ZStack {
             TabView(selection: $selectedTab) {
-                ChatsTab()
+                ChatsTab(mode: .channels)
                     .tabItem {
-                        Image(systemName: "bubble.left.and.bubble.right.fill")
-                        Text("Chats")
+                        Image(systemName: "number")
+                        Text("Channels")
                     }
                     .tag(0)
-                    .badge(totalUnread)
+                    .badge(channelUnread)
+
+                ChatsTab(mode: .dms)
+                    .tabItem {
+                        Image(systemName: "bubble.left.and.bubble.right.fill")
+                        Text("DMs")
+                    }
+                    .tag(1)
+                    .badge(dmUnread)
 
                 DiscoverTab()
                     .tabItem {
                         Image(systemName: "magnifyingglass")
                         Text("Discover")
                     }
-                    .tag(1)
+                    .tag(2)
 
                 SettingsTab()
                     .tabItem {
                         Image(systemName: "gear")
                         Text("Settings")
                     }
-                    .tag(2)
+                    .tag(3)
             }
             .tint(Theme.accent)
             .onChange(of: selectedTab) {
@@ -46,14 +54,26 @@ struct MainTabView: View {
         .animation(.easeInOut(duration: 0.2), value: appState.lightboxURL != nil)
         .onChange(of: appState.pendingDMNick) {
             if appState.pendingDMNick != nil {
-                selectedTab = 0 // Switch to Chats tab
+                selectedTab = 1 // Switch to DMs tab so ChatsTab(.dms) consumes it
             }
         }
         .withToast()
         .preferredColorScheme(.dark)
     }
 
-    private var totalUnread: Int {
-        appState.unreadCounts.values.reduce(0, +)
+    /// Unread counts split per pane. DM buffers are keyed by peer nick (no
+    /// prefix); channels are keyed by `#…` (or `&…` for local-only channels).
+    private var channelUnread: Int {
+        appState.unreadCounts
+            .filter { $0.key.hasPrefix("#") || $0.key.hasPrefix("&") }
+            .values
+            .reduce(0, +)
+    }
+
+    private var dmUnread: Int {
+        appState.unreadCounts
+            .filter { !$0.key.hasPrefix("#") && !$0.key.hasPrefix("&") }
+            .values
+            .reduce(0, +)
     }
 }

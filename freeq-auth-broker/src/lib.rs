@@ -1,8 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use anyhow::Result;
+use axum::http::Method;
 use axum::{
     Json, Router,
     extract::{Query, State},
@@ -10,123 +9,78 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
-use base64::Engine;
-use p256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
+
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use base64::Engine;
+use hkdf::Hkdf;
+use sha2::Sha256;
 
 #[derive(Clone)]
 pub struct BrokerConfig {
     pub public_url: String,
     pub freeq_server_url: String,
     pub shared_secret: String,
-    pub db_path: String,
 }
 
-struct BrokerState {
-    config: BrokerConfig,
-    pending: Mutex<HashMap<String, PendingAuth>>,
-    completed: Mutex<HashMap<String, serde_json::Value>>,
-    db: Mutex<rusqlite::Connection>,
+pub struct BrokerState {
+    pub config: BrokerConfig,
+    /// Where minted sessions are published. Standalone uses [`RemoteWriter`]
+    /// (HMAC push to the freeq-server); an embedding server supplies its own
+    /// in-process writer.
+    pub writer: Arc<dyn SessionWriter>,
+    /// Where broker sessions are kept: [`SqliteStore`] (standalone) or
+    /// [`InMemoryStore`] (embedded default).
+    pub store: Arc<dyn SessionStore>,
+    pub pending: Mutex<std::collections::HashMap<String, PendingAuth>>,
+    /// Idempotency cache: `oauth_state` → (unix ts, final redirect URL) for a
+    /// just-completed login. The OAuth `code` is single-use, so a duplicate
+    /// callback (browsers/proxies re-request the URL — observed: the same
+    /// state hitting the callback 3× in 2s) can't re-run the exchange. We
+    /// replay the FIRST callback's redirect instead of erroring with "Invalid
+    /// OAuth state", so whichever duplicate the tab renders still logs in.
+    /// In-memory + short TTL (see `COMPLETED_TTL_SECS`).
+    pub completed: Mutex<std::collections::HashMap<String, (i64, String)>>,
+    /// Per-`oauth_state` lock serializing callbacks for the same state. Without
+    /// it, two callbacks arriving DURING the (single-use) code exchange race:
+    /// the second finds the pending entry already consumed but the result not
+    /// yet cached in `completed`, and errors. The lock makes the duplicate wait
+    /// and then hit the completed cache. Different states don't contend.
+    /// Mirrors `refresh_locks`.
+    pub callback_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-broker-token refresh serialization. AT Proto refresh tokens are
+    /// single-use (rotating): the PDS invalidates the old one when it issues a
+    /// new one. Concurrent `/session` calls for the same token — which the
+    /// reconnect loop and multiple app instances trigger — would each try to
+    /// use the same token, and all but the first get `invalid_grant`, wedging
+    /// the session. Holding a per-token async lock across the refresh + store
+    /// makes concurrent calls queue and reuse the freshly-rotated token
+    /// instead of racing it. (Root cause of the 2026-07-03 fast session death.)
+    pub refresh_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 #[derive(Clone)]
-struct PendingAuth {
-    handle: String,
-    did: String,
-    pds_url: String,
-    code_verifier: String,
-    redirect_uri: String,
-    client_id: String,
-    token_endpoint: String,
-    dpop_key_b64: String,
-    dpop_nonce: Option<String>,
-    mobile: bool,
-    return_to: Option<String>,
-    popup: bool,
-    session_id: Option<String>,
+pub struct PendingAuth {
+    pub handle: String,
+    pub did: String,
+    pub pds_url: String,
+    pub code_verifier: String,
+    pub redirect_uri: String,
+    pub client_id: String,
+    pub token_endpoint: String,
+    pub dpop_key_b64: String,
+    pub dpop_nonce: Option<String>,
+    pub mobile: bool,
+    pub return_to: Option<String>,
+    pub popup: bool,
 }
 
-#[derive(Debug, Clone)]
-struct DpopKey {
-    signing_key: SigningKey,
-}
-
-impl DpopKey {
-    fn generate() -> Self {
-        let signing_key = SigningKey::random(&mut rand::thread_rng());
-        Self { signing_key }
-    }
-
-    fn to_base64url(&self) -> String {
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(self.signing_key.to_bytes())
-    }
-
-    fn from_base64url(s: &str) -> Result<Self> {
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s)?;
-        let signing_key =
-            SigningKey::from_slice(&bytes).map_err(|e| anyhow::anyhow!("Invalid DPoP key: {e}"))?;
-        Ok(Self { signing_key })
-    }
-
-    fn jwk(&self) -> serde_json::Value {
-        let verifying_key = self.signing_key.verifying_key();
-        let point = verifying_key.to_encoded_point(false);
-        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(point.x().unwrap());
-        let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(point.y().unwrap());
-        serde_json::json!({
-            "kty": "EC",
-            "crv": "P-256",
-            "x": x,
-            "y": y,
-        })
-    }
-
-    fn proof(
-        &self,
-        method: &str,
-        url: &str,
-        nonce: Option<&str>,
-        access_token: Option<&str>,
-    ) -> Result<String> {
-        use p256::ecdsa::{Signature, signature::Signer};
-        use sha2::{Digest, Sha256};
-
-        let header = serde_json::json!({
-            "typ": "dpop+jwt",
-            "alg": "ES256",
-            "jwk": self.jwk(),
-        });
-
-        let mut payload = serde_json::json!({
-            "jti": generate_random_string(16),
-            "htm": method,
-            "htu": url,
-            "iat": chrono::Utc::now().timestamp(),
-        });
-        if let Some(nonce) = nonce {
-            payload["nonce"] = serde_json::Value::String(nonce.to_string());
-        }
-        if let Some(token) = access_token {
-            let hash = Sha256::digest(token.as_bytes());
-            payload["ath"] = serde_json::Value::String(
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash),
-            );
-        }
-
-        let header_b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header)?);
-        let payload_b64 =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload)?);
-        let signing_input = format!("{header_b64}.{payload_b64}");
-
-        let sig: Signature = self.signing_key.sign(signing_input.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes());
-
-        Ok(format!("{signing_input}.{sig_b64}"))
-    }
-}
+// DPoP key + proof now live in the shared engine crate. Re-exported so
+// this crate's `DpopKey` path (and the characterization tests) stay stable.
+pub use freeq_oauth::DpopKey;
 
 #[derive(Debug, Deserialize)]
 struct DidDocument {
@@ -142,13 +96,222 @@ struct DidService {
     service_endpoint: String,
 }
 
+/// Hard-bounded client for the broker's PDS calls (session refresh, graph
+/// writes). Default reqwest waits forever; a slow PDS would otherwise pile up
+/// stuck requests until the gateway times out. Connection pooling + keep-alive
+/// are left on so a request and its DPoP `use_dpop_nonce` retry reuse one
+/// connection to the same host rather than opening a second socket.
+fn upstream_client() -> Result<reqwest::Client, anyhow::Error> {
+    Ok(reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .pool_max_idle_per_host(32)
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        // Force IPv4. The broker runs in a Docker container that has NO IPv6
+        // route (bridge network, daemon IPv6 off) — only IPv4 (NAT) egress —
+        // yet the host resolver hands back AAAA records for IPv6-first CDNs
+        // like public.api.bsky.app (Bunny). Without this, the client attempts
+        // the unroutable IPv6 address and stalls on the 8s connect timeout
+        // before (maybe) falling back to IPv4 — the intermittent "can't
+        // resolve handle" first-login failures. Binding to an IPv4 local
+        // address makes every connection IPv4-only. (This is what the old
+        // "Miren egress / second TCP connection TimedOut" comments were really
+        // fighting — it was container IPv6, not the platform.)
+        .local_address(Some(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)))
+        .build()?)
+}
+
+/// [`ClientProvider`] for the login flow's discovery + PAR hops, which all
+/// reach user-controlled PDS / auth-server hosts. Validates each URL against
+/// SSRF policy and DNS-pins a fresh client to the resolved addresses. The PAR
+/// nonce-retry still shares one connection because the engine reuses the
+/// single client we hand it (pinned clients keep reqwest's default pooling).
+struct SsrfClients;
+
+impl ClientProvider for SsrfClients {
+    async fn client_for(&self, url: &str) -> anyhow::Result<reqwest::Client> {
+        let parsed = url::Url::parse(url)?;
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            anyhow::bail!("unsupported URL scheme");
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("URL has no host"))?;
+        let port = parsed
+            .port()
+            .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+        let addrs = freeq_ssrf::resolve_and_check(host, port).await?;
+        Ok(freeq_ssrf::pinned_client(
+            host,
+            &addrs,
+            std::time::Duration::from_secs(30),
+        )?)
+    }
+}
+
+async fn resolve_handle(handle: &str) -> Result<String, anyhow::Error> {
+    let client = upstream_client()?;
+
+    // 1. HTTPS well-known first — custom domains AND bsky.social handles both
+    //    serve `/.well-known/atproto-did`. One retry to ride out a blip.
+    let well_known = format!("https://{handle}/.well-known/atproto-did");
+    for attempt in 1..=2 {
+        match client.get(&well_known).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(text) = resp.text().await {
+                    let did = text.trim().to_string();
+                    if did.starts_with("did:") {
+                        return Ok(did);
+                    }
+                }
+            }
+            Ok(resp) => tracing::debug!(
+                handle, status = %resp.status(), "resolve: well-known non-success, trying appview"
+            ),
+            Err(e) => tracing::debug!(handle, attempt, error = %e, "resolve: well-known request failed"),
+        }
+    }
+
+    // 2. Fallback to the public appview resolver. CHECK THE STATUS before
+    //    parsing — a rate-limit (429) or 5xx returns a JSON error body with no
+    //    `did`, which previously surfaced as the confusing "No DID in
+    //    response" and failed the whole login. Retry transient statuses.
+    let api_url = format!(
+        "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={}",
+        handle
+    );
+    let mut last_err = "unknown".to_string();
+    for attempt in 1..=3 {
+        match client.get(&api_url).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body)
+                        && let Some(did) = json["did"].as_str()
+                    {
+                        return Ok(did.to_string());
+                    }
+                    let snippet: String = body.chars().take(160).collect();
+                    last_err = format!("appview 2xx without a DID field (body: {snippet})");
+                    break; // a 2xx with no DID won't change on retry
+                }
+                last_err = format!("appview HTTP {status}");
+                // 429 / 5xx are transient — back off and retry.
+                if status.as_u16() == 429 || status.is_server_error() {
+                    tracing::warn!(handle, %status, attempt, "resolve: appview transient error, retrying");
+                    tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+                    continue;
+                }
+                break; // other 4xx (e.g. genuinely bad handle) — don't retry
+            }
+            Err(e) => {
+                last_err = format!("appview request error: {e}");
+                tracing::warn!(handle, attempt, error = %e, "resolve: appview request failed, retrying");
+                tokio::time::sleep(std::time::Duration::from_millis(250 * attempt)).await;
+            }
+        }
+    }
+
+    tracing::error!(handle, reason = %last_err, "handle resolution failed");
+    anyhow::bail!("Could not resolve handle '{handle}': {last_err}")
+}
+
+async fn resolve_did(did: &str) -> Result<DidDocument, anyhow::Error> {
+    let client = upstream_client()?;
+    if did.starts_with("did:plc:") {
+        let url = format!("https://plc.directory/{did}");
+        let doc: DidDocument = client.get(&url).send().await?.json().await?;
+        return Ok(doc);
+    }
+    if did.starts_with("did:web:") {
+        let domain = did.trim_start_matches("did:web:").replace(':', "/");
+        let url = format!("https://{domain}/.well-known/did.json");
+
+        // SSRF protection: resolve hostname and reject private IPs
+        let host = domain.split('/').next().unwrap_or(&domain);
+        reject_private_host(host).await?;
+
+        let doc: DidDocument = client.get(&url).send().await?.json().await?;
+        return Ok(doc);
+    }
+    Err(anyhow::anyhow!("Unsupported DID method"))
+}
+
+/// SSRF protection: resolve a hostname and reject private/loopback IPs.
+async fn reject_private_host(host: &str) -> Result<(), anyhow::Error> {
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower.ends_with(".local")
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".localhost")
+    {
+        anyhow::bail!("SSRF blocked: private hostname {host}");
+    }
+
+    // If the host is an IP literal, check directly
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_ip(&ip) {
+            anyhow::bail!("SSRF blocked: private IP {ip}");
+        }
+        return Ok(());
+    }
+
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host(format!("{host}:443"))
+        .await?
+        .collect();
+    for addr in &addrs {
+        if is_private_ip(&addr.ip()) {
+            anyhow::bail!(
+                "SSRF blocked: {} resolves to private IP {}",
+                host,
+                addr.ip()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64) // CGNAT
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local
+        }
+    }
+}
+
+fn pds_endpoint(doc: &DidDocument) -> Option<String> {
+    doc.service.iter().find_map(|svc| {
+        if svc.service_type == "AtprotoPersonalDataServer" {
+            Some(svc.service_endpoint.clone())
+        } else {
+            None
+        }
+    })
+}
+
 #[derive(Deserialize)]
 struct AuthLoginQuery {
     handle: String,
     mobile: Option<String>,
     return_to: Option<String>,
     popup: Option<String>,
-    session_id: Option<String>,
+}
+
+fn is_truthy(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true") | Some("yes"))
 }
 
 #[derive(Deserialize)]
@@ -173,150 +336,273 @@ struct BrokerSessionResponse {
     handle: String,
 }
 
-#[derive(Serialize)]
-struct BrokerSessionRecord {
-    broker_token: String,
-    did: String,
-    handle: String,
-    pds_url: String,
-    token_endpoint: String,
-    refresh_token: String,
-    dpop_key_b64: String,
-    dpop_nonce: Option<String>,
-    created_at: i64,
-    updated_at: i64,
+/// A durable broker session — the record `/session` refreshes from. Fields
+/// are plaintext here; `SqliteStore` encrypts the sensitive ones at rest.
+#[derive(Serialize, Clone)]
+pub struct BrokerSessionRecord {
+    pub broker_token: String,
+    pub did: String,
+    pub handle: String,
+    pub pds_url: String,
+    pub token_endpoint: String,
+    pub refresh_token: String,
+    pub dpop_key_b64: String,
+    pub dpop_nonce: Option<String>,
+    /// The OAuth `client_id` this grant was issued to. Refresh must reuse it.
+    /// Empty for sessions created before this field existed — refresh then
+    /// falls back to rebuilding it from broker config (standalone's origin is
+    /// static, so that matches). Embedded sessions always store it, because
+    /// the origin is per-request.
+    pub client_id: String,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
-pub struct EmbeddedBroker {
-    state: Arc<BrokerState>,
-    base_url: String,
-    _task: tokio::task::JoinHandle<()>,
+/// Where broker sessions (`broker_token → refresh_token/dpop`) are kept.
+/// [`SqliteStore`] is durable (standalone; or embedded opt-in);
+/// [`InMemoryStore`] is ephemeral (embedded default).
+#[async_trait::async_trait]
+pub trait SessionStore: Send + Sync {
+    async fn get(&self, broker_token: &str) -> Option<BrokerSessionRecord>;
+    async fn insert(&self, rec: &BrokerSessionRecord) -> anyhow::Result<()>;
+    /// Persist a rotated refresh token + DPoP nonce (single-use rotation).
+    async fn update_refresh(
+        &self,
+        broker_token: &str,
+        refresh_token: &str,
+        dpop_nonce: Option<&str>,
+    ) -> anyhow::Result<()>;
 }
 
-impl EmbeddedBroker {
-    pub fn base_url(&self) -> &str {
-        &self.base_url
+/// Durable SQLite store with AES-GCM field encryption at rest. Owns the key.
+pub struct SqliteStore {
+    conn: Mutex<rusqlite::Connection>,
+    enc_key: [u8; 32],
+}
+
+impl SqliteStore {
+    pub fn open(path: &str, enc_key: [u8; 32]) -> anyhow::Result<Self> {
+        let conn = rusqlite::Connection::open(path)?;
+        init_db(&conn)?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+            enc_key,
+        })
     }
 
-    pub fn start_login(&self, handle: &str) -> (String, String) {
-        let session_id = generate_random_string(16);
-        let url = format!(
-            "{}/auth/login?handle={}&session_id={}&popup=1",
-            self.base_url,
-            urlencod(handle),
-            urlencod(&session_id)
-        );
-        (session_id, url)
-    }
-
-    pub async fn poll_auth_result(&self, session_id: &str) -> Option<serde_json::Value> {
-        self.state.completed.lock().await.remove(session_id)
-    }
-}
-
-pub async fn spawn_embedded_broker(
-    shared_secret: String,
-    freeq_server_url: Option<String>,
-) -> Result<EmbeddedBroker> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let base_url = format!("http://{}", addr);
-    let config = BrokerConfig {
-        public_url: base_url.clone(),
-        freeq_server_url: freeq_server_url.unwrap_or_else(|| "https://irc.freeq.at".to_string()),
-        shared_secret,
-        db_path: ":memory:".to_string(),
-    };
-    let state = build_state(config)?;
-    let app = build_app(state.clone());
-    let task = tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    Ok(EmbeddedBroker {
-        state,
-        base_url,
-        _task: task,
-    })
-}
-
-pub async fn run_from_env() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
-
-    let public_url =
-        std::env::var("BROKER_PUBLIC_URL").unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
-    let freeq_server_url =
-        std::env::var("FREEQ_SERVER_URL").unwrap_or_else(|_| "https://irc.freeq.at".to_string());
-    let shared_secret = std::env::var("BROKER_SHARED_SECRET").unwrap_or_else(|_| "".to_string());
-    let db_path = std::env::var("BROKER_DB_PATH").unwrap_or_else(|_| "broker.db".to_string());
-
-    let config = BrokerConfig {
-        public_url,
-        freeq_server_url,
-        shared_secret,
-        db_path,
-    };
-    let state = build_state(config)?;
-    let app = build_app(state);
-
-    let addr = std::env::var("BROKER_ADDR").unwrap_or_else(|_| {
-        if let Ok(port) = std::env::var("PORT") {
-            format!("0.0.0.0:{port}")
-        } else {
-            "0.0.0.0:8081".to_string()
+    /// Wrap an already-open connection (the standalone binary opens it with a
+    /// mount-retry loop; tests pass `:memory:`).
+    pub fn from_connection(conn: rusqlite::Connection, enc_key: [u8; 32]) -> Self {
+        Self {
+            conn: Mutex::new(conn),
+            enc_key,
         }
-    });
-    tracing::info!(%addr, "freeq auth broker listening");
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
+    }
 }
 
-fn build_state(config: BrokerConfig) -> Result<Arc<BrokerState>> {
-    if !config.db_path.is_empty()
-        && config.db_path != ":memory:"
-        && let Some(parent) = std::path::Path::new(&config.db_path).parent()
-        && !parent.as_os_str().is_empty()
-    {
-        std::fs::create_dir_all(parent).ok();
+#[async_trait::async_trait]
+impl SessionStore for SqliteStore {
+    async fn get(&self, broker_token: &str) -> Option<BrokerSessionRecord> {
+        let db = self.conn.lock().await;
+        let enc_key = &self.enc_key;
+        let mut stmt = db.prepare(
+            "SELECT broker_token, did, handle, pds_url, token_endpoint, refresh_token, dpop_key_b64, dpop_nonce, created_at, updated_at FROM sessions WHERE broker_token = ?1"
+        ).ok()?;
+        let mut rows = stmt.query(rusqlite::params![broker_token]).ok()?;
+        let row = rows.next().ok().flatten()?;
+        let encrypted_refresh: String = row.get(5).ok()?;
+        let encrypted_dpop: String = row.get(6).ok()?;
+        let encrypted_nonce: Option<String> = row.get(7).ok()?;
+        // C-5: decrypt sensitive fields after reading from DB.
+        let refresh_token = decrypt_field(enc_key, &encrypted_refresh)
+            .map_err(|e| tracing::error!("Failed to decrypt refresh_token: {e}"))
+            .ok()?;
+        let dpop_key_b64 = decrypt_field(enc_key, &encrypted_dpop)
+            .map_err(|e| tracing::error!("Failed to decrypt dpop_key_b64: {e}"))
+            .ok()?;
+        let dpop_nonce = encrypted_nonce
+            .map(|n| decrypt_field(enc_key, &n))
+            .transpose()
+            .map_err(|e| tracing::error!("Failed to decrypt dpop_nonce: {e}"))
+            .ok()?;
+        Some(BrokerSessionRecord {
+            broker_token: row.get(0).ok()?,
+            did: row.get(1).ok()?,
+            handle: row.get(2).ok()?,
+            pds_url: row.get(3).ok()?,
+            token_endpoint: row.get(4).ok()?,
+            refresh_token,
+            dpop_key_b64,
+            dpop_nonce,
+            created_at: row.get(8).ok()?,
+            updated_at: row.get(9).ok()?,
+            // Not persisted — the standalone broker (the only SqliteStore user)
+            // rebuilds client_id from its static config on refresh, so it never
+            // reads a stored one. Only the embedded InMemoryStore needs it (its
+            // origin is per-request). A future durable-embedded SQLite store
+            // would add the column then.
+            client_id: String::new(),
+        })
     }
 
-    if config.shared_secret.is_empty() {
-        tracing::warn!("BROKER_SHARED_SECRET not set — broker cannot mint web-tokens");
+    async fn insert(&self, rec: &BrokerSessionRecord) -> anyhow::Result<()> {
+        let enc_key = &self.enc_key;
+        let encrypted_refresh = encrypt_field(enc_key, &rec.refresh_token);
+        let encrypted_dpop = encrypt_field(enc_key, &rec.dpop_key_b64);
+        let encrypted_nonce = rec.dpop_nonce.as_deref().map(|n| encrypt_field(enc_key, n));
+        let db = self.conn.lock().await;
+        // client_id is intentionally not persisted (see `get`).
+        db.execute(
+            "INSERT INTO sessions (broker_token, did, handle, pds_url, token_endpoint, refresh_token, dpop_key_b64, dpop_nonce, created_at, updated_at)\
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)\
+             ON CONFLICT(broker_token) DO UPDATE SET refresh_token=excluded.refresh_token, updated_at=excluded.updated_at",
+            rusqlite::params![
+                rec.broker_token, rec.did, rec.handle, rec.pds_url, rec.token_endpoint,
+                encrypted_refresh, encrypted_dpop, encrypted_nonce, rec.created_at, rec.updated_at,
+            ],
+        )?;
+        Ok(())
     }
 
-    let db = if config.db_path == ":memory:" {
-        rusqlite::Connection::open_in_memory()?
-    } else {
-        rusqlite::Connection::open(&config.db_path)?
-    };
-    init_db(&db)?;
-
-    Ok(Arc::new(BrokerState {
-        config,
-        pending: Mutex::new(HashMap::new()),
-        completed: Mutex::new(HashMap::new()),
-        db: Mutex::new(db),
-    }))
+    async fn update_refresh(
+        &self,
+        broker_token: &str,
+        refresh_token: &str,
+        dpop_nonce: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let enc_key = &self.enc_key;
+        let encrypted_refresh = encrypt_field(enc_key, refresh_token);
+        let encrypted_nonce = dpop_nonce.map(|n| encrypt_field(enc_key, n));
+        let now = chrono::Utc::now().timestamp();
+        let db = self.conn.lock().await;
+        db.execute(
+            "UPDATE sessions SET refresh_token = ?1, dpop_nonce = ?2, updated_at = ?3 WHERE broker_token = ?4",
+            rusqlite::params![encrypted_refresh, encrypted_nonce, now, broker_token],
+        )?;
+        Ok(())
+    }
 }
 
-fn build_app(state: Arc<BrokerState>) -> Router {
+/// Ephemeral in-memory store — no persistence, no at-rest encryption (never
+/// leaves RAM). Default for embedded mode: `/session` works within the
+/// server's uptime, resets on restart.
+#[derive(Default)]
+pub struct InMemoryStore {
+    sessions: Mutex<std::collections::HashMap<String, BrokerSessionRecord>>,
+}
+
+impl InMemoryStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for InMemoryStore {
+    async fn get(&self, broker_token: &str) -> Option<BrokerSessionRecord> {
+        self.sessions.lock().await.get(broker_token).cloned()
+    }
+
+    async fn insert(&self, rec: &BrokerSessionRecord) -> anyhow::Result<()> {
+        self.sessions
+            .lock()
+            .await
+            .insert(rec.broker_token.clone(), rec.clone());
+        Ok(())
+    }
+
+    async fn update_refresh(
+        &self,
+        broker_token: &str,
+        refresh_token: &str,
+        dpop_nonce: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if let Some(r) = self.sessions.lock().await.get_mut(broker_token) {
+            r.refresh_token = refresh_token.to_string();
+            r.dpop_nonce = dpop_nonce.map(str::to_string);
+            r.updated_at = chrono::Utc::now().timestamp();
+        }
+        Ok(())
+    }
+}
+
+/// Build the broker's axum router over shared state. Used by the
+/// standalone binary and by the characterization tests; embedding
+/// servers mount this when embedding the broker in-process.
+/// The durable-session routes an embedding server lacks: `/session` (refresh)
+/// and Bluesky graph delegation. Returned un-stated so a host can `.merge()` it
+/// into its own router (its layers/CORS then apply); the standalone [`router`]
+/// includes these plus the login endpoints.
+fn session_routes() -> Router<Arc<BrokerState>> {
+    Router::new()
+        .route("/session", post(session))
+        .route("/api/graph/follow", post(graph_follow))
+        .route("/api/graph/unfollow", post(graph_unfollow))
+}
+
+/// Ready-to-mount `/session` + `/api/graph/*` router for an embedding server.
+/// The host supplies a [`BrokerState`] with its own writer + store and applies
+/// its own CORS.
+pub fn session_router(state: Arc<BrokerState>) -> Router {
+    session_routes().with_state(state)
+}
+
+pub fn router(state: Arc<BrokerState>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/health-v3", get(health_v3))
         .route("/client-metadata.json", get(client_metadata))
         .route("/auth/login", get(auth_login))
         .route("/auth/callback", get(auth_callback))
-        .route("/session", post(session))
-        .layer(CorsLayer::permissive())
+        .merge(session_routes())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::list([
+                    "https://irc.freeq.at".parse().unwrap(),
+                    "https://revenant-watch.boxd.sh".parse().unwrap(),
+                    "http://localhost:5173".parse().unwrap(),
+                    "http://localhost:8000".parse().unwrap(),
+                    "http://127.0.0.1:5173".parse().unwrap(),
+                ]))
+                .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+                .allow_headers(AllowHeaders::any()),
+        )
         .with_state(state)
 }
 
-async fn health() -> &'static str {
-    "ok-v3"
+const GIT_COMMIT_FILE: &str = include_str!("../git_commit.txt");
+
+fn git_commit() -> String {
+    if let Ok(v) = std::env::var("GIT_HASH")
+        && !v.is_empty()
+    {
+        return v;
+    }
+    let trimmed = GIT_COMMIT_FILE.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    let built_in = env!("GIT_HASH");
+    if !built_in.is_empty() {
+        return built_in.to_string();
+    }
+    "unknown".to_string()
 }
 
-async fn health_v3() -> &'static str {
-    "ok-v3"
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_commit": git_commit(),
+    }))
+}
+
+async fn health_v3() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+        "git_commit": git_commit(),
+    }))
 }
 
 async fn client_metadata(State(state): State<Arc<BrokerState>>) -> Json<serde_json::Value> {
@@ -333,7 +619,12 @@ async fn client_metadata(State(state): State<Arc<BrokerState>>) -> Json<serde_js
         "tos_uri": state.config.public_url,
         "policy_uri": state.config.public_url,
         "redirect_uris": [redirect_uri],
-        "scope": "atproto transition:generic",
+        // Union of scopes the broker may ever request, plus
+        // `transition:generic` for backward compat with refresh tokens
+        // issued before this change. We never request it at /authorize
+        // — the broker only asks for `atproto`. Remove transition:generic
+        // once the PDS grace period closes.
+        "scope": "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
@@ -364,164 +655,62 @@ async fn auth_login(
         )
     })?;
 
-    let client = reqwest::Client::new();
-    let pr_url = format!(
-        "{}/.well-known/oauth-protected-resource",
-        pds_url.trim_end_matches('/')
-    );
-    let pr_meta: serde_json::Value = client
-        .get(&pr_url)
-        .send()
+    // Discovery + PAR reach user-controlled PDS / auth-server hosts, so each
+    // hop goes through the SSRF-validating, DNS-pinning provider (closes audit
+    // M-8). The PAR nonce-retry still reuses its connection: the engine reuses
+    // the single client we hand it.
+    let auth_meta = freeq_oauth::discovery::discover_auth_server(&SsrfClients, &pds_url)
         .await
         .map_err(|e| {
             (
                 StatusCode::BAD_GATEWAY,
-                format!("PDS metadata fetch failed: {e}"),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("PDS metadata parse failed: {e}"),
+                format!("Auth server discovery failed: {e}"),
             )
         })?;
-    let auth_server = pr_meta["authorization_servers"][0]
-        .as_str()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "No authorization server".to_string(),
-            )
-        })?;
-
-    let as_url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        auth_server.trim_end_matches('/')
-    );
-    let auth_meta: serde_json::Value = client
-        .get(&as_url)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Auth server metadata failed: {e}"),
-            )
-        })?
-        .json()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Auth server metadata parse failed: {e}"),
-            )
-        })?;
-
-    let authorization_endpoint = auth_meta["authorization_endpoint"]
-        .as_str()
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_GATEWAY,
-                "No authorization_endpoint".to_string(),
-            )
-        })?;
-    let token_endpoint = auth_meta["token_endpoint"]
-        .as_str()
-        .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No token_endpoint".to_string()))?;
-    let par_endpoint = auth_meta["pushed_authorization_request_endpoint"]
-        .as_str()
+    let authorization_endpoint = auth_meta.authorization_endpoint.as_str();
+    let token_endpoint = auth_meta.token_endpoint.as_str();
+    let par_endpoint = auth_meta
+        .pushed_authorization_request_endpoint
+        .as_deref()
         .ok_or_else(|| (StatusCode::BAD_GATEWAY, "No PAR endpoint".to_string()))?;
 
     let redirect_uri = format!(
         "{}/auth/callback",
         state.config.public_url.trim_end_matches('/')
     );
-    let scope = "atproto transition:generic";
+    // Identity-only scope. The broker's job is to mint a session token
+    // for SASL — that needs nothing more than `atproto`. PDS-touching
+    // features (image upload, Bluesky cross-post) are step-ups served
+    // by the freeq-server's `/auth/step-up`, never the broker.
+    let scope = "atproto";
     let client_id = build_client_id(&state.config.public_url, &redirect_uri);
 
     let dpop_key = DpopKey::generate();
     let (code_verifier, code_challenge) = generate_pkce();
     let oauth_state = generate_random_string(16);
 
-    let params = [
-        ("response_type", "code"),
-        ("client_id", &client_id),
-        ("redirect_uri", &redirect_uri),
-        ("code_challenge", &code_challenge),
-        ("code_challenge_method", "S256"),
-        ("scope", scope),
-        ("state", &oauth_state),
-        ("login_hint", &handle),
-    ];
-
-    let dpop_proof = dpop_key
-        .proof("POST", par_endpoint, None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP proof failed: {e}"),
-            )
-        })?;
-    let resp = client
-        .post(par_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
+    // PAR over an SSRF-validated, DNS-pinned client for the auth-server host.
+    // One client is reused for the initial POST and the nonce-retry (the
+    // engine reuses it), preserving the connection-reuse the PAR retry needs.
+    let par_client = SsrfClients
+        .client_for(par_endpoint)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR failed: {e}")))?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-
-    let par_resp: serde_json::Value = if status.as_u16() == 400 && dpop_nonce.is_some() {
-        let nonce = dpop_nonce.as_deref().unwrap();
-        let dpop_proof2 = dpop_key
-            .proof("POST", par_endpoint, Some(nonce), None)
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("DPoP retry failed: {e}"),
-                )
-            })?;
-        let resp2 = client
-            .post(par_endpoint)
-            .header("DPoP", &dpop_proof2)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR retry failed: {e}")))?;
-        if !resp2.status().is_success() {
-            let text = resp2.text().await.unwrap_or_default();
-            return Err((StatusCode::BAD_GATEWAY, format!("PAR failed: {text}")));
-        }
-        resp2
-            .json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR parse failed: {e}")))?
-    } else if status.is_success() {
-        resp.json()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR parse failed: {e}")))?
-    } else {
-        let text = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("PAR failed ({status}): {text}"),
-        ));
-    };
-
-    let request_uri = par_resp["request_uri"].as_str().ok_or_else(|| {
-        (
-            StatusCode::BAD_GATEWAY,
-            "No request_uri in PAR response".to_string(),
-        )
-    })?;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR client init: {e}")))?;
+    let par = freeq_oauth::discovery::pushed_authorization_request(
+        &par_client,
+        par_endpoint,
+        &client_id,
+        &redirect_uri,
+        &code_challenge,
+        &oauth_state,
+        &handle,
+        scope,
+        &dpop_key,
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PAR failed: {e}")))?;
+    let request_uri = par.request_uri.as_str();
+    let dpop_nonce = par.dpop_nonce;
 
     let _now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -531,19 +720,30 @@ async fn auth_login(
     let is_popup = is_truthy(q.popup.as_deref());
     let is_mobile = is_truthy(q.mobile.as_deref());
 
-    if q.session_id.is_none() {
-        if return_to.is_none()
-            && let Some(referer) = headers.get("referer").and_then(|v| v.to_str().ok())
-            && let Ok(url) = url::Url::parse(referer)
-        {
-            return_to = Some(url.origin().ascii_serialization());
+    // C-6: Validate return_to against allowlist to prevent open redirects
+    if let Some(ref rt) = return_to
+        && !is_valid_return_to(rt)
+    {
+        tracing::warn!(return_to = %rt, "Rejected invalid return_to URL");
+        return Err((StatusCode::BAD_REQUEST, "Invalid return_to URL".to_string()));
+    }
+
+    if return_to.is_none()
+        && let Some(referer) = headers.get("referer").and_then(|v| v.to_str().ok())
+        && let Ok(url) = url::Url::parse(referer)
+    {
+        let origin = url.origin().ascii_serialization();
+        if is_valid_return_to(&origin) {
+            return_to = Some(origin);
         }
-        if return_to.is_none() && !is_mobile {
-            return_to = Some("https://irc.freeq.at".to_string());
-        }
+    }
+    if return_to.is_none() && !is_mobile {
+        return_to = Some("https://irc.freeq.at".to_string());
     }
 
     tracing::info!(handle = %handle, did = %did, popup = %is_popup, return_to = ?return_to, "BROKER_LOGIN_PARAMS_V3");
+
+    let state_prefix: String = oauth_state.chars().take(6).collect();
 
     state.pending.lock().await.insert(
         oauth_state.clone(),
@@ -560,9 +760,10 @@ async fn auth_login(
             mobile: is_mobile,
             return_to,
             popup: is_popup,
-            session_id: q.session_id.clone(),
         },
     );
+    let pending_count = state.pending.lock().await.len();
+    tracing::info!(state_prefix = %state_prefix, pending_count, "BROKER stored pending login state");
 
     let auth_url = format!(
         "{}?client_id={}&request_uri={}",
@@ -573,6 +774,9 @@ async fn auth_login(
 
     Ok(Redirect::temporary(&auth_url))
 }
+
+/// How long a completed login's redirect is replayable for duplicate callbacks.
+const COMPLETED_TTL_SECS: i64 = 120;
 
 async fn auth_callback(
     Query(q): Query<AuthCallbackQuery>,
@@ -600,13 +804,61 @@ async fn auth_callback(
         }
     };
 
-    let pending = {
+    let state_prefix: String = state_value.chars().take(6).collect();
+
+    // Serialize callbacks for the SAME state so concurrent duplicates (the
+    // browser fires the callback URL 2-3× at once) don't race between
+    // consuming the pending entry and caching the result. Different states
+    // don't contend. Held across the whole handler (incl. the code exchange).
+    let state_lock = {
+        let mut locks = state.callback_locks.lock().await;
+        locks
+            .entry(state_value.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _state_guard = state_lock.lock().await;
+
+    // Idempotency: if this state already completed (a prior OR concurrent
+    // duplicate finished first), replay its redirect instead of erroring — the
+    // single-use code is spent, but the login succeeded, so whichever duplicate
+    // the browser renders should still land in the app. (Root cause of the
+    // "Invalid OAuth state" a user hit: the same state hit the callback 3×.)
+    {
+        let now = chrono::Utc::now().timestamp();
+        let mut done = state.completed.lock().await;
+        done.retain(|_, (ts, _)| now - *ts < COMPLETED_TTL_SECS);
+        if let Some((_, url)) = done.get(state_value) {
+            let url = url.clone();
+            tracing::info!(state_prefix = %state_prefix, "OAuth callback: replaying completed login (duplicate request)");
+            // `freeq://` needs a 302 (ASWebAuthenticationSession only intercepts
+            // those); web uses a 307.
+            if url.starts_with("freeq://") {
+                return Ok(Redirect::to(&url).into_response());
+            }
+            return Ok(Redirect::temporary(&url).into_response());
+        }
+    }
+
+    let (pending, remaining) = {
         let mut pending_map = state.pending.lock().await;
-        pending_map.remove(state_value)
+        let p = pending_map.remove(state_value);
+        (p, pending_map.len())
     };
     let pending = match pending {
         Some(p) => p,
-        None => return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response()),
+        None => {
+            // Not completed (checked above under the lock) and not pending →
+            // genuinely unknown: login expired, or a state mismatch/restart
+            // (remaining==0 ⇒ store empty). Previously this returned before any
+            // log line, so the failure was invisible.
+            tracing::warn!(
+                state_prefix = %state_prefix,
+                remaining_pending = remaining,
+                "OAuth callback: unknown state (login expired or state mismatch)"
+            );
+            return Ok(Html(oauth_result_page("Invalid OAuth state", None)).into_response());
+        }
     };
     tracing::info!(popup = %pending.popup, return_to = ?pending.return_to, "BROKER_CALLBACK_PARAMS_V3");
     let return_to = pending
@@ -621,102 +873,38 @@ async fn auth_callback(
         )
     })?;
 
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", pending.redirect_uri.as_str()),
-        ("client_id", pending.client_id.as_str()),
-        ("code_verifier", pending.code_verifier.as_str()),
-    ];
-
+    // Shared engine performs the code exchange + DPoP nonce-retry dance.
+    // We pass the PAR-step nonce as `initial_nonce`: the PDS consumes the
+    // auth code even on a `use_dpop_nonce` failure, so sending the known
+    // nonce up front avoids a retry landing on `invalid_grant: Invalid code`.
+    // On failure, render the caller-specific page/redirect (mobile clients
+    // need a `freeq://` custom-scheme redirect, not HTML).
     let client = reqwest::Client::new();
-    let dpop_proof = dpop_key
-        .proof("POST", &pending.token_endpoint, None, None)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("DPoP proof failed: {e}"),
-            )
-        })?;
-    let resp = client
-        .post(&pending.token_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Token exchange failed: {e}"),
-            )
-        })?;
-
-    let status = resp.status();
-    let dpop_nonce = resp
-        .headers()
-        .get("dpop-nonce")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or(pending.dpop_nonce.clone());
-
-    let token_resp: serde_json::Value =
-        if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
-            let nonce = dpop_nonce.as_deref().unwrap();
-            tracing::info!(nonce = %nonce, "DPoP nonce retry for token exchange");
-            let dpop_proof2 = dpop_key
-                .proof("POST", &pending.token_endpoint, Some(nonce), None)
-                .map_err(|e| {
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("DPoP retry failed: {e}"),
-                    )
-                })?;
-            let resp2 = client
-                .post(&pending.token_endpoint)
-                .header("DPoP", &dpop_proof2)
-                .form(&params)
-                .send()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token retry failed: {e}")))?;
-            let resp2_status = resp2.status();
-            if !resp2_status.is_success() {
-                let text = resp2.text().await.unwrap_or_default();
-                let err_msg = format!("Token exchange failed: {text}");
-                if let Some(session_id) = pending.session_id.as_deref() {
-                    state.completed.lock().await.insert(
-                        session_id.to_string(),
-                        serde_json::json!({ "error": err_msg }),
-                    );
-                }
-                if pending.mobile {
-                    let redirect = format!("freeq://auth?error={}", urlencod(&err_msg));
-                    return Ok(axum::response::Redirect::to(&redirect).into_response());
-                }
-                return Ok(Html(oauth_result_page(&err_msg, None)).into_response());
-            }
-            resp2
-                .json()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-        } else if status.is_success() {
-            resp.json()
-                .await
-                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Token parse failed: {e}")))?
-        } else {
-            let text = resp.text().await.unwrap_or_default();
-            let err_msg = format!("Token exchange failed ({status}): {text}");
-            if let Some(session_id) = pending.session_id.as_deref() {
-                state.completed.lock().await.insert(
-                    session_id.to_string(),
-                    serde_json::json!({ "error": err_msg }),
-                );
-            }
+    let exchanged = match freeq_oauth::flow::exchange_code(
+        &client,
+        &pending.token_endpoint,
+        code,
+        &pending.code_verifier,
+        &pending.redirect_uri,
+        &pending.client_id,
+        &dpop_key,
+        pending.dpop_nonce.as_deref(),
+    )
+    .await
+    {
+        Ok(t) => t,
+        Err(e) => {
+            let err_msg = e.to_string();
+            tracing::error!(error = %err_msg, "Token exchange failed");
             if pending.mobile {
                 let redirect = format!("freeq://auth?error={}", urlencod(&err_msg));
                 return Ok(axum::response::Redirect::to(&redirect).into_response());
             }
             return Ok(Html(oauth_result_page(&err_msg, None)).into_response());
-        };
+        }
+    };
+    let token_resp = exchanged.token_response;
+    let dpop_nonce = exchanged.dpop_nonce;
 
     let refresh_token = token_resp["refresh_token"]
         .as_str()
@@ -724,39 +912,75 @@ async fn auth_callback(
 
     let broker_token = generate_random_string(32);
     let now = chrono::Utc::now().timestamp();
-    {
-        let db = state.db.lock().await;
-        db.execute(
-            "INSERT INTO sessions (broker_token, did, handle, pds_url, token_endpoint, refresh_token, dpop_key_b64, dpop_nonce, created_at, updated_at)\
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)\
-             ON CONFLICT(broker_token) DO UPDATE SET refresh_token=excluded.refresh_token, updated_at=excluded.updated_at",
-            rusqlite::params![
-                broker_token,
-                pending.did,
-                pending.handle,
-                pending.pds_url,
-                pending.token_endpoint,
-                refresh_token,
-                pending.dpop_key_b64,
-                dpop_nonce,
-                now,
-                now
-            ],
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    }
-
-    let (web_token, nick) = mint_web_token(&state.config, &pending.did, &pending.handle)
+    // Persist the durable session; the store encrypts sensitive fields at rest.
+    state
+        .store
+        .insert(&BrokerSessionRecord {
+            broker_token: broker_token.clone(),
+            did: pending.did.clone(),
+            handle: pending.handle.clone(),
+            pds_url: pending.pds_url.clone(),
+            token_endpoint: pending.token_endpoint.clone(),
+            refresh_token: refresh_token.to_string(),
+            dpop_key_b64: pending.dpop_key_b64.clone(),
+            dpop_nonce: dpop_nonce.clone(),
+            client_id: pending.client_id.clone(),
+            created_at: now,
+            updated_at: now,
+        })
         .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Broker token mint failed: {e}"),
-            )
-        })?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
 
-    if let Err(e) = push_web_session(&state.config, &pending, &token_resp, dpop_nonce.clone()).await
+    // Mint a one-time web-token + web session on the freeq server. Optional:
+    // a standalone broker (not trusted by irc.freeq.at's shared secret) just
+    // can't mint one — the verified DID + handle + broker_token are enough for
+    // identity-only consumers, so degrade gracefully instead of failing login.
+    let (web_token, nick) = state
+        .writer
+        .mint_web_token(&pending.did, &pending.handle)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "web-token mint failed — continuing identity-only");
+            (String::new(), pending.handle.clone())
+        });
+
+    // Read the actually-granted scope from the token response; older PDSes may
+    // downgrade to `transition:generic`. Default to `atproto` (what the broker
+    // requests at /authorize) when the response omits it.
+    let granted_scope = token_resp["scope"].as_str().unwrap_or("atproto");
+    let access_token = token_resp["access_token"].as_str().unwrap_or_default();
+    if let Err(e) = state
+        .writer
+        .push_session(&SessionPush {
+            did: &pending.did,
+            handle: &pending.handle,
+            pds_url: &pending.pds_url,
+            access_token,
+            dpop_key_b64: &pending.dpop_key_b64,
+            dpop_nonce: dpop_nonce.as_deref(),
+            granted_scope,
+        })
+        .await
     {
         tracing::warn!(error = %e, "Failed to push web session to server");
+    }
+
+    if pending.mobile {
+        let redirect = format!(
+            "freeq://auth?token={}&broker_token={}&nick={}&did={}&handle={}",
+            urlencod(&web_token),
+            urlencod(&broker_token),
+            urlencod(&nick),
+            urlencod(&pending.did),
+            urlencod(&pending.handle),
+        );
+        // Must be a 302 redirect — ASWebAuthenticationSession only intercepts
+        // HTTP redirects with the custom scheme, not JS/meta-refresh in HTML.
+        state.completed.lock().await.insert(
+            state_value.to_string(),
+            (chrono::Utc::now().timestamp(), redirect.clone()),
+        );
+        return Ok(axum::response::Redirect::to(&redirect).into_response());
     }
 
     let result = serde_json::json!({
@@ -768,85 +992,117 @@ async fn auth_callback(
         "pds_url": pending.pds_url,
     });
 
-    if let Some(session_id) = pending.session_id.as_deref() {
-        state
-            .completed
-            .lock()
-            .await
-            .insert(session_id.to_string(), result.clone());
-        return Ok(Html(oauth_result_page(
-            "Authentication complete. Return to freeq.",
-            Some(&result),
-        ))
-        .into_response());
-    }
-
-    if pending.mobile {
-        let redirect = format!(
-            "freeq://auth?token={}&broker_token={}&nick={}&did={}&handle={}",
-            urlencod(result["token"].as_str().unwrap_or_default()),
-            urlencod(result["broker_token"].as_str().unwrap_or_default()),
-            urlencod(result["nick"].as_str().unwrap_or_default()),
-            urlencod(result["did"].as_str().unwrap_or_default()),
-            urlencod(result["handle"].as_str().unwrap_or_default()),
-        );
-        return Ok(axum::response::Redirect::to(&redirect).into_response());
-    }
-
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&result).unwrap_or_default());
     let redirect = format!("{return_to}#oauth={payload}");
+    // Cache for idempotent replay on a duplicate callback (see COMPLETED_TTL_SECS).
+    state.completed.lock().await.insert(
+        state_value.to_string(),
+        (chrono::Utc::now().timestamp(), redirect.clone()),
+    );
+    tracing::info!(redirect_base = %return_to, "OAuth callback redirecting to app");
     Ok(Redirect::temporary(&redirect).into_response())
+}
+
+const ALLOWED_ORIGINS: &[&str] = &[
+    "https://irc.freeq.at",
+    "https://revenant-watch.boxd.sh",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:5173",
+];
+
+/// M-13 CSRF guard. A request is allowed when it has no `Origin` (non-browser
+/// clients — curl, native apps), when the `Origin` is same-origin as the
+/// request's own `Host` (the embedded case — a same-origin POST is not a CSRF
+/// vector), or when it's in the cross-origin allowlist (a standalone broker
+/// serving a web client on a different host, e.g. irc.freeq.at → auth.freeq.at).
+fn origin_allowed(headers: &HeaderMap) -> bool {
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return true;
+    };
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok())
+        && (origin == format!("https://{host}") || origin == format!("http://{host}"))
+    {
+        return true;
+    }
+    ALLOWED_ORIGINS.contains(&origin)
 }
 
 async fn session(
     State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
     Json(req): Json<BrokerSessionRequest>,
 ) -> Result<Json<BrokerSessionResponse>, (StatusCode, String)> {
-    let record = get_session(&state, &req.broker_token)
+    if !origin_allowed(&headers) {
+        tracing::warn!("Rejected /session request from disallowed origin");
+        return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
+    }
+
+    // Serialize refresh for this token so concurrent /session calls (reconnect
+    // loop, multiple devices) queue and reuse the rotated refresh token rather
+    // than racing single-use rotation into `invalid_grant`.
+    let token_lock = {
+        let mut locks = state.refresh_locks.lock().await;
+        locks
+            .entry(req.broker_token.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _refresh_guard = token_lock.lock().await;
+
+    // Read the record INSIDE the lock — a caller we queued behind may have just
+    // rotated the refresh token, so the stored copy is the one to use.
+    let record = state
+        .store
+        .get(&req.broker_token)
         .await
         .ok_or((StatusCode::UNAUTHORIZED, "Invalid broker token".to_string()))?;
 
-    let (access_token, refresh_token, dpop_nonce) = refresh_access_token(&state.config, &record)
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Refresh failed: {e}")))?;
-
-    let now = chrono::Utc::now().timestamp();
-    {
-        let db = state.db.lock().await;
-        db.execute(
-            "UPDATE sessions SET refresh_token = ?1, dpop_nonce = ?2, updated_at = ?3 WHERE broker_token = ?4",
-            rusqlite::params![refresh_token, dpop_nonce, now, record.broker_token],
-        ).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
-    }
-
-    let (web_token, nick) = mint_web_token(&state.config, &record.did, &record.handle)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("Broker token mint failed: {e}"),
-            )
-        })?;
-
-    let pending = PendingAuth {
-        handle: record.handle.clone(),
-        did: record.did.clone(),
-        pds_url: record.pds_url.clone(),
-        code_verifier: String::new(),
-        redirect_uri: String::new(),
-        client_id: String::new(),
-        token_endpoint: record.token_endpoint.clone(),
-        dpop_key_b64: record.dpop_key_b64.clone(),
-        dpop_nonce: dpop_nonce.clone(),
-        mobile: true,
-        return_to: None,
-        popup: false,
-        session_id: None,
-    };
-    if let Err(e) =
-        push_web_session_with_token(&state.config, &pending, &access_token, dpop_nonce.clone())
+    let (access_token, refresh_token, dpop_nonce, granted_scope) =
+        refresh_access_token(&state.config, &record)
             .await
+            .map_err(|e| match e {
+                // Dead session → 401 so the client shows sign-in, not a retry loop.
+                RefreshError::InvalidGrant => (
+                    StatusCode::UNAUTHORIZED,
+                    "Session expired — re-authentication required".to_string(),
+                ),
+                RefreshError::Transient(err) => {
+                    (StatusCode::BAD_GATEWAY, format!("Refresh failed: {err}"))
+                }
+            })?;
+
+    // Persist the rotated refresh token + nonce (store encrypts at rest).
+    state
+        .store
+        .update_refresh(&record.broker_token, &refresh_token, dpop_nonce.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    let (web_token, nick) = state
+        .writer
+        .mint_web_token(&record.did, &record.handle)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "web-token mint failed — continuing identity-only");
+            (String::new(), record.handle.clone())
+        });
+
+    // Forward the actually-granted scope from the refresh response so the
+    // server's per-purpose checks see the truth, not a hard-coded assumption.
+    if let Err(e) = state
+        .writer
+        .push_session(&SessionPush {
+            did: &record.did,
+            handle: &record.handle,
+            pds_url: &record.pds_url,
+            access_token: &access_token,
+            dpop_key_b64: &record.dpop_key_b64,
+            dpop_nonce: dpop_nonce.as_deref(),
+            granted_scope: &granted_scope,
+        })
+        .await
     {
         tracing::warn!(error = %e, "Failed to refresh web session on server");
     }
@@ -859,233 +1115,428 @@ async fn session(
     }))
 }
 
-async fn get_session(state: &Arc<BrokerState>, broker_token: &str) -> Option<BrokerSessionRecord> {
-    let db = state.db.lock().await;
-    let mut stmt = db.prepare(
-        "SELECT broker_token, did, handle, pds_url, token_endpoint, refresh_token, dpop_key_b64, dpop_nonce, created_at, updated_at FROM sessions WHERE broker_token = ?1"
-    ).ok()?;
-    let mut rows = stmt.query(rusqlite::params![broker_token]).ok()?;
-    if let Some(row) = rows.next().ok().flatten() {
-        Some(BrokerSessionRecord {
-            broker_token: row.get(0).ok()?,
-            did: row.get(1).ok()?,
-            handle: row.get(2).ok()?,
-            pds_url: row.get(3).ok()?,
-            token_endpoint: row.get(4).ok()?,
-            refresh_token: row.get(5).ok()?,
-            dpop_key_b64: row.get(6).ok()?,
-            dpop_nonce: row.get(7).ok()?,
-            created_at: row.get(8).ok()?,
-            updated_at: row.get(9).ok()?,
-        })
-    } else {
-        None
-    }
+// ── Graph delegation: follow / unfollow ────────────────────────────────────
+//
+// The client never holds the AT access token (it's DPoP-bound to the broker's
+// key anyway). Instead the broker performs the two graph writes on the user's
+// own PDS on their behalf, authenticated by the same broker_token as /session.
+
+#[derive(Deserialize)]
+struct GraphFollowRequest {
+    broker_token: String,
+    /// DID of the account to follow.
+    #[serde(default)]
+    subject_did: Option<String>,
+    /// For unfollow: the at:// URI of the existing follow record (the client
+    /// already has it from app.bsky.graph.getRelationships).
+    #[serde(default)]
+    follow_uri: Option<String>,
 }
 
-async fn refresh_access_token(
-    config: &BrokerConfig,
-    record: &BrokerSessionRecord,
-) -> Result<(String, String, Option<String>)> {
-    let dpop_key = DpopKey::from_base64url(&record.dpop_key_b64)?;
-    let redirect_uri = format!("{}/auth/callback", config.public_url.trim_end_matches('/'));
-    let client_id = build_client_id(&config.public_url, &redirect_uri);
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", record.refresh_token.as_str()),
-        ("client_id", client_id.as_str()),
-    ];
+/// Authenticate a broker token and produce a fresh access token, persisting
+/// the rotated refresh token — the same discipline as `/session` (shared
+/// per-token lock, read-inside-lock, encrypt-before-store).
+async fn authed_access_token(
+    state: &Arc<BrokerState>,
+    broker_token: &str,
+) -> Result<(BrokerSessionRecord, String, Option<String>), (StatusCode, String)> {
+    let token_lock = {
+        let mut locks = state.refresh_locks.lock().await;
+        locks
+            .entry(broker_token.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _refresh_guard = token_lock.lock().await;
 
-    let client = reqwest::Client::new();
-    let dpop_proof = dpop_key.proof("POST", &record.token_endpoint, None, None)?;
+    let record = state
+        .store
+        .get(broker_token)
+        .await
+        .ok_or((StatusCode::UNAUTHORIZED, "Invalid broker token".to_string()))?;
+
+    let (access_token, refresh_token, dpop_nonce, _scope) =
+        refresh_access_token(&state.config, &record)
+            .await
+            .map_err(|e| match e {
+                RefreshError::InvalidGrant => (
+                    StatusCode::UNAUTHORIZED,
+                    "Session expired — re-authentication required".to_string(),
+                ),
+                RefreshError::Transient(err) => {
+                    (StatusCode::BAD_GATEWAY, format!("Refresh failed: {err}"))
+                }
+            })?;
+
+    state
+        .store
+        .update_refresh(&record.broker_token, &refresh_token, dpop_nonce.as_deref())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")))?;
+
+    Ok((record, access_token, dpop_nonce))
+}
+
+/// DPoP-authenticated POST to the user's PDS, with the standard
+/// `use_dpop_nonce` retry dance resource servers require.
+async fn pds_dpop_post(
+    record: &BrokerSessionRecord,
+    access_token: &str,
+    nonce: Option<String>,
+    url: &str,
+    body: serde_json::Value,
+) -> Result<(reqwest::StatusCode, String), anyhow::Error> {
+    let dpop_key = DpopKey::from_base64url(&record.dpop_key_b64)?;
+    let client = upstream_client()?;
+
+    let proof = dpop_key.proof("POST", url, nonce.as_deref(), Some(access_token))?;
     let resp = client
-        .post(&record.token_endpoint)
-        .header("DPoP", &dpop_proof)
-        .form(&params)
+        .post(url)
+        .header("Authorization", format!("DPoP {access_token}"))
+        .header("DPoP", &proof)
+        .json(&body)
         .send()
         .await?;
-    let status = resp.status();
-    let mut dpop_nonce = resp
+
+    let fresh_nonce = resp
         .headers()
         .get("dpop-nonce")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .or(record.dpop_nonce.clone());
+        .map(String::from);
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
 
-    let token_resp: serde_json::Value =
-        if (status.as_u16() == 400 || status.as_u16() == 401) && dpop_nonce.is_some() {
-            let nonce = dpop_nonce.as_deref().unwrap();
-            let dpop_proof2 = dpop_key.proof("POST", &record.token_endpoint, Some(nonce), None)?;
-            let resp2 = client
-                .post(&record.token_endpoint)
-                .header("DPoP", &dpop_proof2)
-                .form(&params)
-                .send()
-                .await?;
-            if !resp2.status().is_success() {
-                return Err(anyhow::anyhow!(
-                    "Refresh failed: {}",
-                    resp2.text().await.unwrap_or_default()
-                ));
-            }
-            resp2.json().await?
-        } else if status.is_success() {
-            resp.json().await?
-        } else {
-            return Err(anyhow::anyhow!("Refresh failed ({status})"));
-        };
-
-    let access_token = token_resp["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No access_token"))?
-        .to_string();
-    let refresh_token = token_resp["refresh_token"]
-        .as_str()
-        .unwrap_or(&record.refresh_token)
-        .to_string();
-    dpop_nonce = token_resp
-        .get("dpop_nonce")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .or(dpop_nonce);
-
-    Ok((access_token, refresh_token, dpop_nonce))
-}
-
-async fn mint_web_token(
-    config: &BrokerConfig,
-    did: &str,
-    handle: &str,
-) -> Result<(String, String)> {
-    let body = serde_json::json!({"did": did, "handle": handle});
-    let sig = sign_body(&config.shared_secret, &body)?;
-    let url = format!(
-        "{}/auth/broker/web-token",
-        config.freeq_server_url.trim_end_matches('/')
-    );
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .header("X-Broker-Signature", sig)
-        .json(&body)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "web-token failed: {}",
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-    let json: serde_json::Value = resp.json().await?;
-    let token = json["token"].as_str().unwrap_or_default().to_string();
-    let nick = json["nick"].as_str().unwrap_or_default().to_string();
-    Ok((token, nick))
-}
-
-async fn push_web_session(
-    config: &BrokerConfig,
-    pending: &PendingAuth,
-    token_resp: &serde_json::Value,
-    dpop_nonce: Option<String>,
-) -> Result<()> {
-    let access_token = token_resp["access_token"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No access_token"))?;
-    push_web_session_with_token(config, pending, access_token, dpop_nonce).await
-}
-
-async fn push_web_session_with_token(
-    config: &BrokerConfig,
-    pending: &PendingAuth,
-    access_token: &str,
-    dpop_nonce: Option<String>,
-) -> Result<()> {
-    let body = serde_json::json!({
-        "did": pending.did,
-        "handle": pending.handle,
-        "pds_url": pending.pds_url,
-        "access_token": access_token,
-        "dpop_key_b64": pending.dpop_key_b64,
-        "dpop_nonce": dpop_nonce,
-    });
-    let sig = sign_body(&config.shared_secret, &body)?;
-    let url = format!(
-        "{}/auth/broker/session",
-        config.freeq_server_url.trim_end_matches('/')
-    );
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .header("X-Broker-Signature", sig)
-        .json(&body)
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "session push failed: {}",
-            resp.text().await.unwrap_or_default()
-        ));
-    }
-    Ok(())
-}
-
-async fn resolve_handle(handle: &str) -> Result<String> {
-    let url = format!("https://{handle}/.well-known/atproto-did");
-    if let Ok(resp) = reqwest::get(&url).await
-        && resp.status().is_success()
+    if (status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::BAD_REQUEST)
+        && text.contains("use_dpop_nonce")
+        && fresh_nonce.is_some()
     {
-        let did = resp.text().await?.trim().to_string();
-        if did.starts_with("did:") {
-            return Ok(did);
+        let proof2 = dpop_key.proof("POST", url, fresh_nonce.as_deref(), Some(access_token))?;
+        let resp2 = client
+            .post(url)
+            .header("Authorization", format!("DPoP {access_token}"))
+            .header("DPoP", &proof2)
+            .json(&body)
+            .send()
+            .await?;
+        let status2 = resp2.status();
+        let text2 = resp2.text().await.unwrap_or_default();
+        return Ok((status2, text2));
+    }
+
+    Ok((status, text))
+}
+
+/// POST /api/graph/follow {broker_token, subject_did} — create an
+/// app.bsky.graph.follow record in the user's own repo.
+async fn graph_follow(
+    State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
+    Json(req): Json<GraphFollowRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !origin_allowed(&headers) {
+        return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
+    }
+    let subject = req
+        .subject_did
+        .as_deref()
+        .filter(|d| d.starts_with("did:"))
+        .ok_or((StatusCode::BAD_REQUEST, "subject_did required".to_string()))?;
+
+    let (record, access_token, nonce) = authed_access_token(&state, &req.broker_token).await?;
+    if subject == record.did {
+        return Err((StatusCode::BAD_REQUEST, "Cannot follow yourself".to_string()));
+    }
+
+    let url = format!("{}/xrpc/com.atproto.repo.createRecord", record.pds_url);
+    let body = serde_json::json!({
+        "repo": record.did,
+        "collection": "app.bsky.graph.follow",
+        "record": {
+            "$type": "app.bsky.graph.follow",
+            "subject": subject,
+            "createdAt": chrono::Utc::now().to_rfc3339(),
         }
-    }
+    });
+    let (status, text) = pds_dpop_post(&record, &access_token, nonce, &url, body)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PDS call failed: {e}")))?;
 
-    let api_url = format!(
-        "https://public.api.bsky.app/xrpc/com.atproto.identity.resolveHandle?handle={}",
-        handle
-    );
-    let json: serde_json::Value = reqwest::get(&api_url).await?.json().await?;
-    let did = json["did"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("No DID in response"))?;
-    Ok(did.to_string())
+    if !status.is_success() {
+        tracing::warn!(did = %record.did, status = %status, "follow createRecord failed");
+        return Err((StatusCode::BAD_GATEWAY, format!("PDS rejected follow: {text}")));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+    Ok(Json(serde_json::json!({ "ok": true, "uri": parsed.get("uri") })))
 }
 
-async fn resolve_did(did: &str) -> Result<DidDocument> {
-    if did.starts_with("did:plc:") {
-        let url = format!("https://plc.directory/{did}");
-        let doc: DidDocument = reqwest::get(&url).await?.json().await?;
-        return Ok(doc);
+/// POST /api/graph/unfollow {broker_token, follow_uri} — delete the follow
+/// record named by the at:// URI (must live in the caller's own repo).
+async fn graph_unfollow(
+    State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
+    Json(req): Json<GraphFollowRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !origin_allowed(&headers) {
+        return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
     }
-    if did.starts_with("did:web:") {
-        let domain = did.trim_start_matches("did:web:").replace(':', "/");
-        let url = format!("https://{domain}/.well-known/did.json");
-        let doc: DidDocument = reqwest::get(&url).await?.json().await?;
-        return Ok(doc);
-    }
-    Err(anyhow::anyhow!("Unsupported DID method"))
-}
+    let uri = req
+        .follow_uri
+        .as_deref()
+        .ok_or((StatusCode::BAD_REQUEST, "follow_uri required".to_string()))?;
 
-fn pds_endpoint(doc: &DidDocument) -> Option<String> {
-    doc.service.iter().find_map(|svc| {
-        if svc.service_type == "AtprotoPersonalDataServer" {
-            Some(svc.service_endpoint.clone())
-        } else {
-            None
+    let (record, access_token, nonce) = authed_access_token(&state, &req.broker_token).await?;
+
+    // at://did:plc:xxx/app.bsky.graph.follow/rkey — the repo DID must be the
+    // caller's own (you can only delete your own follow records).
+    let rest = uri
+        .strip_prefix("at://")
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid follow_uri".to_string()))?;
+    let mut parts = rest.split('/');
+    let (repo_did, collection, rkey) = (parts.next(), parts.next(), parts.next());
+    match (repo_did, collection, rkey) {
+        (Some(d), Some("app.bsky.graph.follow"), Some(rkey))
+            if d == record.did && !rkey.is_empty() =>
+        {
+            let url = format!("{}/xrpc/com.atproto.repo.deleteRecord", record.pds_url);
+            let body = serde_json::json!({
+                "repo": record.did,
+                "collection": "app.bsky.graph.follow",
+                "rkey": rkey,
+            });
+            let (status, text) = pds_dpop_post(&record, &access_token, nonce, &url, body)
+                .await
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("PDS call failed: {e}")))?;
+            if !status.is_success() {
+                tracing::warn!(did = %record.did, status = %status, "unfollow deleteRecord failed");
+                return Err((StatusCode::BAD_GATEWAY, format!("PDS rejected unfollow: {text}")));
+            }
+            Ok(Json(serde_json::json!({ "ok": true })))
         }
-    })
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "follow_uri must be an app.bsky.graph.follow record in your own repo".to_string(),
+        )),
+    }
 }
 
-fn sign_body(secret: &str, body: &serde_json::Value) -> Result<String> {
+// Refresh + dead-vs-transient classification now live in the shared engine.
+use freeq_oauth::ClientProvider;
+use freeq_oauth::flow::RefreshError;
+
+/// Refresh a stored broker session's PDS access token.
+///
+/// Thin adapter over [`freeq_oauth::flow::refresh_access_token`]: reuses the
+/// grant's stored `client_id` and injects the broker's bounded HTTP client,
+/// then returns the tuple the `/session` and graph handlers expect. Returns
+/// `(access_token, refresh_token, dpop_nonce, granted_scope)`.
+async fn refresh_access_token(
+    config: &BrokerConfig,
+    record: &BrokerSessionRecord,
+) -> Result<(String, String, Option<String>, String), RefreshError> {
+    let dpop_key = DpopKey::from_base64url(&record.dpop_key_b64)?;
+    // Reuse the client_id the grant was issued to. Pre-migration rows have
+    // none, so fall back to rebuilding from config (standalone's origin is
+    // static, so it matches what login used).
+    let client_id = if record.client_id.is_empty() {
+        let redirect_uri = format!("{}/auth/callback", config.public_url.trim_end_matches('/'));
+        build_client_id(&config.public_url, &redirect_uri)
+    } else {
+        record.client_id.clone()
+    };
+    let client = upstream_client()?;
+    let t = freeq_oauth::flow::refresh_access_token(
+        &client,
+        &record.token_endpoint,
+        &client_id,
+        &dpop_key,
+        &record.refresh_token,
+        record.dpop_nonce.as_deref(),
+    )
+    .await?;
+    Ok((t.access_token, t.refresh_token, t.dpop_nonce, t.granted_scope))
+}
+
+/// The server-side web session a writer installs: a fresh PDS access token plus
+/// the DPoP key bound to it, for server-proxied PDS operations.
+pub struct SessionPush<'a> {
+    pub did: &'a str,
+    pub handle: &'a str,
+    pub pds_url: &'a str,
+    pub access_token: &'a str,
+    pub dpop_key_b64: &'a str,
+    pub dpop_nonce: Option<&'a str>,
+    pub granted_scope: &'a str,
+}
+
+/// How a freshly-minted session reaches the freeq-server. Standalone pushes
+/// over HTTP+HMAC ([`RemoteWriter`]); an embedding server writes in-process.
+#[async_trait::async_trait]
+pub trait SessionWriter: Send + Sync {
+    /// Mint a one-time SASL web-token for this identity → `(token, nick)`.
+    async fn mint_web_token(&self, did: &str, handle: &str)
+    -> Result<(String, String), anyhow::Error>;
+    /// Install / refresh the server-side web session for proxied PDS ops.
+    async fn push_session(&self, push: &SessionPush<'_>) -> Result<(), anyhow::Error>;
+}
+
+/// [`SessionWriter`] for the standalone broker: HMAC-signed HTTP POSTs to the
+/// freeq-server's `/auth/broker/*` receiver endpoints.
+pub struct RemoteWriter {
+    pub freeq_server_url: String,
+    pub shared_secret: String,
+}
+
+#[async_trait::async_trait]
+impl SessionWriter for RemoteWriter {
+    async fn mint_web_token(
+        &self,
+        did: &str,
+        handle: &str,
+    ) -> Result<(String, String), anyhow::Error> {
+        let body = serde_json::json!({"did": did, "handle": handle});
+        let (sig, ts) = sign_body(&self.shared_secret, &body)?;
+        let url = format!(
+            "{}/auth/broker/web-token",
+            self.freeq_server_url.trim_end_matches('/')
+        );
+        let client = upstream_client()?;
+        let resp = client
+            .post(&url)
+            .header("X-Broker-Signature", sig)
+            .header("X-Broker-Timestamp", ts)
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "web-token failed: {}",
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        let json: serde_json::Value = resp.json().await?;
+        let token = json["token"].as_str().unwrap_or_default().to_string();
+        let nick = json["nick"].as_str().unwrap_or_default().to_string();
+        Ok((token, nick))
+    }
+
+    async fn push_session(&self, push: &SessionPush<'_>) -> Result<(), anyhow::Error> {
+        let body = serde_json::json!({
+            "did": push.did,
+            "handle": push.handle,
+            "pds_url": push.pds_url,
+            "access_token": push.access_token,
+            "dpop_key_b64": push.dpop_key_b64,
+            "dpop_nonce": push.dpop_nonce,
+            "granted_scope": push.granted_scope,
+        });
+        let (sig, ts) = sign_body(&self.shared_secret, &body)?;
+        let url = format!(
+            "{}/auth/broker/session",
+            self.freeq_server_url.trim_end_matches('/')
+        );
+        let client = upstream_client()?;
+        let resp = client
+            .post(&url)
+            .header("X-Broker-Signature", sig)
+            .header("X-Broker-Timestamp", ts)
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "session push failed: {}",
+                resp.text().await.unwrap_or_default()
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Derive a 256-bit encryption key from the shared secret using HKDF-SHA256.
+pub fn derive_encryption_key(shared_secret: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, shared_secret.as_bytes());
+    let mut key = [0u8; 32];
+    hk.expand(b"freeq-broker-session-encryption-v1", &mut key)
+        .expect("HKDF expand failed");
+    key
+}
+
+/// Encrypt a plaintext string with AES-256-GCM. Returns base64url(nonce || ciphertext).
+pub fn encrypt_field(key: &[u8; 32], plaintext: &str) -> String {
+    use rand::RngCore;
+    let cipher = Aes256Gcm::new(key.into());
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_bytes())
+        .expect("AES-GCM encryption failed");
+    let mut combined = nonce_bytes.to_vec();
+    combined.extend_from_slice(&ciphertext);
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&combined)
+}
+
+/// Decrypt a field previously encrypted with encrypt_field.
+pub fn decrypt_field(key: &[u8; 32], encoded: &str) -> Result<String, anyhow::Error> {
+    let combined = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|e| anyhow::anyhow!("base64 decode failed: {e}"))?;
+    if combined.len() < 13 {
+        return Err(anyhow::anyhow!("encrypted field too short"));
+    }
+    let (nonce_bytes, ciphertext) = combined.split_at(12);
+    let cipher = Aes256Gcm::new(key.into());
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|e| anyhow::anyhow!("AES-GCM decryption failed: {e}"))?;
+    String::from_utf8(plaintext).map_err(|e| anyhow::anyhow!("UTF-8 decode failed: {e}"))
+}
+
+/// Validate return_to against an allowlist to prevent open redirects.
+///
+/// Matches on the parsed URL's scheme + host (exactly), not a string prefix.
+/// A prefix match let `https://irc.freeq.at.evil.example` through — it starts
+/// with `https://irc.freeq.at` — sending the token-bearing `#oauth=` fragment
+/// to an attacker origin (residual SECURITY-AUDIT C-6).
+pub fn is_valid_return_to(url: &str) -> bool {
+    // Relative, same-origin URLs. Reject protocol-relative (`//host`) and the
+    // `/\host` backslash trick, which browsers treat as off-origin.
+    if url.starts_with('/') {
+        return !(url.starts_with("//") || url.starts_with("/\\"));
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match (parsed.scheme(), parsed.host_str()) {
+        ("https", Some("irc.freeq.at" | "staging.freeq.at" | "revenant-watch.boxd.sh")) => true,
+        // Loopback dev origins, any port.
+        ("http", Some("localhost" | "127.0.0.1")) => true,
+        _ => false,
+    }
+}
+
+/// Sign a request body with HMAC-SHA256. Returns (signature, timestamp) pair.
+/// The MAC covers `ts={timestamp}\n` || body_bytes to prevent replay attacks.
+pub fn sign_body(secret: &str, body: &serde_json::Value) -> Result<(String, String), anyhow::Error> {
+    use base64::Engine;
     use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())?;
     let bytes = serde_json::to_vec(body)?;
+    mac.update(format!("ts={timestamp}\n").as_bytes());
     mac.update(&bytes);
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+    Ok((
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()),
+        timestamp,
+    ))
 }
 
-fn init_db(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
+pub fn init_db(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
             broker_token TEXT PRIMARY KEY,
@@ -1103,64 +1554,164 @@ fn init_db(db: &rusqlite::Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-fn oauth_result_page(message: &str, result: Option<&serde_json::Value>) -> String {
-    let detail = result
-        .map(|value| {
-            format!(
-                "<pre>{}</pre>",
-                serde_json::to_string_pretty(value).unwrap_or_default()
-            )
-        })
-        .unwrap_or_default();
+fn oauth_result_page(message: &str, _result: Option<&serde_json::Value>) -> String {
     format!(
         r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>freeq auth</title>
         <style>
         body {{ font-family: system-ui; background: #1e1e2e; color: #cdd6f4; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }}
-        .box {{ text-align: center; max-width: 720px; padding: 24px; }}
+        .box {{ text-align: center; }}
         h1 {{ color: #89b4fa; font-size: 20px; }}
-        p, pre {{ color: #a6adc8; }}
-        pre {{ text-align: left; white-space: pre-wrap; }}
+        p {{ color: #a6adc8; }}
         </style></head>
-        <body><div class="box"><h1>freeq</h1><p>{message}</p>{detail}</div></body></html>"#
+        <body><div class="box"><h1>freeq</h1><p>{message}</p></div></body></html>"#
     )
 }
 
-fn generate_pkce() -> (String, String) {
-    use sha2::{Digest, Sha256};
-    let verifier = generate_random_string(32);
-    let hash = Sha256::digest(verifier.as_bytes());
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
-    (verifier, challenge)
-}
+// PKCE, random strings, URL encoding, and client_id construction now live
+// in the shared engine crate. Kept as thin re-exports/aliases so call sites
+// in this file don't churn.
+pub use freeq_oauth::{build_client_id, generate_random_string};
+use freeq_oauth::{generate_pkce, urlencode as urlencod};
 
-fn generate_random_string(len: usize) -> String {
-    use rand::RngCore;
-    let mut bytes = vec![0u8; len];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes)
-}
+// The refresh-classification unit tests (invalid_grant detection, RefreshError
+// display) moved with their code into freeq-oauth's `flow` module. This crate's
+// request-path coverage lives in tests/characterization.rs.
 
-fn is_truthy(value: Option<&str>) -> bool {
-    matches!(value, Some("1") | Some("true") | Some("yes"))
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn urlencod(s: &str) -> String {
-    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
-    utf8_percent_encode(s, NON_ALPHANUMERIC).to_string()
-}
+    // The SSRF provider guards the (hermetically-untestable) auth_login
+    // discovery/PAR hops; pin its policy here.
+    #[tokio::test]
+    async fn ssrf_provider_refuses_private_targets() {
+        for url in [
+            "http://127.0.0.1:1/",
+            "http://10.0.0.1/",
+            "http://localhost:9999/",
+            "http://169.254.169.254/", // cloud metadata
+        ] {
+            assert!(
+                SsrfClients.client_for(url).await.is_err(),
+                "must refuse private target {url}"
+            );
+        }
+    }
 
-fn build_client_id(web_origin: &str, redirect_uri: &str) -> String {
-    if web_origin.starts_with("http://127.")
-        || web_origin.starts_with("http://192.168.")
-        || web_origin.starts_with("http://10.")
-    {
-        let scope = "atproto transition:generic";
-        format!(
-            "http://localhost?redirect_uri={}&scope={}",
-            urlencod(redirect_uri),
-            urlencod(scope),
-        )
-    } else {
-        format!("{web_origin}/client-metadata.json")
+    #[tokio::test]
+    async fn ssrf_provider_rejects_bad_urls() {
+        assert!(SsrfClients.client_for("not a url").await.is_err());
+        assert!(SsrfClients.client_for("ftp://example.com").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn ssrf_provider_allows_public_host() {
+        // An IP literal that is public passes validation and yields a client
+        // (no network I/O — resolution short-circuits on the literal).
+        assert!(SsrfClients.client_for("https://8.8.8.8/").await.is_ok());
+    }
+
+    fn record(refresh: &str) -> BrokerSessionRecord {
+        BrokerSessionRecord {
+            broker_token: "BT".into(),
+            did: "did:plc:x".into(),
+            handle: "h".into(),
+            pds_url: "https://pds".into(),
+            token_endpoint: "https://pds/token".into(),
+            refresh_token: refresh.into(),
+            dpop_key_b64: DpopKey::generate().to_base64url(),
+            dpop_nonce: None,
+            client_id: "cid".into(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_roundtrips_and_updates() {
+        let store = InMemoryStore::new();
+        assert!(store.get("BT").await.is_none());
+        store.insert(&record("R0")).await.unwrap();
+        assert_eq!(store.get("BT").await.unwrap().refresh_token, "R0");
+        store.update_refresh("BT", "R1", Some("N1")).await.unwrap();
+        let r = store.get("BT").await.unwrap();
+        assert_eq!(r.refresh_token, "R1");
+        assert_eq!(r.dpop_nonce.as_deref(), Some("N1"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_store_encrypts_refresh_token_at_rest() {
+        let key = derive_encryption_key("k");
+        let path = std::env::temp_dir().join(format!("freeq-broker-test-{}.db", std::process::id()));
+        std::fs::remove_file(&path).ok();
+        let path_str = path.to_str().unwrap();
+        {
+            let store = SqliteStore::open(path_str, key).unwrap();
+            store.insert(&record("SECRET")).await.unwrap();
+            // Round-trips through decryption.
+            assert_eq!(store.get("BT").await.unwrap().refresh_token, "SECRET");
+        }
+        // A separate raw connection sees ciphertext, not the plaintext token.
+        let raw = rusqlite::Connection::open(path_str).unwrap();
+        let stored: String = raw
+            .query_row(
+                "SELECT refresh_token FROM sessions WHERE broker_token='BT'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(stored, "SECRET");
+        assert_eq!(decrypt_field(&key, &stored).unwrap(), "SECRET");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn origin_guard_allows_same_origin_and_no_origin() {
+        use axum::http::HeaderMap;
+        let h = |pairs: &[(&str, &str)]| {
+            let mut m = HeaderMap::new();
+            for (k, v) in pairs {
+                m.insert(
+                    k.parse::<axum::http::HeaderName>().unwrap(),
+                    v.parse().unwrap(),
+                );
+            }
+            m
+        };
+        // No Origin (curl / native app) → allowed.
+        assert!(origin_allowed(&h(&[("host", "irc.zerosum.org")])));
+        // Same-origin (embedded web client) → allowed, even though it's not in
+        // the hardcoded freeq.at allowlist. This is the case the browser hits.
+        assert!(origin_allowed(&h(&[
+            ("host", "irc.zerosum.org"),
+            ("origin", "https://irc.zerosum.org"),
+        ])));
+        assert!(origin_allowed(&h(&[
+            ("host", "127.0.0.1:8080"),
+            ("origin", "http://127.0.0.1:8080"),
+        ])));
+        // Cross-origin in the allowlist (standalone: irc.freeq.at web client) → allowed.
+        assert!(origin_allowed(&h(&[
+            ("host", "auth.freeq.at"),
+            ("origin", "https://irc.freeq.at"),
+        ])));
+        // Cross-origin, not same-origin, not allowlisted → rejected.
+        assert!(!origin_allowed(&h(&[
+            ("host", "irc.zerosum.org"),
+            ("origin", "https://evil.example"),
+        ])));
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_keeps_client_id_but_sqlite_does_not() {
+        // Embedded (in-memory) needs the stored client_id; standalone (SQLite)
+        // rebuilds it from config, so SqliteStore deliberately drops it.
+        let mem = InMemoryStore::new();
+        mem.insert(&record("R")).await.unwrap();
+        assert_eq!(mem.get("BT").await.unwrap().client_id, "cid");
+
+        let sql = SqliteStore::open(":memory:", derive_encryption_key("k")).unwrap();
+        sql.insert(&record("R")).await.unwrap();
+        assert_eq!(sql.get("BT").await.unwrap().client_id, "");
     }
 }

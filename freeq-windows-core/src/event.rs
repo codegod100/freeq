@@ -124,7 +124,7 @@ pub fn convert_event(event: &freeq_sdk::event::Event) -> DomainEvent {
         Event::AuthFailed { reason } => DomainEvent::AuthFailed {
             reason: reason.clone(),
         },
-        Event::Joined { channel, nick } => DomainEvent::Joined {
+        Event::Joined { channel, nick, .. } => DomainEvent::Joined {
             channel: channel.clone(),
             nick: nick.clone(),
         },
@@ -136,8 +136,7 @@ pub fn convert_event(event: &freeq_sdk::event::Event) -> DomainEvent {
             from,
             target,
             text,
-            tags,
-        } => {
+            tags, .. } => {
             let msgid = tags.get("msgid").cloned();
             let reply_to = tags.get("+reply").cloned();
             let edit_of = tags.get("+draft/edit").cloned();
@@ -167,7 +166,7 @@ pub fn convert_event(event: &freeq_sdk::event::Event) -> DomainEvent {
                 timestamp_ms: ts,
             })
         }
-        Event::TagMsg { from, target, tags } => DomainEvent::TagMsg(TagMsgData {
+        Event::TagMsg { from, target, tags, .. } => DomainEvent::TagMsg(TagMsgData {
             from: from.clone(),
             target: target.clone(),
             tags: tags.clone(),
@@ -265,10 +264,19 @@ pub fn convert_event(event: &freeq_sdk::event::Event) -> DomainEvent {
         Event::WhoisReply { nick, info } => DomainEvent::Notice {
             text: format!("WHOIS {nick}: {info}"),
         },
-        Event::ChatHistoryTarget { nick, timestamp } => DomainEvent::Notice {
+        Event::ChatHistoryTarget { nick, timestamp, .. } => DomainEvent::Notice {
             text: format!("DM: {nick} (last: {})", timestamp.as_deref().unwrap_or("?")),
         },
+        Event::ReadMarker { target, timestamp } => DomainEvent::Notice {
+            text: format!(
+                "read marker: {target} (up to: {})",
+                timestamp.as_deref().unwrap_or("*")
+            ),
+        },
         Event::RawLine(line) => DomainEvent::Notice { text: line.clone() },
+        // Nick<->DID binding learned. Not yet modeled as a DomainEvent —
+        // adopted in the Windows DID-DM pass; inert empty notice until then.
+        Event::MemberDid { .. } => DomainEvent::Notice { text: String::new() },
     }
 }
 
@@ -288,6 +296,7 @@ mod tests {
             target: "#test".to_string(),
             text: "hello world".to_string(),
             tags,
+            dm_key: None,
         };
 
         let domain = convert_event(&event);
@@ -308,6 +317,7 @@ mod tests {
             target: "#test".to_string(),
             text: "\x01ACTION waves\x01".to_string(),
             tags: HashMap::new(),
+            dm_key: None,
         };
 
         let domain = convert_event(&event);
@@ -373,6 +383,7 @@ mod tests {
             target: "#test".to_string(),
             text: "edited text".to_string(),
             tags,
+            dm_key: None,
         };
 
         let domain = convert_event(&event);

@@ -104,6 +104,7 @@ async fn run_once(cfg: Config) -> anyhow::Result<()> {
         tls: cfg.server_addr.ends_with(":6697") || cfg.server_addr.ends_with(":443"),
         tls_insecure: false,
         web_token,
+        websocket_url: None,
     };
 
     let (handle, mut events) = client::connect(config, None);
@@ -155,10 +156,9 @@ async fn run_once(cfg: Config) -> anyhow::Result<()> {
             Event::Joined {
                 channel,
                 nick: joined_nick,
-            } => {
-                if joined_nick.eq_ignore_ascii_case(&current_nick) {
-                    tracing::info!(channel = %channel, "pi-bridge joined channel");
-                }
+                ..
+            } if joined_nick.eq_ignore_ascii_case(&current_nick) => {
+                tracing::info!(channel = %channel, "pi-bridge joined channel");
             }
             Event::ServerNotice { text } => {
                 tracing::info!(notice = %text, "server notice");
@@ -201,8 +201,7 @@ async fn run_once(cfg: Config) -> anyhow::Result<()> {
                 from,
                 target,
                 text,
-                tags,
-            } => {
+                tags, .. } => {
                 if tags.contains_key("batch") {
                     continue;
                 }

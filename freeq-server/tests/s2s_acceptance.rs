@@ -45,7 +45,7 @@ async fn connect_guest(addr: &str, nick: &str) -> (ClientHandle, mpsc::Receiver<
         realname: format!("S2S Test ({nick})"),
         tls: false,
         tls_insecure: false,
-        web_token: None,
+        ..Default::default()
     })
     .await
     .unwrap_or_else(|e| panic!("Failed to connect {nick} to {addr}: {e}"));
@@ -57,7 +57,7 @@ async fn connect_guest(addr: &str, nick: &str) -> (ClientHandle, mpsc::Receiver<
         realname: format!("S2S Test ({nick})"),
         tls: false,
         tls_insecure: false,
-        web_token: None,
+        ..Default::default()
     };
 
     client::connect_with_stream(conn, config, None)
@@ -877,6 +877,44 @@ async fn single_server_ban() {
     )
     .await;
     eprintln!("  ✓ +b blocks banned users");
+
+    let _ = h_op.quit(Some("done")).await;
+    let _ = h_tgt.quit(Some("done")).await;
+}
+
+#[tokio::test]
+async fn single_server_invite_exception() {
+    let Some(server) = get_single_server() else {
+        return;
+    };
+    let nick_op = test_nick("invex", "op");
+    let nick_target = test_nick("invex", "tgt");
+    let channel = test_channel("invex");
+
+    let (h_op, mut e_op) = connect_guest(&server, &nick_op).await;
+    let (h_tgt, mut e_tgt) = connect_guest(&server, &nick_target).await;
+    wait_registered(&mut e_op).await;
+    wait_registered(&mut e_tgt).await;
+
+    h_op.join(&channel).await.unwrap();
+    wait_joined(&mut e_op, &channel).await;
+
+    // Lock the channel +i, then add the target's mask to the +I list.
+    h_op.raw(&format!("MODE {channel} +i")).await.unwrap();
+    h_op.raw(&format!("MODE {channel} +I {nick_target}!*@*"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Target tries to join — admitted via +I match, no INVITE issued.
+    h_tgt.join(&channel).await.unwrap();
+    wait_for(
+        &mut e_tgt,
+        |e| matches!(e, Event::Joined { channel: ch, .. } if ch == &channel),
+        "target admitted via +I",
+    )
+    .await;
+    eprintln!("  ✓ +I admits without INVITE");
 
     let _ = h_op.quit(Some("done")).await;
     let _ = h_tgt.quit(Some("done")).await;
@@ -6562,7 +6600,7 @@ async fn single_server_dm1_bidirectional_dm() {
 
     // A → B
     ha.privmsg(&nick_b, "hello from A").await.unwrap();
-    let (from, text) = wait_message_from(&mut eb, &nick_a).await;
+    let (_from, text) = wait_message_from(&mut eb, &nick_a).await;
     assert_eq!(text, "hello from A");
     eprintln!("  ✓ A→B DM delivered");
 
@@ -7470,4 +7508,183 @@ async fn s2s_invite_syncs_across_servers() {
 
     let _ = h_op.quit(Some("done")).await;
     let _ = h_g.quit(Some("done")).await;
+}
+
+// ── REACT-1: Reaction in channel visible cross-server ──
+
+#[tokio::test]
+async fn s2s_react1_channel_reaction_cross_server() {
+    let Some((local, remote)) = get_servers() else {
+        return;
+    };
+    let channel = test_channel("react1");
+    let nick_a = test_nick("react1", "a");
+    let nick_b = test_nick("react1", "b");
+
+    let (ha, mut ea) = connect_guest(&local, &nick_a).await;
+    wait_registered(&mut ea).await;
+    ha.join(&channel).await.unwrap();
+    wait_joined(&mut ea, &channel).await;
+
+    let (hb, mut eb) = connect_guest(&remote, &nick_b).await;
+    wait_registered(&mut eb).await;
+    hb.join(&channel).await.unwrap();
+    wait_joined(&mut eb, &channel).await;
+
+    tokio::time::sleep(S2S_SETTLE).await;
+    drain(&mut ea).await;
+    drain(&mut eb).await;
+
+    // A sends a message so B can react to it
+    let msg_text = format!("react-target-{}", rand::random::<u16>());
+    ha.privmsg(&channel, &msg_text).await.unwrap();
+    let evt = wait_message_event_containing(&mut eb, &msg_text).await;
+    let msgid = if let Event::Message { tags, .. } = &evt {
+        tags.get("msgid").cloned().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    assert!(!msgid.is_empty(), "Message should have a msgid");
+
+    // B reacts to A's message
+    let mut react_tags = std::collections::HashMap::new();
+    react_tags.insert("+react".to_string(), "👍".to_string());
+    react_tags.insert("+reply".to_string(), msgid.clone());
+    hb.send_tagmsg(&channel, react_tags).await.unwrap();
+
+    // A should see the reaction via S2S (as TAGMSG or ACTION fallback)
+    let reaction_evt = timeout(S2S_TIMEOUT, async {
+        loop {
+            if let Some(evt) = ea.recv().await {
+                match &evt {
+                    Event::TagMsg { tags, .. }
+                        if tags.get("+react").map(|s| s.as_str()) == Some("👍") =>
+                    {
+                        return evt;
+                    }
+                    Event::Message { text, .. } if text.contains("reacted with 👍") => {
+                        return evt;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        reaction_evt.is_ok(),
+        "A should receive B's reaction via S2S"
+    );
+    eprintln!("  ✓ REACT-1: channel reaction visible cross-server");
+
+    let _ = ha.quit(Some("done")).await;
+    let _ = hb.quit(Some("done")).await;
+}
+
+// ── DM-S2S-1: DM bidirectional across servers ──
+
+#[tokio::test]
+async fn s2s_dm_s2s1_bidirectional_dm() {
+    let Some((local, remote)) = get_servers() else {
+        return;
+    };
+    let channel = test_channel("dms2s1");
+    let nick_a = test_nick("dms2s1", "a");
+    let nick_b = test_nick("dms2s1", "b");
+
+    // Both join a channel so they're visible to each other
+    let (ha, mut ea) = connect_guest(&local, &nick_a).await;
+    wait_registered(&mut ea).await;
+    ha.join(&channel).await.unwrap();
+    wait_joined(&mut ea, &channel).await;
+
+    let (hb, mut eb) = connect_guest(&remote, &nick_b).await;
+    wait_registered(&mut eb).await;
+    hb.join(&channel).await.unwrap();
+    wait_joined(&mut eb, &channel).await;
+
+    tokio::time::sleep(S2S_SETTLE).await;
+
+    // A sends DM to B
+    let dm_text = format!("dm-s2s-{}", rand::random::<u16>());
+    ha.privmsg(&nick_b, &dm_text).await.unwrap();
+    let (from, _, text) = wait_message_containing(&mut eb, &dm_text).await;
+    assert_eq!(from, nick_a);
+    assert_eq!(text, dm_text);
+    eprintln!("  ✓ DM-S2S-1a: A→B cross-server DM delivered");
+
+    // B sends DM to A
+    let dm_text2 = format!("dm-s2s-reply-{}", rand::random::<u16>());
+    hb.privmsg(&nick_a, &dm_text2).await.unwrap();
+    let (from2, _, text2) = wait_message_containing(&mut ea, &dm_text2).await;
+    assert_eq!(from2, nick_b);
+    assert_eq!(text2, dm_text2);
+    eprintln!("  ✓ DM-S2S-1b: B→A cross-server DM delivered (bidirectional)");
+
+    let _ = ha.quit(Some("done")).await;
+    let _ = hb.quit(Some("done")).await;
+}
+
+// ── PIN-S2S-1: Pin visible cross-server ──
+
+#[tokio::test]
+async fn s2s_pin1_pin_visible_cross_server() {
+    let Some((local, remote)) = get_servers() else {
+        return;
+    };
+    let channel = test_channel("pin1");
+    let nick_a = test_nick("pin1", "a");
+    let nick_b = test_nick("pin1", "b");
+
+    let (ha, mut ea) = connect_guest(&local, &nick_a).await;
+    wait_registered(&mut ea).await;
+    ha.join(&channel).await.unwrap();
+    wait_joined(&mut ea, &channel).await;
+
+    let (hb, mut eb) = connect_guest(&remote, &nick_b).await;
+    wait_registered(&mut eb).await;
+    hb.join(&channel).await.unwrap();
+    wait_joined(&mut eb, &channel).await;
+
+    tokio::time::sleep(S2S_SETTLE).await;
+    drain(&mut ea).await;
+    drain(&mut eb).await;
+
+    // A sends a message to pin
+    let msg_text = format!("pin-target-{}", rand::random::<u16>());
+    ha.privmsg(&channel, &msg_text).await.unwrap();
+    let evt = wait_message_event_containing(&mut eb, &msg_text).await;
+    let msgid = if let Event::Message { tags, .. } = &evt {
+        tags.get("msgid").cloned().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    assert!(!msgid.is_empty(), "Message should have a msgid");
+
+    // A is op (created channel), A pins the message
+    ha.pin(&channel, &msgid).await.unwrap();
+
+    // B should see the pin notification via S2S (NOTICE with +freeq.at/pin tag or ACTION text)
+    let pin_evt = timeout(S2S_TIMEOUT, async {
+        loop {
+            if let Some(evt) = eb.recv().await {
+                match &evt {
+                    Event::Message { text, tags, .. }
+                        if text.contains("pinned") || tags.get("+freeq.at/pin").is_some() =>
+                    {
+                        return evt;
+                    }
+                    _ => continue,
+                }
+            }
+        }
+    })
+    .await;
+
+    assert!(pin_evt.is_ok(), "B should receive A's pin via S2S");
+    eprintln!("  ✓ PIN-S2S-1: pin visible cross-server");
+
+    let _ = ha.quit(Some("done")).await;
+    let _ = hb.quit(Some("done")).await;
 }

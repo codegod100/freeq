@@ -317,6 +317,7 @@ impl Bot {
             target,
             text,
             tags,
+            ..
         } = event
         {
             // Ignore CHATHISTORY batches (avoid replaying history)

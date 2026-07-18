@@ -14,7 +14,7 @@ struct ChannelSettingsSheet: View {
     }
 
     var body: some View {
-        NavigationView {
+        NavigationStack {
             ZStack {
                 Theme.bgPrimary.ignoresSafeArea()
 
@@ -27,17 +27,17 @@ struct ChannelSettingsSheet: View {
                                     .fill(Theme.accent.opacity(0.15))
                                     .frame(width: 48, height: 48)
                                 Text("#")
-                                    .font(.system(size: 24, weight: .bold, design: .monospaced))
+                                    .font(.fqMono.weight(.bold))
                                     .foregroundColor(Theme.accent)
                             }
 
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(channel.name)
-                                    .font(.system(size: 17, weight: .bold))
+                                    .font(.fqBody.weight(.bold))
                                     .foregroundColor(Theme.textPrimary)
 
-                                Text("\(channel.members.count) members")
-                                    .font(.system(size: 13))
+                                Text("\(channel.uniqueMemberCount) members")
+                                    .font(.fqFootnote)
                                     .foregroundColor(Theme.textSecondary)
                             }
                         }
@@ -49,7 +49,7 @@ struct ChannelSettingsSheet: View {
                         if editingTopic {
                             VStack(alignment: .leading, spacing: 8) {
                                 TextField("Channel topic", text: $topicDraft, axis: .vertical)
-                                    .font(.system(size: 15))
+                                    .font(.fqSubheadline)
                                     .foregroundColor(Theme.textPrimary)
                                     .lineLimit(1...5)
                                     .tint(Theme.accent)
@@ -59,7 +59,7 @@ struct ChannelSettingsSheet: View {
                                         editingTopic = false
                                         topicDraft = channel.topic
                                     }
-                                    .font(.system(size: 14, weight: .medium))
+                                    .font(.fqFootnote.weight(.medium))
                                     .foregroundColor(Theme.textSecondary)
 
                                     Spacer()
@@ -68,7 +68,7 @@ struct ChannelSettingsSheet: View {
                                         appState.sendRaw("TOPIC \(channel.name) :\(topicDraft)")
                                         editingTopic = false
                                     }
-                                    .font(.system(size: 14, weight: .bold))
+                                    .font(.fqFootnote.weight(.bold))
                                     .foregroundColor(Theme.accent)
                                 }
                             }
@@ -77,7 +77,7 @@ struct ChannelSettingsSheet: View {
                             VStack(alignment: .leading, spacing: 6) {
                                 HStack {
                                     Text("Topic")
-                                        .font(.system(size: 13, weight: .semibold))
+                                        .font(.fqFootnote.weight(.semibold))
                                         .foregroundColor(Theme.textMuted)
                                     Spacer()
                                     if isOp {
@@ -94,12 +94,12 @@ struct ChannelSettingsSheet: View {
 
                                 if channel.topic.isEmpty {
                                     Text("No topic set")
-                                        .font(.system(size: 14))
+                                        .font(.fqFootnote)
                                         .foregroundColor(Theme.textMuted)
                                         .italic()
                                 } else {
                                     Text(channel.topic)
-                                        .font(.system(size: 14))
+                                        .font(.fqFootnote)
                                         .foregroundColor(Theme.textSecondary)
                                         .textSelection(.enabled)
                                 }
@@ -117,7 +117,7 @@ struct ChannelSettingsSheet: View {
                         if !ops.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Operators")
-                                    .font(.system(size: 12, weight: .bold))
+                                    .font(.fqCaption.weight(.bold))
                                     .foregroundColor(Theme.textMuted)
                                     .kerning(0.5)
 
@@ -125,7 +125,7 @@ struct ChannelSettingsSheet: View {
                                     HStack(spacing: 8) {
                                         UserAvatar(nick: member.nick, size: 28)
                                         Text(member.nick)
-                                            .font(.system(size: 14))
+                                            .font(.fqFootnote)
                                             .foregroundColor(Theme.textPrimary)
                                         if member.isVerified {
                                             VerifiedBadge(size: 12)
@@ -140,7 +140,7 @@ struct ChannelSettingsSheet: View {
                             .listRowBackground(Theme.bgSecondary)
                         }
                     } header: {
-                        Text("Members (\(channel.members.count))")
+                        Text("Members (\(channel.uniqueMemberCount))")
                             .foregroundColor(Theme.textMuted)
                     }
 
@@ -180,7 +180,7 @@ struct ChannelSettingsSheet: View {
                             HStack {
                                 Spacer()
                                 Text("Leave Channel")
-                                    .font(.system(size: 16, weight: .medium))
+                                    .font(.fqCallout.weight(.medium))
                                     .foregroundColor(Theme.danger)
                                 Spacer()
                             }
@@ -199,7 +199,7 @@ struct ChannelSettingsSheet: View {
                         .foregroundColor(Theme.accent)
                 }
             }
-            .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
         }
         .preferredColorScheme(.dark)

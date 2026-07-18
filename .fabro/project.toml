@@ -1,0 +1,66 @@
+# Fabro project configuration for freeq.
+# https://docs.fabro.sh/execution/run-configuration
+#
+# These are PROJECT-WIDE DEFAULTS. Each workflow's workflow.toml inherits
+# them and may override per-key. The goal of this setup is a fleet of agents
+# that improve freeq around the clock, each opening a reviewable PR.
+
+_version = 1
+
+# ── Pull requests ────────────────────────────────────────────────────────
+# Every successful run opens a PR from the agent's branch. Ready for review
+# (not draft) so CI runs and you get pinged — but never auto-merged: a human
+# clicks merge.
+[run.pull_request]
+enabled = true
+draft = false
+auto_merge = false
+merge_strategy = "squash"
+
+# ── Default model ────────────────────────────────────────────────────────
+# Sonnet is the default workhorse (good quality/cost). Individual nodes that
+# need deeper reasoning (e.g. the bug-hunt finder) override to opus in their
+# graph via `model=`.
+[run.model]
+name = "claude-sonnet-4-6"
+
+# ── Execution environment ────────────────────────────────────────────────
+# Runs execute in a Docker container on the always-on boxd VM that hosts the
+# Fabro server (boxd ships Docker, no sudo). The docker provider is
+# clone-based: each run gets its own fresh clone on a run branch, so Fabro
+# owns the branch → commit → push → PR lifecycle and runs can safely overlap.
+#
+# (An earlier `provider = "local"` + `clone.enabled = false` setup reused a
+# warm checkout for build-cache speed, but that bypasses Fabro's managed
+# branch/PR machinery — work landed uncommitted on main and no PR opened. The
+# clone-based docker provider is the correct path.)
+#
+# Base image: `freeq-fabro:tools` (.fabro/Dockerfile.tools) — a SLIM image with
+# just the toolchain baked (rustfmt/clippy, cmake, libasound2-dev, node,
+# cargo-audit), no source/target. Build/rebuild it on the VM:
+#   boxd exec fabro-freeq -- 'cd ~/freeq && git pull && docker build -f .fabro/Dockerfile.tools -t freeq-fabro:tools .'
+#
+# Build profile: CARGO_PROFILE_*_DEBUG=0 turns OFF debug symbols. On this fixed
+# 2 vCPU / 8 GB / 98 GB boxd VM, debug=2 binaries blew the disk and bus-errored
+# the linker; debug=0 keeps the workspace build small and link-safe, and doesn't
+# change check/clippy/test correctness. Builds are cold per run (~20-30 min) but
+# reliable; a persistent cache for warmth is a follow-up (see README).
+[run.environment]
+id = "boxd-docker"
+
+[environments.boxd-docker]
+provider = "docker"
+
+[environments.boxd-docker.image]
+docker = "freeq-fabro:tools"
+
+[environments.boxd-docker.resources]
+cpu = 2
+memory = "7GB"
+
+[environments.boxd-docker.env]
+CARGO_TERM_COLOR = "always"
+CARGO_PROFILE_DEV_DEBUG = "0"
+CARGO_PROFILE_TEST_DEBUG = "0"
+
+# No prepare steps: the toolchain is baked into freeq-fabro:tools.

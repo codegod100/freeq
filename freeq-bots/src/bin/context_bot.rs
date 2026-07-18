@@ -192,8 +192,7 @@ async fn run_once(args: &Args, llm: &LlmClient, ctx: &Arc<AgentContext>) -> Resu
                 from,
                 target,
                 text,
-                tags,
-            } if target == args.channel => {
+                tags, .. } if target == args.channel => {
                 // Record every message
                 let timestamp = tags
                     .get("time")

@@ -1,0 +1,10 @@
+{
+  "name": "freeq-karma-bot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Classic IRC karma tracker that uses /.well-known/agent.json diagnostic tools to validate every step of its lifecycle.",
+  "scripts": { "start": "tsx index.ts" },
+  "dependencies": { "@freeq/sdk": "file:../../freeq-sdk-js" },
+  "devDependencies": { "tsx": "^4.19.2", "@types/node": "^24.0.0" }
+}

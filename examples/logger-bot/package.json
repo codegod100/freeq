@@ -1,0 +1,17 @@
+{
+  "name": "freeq-logger-bot",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Reference bot built on @freeq/sdk that logs every event it sees to stdout + a JSONL file.",
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "@freeq/sdk": "file:../../freeq-sdk-js"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "@types/node": "^24.0.0"
+  }
+}

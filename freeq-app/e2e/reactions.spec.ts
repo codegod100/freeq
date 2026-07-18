@@ -91,6 +91,39 @@ test.describe('Message interactions', () => {
     }
   });
 
+  test('BUG: self-reaction appears immediately without server echo', async ({ page }) => {
+    const nick = uniqueNick();
+    const channel = uniqueChannel();
+    await connectGuest(page, nick, channel);
+
+    await sendMessage(page, 'self-react test message');
+    await expectMessage(page, 'self-react test message');
+
+    // Hover over the message to reveal action buttons
+    const msgEl = page.getByTestId('message-list').getByText('self-react test message');
+    await msgEl.hover();
+    await page.waitForTimeout(200);
+
+    // Click the reaction hover button (😄)
+    const reactBtn = page.locator('[title="Add reaction"]').first();
+    if (await reactBtn.isVisible()) {
+      await reactBtn.click();
+      await page.waitForTimeout(300);
+
+      // Click 👍 in the emoji picker
+      const thumbs = page.locator('.fixed.z-50 button:has-text("👍")').first();
+      if (await thumbs.isVisible()) {
+        await thumbs.click();
+
+        // The reaction should appear on OUR OWN message immediately
+        // This is the bug: previously only showed after server echo
+        await expect(
+          page.getByTestId('message-list').locator('button:has-text("👍")')
+        ).toBeVisible({ timeout: 2_000 });
+      }
+    }
+  });
+
   test('reactions from another user show up', async ({ browser }) => {
     const nick1 = uniqueNick('reactor1');
     const nick2 = uniqueNick('reactor2');

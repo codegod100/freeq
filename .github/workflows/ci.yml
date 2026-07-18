@@ -19,13 +19,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Linux audio dev packages
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Check
-        run: cargo check --workspace
+        run: cargo check --workspace --exclude freeq-av-client --exclude freeq-eliza --exclude freeq-av --exclude freeq-av-image
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude freeq-av-client --exclude freeq-eliza --exclude freeq-av --exclude freeq-av-image
 
   clippy:
     name: Lint
@@ -37,10 +40,13 @@ jobs:
         with:
           components: clippy
 
+      - name: Install Linux audio dev packages
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --exclude freeq-av-client --exclude freeq-eliza --exclude freeq-av --exclude freeq-av-image -- -D warnings
 
   fmt:
     name: Format
@@ -55,6 +61,32 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Cargo audit (RustSec advisories)
+        run: cargo audit
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm audit (web client)
+        working-directory: freeq-app
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (JS SDK)
+        working-directory: freeq-sdk-js
+        run: npm audit --omit=dev --audit-level=high
+
   web:
     name: Web Client
     runs-on: ubuntu-latest
@@ -65,7 +97,13 @@ jobs:
         with:
           node-version: 20
           cache: npm
-          cache-dependency-path: freeq-app/package-lock.json
+          cache-dependency-path: |
+            freeq-app/package-lock.json
+            freeq-sdk-js/package-lock.json
+
+      - name: Install SDK deps
+        working-directory: freeq-sdk-js
+        run: npm ci
 
       - name: Install
         working-directory: freeq-app
@@ -79,22 +117,71 @@ jobs:
         working-directory: freeq-app
         run: npm run build
 
-  nix:
-    name: Nix freeq-textual
+  macos-swift:
+    name: macOS Client (SwiftPM tests)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # The SwiftPM harness compiles only the pure-logic core (no FFI, no
+      # Xcode project), so this stays fast and needs no Rust toolchain.
+      - name: Run Swift tests
+        working-directory: freeq-macos
+        run: swift test
+
+  ios-swift:
+    name: iOS Client (SwiftPM tests)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mirrors macos-swift: the SwiftPM harness compiles only the pure-logic
+      # core (ChatMessage + MessageActions) — no FFI, no Xcode project — so it
+      # stays fast and needs no Rust toolchain or simulator.
+      - name: Run Swift tests
+        working-directory: freeq-ios
+        run: swift test
+
+  macos-smoke:
+    name: macOS Client (interaction smoke test)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build the full app and drive its core interactions (send / react /
+      # delete / channel switch / stress) through the DebugBridge, asserting
+      # on state snapshots. Catches wiring + crash regressions the unit tests
+      # can't (they don't compile AppState or the AppKit list). The FFI
+      # xcframework is checked in, so no Rust build is needed.
+      - name: Build the macOS app (Debug)
+        working-directory: freeq-macos
+        run: |
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+          xcodegen generate
+          xcodebuild -project freeq-macos.xcodeproj -scheme freeq-macos \
+            -configuration Debug -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO build
+
+      - name: Run interaction smoke test
+        working-directory: freeq-macos
+        run: ./scripts/smoke.sh
+
+  android-unit:
+    name: Android Client (JVM unit tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: DeterminateSystems/nix-installer-action@v19
-
-      - uses: DeterminateSystems/magic-nix-cache-action@v13
-
-      - name: Configure Cachix
-        if: ${{ github.event_name != 'pull_request' && vars.CACHIX_CACHE_NAME != '' && secrets.CACHIX_AUTH_TOKEN != '' }}
-        uses: cachix/cachix-action@v15
+      - uses: actions/setup-java@v4
         with:
-          name: ${{ vars.CACHIX_CACHE_NAME }}
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          distribution: temurin
+          java-version: '17'
 
-      - name: Build freeq-textual
-        run: nix build .#freeq-textual
+      # Mirrors ios-swift / macos-swift: runs the pure-logic JVM unit suite
+      # (routers, reconnect, batching, unread, pin cache). The FFI Kotlin
+      # bindings are checked in and the tests don't load the native lib, so no
+      # Rust toolchain, NDK, or emulator is needed. Compiling the test variant
+      # also compiles the app's Kotlin, so this catches build breaks too.
+      - name: Run unit tests
+        working-directory: freeq-android
+        run: ./gradlew testFreeqDebugUnitTest

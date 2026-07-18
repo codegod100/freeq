@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
+    @State private var showStatusEditor = false
 
     var body: some View {
         @Bindable var state = appState
@@ -13,6 +14,8 @@ struct SidebarView: View {
                     ForEach(favChannels) { channel in
                         ChannelRow(channel: channel)
                             .tag(channel.name)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                     }
                 }
             }
@@ -22,15 +25,20 @@ struct SidebarView: View {
                 ForEach(appState.channels.filter { !appState.favorites.contains($0.name.lowercased()) }) { channel in
                     ChannelRow(channel: channel)
                         .tag(channel.name)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
             }
 
-            // DMs
-            if !appState.dmBuffers.isEmpty {
+            // DMs (blocked people's DMs are suppressed)
+            let visibleDMs = appState.dmBuffers.filter { !appState.isBlocked(nick: $0.name) }
+            if !visibleDMs.isEmpty {
                 Section("Direct Messages") {
-                    ForEach(appState.dmBuffers.sorted(by: { $0.lastActivity > $1.lastActivity })) { dm in
+                    ForEach(visibleDMs.sorted(by: { $0.lastActivity > $1.lastActivity })) { dm in
                         DMRow(dm: dm)
                             .tag(dm.name)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
                     }
                 }
             }
@@ -44,7 +52,7 @@ struct SidebarView: View {
                                 .font(.system(.body, design: .monospaced))
                         } icon: {
                             Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .foregroundStyle(.green)
+                                .foregroundStyle(Theme.success)
                         }
                         .tag("p2p:\(String(peerId.prefix(8)))")
                     }
@@ -52,11 +60,17 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Theme.sidebarBackground)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
-                Divider()
+                Divider().overlay(Theme.borderSoft)
                 bottomBar
             }
+        }
+        .sheet(isPresented: $showStatusEditor) {
+            StatusEditorSheet()
+                .environment(appState)
         }
         .onChange(of: appState.activeChannel) { _, newValue in
             if let ch = newValue {
@@ -77,32 +91,48 @@ struct SidebarView: View {
         HStack(spacing: 8) {
             // User info
             if let did = appState.authenticatedDID {
-                Circle()
-                    .fill(.green)
-                    .frame(width: 8, height: 8)
+                let isAway = appState.selfAwayReason != nil
+                AvatarView(nick: appState.nick, size: 24)
+                    .overlay(alignment: .bottomTrailing) {
+                        Circle()
+                            .fill(isAway ? Theme.warning : Theme.success)
+                            .frame(width: 7, height: 7)
+                            .overlay(Circle().strokeBorder(Theme.sidebarBackground, lineWidth: 1))
+                    }
                 VStack(alignment: .leading, spacing: 0) {
                     Text(appState.nick)
                         .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                    Text(did.prefix(24) + "…")
+                    // A custom status shows verbatim; a plain away shows as "Away — X".
+                    Text(appState.selfStatus
+                        ?? appState.selfAwayReason.map { "Away — \($0)" }
+                        ?? "Signed in")
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(isAway ? Theme.warning : Theme.textTertiary)
                         .lineLimit(1)
                 }
+                .help(isAway
+                    ? "Away: \(appState.selfAwayReason ?? "") — signed in as \(did). Click to set a status."
+                    : "Signed in as \(did). Click to set a status.")
+                .contentShape(Rectangle())
+                .onTapGesture { showStatusEditor = true }
             } else if appState.connectionState == .registered {
                 Circle()
-                    .fill(.yellow)
+                    .fill(Theme.warning)
                     .frame(width: 8, height: 8)
-                Text("\(appState.nick) (guest)")
+                Text(appState.selfAwayReason != nil
+                    ? "\(appState.nick) (guest · away)"
+                    : "\(appState.nick) (guest)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
             } else {
                 Circle()
-                    .fill(.gray)
+                    .fill(Theme.textTertiary)
                     .frame(width: 8, height: 8)
                 Text("Not connected")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.textSecondary)
             }
             Spacer()
 
@@ -110,7 +140,7 @@ struct SidebarView: View {
             if appState.isP2pActive {
                 Image(systemName: "point.3.connected.trianglepath.dotted")
                     .font(.caption)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Theme.success)
                     .help("iroh P2P: \(appState.p2pConnectedPeers.count) peers")
             }
 
@@ -126,11 +156,17 @@ struct SidebarView: View {
             // User menu
             Menu {
                 if appState.authenticatedDID != nil {
-                    Button("Set Away…") {
-                        appState.setAway("AFK")
+                    Button(appState.selfStatus == nil ? "Set Status…" : "Edit Status…") {
+                        showStatusEditor = true
                     }
-                    Button("Remove Away") {
-                        appState.setAway(nil)
+                    if appState.selfAwayReason == nil {
+                        Button("Set Away") {
+                            appState.setAway("AFK")
+                        }
+                    } else {
+                        Button(appState.selfStatus == nil ? "Remove Away" : "Clear Status") {
+                            appState.setAway(nil)
+                        }
                     }
                     Divider()
                 }
@@ -151,7 +187,7 @@ struct SidebarView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(.bar)
+        .background(Theme.sidebarBackground)
     }
 }
 
@@ -167,6 +203,10 @@ struct ChannelRow: View {
         appState.mentionCounts[channel.name.lowercased()] ?? 0
     }
 
+    private var isActive: Bool {
+        appState.activeChannel?.lowercased() == channel.name.lowercased()
+    }
+
     private var lastMessage: ChatMessage? {
         channel.messages.last(where: { !$0.from.isEmpty && !$0.isDeleted })
     }
@@ -177,7 +217,8 @@ struct ChannelRow: View {
                 HStack {
                     Text(channel.name.replacingOccurrences(of: "#", with: ""))
                         .lineLimit(1)
-                        .fontWeight(unread > 0 ? .semibold : .regular)
+                        .font(.system(.body, weight: unread > 0 || isActive ? .semibold : .medium))
+                        .foregroundStyle(isActive ? Theme.textPrimary : Theme.textSecondary)
                     Spacer()
                     if mentions > 0 {
                         Text("\(mentions)")
@@ -185,30 +226,57 @@ struct ChannelRow: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(.red))
+                            .background(Capsule().fill(Theme.danger))
                     } else if unread > 0 {
                         Circle()
-                            .fill(Color.accentColor)
+                            .fill(Theme.accent)
                             .frame(width: 8, height: 8)
                     }
                 }
                 if let last = lastMessage {
                     Text("\(last.from): \(last.text)")
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(isActive ? Theme.textSecondary : Theme.textTertiary)
                         .lineLimit(1)
                 }
             }
         } icon: {
-            Image(systemName: "number")
-                .foregroundStyle(.secondary)
+            Image(systemName: channel.isEncrypted ? "lock.fill" : "number")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(channel.isEncrypted ? Theme.success : (isActive ? Theme.accent : Theme.textTertiary))
+                .help(channel.isEncrypted ? "End-to-end encrypted channel" : "")
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isActive ? Theme.surfaceElevated : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(isActive ? Theme.borderSoft : Color.clear, lineWidth: 1)
+        )
         .contextMenu {
             Button(appState.favorites.contains(channel.name.lowercased()) ? "Unfavorite" : "Favorite") {
                 appState.toggleFavorite(channel.name)
             }
-            Button(appState.mutedChannels.contains(channel.name.lowercased()) ? "Unmute" : "Mute") {
-                appState.toggleMuted(channel.name)
+            Menu("Notifications") {
+                let current = appState.notifyLevel(channel.name)
+                Button {
+                    appState.setNotifyLevel(.all, for: channel.name)
+                } label: {
+                    Label("All messages", systemImage: current == .all ? "checkmark" : "")
+                }
+                Button {
+                    appState.setNotifyLevel(.mentionsOnly, for: channel.name)
+                } label: {
+                    Label("Mentions only", systemImage: current == .mentionsOnly ? "checkmark" : "")
+                }
+                Button {
+                    appState.setNotifyLevel(.muted, for: channel.name)
+                } label: {
+                    Label("Muted", systemImage: current == .muted ? "checkmark" : "")
+                }
             }
             Divider()
             Button("Leave Channel") {
@@ -235,6 +303,10 @@ struct DMRow: View {
         ProfileCache.shared.profile(for: dm.name)
     }
 
+    private var isActive: Bool {
+        appState.activeChannel?.lowercased() == dm.name.lowercased()
+    }
+
     private var lastMessage: ChatMessage? {
         dm.messages.last(where: { !$0.isDeleted })
     }
@@ -245,12 +317,13 @@ struct DMRow: View {
                 HStack {
                     Text(profile?.displayName ?? dm.name)
                         .lineLimit(1)
-                        .fontWeight(unread > 0 ? .semibold : .regular)
+                        .font(.system(.body, weight: unread > 0 || isActive ? .semibold : .medium))
+                        .foregroundStyle(isActive ? Theme.textPrimary : Theme.textSecondary)
 
                     if appState.p2pDMActive.contains(dm.name.lowercased()) {
                         Image(systemName: "point.3.connected.trianglepath.dotted")
                             .font(.caption2)
-                            .foregroundStyle(.green)
+                            .foregroundStyle(Theme.success)
                     }
 
                     Spacer()
@@ -260,13 +333,13 @@ struct DMRow: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
-                            .background(Capsule().fill(.red))
+                            .background(Capsule().fill(Theme.danger))
                     }
                 }
                 if let last = lastMessage {
                     Text(last.text)
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(isActive ? Theme.textSecondary : Theme.textTertiary)
                         .lineLimit(1)
                 }
             }
@@ -274,17 +347,24 @@ struct DMRow: View {
             AvatarView(nick: dm.name, size: 22)
                 .overlay(alignment: .bottomTrailing) {
                     Circle()
-                        .fill(isOnline ? .green : Color.secondary.opacity(0.3))
+                        .fill(isOnline ? Theme.success : Theme.textTertiary.opacity(0.35))
                         .frame(width: 7, height: 7)
-                        .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: 1))
+                        .overlay(Circle().strokeBorder(Theme.surface, lineWidth: 1))
                 }
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(isActive ? Theme.surfaceElevated : Color.clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(isActive ? Theme.borderSoft : Color.clear, lineWidth: 1)
+        )
         .contextMenu {
             Button("Close DM") {
-                appState.dmBuffers.removeAll { $0.name.lowercased() == dm.name.lowercased() }
-                if appState.activeChannel?.lowercased() == dm.name.lowercased() {
-                    appState.activeChannel = appState.channels.first?.name
-                }
+                appState.closeDM(dm.name)
             }
         }
     }

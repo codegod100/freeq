@@ -3,14 +3,20 @@ resolver = "2"
 members = [
     "freeq-server",
     "freeq-sdk",
+    "freeq-oauth",
+    "freeq-ssrf",
     "freeq-sdk-ffi",
     "freeq-tui",
-    "freeq-py",
     "freeq-bots",
     "freeq-auth-broker",
     "freeq-windows-core",
     "freeq-bot-id",
-    "freeq-webui",
+    "freeq-av-client",
+    "freeq-av",
+    "freeq-av-image",
+    "freeq-agent-kit",
+    "freeq-eliza",
+    "freeq-agent-kit/examples/claude-mcp",
 ]
 exclude = [
     "freeq-app/src-tauri",
@@ -45,6 +51,8 @@ webpki-roots = "1"
 p256 = { version = "0.13", features = ["ecdsa"] }
 sha2 = "0.10"
 percent-encoding = "2"
+freeq-oauth = { path = "freeq-oauth" }
+freeq-ssrf = { path = "freeq-ssrf" }
 open = "5"
 dirs = "5"
 rusqlite = { version = "0.38", features = ["bundled"] }
@@ -53,9 +61,23 @@ tower-http = { version = "0.6", features = ["cors", "fs"] }
 aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
-iroh = "0.96"
+iroh = "0.97"
 iroh-quinn = "0.16"
 automerge = "0.5"
+
+# iroh-live requires unreleased iroh 0.97 — pin to known-good revision
+[patch.crates-io]
+noq = { git = "https://github.com/n0-computer/noq", branch = "main" }
+noq-proto = { git = "https://github.com/n0-computer/noq", branch = "main" }
+noq-udp = { git = "https://github.com/n0-computer/noq", branch = "main" }
+iroh = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-base = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-relay = { git = "https://github.com/n0-computer/iroh", rev = "8af8370b" }
+iroh-gossip = { git = "https://github.com/n0-computer/iroh-gossip", rev = "1038f721" }
+web-transport-iroh = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-noq = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-proto = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
+web-transport-trait = { git = "https://github.com/Frando/web-transport", rev = "f7a523f1" }
 
 [workspace.lints.clippy]
 too_many_arguments = "allow"

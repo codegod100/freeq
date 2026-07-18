@@ -1,3 +1,14 @@
+> **⚠️ Pending developer-account work — do not lose track.**
+> A batch of signing/distribution tasks for macOS, iOS, and Android is
+> **blocked on Apple Developer Program + Google Play Console approval**.
+> When those accounts are approved, work through
+> **`docs/DEVELOPER-ACCOUNT-TODO.md`** (Developer ID + notarization + Sparkle
+> for Mac; Live Activity/Watch provisioning + APNs/CallKit + TestFlight for
+> iOS; release keystore + Play App Signing + FCM for Android; plus the
+> coordinated S2 session-scoping flip and store-compliance items). The code is
+> already ready — these are the identity/provisioning steps ad-hoc signing
+> can't do. See also `docs/QUEUE-FOR-CHAD.md` for other participation items.
+
 **Requirements:**
 - `session_id` must be unique per TCP connection
 - `nonce` must be cryptographically random
@@ -189,6 +200,22 @@ If something feels “too clever,” it’s probably wrong.
 
 ---
 
+## Hotspot Analysis
+
+Run `./scripts/hotspots.sh` at session start to identify high-risk files. Focus adversarial testing, careful review, and iterative refactoring on files with high gamma scores. Files with low gamma can be changed quickly.
+
+**Current hotspots (updated 2026-03-31):**
+- `server.rs` (gamma 334) — heavily tested, 116 unit/integration tests
+- `web.rs` (gamma 275) — 41 tests (broker + upload + REST)
+- `irc/client.ts` (gamma 133) — **UNDERTESTED** — needs dedicated unit tests
+- `MessageList.tsx` (gamma 103) — **UNDERTESTED** — only Playwright coverage
+- `sdk/client.rs` (gamma 104) — **ZERO unit tests** on connection state machine
+- `store.ts` (gamma 43) — well tested (397 vitest)
+
+When modifying a high-gamma file, write tests FIRST.
+
+---
+
 ## TODO
 
 ### P0 — Critical (do next)
@@ -203,16 +230,17 @@ If something feels “too clever,” it’s probably wrong.
 - [x] **`away-notify` cap** — ✅ DONE. Broadcast AWAY changes to shared channel members. Server, SDK, TUI, and web client all support it.
 - [x] **S2S authorization on Kick/Mode** — ✅ DONE. Receiving server verifies the kicker/mode-setter is an op (via remote_members is_op, founder_did, or did_ops) before executing. Unauthorized mode/kick events are rejected with warning log.
 - [x] **S2S authorization on Topic** — ✅ DONE. +t channels reject topic changes from non-ops. Removed "trust unknown users" fallback.
-- [ ] **SyncResponse channel creation limit** — NOT YET IMPLEMENTED. No 500-channel cap found in s2s.rs.
+- [x] **SyncResponse channel creation limit** — ✅ DONE. `MAX_SYNC_CHANNELS = 500` cap in `server.rs:3116`; overflow truncated with `tracing::warn!`.
 - [x] **ChannelCreated should propagate default modes** — ✅ DONE. New channels from S2S get +nt defaults.
 - [x] **Invites should sync via S2S** — ✅ DONE. S2sMessage::Invite variant relays invite tokens (DID or nick:XXX) to peers. SyncResponse carries invites (additive merge). S2S Join enforcement checks invite list before rejecting +i. Invites consumed on join.
-- [ ] **S2S rate limiting** — NOT YET IMPLEMENTED. Documented in SECURITY.md but no rate limiter in s2s.rs.
+- [x] **S2S rate limiting** — ✅ DONE. 100 events/sec/peer enforced in `process_s2s_message` (`server.rs:2135`) via `S2S_RATE_LIMITS` map + `S2S_MAX_EVENTS_PER_SEC`. Over-limit events dropped with a single warn-per-second per peer.
 - [x] **DPoP nonce retry for SASL verification** — ✅ DONE. Server detects PDS `use_dpop_nonce` errors, sends fresh nonce to client via NOTICE, re-issues SASL challenge. Client (SDK) updates DPoP nonce and retries automatically. Capped at 3 retries per SASL attempt to prevent infinite loops. Counter resets on new SASL attempt.
 
 ### P2 — Important
 
-- [ ] **Topic merge consistency** — SyncResponse ignores remote topic if local is set, but CRDT reconciliation overwrites. Two systems with different merge strategies cause flapping.
-- [ ] **Channel key removal propagation** — `-k` can't propagate via SyncResponse (only additive). Needs protocol change or CRDT-backed key state.
+- [x] **Topic merge consistency** — ✅ DONE. Sync-adopted topics now seed the CRDT (only when CRDT has none), making the CRDT the single topic authority. No more dual merge strategies.
+- [x] **Channel key removal propagation** — ✅ DONE. With no local members, SyncResponse adopts the full mode snapshot including `key: None` (-k propagates). With locals present, snapshots still never weaken local protections (live S2S Mode events handle -k there).
+- [x] **SyncResponse invite authority** — ✅ DONE. Synced invites are only merged when the peer's snapshot names the same founder we have (or we have none); mismatches are rejected + logged. Closes the +i bypass.
 - [ ] **S2S authentication (allowlist enforcement)** — `--s2s-allowed-peers` only checks incoming. Formalize mutual auth.
 - [x] **Ban sync + enforcement** — ✅ DONE. S2sMessage::Ban variant, authorized set/remove, SyncResponse carries bans, additive merge.
 - [x] **S2S Join enforcement** — ✅ DONE. Incoming S2S Joins check bans (nick + DID) and +i (invite only). Blocked joins logged.
@@ -227,7 +255,7 @@ If something feels “too clever,” it’s probably wrong.
 ### P2.5 — Web App Prerequisites (see `docs/WEB-APP-PLAN.md`)
 
 - [x] **Web app (Phase 1)** — ✅ DONE. React+TS+Vite+Tailwind at freeq-app/.
-- [ ] **Search (FTS5)** — SQLite FTS5 for message search. REST endpoint or IRC SEARCH command.
+- [x] **Search (FTS5)** — ✅ DONE. SQLite FTS5 index (plaintext DBs; encrypted DBs use bounded decrypt-and-scan, and opening encrypted drops any stale plaintext index). IRC `SEARCH <target> :<query>` with CHATHISTORY-equivalent authorization, results in `freeq.at/search` batch. REST `GET /api/v1/search?channel=&q=` (channels only, +i/+k → 403). 9 db unit tests + 6 acceptance tests.
 - [x] **Pinned messages** — ✅ DONE. PIN/UNPIN/PINS commands, REST API, web client PinnedBar + context menu.
 
 ### P3 — Future

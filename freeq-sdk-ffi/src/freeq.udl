@@ -14,6 +14,15 @@ dictionary IrcMessage {
     boolean is_action;
     boolean is_signed;
     i64 timestamp_ms;
+    string? account;
+    string? origin;
+    sequence<ReactionTally> reactions;
+    string? dm_key;
+};
+
+dictionary ReactionTally {
+    string emoji;
+    sequence<string> nicks;
 };
 
 dictionary IrcMember {
@@ -38,6 +47,7 @@ dictionary TagMessage {
     string from;
     string target;
     sequence<TagEntry> tags;
+    string? dm_key;
 };
 
 [Enum]
@@ -59,7 +69,11 @@ interface FreeqEvent {
     UserQuit(string nick, string reason);
     BatchStart(string id, string batch_type, string target);
     BatchEnd(string id);
-    ChatHistoryTarget(string nick, string? timestamp);
+    ChatHistoryTarget(string nick, string? timestamp, string? partner_did);
+    MemberDid(string nick, string did);
+    // draft/read-marker (S1): reply to our mark/get, or another of our
+    // devices advancing the marker. timestamp null = server reports none.
+    ReadMarker(string target, string? timestamp);
     WhoisReply(string nick, string info);
     Notice(string text);
     Disconnected(string reason);
@@ -78,6 +92,9 @@ interface FreeqClient {
 
     [Throws=FreeqError]
     void set_platform(string platform);
+
+    [Throws=FreeqError]
+    void set_websocket_url(string url);
 
     [Throws=FreeqError]
     void connect();
@@ -184,6 +201,98 @@ interface FreeqP2p {
     sequence<string> connected_peers();
 
     void shutdown();
+};
+
+// ── AV (voice/video calls via MoQ SFU) ──
+
+[Enum]
+interface AvEvent {
+    Connected();
+    Disconnected(string reason);
+    ParticipantJoined(string nick, string instance);
+    ParticipantLeft(string nick, string instance);
+    AudioTrackStarted(string nick);
+    AudioTrackStopped(string nick);
+    VideoTrackStarted(string nick);
+    VideoTrackStopped(string nick);
+    // BGRA frame from a remote participant. Swift renders via AVSampleBufferDisplayLayer.
+    VideoFrame(string nick, sequence<u8> bgra, u32 width, u32 height);
+    // Screen-share broadcasts ride a separate MoQ path ({peer}/screen — the
+    // same convention as the web client), so they get their own events and
+    // can run alongside the camera track.
+    ScreenTrackStarted(string nick);
+    ScreenTrackStopped(string nick);
+    ScreenFrame(string nick, sequence<u8> bgra, u32 width, u32 height);
+    // ── R1 interface freeze (DESIGN-APP-OF-THE-YEAR Track R) ──
+    // Per-participant playout level, 0.0–1.0, ~10 Hz while they speak.
+    // Drives remote active-speaker highlighting. Emission lands with the
+    // playout tap; the shape is frozen so clients can build against it.
+    AudioLevel(string nick, float level);
+    // Transport dropped; the SDK is retrying (attempt count, 1-based).
+    Reconnecting(u32 attempt);
+    // Transport restored after Reconnecting.
+    Reconnected();
+    Error(string message);
+};
+
+// An audio output device for the speaker picker.
+dictionary AvAudioDevice {
+    string id;
+    string name;
+    boolean is_default;
+};
+
+callback interface AvEventHandler {
+    void on_av_event(AvEvent event);
+};
+
+interface FreeqAv {
+    [Throws=FreeqError]
+    constructor(string server_url, string session_id, string nick, string instance_id, AvEventHandler handler);
+
+    void leave();
+
+    // Mute toggles whether the locally-captured mic samples are sent (vs silence).
+    // Track stays live so peers don't see AudioTrackStopped.
+    void set_muted(boolean muted);
+
+    // Enable/disable the local video track. When enabled, the encoder pipeline
+    // pulls frames pushed via push_video_frame(). When disabled, the track is
+    // removed from the broadcast and peers see VideoTrackStopped.
+    [Throws=FreeqError]
+    void set_camera_enabled(boolean enabled);
+
+    // Swift-driven camera capture. Each call queues a BGRA frame for the
+    // encoder pipeline. Caller is responsible for capture cadence; the
+    // encoder will pull the most-recent queued frame.
+    void push_video_frame(sequence<u8> bgra, u32 width, u32 height, u64 timestamp_us);
+
+    // Swift-driven mic capture. Each call queues mono 48 kHz f32 samples
+    // for the Opus encoder. iroh-live's audio input backend isn't viable
+    // on iOS, so capture happens in Swift (AVAudioEngine).
+    void push_audio_frame(sequence<f32> samples);
+
+    // Publish (true) or retract (false) a second, video-only broadcast at
+    // `{our-path}/screen` — the web client's screen-share convention. This
+    // is independent of the camera track, so camera + screen can run
+    // simultaneously.
+    [Throws=FreeqError]
+    void set_screen_enabled(boolean enabled);
+
+    // Swift-driven screen capture (ScreenCaptureKit). Same contract as
+    // push_video_frame, but feeds the /screen broadcast's encoder.
+    void push_screen_frame(sequence<u8> bgra, u32 width, u32 height, u64 timestamp_us);
+
+    // Remote audio plays through the Rust audio backend (cpal), so the
+    // speaker picker lives here, not in AVFoundation.
+    sequence<AvAudioDevice> list_output_devices();
+
+    // Route remote audio to a specific output device (id from
+    // list_output_devices). null = system default.
+    [Throws=FreeqError]
+    void set_output_device(string? device_id);
+
+    boolean is_connected();
 };
 
 [Error]

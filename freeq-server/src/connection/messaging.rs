@@ -5,7 +5,14 @@ use super::Connection;
 use super::helpers::{normalize_channel, s2s_broadcast, s2s_next_event_id};
 use crate::irc::{self, Message};
 use crate::server::SharedState;
+use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Prune every N inserts per channel rather than on every message — see the
+/// prune call site. Process-static (like `S2S_RATE_LIMITS`), keyed by channel.
+static PRUNE_COUNTERS: std::sync::LazyLock<parking_lot::Mutex<HashMap<String, u32>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+const PRUNE_INTERVAL: u32 = 256;
 
 /// Verify a client-provided signature, or server-sign as fallback.
 ///
@@ -57,6 +64,124 @@ fn resolve_signature(
     Some(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig.to_bytes()))
 }
 
+/// Verify a commit-reveal binding declared on a PRIVMSG carrying
+/// `+freeq.at/event=reveal`.
+///
+/// The convention (see `docs/agents.md` § Commit-Reveal):
+///
+/// ```text
+/// Commit PRIVMSG: +freeq.at/event=commit
+///                 +freeq.at/payload={"hash":"<b64url>","alg":"sha256"}
+///                 (body: human-readable placeholder)
+///
+/// Reveal PRIVMSG: +freeq.at/event=reveal
+///                 +freeq.at/payload={"reveal_of":"<commit_msgid>","salt":"<b64url>"}
+///                 (body: the plaintext being revealed)
+/// ```
+///
+/// Verification recomputes `sha256(salt || body_bytes)` and compares to
+/// the commit's stored hash. Same actor, same channel, and same
+/// `+freeq.at/ref` are also required. Returns `Ok(())` on a clean
+/// match, or `Err(reason)` with one of:
+/// `bad_payload | commit_not_found | actor_mismatch | channel_mismatch |
+/// not_a_commit | ref_id_mismatch | bad_commit_payload | unsupported_alg |
+/// bad_salt | bad_commit_hash | hash_mismatch`.
+///
+/// Mirrors the verify-and-stamp pattern used by `+freeq.at/sig` above:
+/// callers turn `Ok`/`Err` into `+freeq.at/commit-verified=true|false`
+/// and (on error) `+freeq.at/commit-mismatch=<reason>` tags on the
+/// outgoing relay. Verify-and-annotate, never reject.
+pub(crate) fn verify_commit_reveal(
+    state: &Arc<SharedState>,
+    reveal_actor_did: Option<&str>,
+    reveal_channel: &str,
+    reveal_ref_id: Option<&str>,
+    reveal_payload_json: &str,
+    reveal_body: &str,
+) -> Result<(), &'static str> {
+    // Parse reveal payload: { reveal_of, salt }
+    let payload: serde_json::Value =
+        serde_json::from_str(reveal_payload_json).map_err(|_| "bad_payload")?;
+    let reveal_of = payload
+        .get("reveal_of")
+        .and_then(|v| v.as_str())
+        .ok_or("bad_payload")?;
+    let salt_b64 = payload
+        .get("salt")
+        .and_then(|v| v.as_str())
+        .ok_or("bad_payload")?;
+
+    // Look up the prior commit message by msgid.
+    // `with_db` already unwraps the inner SqlResult, so we get
+    // Option<Option<MessageRow>>: outer None = no DB attached or
+    // query errored; inner None = no row with that msgid.
+    let commit = state
+        .with_db(|db| db.find_message_by_msgid(reveal_of))
+        .flatten()
+        .ok_or("commit_not_found")?;
+
+    // Actor must match (the same DID that committed must reveal).
+    if commit.sender_did.as_deref() != reveal_actor_did {
+        return Err("actor_mismatch");
+    }
+    // Channel must match.
+    if commit.channel != reveal_channel {
+        return Err("channel_mismatch");
+    }
+    // Must actually be a commit event.
+    if commit.tags.get("+freeq.at/event").map(String::as_str) != Some("commit") {
+        return Err("not_a_commit");
+    }
+    // Ref-id must agree (either both absent, or both present and equal).
+    let commit_ref = commit
+        .tags
+        .get("+freeq.at/ref")
+        .or_else(|| commit.tags.get("+freeq.at/task-id"))
+        .map(String::as_str);
+    if commit_ref != reveal_ref_id {
+        return Err("ref_id_mismatch");
+    }
+    // Parse commit payload: { hash, alg }
+    let commit_payload_raw = commit
+        .tags
+        .get("+freeq.at/payload")
+        .ok_or("bad_commit_payload")?;
+    let commit_payload_decoded: String = urlencoding::decode(commit_payload_raw)
+        .map(|c| c.into_owned())
+        .unwrap_or_else(|_| commit_payload_raw.clone());
+    let commit_payload: serde_json::Value =
+        serde_json::from_str(&commit_payload_decoded).map_err(|_| "bad_commit_payload")?;
+    let expected_hash_b64 = commit_payload
+        .get("hash")
+        .and_then(|v| v.as_str())
+        .ok_or("bad_commit_payload")?;
+    let alg = commit_payload
+        .get("alg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("sha256");
+    if alg != "sha256" {
+        return Err("unsupported_alg");
+    }
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let salt = b64.decode(salt_b64).map_err(|_| "bad_salt")?;
+    let expected_hash = b64
+        .decode(expected_hash_b64)
+        .map_err(|_| "bad_commit_hash")?;
+
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(&salt);
+    hasher.update(reveal_body.as_bytes());
+    let computed = hasher.finalize();
+
+    if computed.as_slice() != expected_hash.as_slice() {
+        return Err("hash_mismatch");
+    }
+    Ok(())
+}
+
 pub(super) fn handle_tagmsg(
     conn: &Connection,
     target: &str,
@@ -67,10 +192,175 @@ pub(super) fn handle_tagmsg(
         return; // TAGMSG with no tags is meaningless
     }
 
+    // Normalize IRCv3 draft tags to their canonical forms so all downstream
+    // code (persistence, relay, fallback) only needs to check one name.
+    let mut tags = tags.clone();
+    for (draft, canonical) in [("+draft/react", "+react"), ("+draft/reply", "+reply")] {
+        if let Some(v) = tags.remove(draft) {
+            tags.entry(canonical.to_string()).or_insert(v);
+        }
+    }
+    let tags = &tags;
+
     // ── Message deletion (+draft/delete=<msgid>) ──
     if let Some(original_msgid) = tags.get("+draft/delete") {
         handle_delete(conn, target, original_msgid, state);
         return;
+    }
+
+    // ── Coordination event storage (+freeq.at/event) ──
+    if let Some(event_type) = tags.get("+freeq.at/event")
+        && let Some(ref did) = conn.authenticated_did
+    {
+        // SECURITY (CTF-20): rate-limit event storage per session.
+        // Previously TAGMSG had no flood protection, so an
+        // authenticated user could spam hundreds of event TAGMSGs
+        // per second to fill the DB. Cap at 5 events / 2s, same
+        // window as PRIVMSG flood protection.
+        //
+        // Reuses msg_timestamps under a session-derived synthetic
+        // key so this counter is independent of the PRIVMSG one.
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let key = format!("event:{}", conn.id);
+            let mut ts_map = state.msg_timestamps.lock();
+            let ts = ts_map.entry(key).or_default();
+            ts.retain(|&t| now.saturating_sub(t) < 2000);
+            if ts.len() >= 5 {
+                let nick = conn.nick_or_star();
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "FAIL",
+                    vec![
+                        "TAGMSG",
+                        "RATE_LIMITED",
+                        "event-storage TAGMSG flood: 5 events / 2s per session",
+                    ],
+                );
+                if let Some(tx) = state.connections.lock().get(&conn.id) {
+                    let _ = tx.try_send(format!("{reply}\r\n"));
+                }
+                tracing::warn!(
+                    actor = %did, nick = %nick,
+                    "Rate-limited coordination-event TAGMSG flood",
+                );
+                return;
+            }
+            ts.push(now);
+        }
+        // SECURITY (CTF-20 cont.): also cap payload size before
+        // decoding + storing. The 8 KB IRC line cap already bounds
+        // each payload, but the explicit cap here is defense in
+        // depth — and lets us return a clean FAIL instead of a
+        // silent truncation.
+        const MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+        let raw_payload = tags
+            .get("+freeq.at/payload")
+            .map(String::as_str)
+            .unwrap_or("");
+        if raw_payload.len() > MAX_PAYLOAD_BYTES {
+            let nick = conn.nick_or_star();
+            let reply = Message::from_server(
+                &state.server_name,
+                "FAIL",
+                vec![
+                    "TAGMSG",
+                    "PAYLOAD_TOO_LARGE",
+                    &format!(
+                        "+freeq.at/payload exceeds {MAX_PAYLOAD_BYTES} bytes; got {}",
+                        raw_payload.len()
+                    ),
+                ],
+            );
+            if let Some(tx) = state.connections.lock().get(&conn.id) {
+                let _ = tx.try_send(format!("{reply}\r\n"));
+            }
+            tracing::warn!(
+                actor = %did, nick = %nick, size = raw_payload.len(),
+                "Refused oversized coordination event payload",
+            );
+            return;
+        }
+        let event_id = tags
+            .get("msgid")
+            .cloned()
+            .unwrap_or_else(crate::msgid::generate);
+        let ref_id = tags
+            .get("+freeq.at/ref")
+            .or_else(|| tags.get("+freeq.at/task-id"))
+            .cloned();
+        let payload = if raw_payload.is_empty() {
+            "{}".to_string()
+        } else {
+            urlencoding::decode(raw_payload)
+                .unwrap_or_else(|_| raw_payload.into())
+                .into_owned()
+        };
+        // Re-check after decoding: percent-decoding can expand by
+        // up to ~3x if the input was all `%xx`, so even a
+        // payload that fit before decoding may exceed the cap
+        // after.
+        if payload.len() > MAX_PAYLOAD_BYTES {
+            tracing::warn!(actor = %did, "Decoded payload exceeded cap; dropping");
+            return;
+        }
+        let signature = tags.get("+freeq.at/sig").cloned();
+        let now = chrono::Utc::now().timestamp();
+        let event = crate::db::CoordinationEventRow {
+            event_id: event_id.clone(),
+            event_type: event_type.clone(),
+            actor_did: did.clone(),
+            channel: target.to_string(),
+            ref_id,
+            payload_json: payload,
+            signature,
+            timestamp: now,
+        };
+        state.with_db(|db| db.store_coordination_event(&event));
+        tracing::debug!(
+            event_type = %event_type,
+            event_id = %event_id,
+            actor = %did,
+            channel = %target,
+            "Stored coordination event"
+        );
+    }
+
+    // Log av-signal relay for debugging
+    if tags.contains_key("+freeq.at/av-signal") {
+        tracing::info!(
+            from = %conn.nick_or_star(),
+            target = %target,
+            "Relaying WebRTC signal TAGMSG"
+        );
+    }
+
+    // ── AV session control (+freeq.at/av-*) ──
+    //
+    // The dispatch key must be the *action* tag (av-start / av-join /
+    // av-leave / av-end), never a parameter (av-id, av-instance,
+    // av-title, …). Previously we grabbed `tags.keys().find(...)` on
+    // anything starting with `+freeq.at/av-` and HashMap iteration
+    // order picked whichever tag happened to hash first — so an
+    // av-join TAGMSG that also carried av-id and av-instance would
+    // sometimes dispatch under av-id, fall into the `_ => debug!` arm,
+    // and silently do nothing. That was the "av-join succeeds for one
+    // device but not the other" bug.
+    //
+    // av-signal / av-chunk are relay tags (WebRTC signalling / data
+    // chunks) — must be forwarded, not consumed.
+    const AV_ACTIONS: &[&str] = &[
+        "+freeq.at/av-start",
+        "+freeq.at/av-join",
+        "+freeq.at/av-leave",
+        "+freeq.at/av-end",
+    ];
+    if let Some(action) = AV_ACTIONS.iter().find(|tag| tags.contains_key(**tag)) {
+        handle_av_tagmsg(conn, target, tags, action, state);
+        return; // AV control tags are consumed server-side; don't relay
     }
 
     // ── Persist reactions (+react with +reply) ──
@@ -90,53 +380,14 @@ pub(super) fn handle_tagmsg(
     }
 
     // ── Remove reactions (+freeq.at/unreact with +reply) ──
+    // The reactor is identified by the connection's current nick — same key the
+    // add path uses to scope a reaction. The TAGMSG itself still relays through
+    // the broadcast below so other clients can drop the pill from the UI.
     if let (Some(emoji), Some(target_msgid)) = (tags.get("+freeq.at/unreact"), tags.get("+reply")) {
         let nick = conn.nick_or_star().to_string();
         let target_msgid = target_msgid.clone();
         let emoji = emoji.clone();
         state.with_db(|db| db.remove_reaction(&target_msgid, &nick, &emoji));
-    }
-
-    // ── Coordination event storage (+freeq.at/event) ──
-    if let Some(event_type) = tags.get("+freeq.at/event") {
-        if let Some(ref did) = conn.authenticated_did {
-            let event_id = tags
-                .get("msgid")
-                .cloned()
-                .unwrap_or_else(|| crate::msgid::generate());
-            let ref_id = tags
-                .get("+freeq.at/ref")
-                .or_else(|| tags.get("+freeq.at/task-id"))
-                .cloned();
-            let payload = tags
-                .get("+freeq.at/payload")
-                .map(|p| {
-                    urlencoding::decode(p)
-                        .unwrap_or_else(|_| p.clone().into())
-                        .into_owned()
-                })
-                .unwrap_or_else(|| "{}".to_string());
-            let signature = tags.get("+freeq.at/sig").cloned();
-            let now = chrono::Utc::now().timestamp();
-            let event = crate::db::CoordinationEventRow {
-                event_id: event_id.clone(),
-                event_type: event_type.clone(),
-                actor_did: did.clone(),
-                channel: target.to_string(),
-                ref_id,
-                payload_json: payload,
-                signature,
-                timestamp: now,
-            };
-            state.with_db(|db| db.store_coordination_event(&event));
-            tracing::debug!(
-                event_type = %event_type,
-                event_id = %event_id,
-                actor = %did,
-                channel = %target,
-                "Stored coordination event"
-            );
-        }
     }
 
     let hostmask = conn.hostmask();
@@ -177,9 +428,16 @@ pub(super) fn handle_tagmsg(
     // Rich clients get TAGMSG, plain clients get fallback PRIVMSG (if any)
     if target.starts_with('#') || target.starts_with('&') {
         // Channel TAGMSG — enforce +n (no external messages) and +m (moderated)
+        // Resolve sender DID once, before taking the channels lock.
+        let sender_did = state.session_dids.lock().get(&conn.id).cloned();
         {
             let channels = state.channels.lock();
             if let Some(ch) = channels.get(target) {
+                // Founder + persistent DID-ops bypass +m. (+n is membership-based;
+                // a non-member can't be founder anyway, so no bypass needed there.)
+                let is_did_authority = sender_did.as_deref().is_some_and(|d| {
+                    ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
+                });
                 // +n: must be a member to send
                 if ch.no_ext_msg && !ch.members.contains(&conn.id) {
                     let nick = conn.nick_or_star();
@@ -195,6 +453,7 @@ pub(super) fn handle_tagmsg(
                 }
                 // +m: must be voiced or op to send
                 if ch.moderated
+                    && !is_did_authority
                     && !ch.ops.contains(&conn.id)
                     && !ch.halfops.contains(&conn.id)
                     && !ch.voiced.contains(&conn.id)
@@ -242,26 +501,38 @@ pub(super) fn handle_tagmsg(
                 }
             }
         }
-    } else {
-        // TAGMSG to a nick — route through federation layer.
-        use super::routing::{RouteResult, relay_to_nick};
-        // TAGMSG uses the same relay path as PRIVMSG.
-        // The text payload is empty for TAGMSG; tags ride in the from-line.
-        let from_nick = conn.nick.as_deref().unwrap_or("*").to_string();
-        let tag_text = plain_fallback.as_deref().unwrap_or("").to_string();
-        match relay_to_nick(
+
+        // Broadcast channel TAGMSG to S2S peers
+        super::helpers::s2s_broadcast(
             state,
-            &from_nick,
-            target,
-            &tag_text,
-            super::helpers::s2s_next_event_id(state),
-        ) {
-            RouteResult::Local(ref session) => {
-                if let Some(tx) = state.connections.lock().get(session) {
-                    let has_tags = state.cap_message_tags.lock().contains(session);
-                    let has_time = state.cap_server_time.lock().contains(session);
-                    if has_tags {
-                        let line = if has_time {
+            crate::s2s::S2sMessage::Tagmsg {
+                event_id: super::helpers::s2s_next_event_id(state),
+                from: conn.nick.as_deref().unwrap_or("*").to_string(),
+                target: target.to_string(),
+                tags: tags.clone(),
+                origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
+            },
+        );
+    } else {
+        // TAGMSG to a nick or DID. Deliver to every local session bound to the
+        // target, and relay a *structured* Tagmsg to peers so a remote (or
+        // multi-homed) recipient receives the tags.
+        //
+        // We deliberately do NOT route through `relay_to_nick` here: it is
+        // PRIVMSG-shaped and, for a remote-only target, broadcasts an S2S
+        // *Privmsg* (the reaction's ACTION fallback), silently dropping the
+        // tags. Emitting an `S2sMessage::Tagmsg` unconditionally (peers dedup
+        // by event_id; a peer with no local session for the target just no-ops)
+        // is the same shape the PRIVMSG DM path already uses.
+        let sessions = super::routing::local_sessions_for_target(state, target);
+        {
+            let tag_caps = state.cap_message_tags.lock();
+            let time_caps = state.cap_server_time.lock();
+            let conns = state.connections.lock();
+            for session in &sessions {
+                if let Some(tx) = conns.get(session) {
+                    if tag_caps.contains(session) {
+                        let line = if time_caps.contains(session) {
                             &tagged_line_with_time
                         } else {
                             &tagged_line
@@ -272,11 +543,19 @@ pub(super) fn handle_tagmsg(
                     }
                 }
             }
-            RouteResult::Relayed | RouteResult::Unreachable => {
-                // TAGMSG to remote user — best-effort relay (or silently dropped).
-                // No error sent: TAGMSG has no delivery expectation.
-            }
         }
+        // Relay to peers for cross-server + multi-homed delivery. The receiver
+        // rebuilds the plain-client fallback from the tags.
+        super::helpers::s2s_broadcast(
+            state,
+            crate::s2s::S2sMessage::Tagmsg {
+                event_id: super::helpers::s2s_next_event_id(state),
+                from: conn.nick.as_deref().unwrap_or("*").to_string(),
+                target: target.to_string(),
+                tags: tags.clone(),
+                origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
+            },
+        );
     }
 }
 
@@ -288,6 +567,31 @@ pub(super) fn handle_privmsg(
     tags: &std::collections::HashMap<String, String>,
     state: &Arc<SharedState>,
 ) {
+    // Non-multiline entry — preserves the existing call-shape for every
+    // caller that didn't come from a draft/multiline batch.
+    handle_privmsg_with_multiline(conn, command, target, text, tags, state, None);
+}
+
+/// Same as `handle_privmsg`, but when `multiline_lines` is Some, the
+/// channel-broadcast path emits per-receiver wire frames (BATCH-
+/// wrapped for `draft/multiline`-capable receivers, individual
+/// PRIVMSGs for fallback receivers) instead of a single line.
+///
+/// `handle_privmsg` is the wrapper for the normal single-PRIVMSG case;
+/// `dispatch_assembled_batch` in connection::draft_multiline calls
+/// this directly with `Some(batch.lines)` so the channel broadcast
+/// produces wire-valid output (a single PRIVMSG with `\n` in its body
+/// would corrupt the IRC line on the receiving side).
+pub(super) fn handle_privmsg_with_multiline(
+    conn: &Connection,
+    command: &str,
+    target: &str,
+    text: &str,
+    tags: &std::collections::HashMap<String, String>,
+    state: &Arc<SharedState>,
+    multiline_lines: Option<&[super::draft_multiline::BatchLine]>,
+) {
+    crate::server::Metrics::bump(&state.metrics.messages_total);
     let hostmask = conn.hostmask();
 
     let timestamp = std::time::SystemTime::now()
@@ -301,7 +605,20 @@ pub(super) fn handle_privmsg(
 
     // ── Message editing (+draft/edit=<msgid>) ──
     if let Some(original_msgid) = tags.get("+draft/edit") {
-        handle_edit(conn, target, text, original_msgid, tags, state);
+        // Carry the sender's pre-chunked breakdown through to handle_edit
+        // when the edit arrived as a BATCH (plaintext multi-line OR
+        // ciphertext-chunked E2EE). handle_edit re-broadcasts using the
+        // same chunking; preserves concat=true semantics for ciphertext
+        // so receivers reassemble the exact AES-GCM blob.
+        handle_edit(
+            conn,
+            target,
+            text,
+            original_msgid,
+            tags,
+            state,
+            multiline_lines,
+        );
         return;
     }
 
@@ -337,9 +654,15 @@ pub(super) fn handle_privmsg(
 
     if is_channel {
         // Channel message — enforce +n (no external messages) and +m (moderated)
+        // Resolve sender DID once, before taking the channels lock.
+        let sender_did = state.session_dids.lock().get(&conn.id).cloned();
         {
             let channels = state.channels.lock();
             if let Some(ch) = channels.get(target) {
+                // Founder + persistent DID-ops bypass +m.
+                let is_did_authority = sender_did.as_deref().is_some_and(|d| {
+                    ch.founder_did.as_deref() == Some(d) || ch.did_ops.contains(d)
+                });
                 // +n: must be a member to send
                 if ch.no_ext_msg && !ch.members.contains(&conn.id) {
                     // NOTICE must never generate error replies (RFC 2812 3.3.2)
@@ -358,6 +681,7 @@ pub(super) fn handle_privmsg(
                 }
                 // +m: must be voiced or op to send
                 if ch.moderated
+                    && !is_did_authority
                     && !ch.ops.contains(&conn.id)
                     && !ch.halfops.contains(&conn.id)
                     && !ch.voiced.contains(&conn.id)
@@ -375,18 +699,33 @@ pub(super) fn handle_privmsg(
                     }
                     return;
                 }
-                // +E: encrypted-only mode
-                if ch.encrypted_only && !tags.contains_key("+encrypted") {
+                // +E: encrypted-only mode.
+                //
+                // SECURITY (CTF-21): require BOTH the `+encrypted` tag
+                // AND an actual ENC1-prefixed ciphertext body. Previously
+                // only the tag was checked, so a malicious client could
+                // send `@+encrypted PRIVMSG #ch :leaked plaintext` and
+                // any logger or non-aware viewer would see the body in
+                // the clear.
+                // Accept either passphrase channels (ENC1) or VC-bootstrapped
+                // sender-keys group channels (EG1). Both bodies are opaque
+                // AEAD ciphertext the server never reads; the tag+prefix pair
+                // is what CTF-21 enforces so no plaintext can ride a +E channel.
+                let has_tag = tags.contains_key("+encrypted");
+                let has_ciphertext =
+                    (text.starts_with("ENC1:") || text.starts_with("EG1:")) && text.len() > 5;
+                if ch.encrypted_only && !(has_tag && has_ciphertext) {
                     if !is_notice {
                         let nick = conn.nick_or_star();
+                        let reason = if !has_tag {
+                            "Cannot send to channel (+E) — messages must carry the +encrypted tag"
+                        } else {
+                            "Cannot send to channel (+E) — body must be ENC1/EG1-prefixed ciphertext"
+                        };
                         let reply = Message::from_server(
                             &state.server_name,
                             irc::ERR_CANNOTSENDTOCHAN,
-                            vec![
-                                nick,
-                                target,
-                                "Cannot send to channel (+E) — messages must be encrypted",
-                            ],
+                            vec![nick, target, reason],
                         );
                         if let Some(tx) = state.connections.lock().get(&conn.id) {
                             let _ = tx.try_send(format!("{reply}\r\n"));
@@ -425,6 +764,42 @@ pub(super) fn handle_privmsg(
             full_tags.insert("+freeq.at/sig".to_string(), sig);
         }
 
+        // If this PRIVMSG is a commit-reveal `reveal` event, verify the
+        // binding against the prior commit and stamp the outcome onto
+        // the outgoing relay tags. Mirrors the verify-and-stamp pattern
+        // used by `+freeq.at/sig` above. Verify-and-annotate, never
+        // reject — bad reveals still relay, carrying a `false` verdict.
+        if command == "PRIVMSG"
+            && full_tags.get("+freeq.at/event").map(String::as_str) == Some("reveal")
+        {
+            let reveal_ref = full_tags
+                .get("+freeq.at/ref")
+                .or_else(|| full_tags.get("+freeq.at/task-id"))
+                .cloned();
+            let reveal_payload_raw = full_tags
+                .get("+freeq.at/payload")
+                .cloned()
+                .unwrap_or_default();
+            let reveal_payload_decoded = urlencoding::decode(&reveal_payload_raw)
+                .map(|c| c.into_owned())
+                .unwrap_or(reveal_payload_raw);
+            let outcome = verify_commit_reveal(
+                state,
+                conn.authenticated_did.as_deref(),
+                target,
+                reveal_ref.as_deref(),
+                &reveal_payload_decoded,
+                text,
+            );
+            full_tags.insert(
+                "+freeq.at/commit-verified".to_string(),
+                if outcome.is_ok() { "true" } else { "false" }.to_string(),
+            );
+            if let Err(reason) = outcome {
+                full_tags.insert("+freeq.at/commit-mismatch".to_string(), reason.to_string());
+            }
+        }
+
         let mut full_tags_with_time = full_tags.clone();
         full_tags_with_time.insert("time".to_string(), time_tag.clone());
 
@@ -454,13 +829,17 @@ pub(super) fn handle_privmsg(
         // Store in channel history
         if command == "PRIVMSG" {
             use crate::server::{HistoryMessage, MAX_HISTORY};
+            let mut history_tags = full_tags.clone();
+            if let Some(did) = conn.authenticated_did.as_deref() {
+                history_tags.insert("account".to_string(), did.to_string());
+            }
             let mut channels = state.channels.lock();
             if let Some(ch) = channels.get_mut(target) {
                 ch.history.push_back(HistoryMessage {
                     from: hostmask.clone(),
                     text: text.to_string(),
                     timestamp,
-                    tags: full_tags.clone(),
+                    tags: history_tags,
                     msgid: Some(msgid.clone()),
                 });
                 while ch.history.len() > MAX_HISTORY {
@@ -481,10 +860,28 @@ pub(super) fn handle_privmsg(
                 )
             });
 
-            // Prune old messages if configured
+            // Prune old messages if configured — but only periodically, not on
+            // every message. Pruning is a DELETE behind the single global DB
+            // mutex; running it per-message doubled the blocking DB round-trips
+            // on the hot path for no benefit (the in-memory history is already
+            // capped above). Pruning every PRUNE_INTERVAL inserts keeps the DB
+            // at most `max + PRUNE_INTERVAL` rows transiently.
             let max = state.config.max_messages_per_channel;
             if max > 0 {
-                state.with_db(|db| db.prune_messages(target, max));
+                let should_prune = {
+                    let mut counters = PRUNE_COUNTERS.lock();
+                    let c = counters.entry(target.to_string()).or_insert(0);
+                    *c += 1;
+                    if *c >= PRUNE_INTERVAL {
+                        *c = 0;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if should_prune {
+                    state.with_db(|db| db.prune_messages(target, max));
+                }
             }
         }
 
@@ -497,24 +894,79 @@ pub(super) fn handle_privmsg(
 
         let tag_caps = state.cap_message_tags.lock();
         let time_caps = state.cap_server_time.lock();
+        let account_caps = state.cap_account_tag.lock();
         let echo_caps = state.cap_echo_message.lock();
+        let multiline_caps = state.cap_draft_multiline.lock();
         let conns = state.connections.lock();
+        let sender_did = conn.authenticated_did.as_deref();
+        // When the logical message arrived as a draft/multiline batch
+        // we already have its per-line breakdown; reuse the same
+        // outbound batch id for every receiver. Receivers that
+        // negotiated draft/multiline see BATCH frames; everyone else
+        // sees the constituent PRIVMSGs (msgid on the first only).
+        let outbound_batch_id = multiline_lines.map(|_| format!("ml{}", crate::msgid::generate()));
         for member_session in &members {
             // echo-message: include sender if they requested it
             if member_session == &conn.id && !echo_caps.contains(member_session) {
                 continue;
             }
             if let Some(tx) = conns.get(member_session) {
-                let line = if tag_caps.contains(member_session) {
-                    if time_caps.contains(member_session) {
-                        &tagged_line_with_time
+                let has_tags = tag_caps.contains(member_session);
+                let has_time = time_caps.contains(member_session);
+                let wants_account = sender_did.is_some() && account_caps.contains(member_session);
+                if let (Some(lines), Some(batch_id)) =
+                    (multiline_lines, outbound_batch_id.as_deref())
+                {
+                    let caps = super::draft_multiline::ReceiverCaps {
+                        has_tags,
+                        has_time,
+                        has_multiline: multiline_caps.contains(member_session),
+                        wants_account,
+                        sender_did,
+                    };
+                    let ctx = super::draft_multiline::RelayContext {
+                        hostmask: &hostmask,
+                        command,
+                        target,
+                        msgid: &msgid,
+                        time_tag: &time_tag,
+                        opener_tags: &full_tags,
+                        batch_id,
+                        lines,
+                    };
+                    for frame in
+                        super::draft_multiline::build_outbound_multiline_frames(&ctx, &caps)
+                    {
+                        let _ = tx.try_send(frame);
+                    }
+                    continue;
+                }
+                let line: String = if !has_tags {
+                    plain_line.clone()
+                } else if !wants_account {
+                    if has_time {
+                        tagged_line_with_time.clone()
                     } else {
-                        &tagged_line
+                        tagged_line.clone()
                     }
                 } else {
-                    &plain_line
+                    // Per-recipient build with `account` tag injected.
+                    // IRCv3 account-tag spec requires this only for opted-in clients.
+                    let mut recip_tags = if has_time {
+                        full_tags_with_time.clone()
+                    } else {
+                        full_tags.clone()
+                    };
+                    recip_tags.insert("account".to_string(), sender_did.unwrap().to_string());
+                    let tag_msg = irc::Message {
+                        tags: recip_tags,
+                        prefix: Some(hostmask.clone()),
+                        command: command.to_string(),
+                        params: vec![target.to_string(), text.to_string()],
+                    };
+                    format!("{tag_msg}\r\n")
                 };
-                let _ = tx.try_send(line.clone());
+                let _ = tx.try_send(line);
             }
         }
 
@@ -522,16 +974,37 @@ pub(super) fn handle_privmsg(
         if command == "PRIVMSG" {
             let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
             let sig = full_tags.get("+freeq.at/sig").cloned();
+            let (s2s_text, s2s_tags) = crate::s2s::encode_privmsg_text_for_s2s(
+                text,
+                crate::s2s::relay_coordination_tags(&full_tags),
+            );
             s2s_broadcast(
                 state,
                 crate::s2s::S2sMessage::Privmsg {
                     event_id: s2s_next_event_id(state),
                     from: conn.nick.as_deref().unwrap_or("*").to_string(),
                     target: target.to_string(),
-                    text: text.to_string(),
+                    text: s2s_text,
                     origin,
                     msgid: Some(msgid.clone()),
                     sig,
+                    account: conn.authenticated_did.clone(),
+                    recipient_did: super::routing::recipient_did_for_target(state, target),
+                    tags: s2s_tags,
+                    // When this message originated as a draft/multiline
+                    // batch, ship the per-line breakdown so the peer
+                    // can re-emit BATCH frames to its own multiline-
+                    // capable clients. Otherwise None and the peer
+                    // treats it as a normal PRIVMSG.
+                    multiline_lines: multiline_lines.map(|lines| {
+                        lines
+                            .iter()
+                            .map(|l| crate::s2s::MultilineLine {
+                                body: l.body.clone(),
+                                concat: l.concat_to_previous,
+                            })
+                            .collect()
+                    }),
                 },
             );
         }
@@ -562,7 +1035,7 @@ pub(super) fn handle_privmsg(
         };
         let tagged_line_with_time = {
             let tag_msg = irc::Message {
-                tags: pm_tags_with_time,
+                tags: pm_tags_with_time.clone(),
                 prefix: Some(hostmask.clone()),
                 command: command.to_string(),
                 params: vec![target.to_string(), text.to_string()],
@@ -570,13 +1043,115 @@ pub(super) fn handle_privmsg(
             format!("{tag_msg}\r\n")
         };
 
+        // Build the wire frames for a recipient based on their
+        // negotiated caps. Honors message-tags, server-time, and
+        // account-tag (per IRCv3 spec). When the logical message
+        // arrived as a draft/multiline batch, emits BATCH-wrapped
+        // frames for receivers that negotiated draft/multiline and
+        // N PRIVMSGs (msgid + tags on first only) for fallback
+        // receivers. Without this branch a multiline DM would relay
+        // as a single PRIVMSG with `\n` in its body, breaking the
+        // IRC wire on the recipient side.
+        let sender_did_for_dm = conn.authenticated_did.clone();
+        let dm_outbound_batch_id =
+            multiline_lines.map(|_| format!("ml{}", crate::msgid::generate()));
+        let build_dm_frames = |recipient_session: &str| -> Vec<String> {
+            let has_tags = state.cap_message_tags.lock().contains(recipient_session);
+            let has_time = state.cap_server_time.lock().contains(recipient_session);
+            let wants_account = sender_did_for_dm.is_some()
+                && state.cap_account_tag.lock().contains(recipient_session);
+            if let (Some(lines), Some(batch_id)) =
+                (multiline_lines, dm_outbound_batch_id.as_deref())
+            {
+                let caps = super::draft_multiline::ReceiverCaps {
+                    has_tags,
+                    has_time,
+                    has_multiline: state.cap_draft_multiline.lock().contains(recipient_session),
+                    wants_account,
+                    sender_did: sender_did_for_dm.as_deref(),
+                };
+                let ctx = super::draft_multiline::RelayContext {
+                    hostmask: &hostmask,
+                    command,
+                    target,
+                    msgid: &pm_msgid,
+                    time_tag: &time_tag,
+                    opener_tags: &pm_tags,
+                    batch_id,
+                    lines,
+                };
+                return super::draft_multiline::build_outbound_multiline_frames(&ctx, &caps);
+            }
+            if !has_tags {
+                return vec![plain_line.clone()];
+            }
+            if !wants_account {
+                return vec![if has_time {
+                    tagged_line_with_time.clone()
+                } else {
+                    tagged_line.clone()
+                }];
+            }
+            let mut recip_tags = if has_time {
+                pm_tags_with_time.clone()
+            } else {
+                pm_tags.clone()
+            };
+            recip_tags.insert("account".to_string(), sender_did_for_dm.clone().unwrap());
+            let tag_msg = irc::Message {
+                tags: recip_tags,
+                prefix: Some(hostmask.clone()),
+                command: command.to_string(),
+                params: vec![target.to_string(), text.to_string()],
+            };
+            vec![format!("{tag_msg}\r\n")]
+        };
+
         // Route through the federation routing layer.
         // See routing.rs for why we NEVER gate on remote_members here.
         use super::routing::{RouteResult, relay_to_nick};
         let from_nick = conn.nick.as_deref().unwrap_or("*").to_string();
-        match relay_to_nick(state, &from_nick, target, text, s2s_next_event_id(state)) {
+        match relay_to_nick(
+            state,
+            &from_nick,
+            conn.authenticated_did.as_deref(),
+            target,
+            text,
+            s2s_next_event_id(state),
+            multiline_lines,
+        ) {
             RouteResult::Local(ref session) => {
-                // Target is local — deliver to ALL sessions for target's DID (multi-device)
+                // Target is local — deliver to ALL sessions for target's DID (multi-device).
+                // Also relay via S2S so the DM is visible on other federated servers
+                // (e.g. sender logged into multiple servers).
+                let (s2s_text, s2s_tags) = crate::s2s::encode_privmsg_text_for_s2s(
+                    text,
+                    crate::s2s::relay_coordination_tags(&pm_tags),
+                );
+                super::helpers::s2s_broadcast(
+                    state,
+                    crate::s2s::S2sMessage::Privmsg {
+                        event_id: s2s_next_event_id(state),
+                        from: conn.nick.as_deref().unwrap_or("*").to_string(),
+                        target: target.to_string(),
+                        text: s2s_text,
+                        origin: state.server_iroh_id.lock().clone().unwrap_or_default(),
+                        msgid: Some(pm_msgid.clone()),
+                        sig: pm_tags.get("+freeq.at/sig").cloned(),
+                        account: conn.authenticated_did.clone(),
+                        recipient_did: super::routing::recipient_did_for_target(state, target),
+                        tags: s2s_tags,
+                        multiline_lines: multiline_lines.map(|lines| {
+                            lines
+                                .iter()
+                                .map(|l| crate::s2s::MultilineLine {
+                                    body: l.body.clone(),
+                                    concat: l.concat_to_previous,
+                                })
+                                .collect()
+                        }),
+                    },
+                );
                 // Send RPL_AWAY if target is away
                 if let Some(away_msg) = state.session_away.lock().get(session) {
                     let nick = conn.nick_or_star();
@@ -608,31 +1183,24 @@ pub(super) fn handle_privmsg(
                 let conns = state.connections.lock();
                 // Deliver to all target sessions
                 for target_session in &target_sessions {
-                    let has_tags = state.cap_message_tags.lock().contains(target_session);
-                    let has_time = state.cap_server_time.lock().contains(target_session);
-                    let line = if has_tags {
-                        if has_time {
-                            &tagged_line_with_time
-                        } else {
-                            &tagged_line
-                        }
-                    } else {
-                        &plain_line
-                    };
+                    let frames = build_dm_frames(target_session);
                     if let Some(tx) = conns.get(target_session) {
-                        if let Err(_e) = tx.try_send(line.clone()) {
-                            let target_nick = state
-                                .nick_to_session
-                                .lock()
-                                .get_nick(target_session)
-                                .map(|s| s.to_string())
-                                .unwrap_or_default();
-                            tracing::warn!(
-                                from = %conn.nick.as_deref().unwrap_or("?"),
-                                to = %target_nick,
-                                session = %target_session,
-                                "DM dropped: target send buffer full"
-                            );
+                        for frame in frames {
+                            if let Err(_e) = tx.try_send(frame) {
+                                let target_nick = state
+                                    .nick_to_session
+                                    .lock()
+                                    .get_nick(target_session)
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_default();
+                                tracing::warn!(
+                                    from = %conn.nick.as_deref().unwrap_or("?"),
+                                    to = %target_nick,
+                                    session = %target_session,
+                                    "DM dropped: target send buffer full"
+                                );
+                                break;
+                            }
                         }
                     }
                 }
@@ -655,36 +1223,20 @@ pub(super) fn handle_privmsg(
                         // Original sender — use echo-message cap
                         let sender_has_echo = state.cap_echo_message.lock().contains(&conn.id);
                         if sender_has_echo {
-                            let has_tags = state.cap_message_tags.lock().contains(&conn.id);
-                            let has_time = state.cap_server_time.lock().contains(&conn.id);
-                            let echo_line = if has_tags {
-                                if has_time {
-                                    &tagged_line_with_time
-                                } else {
-                                    &tagged_line
-                                }
-                            } else {
-                                &plain_line
-                            };
+                            let frames = build_dm_frames(&conn.id);
                             if let Some(tx) = conns.get(&conn.id) {
-                                let _ = tx.try_send(echo_line.clone());
+                                for frame in frames {
+                                    let _ = tx.try_send(frame);
+                                }
                             }
                         }
                     } else {
                         // Other sessions of sender — deliver as if they received it
-                        let has_tags = state.cap_message_tags.lock().contains(sender_session);
-                        let has_time = state.cap_server_time.lock().contains(sender_session);
-                        let line = if has_tags {
-                            if has_time {
-                                &tagged_line_with_time
-                            } else {
-                                &tagged_line
-                            }
-                        } else {
-                            &plain_line
-                        };
+                        let frames = build_dm_frames(sender_session);
                         if let Some(tx) = conns.get(sender_session) {
-                            let _ = tx.try_send(line.clone());
+                            for frame in frames {
+                                let _ = tx.try_send(frame);
+                            }
                         }
                     }
                 }
@@ -695,19 +1247,11 @@ pub(super) fn handle_privmsg(
                 // echo-message: echo DM back to sender even for relayed messages
                 let sender_has_echo = state.cap_echo_message.lock().contains(&conn.id);
                 if sender_has_echo {
-                    let sender_has_tags = state.cap_message_tags.lock().contains(&conn.id);
-                    let sender_has_time = state.cap_server_time.lock().contains(&conn.id);
-                    let echo_line = if sender_has_tags {
-                        if sender_has_time {
-                            &tagged_line_with_time
-                        } else {
-                            &tagged_line
-                        }
-                    } else {
-                        &plain_line
-                    };
+                    let frames = build_dm_frames(&conn.id);
                     if let Some(tx) = state.connections.lock().get(&conn.id) {
-                        let _ = tx.try_send(echo_line.clone());
+                        for frame in frames {
+                            let _ = tx.try_send(frame);
+                        }
                     }
                 }
             }
@@ -725,13 +1269,12 @@ pub(super) fn handle_privmsg(
             }
         }
 
-        // Persist DM if both sender and recipient have DIDs
+        // Persist the sender's own copy if both ends have DIDs. Resolve the
+        // recipient via the shared resolver so a `did:` target (and any nick
+        // this server owns) is keyed correctly — previously a bare `nick_owners`
+        // lookup missed DID-addressed DMs entirely.
         let sender_did = conn.authenticated_did.as_deref();
-        let recipient_did = state
-            .nick_owners
-            .lock()
-            .get(&target.to_lowercase())
-            .cloned();
+        let recipient_did = super::routing::recipient_did_for_target(state, target);
         if let (Some(s_did), Some(r_did)) = (sender_did, recipient_did.as_deref()) {
             let dm_key = crate::db::canonical_dm_key(s_did, r_did);
             let did_for_db = Some(s_did);
@@ -757,6 +1300,99 @@ fn parse_chathistory_ts(s: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.timestamp() as u64)
+}
+
+/// Resolve a CHATHISTORY/SEARCH target and authorize access.
+/// For channels: membership check. For DMs: auth check + canonical key.
+/// Returns (db_key, display_target); None means a FAIL was already sent.
+/// `cmd` names the failing command in FAIL replies.
+fn resolve_history_target(
+    conn: &Connection,
+    raw_target: &str,
+    cmd: &str,
+    state: &Arc<SharedState>,
+    server_name: &str,
+    session_id: &str,
+    send: &dyn Fn(&Arc<SharedState>, &str, String),
+) -> Option<(String, String)> {
+    let is_channel = raw_target.starts_with('#') || raw_target.starts_with('&');
+
+    if is_channel {
+        let target = normalize_channel(raw_target);
+        {
+            let channels = state.channels.lock();
+            if let Some(ch) = channels.get(&target) {
+                if !ch.members.contains(session_id) {
+                    let reply = Message::from_server(
+                        server_name,
+                        "FAIL",
+                        vec![
+                            cmd,
+                            "INVALID_TARGET",
+                            &target,
+                            "You are not in that channel",
+                        ],
+                    );
+                    send(state, session_id, format!("{reply}\r\n"));
+                    return None;
+                }
+            } else {
+                let reply = Message::from_server(
+                    server_name,
+                    "FAIL",
+                    vec![cmd, "INVALID_TARGET", &target, "No such channel"],
+                );
+                send(state, session_id, format!("{reply}\r\n"));
+                return None;
+            }
+        }
+        Some((target.clone(), target))
+    } else {
+        // DM target — require DID authentication
+        let requester_did = match conn.authenticated_did.as_deref() {
+            Some(did) => did.to_string(),
+            None => {
+                let reply = Message::from_server(
+                    server_name,
+                    "FAIL",
+                    vec![
+                        cmd,
+                        "ACCOUNT_REQUIRED",
+                        raw_target,
+                        "You must be authenticated to access DM history",
+                    ],
+                );
+                send(state, session_id, format!("{reply}\r\n"));
+                return None;
+            }
+        };
+
+        // Resolve target to DID — accept DID directly or resolve nick
+        let target_did = if raw_target.starts_with("did:") {
+            raw_target.to_string()
+        } else {
+            match state
+                .nick_owners
+                .lock()
+                .get(&raw_target.to_lowercase())
+                .cloned()
+            {
+                Some(did) => did,
+                None => {
+                    let reply = Message::from_server(
+                        server_name,
+                        "FAIL",
+                        vec![cmd, "INVALID_TARGET", raw_target, "Unknown target"],
+                    );
+                    send(state, session_id, format!("{reply}\r\n"));
+                    return None;
+                }
+            }
+        };
+
+        let dm_key = crate::db::canonical_dm_key(&requester_did, &target_did);
+        Some((dm_key, raw_target.to_string()))
+    }
 }
 
 pub(super) fn handle_chathistory(
@@ -789,97 +1425,22 @@ pub(super) fn handle_chathistory(
         return;
     }
 
-    let raw_target = &msg.params[1];
-    let is_channel = raw_target.starts_with('#') || raw_target.starts_with('&');
-
-    // Resolve target and authorize access.
-    // For channels: membership check. For DMs: auth check + canonical key.
-    // db_key = key used for DB queries, target = display name for IRC messages.
-    let (db_key, target) = if is_channel {
-        let target = normalize_channel(raw_target);
-        {
-            let channels = state.channels.lock();
-            if let Some(ch) = channels.get(&target) {
-                if !ch.members.contains(session_id) {
-                    let reply = Message::from_server(
-                        server_name,
-                        "FAIL",
-                        vec![
-                            "CHATHISTORY",
-                            "INVALID_TARGET",
-                            &target,
-                            "You are not in that channel",
-                        ],
-                    );
-                    send(state, session_id, format!("{reply}\r\n"));
-                    return;
-                }
-            } else {
-                let reply = Message::from_server(
-                    server_name,
-                    "FAIL",
-                    vec!["CHATHISTORY", "INVALID_TARGET", &target, "No such channel"],
-                );
-                send(state, session_id, format!("{reply}\r\n"));
-                return;
-            }
-        }
-        (target.clone(), target)
-    } else {
-        // DM target — require DID authentication
-        let requester_did = match conn.authenticated_did.as_deref() {
-            Some(did) => did.to_string(),
-            None => {
-                let reply = Message::from_server(
-                    server_name,
-                    "FAIL",
-                    vec![
-                        "CHATHISTORY",
-                        "ACCOUNT_REQUIRED",
-                        raw_target,
-                        "You must be authenticated to access DM history",
-                    ],
-                );
-                send(state, session_id, format!("{reply}\r\n"));
-                return;
-            }
-        };
-
-        // Resolve target to DID — accept DID directly or resolve nick
-        let target_did = if raw_target.starts_with("did:") {
-            raw_target.to_string()
-        } else {
-            match state
-                .nick_owners
-                .lock()
-                .get(&raw_target.to_lowercase())
-                .cloned()
-            {
-                Some(did) => did,
-                None => {
-                    let reply = Message::from_server(
-                        server_name,
-                        "FAIL",
-                        vec![
-                            "CHATHISTORY",
-                            "INVALID_TARGET",
-                            raw_target,
-                            "Unknown target",
-                        ],
-                    );
-                    send(state, session_id, format!("{reply}\r\n"));
-                    return;
-                }
-            }
-        };
-
-        let dm_key = crate::db::canonical_dm_key(&requester_did, &target_did);
-        (dm_key, raw_target.to_string())
+    let Some((db_key, target)) = resolve_history_target(
+        conn,
+        &msg.params[1],
+        "CHATHISTORY",
+        state,
+        server_name,
+        session_id,
+        send,
+    ) else {
+        return;
     };
 
     let has_tags = state.cap_message_tags.lock().contains(session_id);
     let has_time = state.cap_server_time.lock().contains(session_id);
     let has_batch = state.cap_batch.lock().contains(session_id);
+    let has_multiline = state.cap_draft_multiline.lock().contains(session_id);
 
     // Fetch messages from DB based on subcommand
     let messages: Vec<crate::db::MessageRow> = match subcmd.as_str() {
@@ -937,17 +1498,118 @@ pub(super) fn handle_chathistory(
         _ => vec![],
     };
 
+    replay_rows_as_batch(
+        messages,
+        &target,
+        "chathistory",
+        state,
+        server_name,
+        session_id,
+        send,
+        has_tags,
+        has_time,
+        has_batch,
+        has_multiline,
+    );
+}
+
+/// SEARCH <target> :<query> — full-text search over stored history.
+/// Authorization matches CHATHISTORY: channel search requires membership,
+/// DM search requires DID authentication. Results are replayed newest-last
+/// inside a `freeq.at/search` batch, capped at 25 messages.
+pub(super) fn handle_search(
+    conn: &Connection,
+    msg: &irc::Message,
+    state: &Arc<SharedState>,
+    server_name: &str,
+    session_id: &str,
+    send: &dyn Fn(&Arc<SharedState>, &str, String),
+) {
+    if msg.params.len() < 2 || msg.params[1].trim().is_empty() {
+        let reply = Message::from_server(
+            server_name,
+            "FAIL",
+            vec![
+                "SEARCH",
+                "NEED_MORE_PARAMS",
+                "Usage: SEARCH <target> :<query>",
+            ],
+        );
+        send(state, session_id, format!("{reply}\r\n"));
+        return;
+    }
+
+    let Some((db_key, target)) = resolve_history_target(
+        conn,
+        &msg.params[0],
+        "SEARCH",
+        state,
+        server_name,
+        session_id,
+        send,
+    ) else {
+        return;
+    };
+
+    let query = msg.params[1..].join(" ");
+    const SEARCH_LIMIT: usize = 25;
+    let mut messages: Vec<crate::db::MessageRow> = state
+        .with_db(|db| db.search_messages(&db_key, &query, SEARCH_LIMIT, None))
+        .unwrap_or_default();
+    // search_messages returns newest-first; replay oldest-first so the
+    // batch reads like CHATHISTORY output.
+    messages.reverse();
+
+    let has_tags = state.cap_message_tags.lock().contains(session_id);
+    let has_time = state.cap_server_time.lock().contains(session_id);
+    let has_batch = state.cap_batch.lock().contains(session_id);
+    let has_multiline = state.cap_draft_multiline.lock().contains(session_id);
+
+    replay_rows_as_batch(
+        messages,
+        &target,
+        "freeq.at/search",
+        state,
+        server_name,
+        session_id,
+        send,
+        has_tags,
+        has_time,
+        has_batch,
+        has_multiline,
+    );
+}
+
+/// Replay stored message rows to one session as an (optionally batched)
+/// sequence of PRIVMSGs, preserving msgid/account/reaction tags and
+/// multiline emission shapes. Shared by CHATHISTORY and SEARCH.
+#[allow(clippy::too_many_arguments)]
+fn replay_rows_as_batch(
+    messages: Vec<crate::db::MessageRow>,
+    target: &str,
+    batch_type: &str,
+    state: &Arc<SharedState>,
+    server_name: &str,
+    session_id: &str,
+    send: &dyn Fn(&Arc<SharedState>, &str, String),
+    has_tags: bool,
+    has_time: bool,
+    has_batch: bool,
+    has_multiline: bool,
+) {
+    let target = target.to_string();
+
     // Send as a batch (unique ID per request)
     let batch_id = format!("ch{}", crate::msgid::generate());
     if has_batch {
         send(
             state,
             session_id,
-            format!(":{server_name} BATCH +{batch_id} chathistory {target}\r\n"),
+            format!(":{server_name} BATCH +{batch_id} {batch_type} {target}\r\n"),
         );
     }
 
-    // Attach persisted reactions for this batch.
+    // Fetch reactions for all messages in this batch
     let msgids: Vec<&str> = messages.iter().filter_map(|r| r.msgid.as_deref()).collect();
     let reactions: std::collections::HashMap<String, Vec<crate::db::ReactionRow>> = state
         .with_db(|db| db.get_reactions_for_messages(&msgids))
@@ -963,15 +1625,29 @@ pub(super) fn handle_chathistory(
         if has_tags {
             if let Some(ref mid) = row.msgid {
                 tags.insert("msgid".to_string(), mid.clone());
-                if let Some(reaction_rows) = reactions.get(mid)
-                    && let Some(encoded) = crate::db::encode_reactions_tag(reaction_rows)
-                {
-                    tags.insert("+freeq.at/reactions".to_string(), encoded);
+                // Include reactions as +freeq.at/reactions tag
+                // Format: emoji1:nick1,nick2;emoji2:nick3
+                if let Some(reaction_rows) = reactions.get(mid) {
+                    let mut by_emoji: std::collections::HashMap<&str, Vec<&str>> =
+                        std::collections::HashMap::new();
+                    for r in reaction_rows {
+                        by_emoji.entry(&r.emoji).or_default().push(&r.reactor_nick);
+                    }
+                    let encoded: Vec<String> = by_emoji
+                        .iter()
+                        .map(|(emoji, nicks)| format!("{}:{}", emoji, nicks.join(",")))
+                        .collect();
+                    if !encoded.is_empty() {
+                        tags.insert("+freeq.at/reactions".to_string(), encoded.join(";"));
+                    }
                 }
             }
             if let Some(ref replaces) = row.replaces_msgid {
                 tags.entry("+draft/edit".to_string())
                     .or_insert_with(|| replaces.clone());
+            }
+            if let Some(ref did) = row.sender_did {
+                tags.insert("account".to_string(), did.clone());
             }
         }
         if has_time {
@@ -985,6 +1661,99 @@ pub(super) fn handle_chathistory(
             tags.insert("batch".to_string(), batch_id.clone());
         }
 
+        // If the stored body has internal newlines, the message
+        // originated as a multiline batch. Re-emitting it as one
+        // PRIVMSG would put `\n` on the wire, which terminates an
+        // IRC line — the receiver's parser would split mid-line and
+        // produce malformed input. Two emission shapes here, matching
+        // the live broadcast path:
+        //
+        // - Capable receivers (negotiated draft/multiline): emit a
+        //   nested `draft/multiline` BATCH inside the chathistory
+        //   BATCH. They see history rows grouped as logical messages,
+        //   the same way live broadcast presents them.
+        // - Fallback receivers (no draft/multiline cap): split at \n
+        //   and emit N tagged PRIVMSGs, msgid + client-only tags on
+        //   the first only (per spec § "Message ids" + § "Fallback").
+        let bodies: Vec<&str> = row.text.split('\n').collect();
+        let is_multiline = bodies.len() > 1;
+        if is_multiline && has_multiline && has_batch {
+            // Nested BATCH path: emit `BATCH +<ml_id> draft/multiline
+            // <target>` carrying the assembled-message tags (msgid,
+            // sig, account, reactions, etc.) + batch=<chathistory_id>
+            // for nesting, then per-chunk PRIVMSGs carrying only
+            // batch=<ml_id>, then `BATCH -<ml_id>` carrying
+            // batch=<chathistory_id>.
+            let ml_id = format!("ml{}", crate::msgid::generate());
+            let opener_msg = irc::Message {
+                tags: tags.clone(),
+                prefix: Some(row.sender.clone()),
+                command: "BATCH".to_string(),
+                params: vec![
+                    format!("+{ml_id}"),
+                    "draft/multiline".to_string(),
+                    target.clone(),
+                ],
+            };
+            send(state, session_id, format!("{opener_msg}\r\n"));
+            for body in &bodies {
+                let mut chunk_tags = std::collections::HashMap::new();
+                chunk_tags.insert("batch".to_string(), ml_id.clone());
+                let chunk_msg = irc::Message {
+                    tags: chunk_tags,
+                    prefix: Some(row.sender.clone()),
+                    command: "PRIVMSG".to_string(),
+                    params: vec![target.clone(), body.to_string()],
+                };
+                send(state, session_id, format!("{chunk_msg}\r\n"));
+            }
+            let mut closer_tags = std::collections::HashMap::new();
+            if let Some(b) = tags.get("batch") {
+                closer_tags.insert("batch".to_string(), b.clone());
+            }
+            let closer_msg = irc::Message {
+                tags: closer_tags,
+                prefix: None,
+                command: "BATCH".to_string(),
+                params: vec![format!("-{ml_id}")],
+            };
+            send(state, session_id, format!("{closer_msg}\r\n"));
+            continue;
+        }
+        if is_multiline {
+            // Fallback path: split at \n and emit N PRIVMSGs. msgid
+            // and every client-only tag ride on the first chunk;
+            // subsequent chunks carry only the chathistory batch tag
+            // so they stay grouped under the same history-replay
+            // unit.
+            for (i, body) in bodies.iter().enumerate() {
+                let chunk_tags = if i == 0 {
+                    tags.clone()
+                } else {
+                    let mut t = std::collections::HashMap::new();
+                    if let Some(b) = tags.get("batch") {
+                        t.insert("batch".to_string(), b.clone());
+                    }
+                    t
+                };
+                if !chunk_tags.is_empty() && has_tags {
+                    let tag_msg = irc::Message {
+                        tags: chunk_tags,
+                        prefix: Some(row.sender.clone()),
+                        command: "PRIVMSG".to_string(),
+                        params: vec![target.clone(), body.to_string()],
+                    };
+                    send(state, session_id, format!("{tag_msg}\r\n"));
+                } else {
+                    send(
+                        state,
+                        session_id,
+                        format!(":{} PRIVMSG {} :{}\r\n", row.sender, target, body),
+                    );
+                }
+            }
+            continue;
+        }
         if !tags.is_empty() && has_tags {
             let tag_msg = irc::Message {
                 tags,
@@ -1058,6 +1827,7 @@ fn handle_chathistory_targets(
 
     let has_batch = state.cap_batch.lock().contains(session_id);
     let has_time = state.cap_server_time.lock().contains(session_id);
+    let has_tags = state.cap_message_tags.lock().contains(session_id);
 
     let dm_conversations = state
         .with_db(|db| db.dm_conversations(requester_did, limit))
@@ -1093,13 +1863,11 @@ fn handle_chathistory_targets(
         });
 
         if let Some(partner) = partner_did {
-            // Resolve DID to current nick for display
-            let display_nick = state
-                .did_nicks
-                .lock()
-                .get(partner)
-                .cloned()
-                .unwrap_or_else(|| partner.to_string());
+            // Resolve DID → nick for display via the full chain
+            // (did_nicks → live session → identities table → message
+            // history → raw DID), so an offline agent with a persisted or
+            // previously-seen binding still shows a name, not the raw did:key.
+            let display_nick = state.display_nick_for_did(partner);
 
             let mut tags = std::collections::HashMap::new();
             if has_batch {
@@ -1111,6 +1879,14 @@ fn handle_chathistory_targets(
                     .format("%Y-%m-%dT%H:%M:%S.000Z")
                     .to_string();
                 tags.insert("time".to_string(), ts_str);
+            }
+            // The partner's stable identity, so clients can key the
+            // conversation by DID instead of re-deriving it from the display
+            // nick (ambiguous across renames/servers — the source of DM
+            // thread splits). Old clients ignore the tag; clients that never
+            // negotiated message-tags keep getting the untagged line.
+            if has_tags {
+                tags.insert("freeq.at/partner-did".to_string(), partner.to_string());
             }
 
             if !tags.is_empty() {
@@ -1144,6 +1920,14 @@ fn handle_chathistory_targets(
 
 /// Handle a PRIVMSG with +draft/edit=<msgid> tag.
 /// Verifies authorship, stores the edit, and broadcasts to channel or DM recipient.
+///
+/// `inbound_multiline_lines`: when the edit arrived as a draft/multiline
+/// BATCH, the sender's pre-chunked breakdown — used directly for outbound
+/// re-broadcast so the per-chunk shape (and `concat` flags) survive the
+/// hop. Critical for ciphertext-chunked E2EE edits: the receiver needs
+/// the same chunk boundaries to reassemble the AES-GCM blob byte-exact.
+/// When None, falls back to splitting `new_text` on `\n` (plaintext
+/// multi-line edits sent as a single PRIVMSG).
 fn handle_edit(
     conn: &Connection,
     target: &str,
@@ -1151,6 +1935,7 @@ fn handle_edit(
     original_msgid: &str,
     tags: &std::collections::HashMap<String, String>,
     state: &Arc<SharedState>,
+    inbound_multiline_lines: Option<&[super::draft_multiline::BatchLine]>,
 ) {
     let hostmask = conn.hostmask();
     let nick = conn.nick_or_star();
@@ -1262,15 +2047,53 @@ fn handle_edit(
         full_tags.insert("+freeq.at/sig".to_string(), sig);
     }
 
+    // Multi-line breakdown for BATCH-wrapped outbound. Two sources, in
+    // priority order:
+    //   1. Sender's pre-chunked BATCH (passed in as inbound_multiline_lines)
+    //      — covers ciphertext-chunked E2EE edits where the body has no
+    //      `\n` to split on but the wire frame still exceeds one PRIVMSG.
+    //      Preserves the sender's `concat` flags so receivers reassemble
+    //      the exact AES-GCM blob.
+    //   2. Plaintext fallback: `new_text` contains `\n` — split on it.
+    //      Covers multi-line edits that arrived as a single (malformed)
+    //      PRIVMSG with embedded `\n`, OR were assembled from a sender
+    //      BATCH but the per-chunk breakdown wasn't carried through.
+    let multiline_lines: Option<Vec<super::draft_multiline::BatchLine>> =
+        if let Some(lines) = inbound_multiline_lines {
+            Some(lines.to_vec())
+        } else if new_text.contains('\n') {
+            Some(
+                new_text
+                    .split('\n')
+                    .map(|body| super::draft_multiline::BatchLine {
+                        body: body.to_string(),
+                        concat_to_previous: false,
+                        command: "PRIVMSG".to_string(),
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+    let outbound_batch_id = multiline_lines
+        .as_ref()
+        .map(|_| format!("ml{}", crate::msgid::generate()));
+    // Fallback body: receivers without draft/multiline see only line1
+    // of a multi-line edit. Single-line edits use new_text verbatim.
+    let fallback_text: &str = multiline_lines
+        .as_ref()
+        .and_then(|lines| lines.first().map(|l| l.body.as_str()))
+        .unwrap_or(new_text);
+
     // Plain line for non-tag clients (they see it as a new message)
-    let plain_line = format!(":{hostmask} PRIVMSG {target} :{new_text}\r\n");
+    let plain_line = format!(":{hostmask} PRIVMSG {target} :{fallback_text}\r\n");
     // Tagged line with edit reference
     let tagged_line = {
         let tag_msg = irc::Message {
             tags: full_tags.clone(),
             prefix: Some(hostmask.clone()),
             command: "PRIVMSG".to_string(),
-            params: vec![target.to_string(), new_text.to_string()],
+            params: vec![target.to_string(), fallback_text.to_string()],
         };
         format!("{tag_msg}\r\n")
     };
@@ -1284,13 +2107,13 @@ fn handle_edit(
         .format("%Y-%m-%dT%H:%M:%S.000Z")
         .to_string();
     let mut full_tags_with_time = full_tags.clone();
-    full_tags_with_time.insert("time".to_string(), time_tag);
+    full_tags_with_time.insert("time".to_string(), time_tag.clone());
     let tagged_line_with_time = {
         let tag_msg = irc::Message {
             tags: full_tags_with_time,
             prefix: Some(hostmask.clone()),
             command: "PRIVMSG".to_string(),
-            params: vec![target.to_string(), new_text.to_string()],
+            params: vec![target.to_string(), fallback_text.to_string()],
         };
         format!("{tag_msg}\r\n")
     };
@@ -1362,12 +2185,44 @@ fn handle_edit(
         let tag_caps = state.cap_message_tags.lock();
         let time_caps = state.cap_server_time.lock();
         let echo_caps = state.cap_echo_message.lock();
+        let multiline_caps = state.cap_draft_multiline.lock();
         let conns = state.connections.lock();
         for sid in &members {
             if sid == &conn.id && !echo_caps.contains(sid) {
                 continue;
             }
             if let Some(tx) = conns.get(sid) {
+                // Multi-line edit + receiver negotiated draft/multiline →
+                // emit BATCH-wrapped edit (opener carries +draft/edit + msgid).
+                if let (Some(lines), Some(batch_id)) =
+                    (multiline_lines.as_deref(), outbound_batch_id.as_deref())
+                    && multiline_caps.contains(sid)
+                {
+                    let caps = super::draft_multiline::ReceiverCaps {
+                        has_tags: tag_caps.contains(sid),
+                        has_time: time_caps.contains(sid),
+                        has_multiline: true,
+                        wants_account: false,
+                        sender_did: None,
+                    };
+                    let ctx = super::draft_multiline::RelayContext {
+                        hostmask: &hostmask,
+                        command: "PRIVMSG",
+                        target,
+                        msgid: &edit_msgid,
+                        time_tag: &time_tag,
+                        opener_tags: &full_tags,
+                        batch_id,
+                        lines,
+                    };
+                    for frame in
+                        super::draft_multiline::build_outbound_multiline_frames(&ctx, &caps)
+                    {
+                        let _ = tx.try_send(frame);
+                    }
+                    continue;
+                }
+                // Fallback: single PRIVMSG (line1 only for multi-line edits).
                 let line = if tag_caps.contains(sid) {
                     if time_caps.contains(sid) {
                         &tagged_line_with_time
@@ -1384,16 +2239,35 @@ fn handle_edit(
         // Broadcast to S2S peers
         let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
         let sig = full_tags.get("+freeq.at/sig").cloned();
+        let (s2s_text, s2s_tags) = crate::s2s::encode_privmsg_text_for_s2s(
+            new_text,
+            crate::s2s::relay_coordination_tags(&full_tags),
+        );
         s2s_broadcast(
             state,
             crate::s2s::S2sMessage::Privmsg {
                 event_id: s2s_next_event_id(state),
                 from: nick.to_string(),
                 target: target.to_string(),
-                text: new_text.to_string(),
+                text: s2s_text,
                 origin,
                 msgid: Some(edit_msgid),
                 sig,
+                account: conn.authenticated_did.clone(),
+                recipient_did: super::routing::recipient_did_for_target(state, target),
+                tags: s2s_tags,
+                // Multi-line edit: pass the per-line breakdown so peer
+                // servers can re-emit BATCH frames to their own
+                // multiline-capable clients.
+                multiline_lines: multiline_lines.as_ref().map(|lines| {
+                    lines
+                        .iter()
+                        .map(|l| crate::s2s::MultilineLine {
+                            body: l.body.clone(),
+                            concat: l.concat_to_previous,
+                        })
+                        .collect()
+                }),
             },
         );
     } else {
@@ -1401,12 +2275,60 @@ fn handle_edit(
         use super::routing::{RouteResult, relay_to_nick};
         let from_nick = conn.nick.as_deref().unwrap_or("*").to_string();
 
+        // Per-session deliver helper: BATCH frames for multiline-capable
+        // receivers, fallback single-PRIVMSG (line1 only) otherwise.
+        let deliver_to_session = |tx: &tokio::sync::mpsc::Sender<String>, sid: &str| {
+            let has_tags = state.cap_message_tags.lock().contains(sid);
+            let has_time = state.cap_server_time.lock().contains(sid);
+            let has_multiline = state.cap_draft_multiline.lock().contains(sid);
+            if let (Some(lines), Some(batch_id)) =
+                (multiline_lines.as_deref(), outbound_batch_id.as_deref())
+                && has_multiline
+            {
+                let caps = super::draft_multiline::ReceiverCaps {
+                    has_tags,
+                    has_time,
+                    has_multiline: true,
+                    wants_account: false,
+                    sender_did: None,
+                };
+                let ctx = super::draft_multiline::RelayContext {
+                    hostmask: &hostmask,
+                    command: "PRIVMSG",
+                    target,
+                    msgid: &edit_msgid,
+                    time_tag: &time_tag,
+                    opener_tags: &full_tags,
+                    batch_id,
+                    lines,
+                };
+                for frame in super::draft_multiline::build_outbound_multiline_frames(&ctx, &caps) {
+                    let _ = tx.try_send(frame);
+                }
+                return;
+            }
+            let line = if has_tags {
+                if has_time {
+                    &tagged_line_with_time
+                } else {
+                    &tagged_line
+                }
+            } else {
+                &plain_line
+            };
+            let _ = tx.try_send(line.clone());
+        };
+
+        // Pass multiline_lines to the federated relay so peers see a
+        // multi-line edit and re-emit BATCH frames downstream.
         match relay_to_nick(
             state,
             &from_nick,
+            conn.authenticated_did.as_deref(),
             target,
             new_text,
             s2s_next_event_id(state),
+            multiline_lines.as_deref(),
         ) {
             RouteResult::Local(ref session) => {
                 // Find all sessions for target's DID (multi-device support)
@@ -1427,58 +2349,25 @@ fn handle_edit(
                 let conns = state.connections.lock();
                 // Deliver to all target sessions
                 for target_session in &target_sessions {
-                    let has_tags = state.cap_message_tags.lock().contains(target_session);
-                    let has_time = state.cap_server_time.lock().contains(target_session);
-                    let line = if has_tags {
-                        if has_time {
-                            &tagged_line_with_time
-                        } else {
-                            &tagged_line
-                        }
-                    } else {
-                        &plain_line
-                    };
                     if let Some(tx) = conns.get(target_session) {
-                        let _ = tx.try_send(line.clone());
+                        deliver_to_session(tx, target_session);
                     }
                 }
 
                 // Echo to sender if echo-message enabled
-                if state.cap_echo_message.lock().contains(&conn.id) {
-                    let has_tags = state.cap_message_tags.lock().contains(&conn.id);
-                    let has_time = state.cap_server_time.lock().contains(&conn.id);
-                    let line = if has_tags {
-                        if has_time {
-                            &tagged_line_with_time
-                        } else {
-                            &tagged_line
-                        }
-                    } else {
-                        &plain_line
-                    };
-                    if let Some(tx) = conns.get(&conn.id) {
-                        let _ = tx.try_send(line.clone());
-                    }
+                if state.cap_echo_message.lock().contains(&conn.id)
+                    && let Some(tx) = conns.get(&conn.id)
+                {
+                    deliver_to_session(tx, &conn.id);
                 }
             }
             RouteResult::Relayed => {
                 // Target is on a federated peer — edit was relayed
                 // Echo to sender
-                if state.cap_echo_message.lock().contains(&conn.id) {
-                    let has_tags = state.cap_message_tags.lock().contains(&conn.id);
-                    let has_time = state.cap_server_time.lock().contains(&conn.id);
-                    let line = if has_tags {
-                        if has_time {
-                            &tagged_line_with_time
-                        } else {
-                            &tagged_line
-                        }
-                    } else {
-                        &plain_line
-                    };
-                    if let Some(tx) = state.connections.lock().get(&conn.id) {
-                        let _ = tx.try_send(line.clone());
-                    }
+                if state.cap_echo_message.lock().contains(&conn.id)
+                    && let Some(tx) = state.connections.lock().get(&conn.id)
+                {
+                    deliver_to_session(tx, &conn.id);
                 }
             }
             RouteResult::Unreachable => {
@@ -1615,40 +2504,947 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
             }
         }
     } else {
-        // DM: deliver to target nick
-        // Note: We don't use relay_to_nick here since it sends PRIVMSG, but we need TAGMSG.
-        // For DMs, we handle delivery manually here.
-        if let Some(session) = state
-            .nick_to_session
-            .lock()
-            .get_session(target)
-            .map(|s| s.to_string())
-        {
-            // Find all sessions for target's DID (multi-device support)
-            let target_sessions: Vec<String> = {
-                let target_did = state.session_dids.lock().get(&session).cloned();
-                if let Some(ref did) = target_did {
-                    state
-                        .did_sessions
-                        .lock()
-                        .get(did)
-                        .map(|s| s.iter().cloned().collect())
-                        .unwrap_or_else(|| vec![session.clone()])
-                } else {
-                    vec![session.clone()]
-                }
-            };
-
-            let tag_caps = state.cap_message_tags.lock();
-            let conns = state.connections.lock();
-            for target_session in &target_sessions {
-                if tag_caps.contains(target_session) {
-                    if let Some(tx) = conns.get(target_session) {
-                        let _ = tx.try_send(tagged_line.clone());
-                    }
-                }
+        // DM: deliver the delete to every local session bound to the target
+        // (a nick or a `did:`), fanning out across the DID's devices.
+        // TAGMSG-specific, so we don't reuse relay_to_nick (it sends PRIVMSG).
+        let target_sessions = super::routing::local_sessions_for_target(state, target);
+        let tag_caps = state.cap_message_tags.lock();
+        let conns = state.connections.lock();
+        for target_session in &target_sessions {
+            if tag_caps.contains(target_session)
+                && let Some(tx) = conns.get(target_session)
+            {
+                let _ = tx.try_send(tagged_line.clone());
             }
         }
         // Note: For federated DM deletes, we'd need S2S support — not implemented yet
+    }
+}
+
+// ── AV session control ─────────────────────────────────────────────
+
+/// Send a line to a specific session.
+fn send_to(state: &Arc<SharedState>, session_id: &str, line: String) {
+    if let Some(tx) = state.connections.lock().get(session_id) {
+        let _ = tx.try_send(line);
+    }
+}
+
+/// Handle TAGMSG with +freeq.at/av-* tags (session lifecycle control).
+fn handle_av_tagmsg(
+    conn: &super::Connection,
+    target: &str,
+    tags: &std::collections::HashMap<String, String>,
+    av_tag: &str,
+    state: &Arc<SharedState>,
+) {
+    let nick = conn.nick_or_star().to_string();
+    // Use DID if authenticated, otherwise use nick as fallback identity
+    let did = conn
+        .authenticated_did
+        .clone()
+        .unwrap_or_else(|| format!("guest:{nick}"));
+
+    let session_id = tags.get("+freeq.at/av-id").cloned().unwrap_or_default();
+
+    match av_tag {
+        "+freeq.at/av-start" => {
+            let title = tags.get("+freeq.at/av-title").map(|s| s.as_str());
+            let instance_id = tags.get("+freeq.at/av-instance").map(String::as_str);
+            let channel = if target.starts_with('#') || target.starts_with('&') {
+                Some(target)
+            } else {
+                None
+            };
+
+            let mut mgr = state.av_sessions.lock();
+            match mgr.create_session(channel, &did, &nick, title, instance_id) {
+                Ok(session) => {
+                    let session_id = session.id.clone();
+                    let participant_count = mgr.active_participant_count(&session_id);
+
+                    // Persist to DB
+                    if let Some(s) = mgr.get(&session_id) {
+                        state.with_db(|db| db.save_av_session(s));
+                    }
+
+                    drop(mgr);
+
+                    // Record this instance against the IRC connection. Without
+                    // this, av-start-only clients (the iOS path doesn't send
+                    // a separate av-join after creating the session) leave
+                    // av_instances_per_conn empty, and the disconnect handler
+                    // falls into the legacy whole-DID cleanup which ends the
+                    // session on every minor reconnect blip.
+                    if let Some(inst) = instance_id {
+                        state
+                            .av_instances_per_conn
+                            .lock()
+                            .entry(conn.id.clone())
+                            .or_default()
+                            .insert(inst.to_string());
+                    }
+
+                    // Broadcast session start to channel
+                    let title_display = title.unwrap_or("voice session");
+                    broadcast_av_state(
+                        state,
+                        target,
+                        &session_id,
+                        "started",
+                        &nick,
+                        instance_id.unwrap_or(""),
+                        participant_count,
+                        title_display,
+                    );
+
+                    // Create iroh-live Room for native client P2P audio.
+                    // Browser clients use MoQ SFU; native clients join the Room directly.
+                    {
+                        let backend = state.av_media.lock().clone();
+                        let state2 = state.clone();
+                        let sid = session_id.clone();
+                        let conn_id = conn.id.clone();
+                        let nick2 = nick.clone();
+                        tokio::spawn(async move {
+                            if let Some(backend) = backend.as_ref() {
+                                match crate::av_media::MediaBackend::create_room(
+                                    backend.as_ref(),
+                                    &sid,
+                                )
+                                .await
+                                {
+                                    Ok(ticket) => {
+                                        // Store ticket in session
+                                        let mut mgr = state2.av_sessions.lock();
+                                        if let Some(s) = mgr.sessions.get_mut(&sid) {
+                                            s.iroh_ticket = Some(ticket.clone());
+                                        }
+                                        if let Some(s) = mgr.get(&sid) {
+                                            state2.with_db(|db| db.save_av_session(s));
+                                        }
+                                        drop(mgr);
+                                        // Send ticket to creator
+                                        let notice = Message::from_server(
+                                            &state2.server_name,
+                                            "NOTICE",
+                                            vec![&nick2, &format!("AV ticket: {ticket}")],
+                                        );
+                                        send_to(&state2, &conn_id, format!("{notice}\r\n"));
+
+                                        // Start the MoQ↔Room bridge
+                                        #[cfg(feature = "av-native")]
+                                        {
+                                            if let Some((room_handle, room_events)) =
+                                                backend.take_room_for_bridge(&sid)
+                                            {
+                                                let sfu = state2.sfu_state.lock().clone();
+                                                if let Some(sfu) = sfu {
+                                                    let bridge = crate::av_bridge::start_bridge(
+                                                        sid.clone(),
+                                                        sfu.cluster.clone(),
+                                                        sfu.auth.clone(),
+                                                        sfu.mint_session_token(&sid),
+                                                        room_handle,
+                                                        room_events,
+                                                    );
+                                                    // Store bridge handle to keep it alive
+                                                    state2
+                                                        .av_bridges
+                                                        .lock()
+                                                        .insert(sid.clone(), bridge);
+                                                    tracing::info!(session = %sid, "MoQ↔Room bridge started");
+                                                } else {
+                                                    tracing::warn!(session = %sid, "SFU not available — bridge not started");
+                                                }
+                                            }
+                                        }
+
+                                        tracing::info!(session = %sid, "iroh-live room created");
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(session = %sid, error = %e, "Failed to create iroh-live room");
+                                    }
+                                }
+                            }
+                        });
+                    }
+
+                    // Send session ID back to creator
+                    let notice = Message::from_server(
+                        &state.server_name,
+                        "NOTICE",
+                        vec![&nick, &format!("AV session started: {session_id}")],
+                    );
+                    send_to(state, &conn.id, format!("{notice}\r\n"));
+
+                    // MoQ access token for the creator (they dial the SFU next)
+                    send_av_token(state, &conn.id, &nick, &session_id);
+
+                    // Broadcast via S2S
+                    broadcast_av_s2s(
+                        state,
+                        "created",
+                        &session_id,
+                        channel,
+                        &did,
+                        &nick,
+                        title,
+                        None,
+                    );
+
+                    tracing::info!(session_id = %session_id, channel = ?channel, did = %did, "AV session created");
+                }
+                Err(e) => {
+                    let reply = Message::from_server(
+                        &state.server_name,
+                        "NOTICE",
+                        vec![&nick, &format!("Cannot start session: {e}")],
+                    );
+                    send_to(state, &conn.id, format!("{reply}\r\n"));
+                }
+            }
+        }
+
+        "+freeq.at/av-join" => {
+            if session_id.is_empty() {
+                // Try to join the channel's active session
+                let mgr = state.av_sessions.lock();
+                if let Some(s) = mgr.active_session_for_channel(target) {
+                    let id = s.id.clone();
+                    drop(mgr);
+                    // Re-call with the session ID
+                    let mut tags2 = tags.clone();
+                    tags2.insert("+freeq.at/av-id".to_string(), id);
+                    return handle_av_tagmsg(conn, target, &tags2, av_tag, state);
+                }
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "NOTICE",
+                    vec![&nick, "No active session in this channel"],
+                );
+                send_to(state, &conn.id, format!("{reply}\r\n"));
+                return;
+            }
+
+            // Per-device suffix: clients send a short random `av-instance`
+            // tag so two devices on the same DID get separate participant
+            // slots and distinct MoQ broadcast paths. Older clients omit
+            // it; the manager falls back to one-slot-per-DID for them.
+            let instance_id = tags.get("+freeq.at/av-instance").map(String::as_str);
+
+            tracing::info!(
+                session_id = %session_id,
+                did = %did,
+                nick = %nick,
+                conn_id = %conn.id,
+                instance_id = ?instance_id,
+                "av-join: handler entry"
+            );
+
+            // Record THIS connection's instance BEFORE building the live-set
+            // and reaping. The recording used to happen after join_session,
+            // which opened a race: a second client av-joining a few ms later
+            // built its live-set before we'd registered, didn't see us, and
+            // reaped our just-created slot (observed live: two agents joining
+            // ~5ms apart — the first vanished from the roster). Recording
+            // up-front closes that window.
+            if let Some(inst) = instance_id {
+                state
+                    .av_instances_per_conn
+                    .lock()
+                    .entry(conn.id.clone())
+                    .or_default()
+                    .insert(inst.to_string());
+            }
+
+            // Before joining: reap any orphan slots in this session whose
+            // owning IRC connection is gone. Live-set is built from the
+            // instances that current connections registered on their own
+            // av-join. Without this, a refreshed/crashed tab leaves a
+            // `left_at: None` ghost in the participants list and peers waste
+            // subscriptions on a broadcast nobody publishes.
+            let live: std::collections::HashSet<(String, Option<String>)> = {
+                let per_conn = state.av_instances_per_conn.lock();
+                let dids = state.session_dids.lock();
+                per_conn
+                    .iter()
+                    .flat_map(|(sid, instances)| {
+                        let did_for_sid = dids.get(sid).cloned();
+                        let did_for_sid = did_for_sid.unwrap_or_default();
+                        instances
+                            .iter()
+                            .map(move |inst| (did_for_sid.clone(), Some(inst.clone())))
+                    })
+                    // Always treat the joiner as live, even before we've
+                    // recorded their instance.
+                    .chain(std::iter::once((
+                        did.clone(),
+                        instance_id.map(|s| s.to_string()),
+                    )))
+                    .collect()
+            };
+
+            let mut mgr = state.av_sessions.lock();
+            mgr.reap_orphan_slots(&session_id, &live);
+            match mgr.join_session(&session_id, &did, &nick, instance_id) {
+                Ok(session) => {
+                    let participant_count = mgr.active_participant_count(&session_id);
+                    let channel = session.channel.clone();
+
+                    if let Some(s) = mgr.get(&session_id) {
+                        state.with_db(|db| db.save_av_session(s));
+                    }
+                    drop(mgr);
+
+                    // (Instance was recorded against this connection before
+                    // the reap above, to close the concurrent-join race.)
+
+                    // Send iroh-live RoomTicket to joiner (for native clients)
+                    if let Some(ticket) = &session.iroh_ticket {
+                        let ticket_notice = Message::from_server(
+                            &state.server_name,
+                            "NOTICE",
+                            vec![&nick, &format!("AV ticket: {ticket}")],
+                        );
+                        send_to(state, &conn.id, format!("{ticket_notice}\r\n"));
+                    }
+
+                    // MoQ access token for the joiner (they dial the SFU next)
+                    send_av_token(state, &conn.id, &nick, &session_id);
+
+                    // Ensure bridge is running for this session.
+                    // The bridge may have been cleaned up if the session creator disconnected
+                    // while other participants remained (session stayed active but bridge was orphaned).
+                    #[cfg(feature = "av-native")]
+                    {
+                        let has_bridge = state.av_bridges.lock().contains_key(&session_id);
+                        if !has_bridge {
+                            let backend = state.av_media.lock().clone();
+                            if let Some(backend) = backend.as_ref() {
+                                if let Some((room_handle, room_events)) =
+                                    backend.take_room_for_bridge(&session_id)
+                                {
+                                    let sfu = state.sfu_state.lock().clone();
+                                    if let Some(sfu) = sfu {
+                                        let bridge = crate::av_bridge::start_bridge(
+                                            session_id.clone(),
+                                            sfu.cluster.clone(),
+                                            sfu.auth.clone(),
+                                            sfu.mint_session_token(&session_id),
+                                            room_handle,
+                                            room_events,
+                                        );
+                                        state.av_bridges.lock().insert(session_id.clone(), bridge);
+                                        tracing::info!(session = %session_id, "MoQ↔Room bridge (re)started on join");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Broadcast updated state
+                    broadcast_av_state(
+                        state,
+                        target,
+                        &session_id,
+                        "joined",
+                        &nick,
+                        instance_id.unwrap_or(""),
+                        participant_count,
+                        "",
+                    );
+
+                    // S2S
+                    broadcast_av_s2s(
+                        state,
+                        "joined",
+                        &session_id,
+                        channel.as_deref(),
+                        &did,
+                        &nick,
+                        None,
+                        None,
+                    );
+
+                    tracing::info!(session_id = %session_id, did = %did, "AV session joined");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        did = %did,
+                        nick = %nick,
+                        instance_id = ?instance_id,
+                        error = %e,
+                        "av-join rejected by AvSessionManager"
+                    );
+                    let reply = Message::from_server(
+                        &state.server_name,
+                        "NOTICE",
+                        vec![&nick, &format!("Cannot join session: {e}")],
+                    );
+                    send_to(state, &conn.id, format!("{reply}\r\n"));
+                }
+            }
+        }
+
+        "+freeq.at/av-leave" => {
+            let instance_id = tags.get("+freeq.at/av-instance").map(String::as_str);
+            // Untrack this instance against the connection so the disconnect
+            // handler doesn't try to leave it a second time.
+            if let Some(inst) = instance_id
+                && let Some(set) = state.av_instances_per_conn.lock().get_mut(&conn.id)
+            {
+                set.remove(inst);
+            }
+            let mut mgr = state.av_sessions.lock();
+            match mgr.leave_session(&session_id, &did, instance_id) {
+                Ok((session, should_end)) => {
+                    let participant_count = if should_end {
+                        0
+                    } else {
+                        mgr.active_participant_count(&session_id)
+                    };
+                    let channel = session.channel.clone();
+
+                    if let Some(s) = mgr.get(&session_id) {
+                        state.with_db(|db| db.save_av_session(s));
+                    }
+                    drop(mgr);
+
+                    if should_end {
+                        broadcast_av_state(state, target, &session_id, "ended", &nick, "", 0, "");
+                        broadcast_av_s2s(
+                            state,
+                            "ended",
+                            &session_id,
+                            channel.as_deref(),
+                            &did,
+                            &nick,
+                            None,
+                            Some(&did),
+                        );
+                        // Close iroh-live room and bridge
+                        #[cfg(feature = "av-native")]
+                        {
+                            state.av_bridges.lock().remove(&session_id);
+                        }
+                        let backend = state.av_media.lock().clone();
+                        let sid = session_id.clone();
+                        tokio::spawn(async move {
+                            if let Some(backend) = backend.as_ref() {
+                                let _ = crate::av_media::MediaBackend::close_room(
+                                    backend.as_ref(),
+                                    &sid,
+                                )
+                                .await;
+                            }
+                        });
+                    } else {
+                        broadcast_av_state(
+                            state,
+                            target,
+                            &session_id,
+                            "left",
+                            &nick,
+                            instance_id.unwrap_or(""),
+                            participant_count,
+                            "",
+                        );
+                        broadcast_av_s2s(
+                            state,
+                            "left",
+                            &session_id,
+                            channel.as_deref(),
+                            &did,
+                            &nick,
+                            None,
+                            None,
+                        );
+                    }
+
+                    tracing::info!(session_id = %session_id, did = %did, ended = should_end, "AV session left");
+                }
+                Err(e) => {
+                    let reply = Message::from_server(
+                        &state.server_name,
+                        "NOTICE",
+                        vec![&nick, &format!("Cannot leave session: {e}")],
+                    );
+                    send_to(state, &conn.id, format!("{reply}\r\n"));
+                }
+            }
+        }
+
+        "+freeq.at/av-end" => {
+            let mgr = state.av_sessions.lock();
+            let can_end = mgr.can_end_session(&session_id, &did)
+                || state.server_opers.lock().contains(&conn.id);
+            // Also check if user is channel op
+            let is_chan_op = if target.starts_with('#') || target.starts_with('&') {
+                let channels = state.channels.lock();
+                channels
+                    .get(target)
+                    .map(|ch| ch.ops.contains(&conn.id) || ch.did_ops.contains(&did))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            drop(mgr);
+
+            if !can_end && !is_chan_op {
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "NOTICE",
+                    vec![
+                        &nick,
+                        "Only the session host or channel ops can end a session",
+                    ],
+                );
+                send_to(state, &conn.id, format!("{reply}\r\n"));
+                return;
+            }
+
+            let mut mgr = state.av_sessions.lock();
+            match mgr.end_session(&session_id, Some(&did)) {
+                Ok(session) => {
+                    let channel = session.channel.clone();
+                    state.with_db(|db| db.save_av_session(&session));
+                    drop(mgr);
+
+                    broadcast_av_state(state, target, &session_id, "ended", &nick, "", 0, "");
+                    broadcast_av_s2s(
+                        state,
+                        "ended",
+                        &session_id,
+                        channel.as_deref(),
+                        &did,
+                        &nick,
+                        None,
+                        Some(&did),
+                    );
+
+                    // Close iroh-live room and bridge
+                    {
+                        #[cfg(feature = "av-native")]
+                        {
+                            state.av_bridges.lock().remove(&session_id);
+                        }
+                        let backend = state.av_media.lock().clone();
+                        let sid = session_id.clone();
+                        tokio::spawn(async move {
+                            if let Some(backend) = backend.as_ref()
+                                && let Err(e) = crate::av_media::MediaBackend::close_room(
+                                    backend.as_ref(),
+                                    &sid,
+                                )
+                                .await
+                            {
+                                tracing::warn!(session = %sid, error = %e, "Failed to close iroh-live room");
+                            }
+                        });
+                    }
+
+                    tracing::info!(session_id = %session_id, did = %did, "AV session ended");
+                }
+                Err(e) => {
+                    drop(mgr);
+                    let reply = Message::from_server(
+                        &state.server_name,
+                        "NOTICE",
+                        vec![&nick, &format!("Cannot end session: {e}")],
+                    );
+                    send_to(state, &conn.id, format!("{reply}\r\n"));
+                }
+            }
+        }
+
+        _ => {
+            tracing::debug!(tag = %av_tag, "Unknown AV tag — ignored");
+        }
+    }
+}
+
+/// Broadcast a plain NOTICE to all channel members (used for AV session events from S2S).
+pub fn broadcast_av_notice(state: &Arc<SharedState>, channel: &str, text: &str) {
+    let notice = Message::from_server(&state.server_name, "NOTICE", vec![channel, text]);
+    let line = format!("{notice}\r\n");
+    let members: Vec<String> = state
+        .channels
+        .lock()
+        .get(channel)
+        .map(|ch| ch.members.iter().cloned().collect())
+        .unwrap_or_default();
+    let conns = state.connections.lock();
+    for member in &members {
+        if let Some(tx) = conns.get(member) {
+            let _ = tx.try_send(line.clone());
+        }
+    }
+}
+
+/// Broadcast AV session state to all channel members via TAGMSG (public for disconnect cleanup).
+#[allow(clippy::too_many_arguments)]
+pub fn broadcast_av_state_pub(
+    state: &Arc<SharedState>,
+    target: &str,
+    session_id: &str,
+    action: &str,
+    actor_nick: &str,
+    actor_instance: &str,
+    participant_count: usize,
+    title: &str,
+) {
+    broadcast_av_state(
+        state,
+        target,
+        session_id,
+        action,
+        actor_nick,
+        actor_instance,
+        participant_count,
+        title,
+    );
+}
+
+/// Send the joiner their MoQ access token for a session as a directed
+/// TAGMSG (`+freeq.at/av-token` + `+freeq.at/av-id`). Clients append it to
+/// the SFU dial URL as `?jwt=…`; the same token is available via
+/// `GET /api/v1/av/sessions/{id}/token`. JWTs are base64url+dots so the
+/// value needs no IRC tag-escaping.
+#[cfg(feature = "av-native")]
+fn send_av_token(state: &Arc<SharedState>, conn_id: &str, nick: &str, session_id: &str) {
+    let sfu = state.sfu_state.lock().clone();
+    let Some(token) = sfu.and_then(|sfu| sfu.mint_session_token(session_id)) else {
+        return;
+    };
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("+freeq.at/av-token".to_string(), token);
+    tags.insert("+freeq.at/av-id".to_string(), session_id.to_string());
+    let tag_msg = super::super::irc::Message {
+        tags,
+        prefix: Some(state.server_name.clone()),
+        command: "TAGMSG".to_string(),
+        params: vec![nick.to_string()],
+    };
+    send_to(state, conn_id, format!("{tag_msg}\r\n"));
+}
+
+#[cfg(not(feature = "av-native"))]
+fn send_av_token(_state: &Arc<SharedState>, _conn_id: &str, _nick: &str, _session_id: &str) {}
+
+/// Build the message tags for an AV state TAGMSG (everything but the
+/// nondeterministic `time` tag). Pure + unit-testable.
+///
+/// `actor_instance` is the actor's per-device instance. It's the stable
+/// identity clients key presence on: `av-actor` (nick) can differ between the
+/// media path and this signal for multi-nick accounts, but the instance
+/// matches the media broadcast path `{session}/{nick}~{instance}`, so a `left`
+/// here reliably clears the right tile. Empty for legacy clients (tag omitted).
+fn av_state_tag_map(
+    action: &str,
+    session_id: &str,
+    actor_nick: &str,
+    actor_instance: &str,
+    participant_count: usize,
+    title: &str,
+) -> std::collections::HashMap<String, String> {
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("+freeq.at/av-state".to_string(), action.to_string());
+    tags.insert("+freeq.at/av-id".to_string(), session_id.to_string());
+    tags.insert(
+        "+freeq.at/av-participants".to_string(),
+        participant_count.to_string(),
+    );
+    tags.insert("+freeq.at/av-actor".to_string(), actor_nick.to_string());
+    if !actor_instance.is_empty() {
+        tags.insert(
+            "+freeq.at/av-instance".to_string(),
+            actor_instance.to_string(),
+        );
+    }
+    if !title.is_empty() {
+        tags.insert("+freeq.at/av-title".to_string(), title.to_string());
+    }
+    tags
+}
+
+/// Broadcast AV session state to all channel members via TAGMSG.
+#[allow(clippy::too_many_arguments)]
+fn broadcast_av_state(
+    state: &Arc<SharedState>,
+    target: &str,
+    session_id: &str,
+    action: &str,
+    actor_nick: &str,
+    actor_instance: &str,
+    participant_count: usize,
+    title: &str,
+) {
+    let mut tags = av_state_tag_map(
+        action,
+        session_id,
+        actor_nick,
+        actor_instance,
+        participant_count,
+        title,
+    );
+    let time_tag = chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S.000Z")
+        .to_string();
+    tags.insert("time".to_string(), time_tag);
+
+    let tag_msg = super::super::irc::Message {
+        tags,
+        prefix: Some(state.server_name.clone()),
+        command: "TAGMSG".to_string(),
+        params: vec![target.to_string()],
+    };
+    let line = format!("{tag_msg}\r\n");
+
+    // Also send a human-readable NOTICE for clients that don't parse tags
+    let notice_text = match action {
+        "started" => format!(
+            "{actor_nick} started a voice session{}",
+            if title.is_empty() {
+                String::new()
+            } else {
+                format!(": {title}")
+            }
+        ),
+        "joined" => {
+            format!("{actor_nick} joined the voice session ({participant_count} participants)")
+        }
+        "left" => format!("{actor_nick} left the voice session ({participant_count} participants)"),
+        "ended" => format!("{actor_nick} ended the voice session"),
+        _ => return,
+    };
+    let notice = Message::from_server(&state.server_name, "NOTICE", vec![target, &notice_text]);
+    let notice_line = format!("{notice}\r\n");
+
+    // Broadcast to channel members
+    if target.starts_with('#') || target.starts_with('&') {
+        let members: Vec<String> = state
+            .channels
+            .lock()
+            .get(target)
+            .map(|ch| ch.members.iter().cloned().collect())
+            .unwrap_or_default();
+
+        let tag_caps = state.cap_message_tags.lock();
+        let conns = state.connections.lock();
+        for member in &members {
+            if let Some(tx) = conns.get(member) {
+                if tag_caps.contains(member) {
+                    let _ = tx.try_send(line.clone());
+                } else {
+                    let _ = tx.try_send(notice_line.clone());
+                }
+            }
+        }
+    }
+}
+
+/// Broadcast AV session event via S2S federation.
+fn broadcast_av_s2s(
+    state: &Arc<SharedState>,
+    action: &str,
+    session_id: &str,
+    channel: Option<&str>,
+    did: &str,
+    nick: &str,
+    title: Option<&str>,
+    ended_by: Option<&str>,
+) {
+    let s2s = state.s2s_manager.lock();
+    let Some(ref mgr) = *s2s else { return };
+
+    let event_id = mgr.next_event_id();
+    let origin = mgr.server_id.clone();
+
+    let msg = match action {
+        "created" => crate::s2s::S2sMessage::AvSessionCreated {
+            event_id,
+            session_id: session_id.to_string(),
+            channel: channel.unwrap_or("").to_string(),
+            created_by_did: did.to_string(),
+            created_by_nick: nick.to_string(),
+            title: title.map(|s| s.to_string()),
+            iroh_ticket: None, // TODO: add when iroh-live is integrated
+            origin,
+        },
+        "joined" => crate::s2s::S2sMessage::AvSessionJoined {
+            event_id,
+            session_id: session_id.to_string(),
+            did: did.to_string(),
+            nick: nick.to_string(),
+            origin,
+        },
+        "left" => crate::s2s::S2sMessage::AvSessionLeft {
+            event_id,
+            session_id: session_id.to_string(),
+            did: did.to_string(),
+            origin,
+        },
+        "ended" => crate::s2s::S2sMessage::AvSessionEnded {
+            event_id,
+            session_id: session_id.to_string(),
+            ended_by: ended_by.map(|s| s.to_string()),
+            origin,
+        },
+        _ => return,
+    };
+
+    mgr.broadcast(msg);
+}
+
+#[cfg(test)]
+mod av_dispatch_tests {
+    //! State matrix cell #16: multiple av-* tags on one TAGMSG must
+    //! dispatch on the *action* tag, not whichever parameter tag HashMap
+    //! iteration happens to return first. Pre-fix (commit 8b13ccd) the
+    //! code did `tags.keys().find(|k| k.starts_with("+freeq.at/av-"))`,
+    //! which was non-deterministic. Now we have an explicit AV_ACTIONS
+    //! list and dispatch on the first matching action tag. This test
+    //! pins the order so a future "be helpful and reorder" refactor
+    //! doesn't accidentally re-introduce the bug.
+    use std::collections::HashMap;
+
+    /// Mirrors the dispatch order in `process_tagmsg`. Keep in sync.
+    const AV_ACTIONS: &[&str] = &[
+        "+freeq.at/av-start",
+        "+freeq.at/av-join",
+        "+freeq.at/av-leave",
+        "+freeq.at/av-end",
+    ];
+
+    fn dispatch(tags: &HashMap<String, String>) -> Option<&'static &'static str> {
+        AV_ACTIONS.iter().find(|tag| tags.contains_key(**tag))
+    }
+
+    #[test]
+    fn av_join_with_id_and_instance_dispatches_to_join() {
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/av-join".into(), String::new());
+        tags.insert("+freeq.at/av-id".into(), "sess-1".into());
+        tags.insert("+freeq.at/av-instance".into(), "abcd1234".into());
+        assert_eq!(dispatch(&tags), Some(&"+freeq.at/av-join"));
+    }
+
+    #[test]
+    fn av_start_with_title_and_instance_dispatches_to_start() {
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/av-start".into(), String::new());
+        tags.insert("+freeq.at/av-title".into(), "standup".into());
+        tags.insert("+freeq.at/av-instance".into(), "abcd1234".into());
+        assert_eq!(dispatch(&tags), Some(&"+freeq.at/av-start"));
+    }
+
+    #[test]
+    fn av_leave_with_id_dispatches_to_leave() {
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/av-leave".into(), String::new());
+        tags.insert("+freeq.at/av-id".into(), "sess-1".into());
+        assert_eq!(dispatch(&tags), Some(&"+freeq.at/av-leave"));
+    }
+
+    #[test]
+    fn av_id_alone_with_no_action_does_not_dispatch() {
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/av-id".into(), "sess-1".into());
+        tags.insert("+freeq.at/av-instance".into(), "abcd1234".into());
+        assert_eq!(
+            dispatch(&tags),
+            None,
+            "parameter-only TAGMSG must not be treated as an action"
+        );
+    }
+
+    #[test]
+    fn av_signal_is_not_an_action() {
+        // av-signal is a relay tag (WebRTC payload) — must NOT be
+        // consumed as an action.
+        let mut tags: HashMap<String, String> = HashMap::new();
+        tags.insert("+freeq.at/av-signal".into(), "payload".into());
+        assert_eq!(dispatch(&tags), None);
+    }
+
+    #[test]
+    fn priority_order_start_then_join_then_leave_then_end() {
+        // The order matters: if a (malformed) message had multiple action
+        // tags, we must dispatch deterministically. Tests pin the order.
+        let mut both = HashMap::new();
+        both.insert("+freeq.at/av-start".into(), String::new());
+        both.insert("+freeq.at/av-join".into(), String::new());
+        assert_eq!(
+            dispatch(&both),
+            Some(&"+freeq.at/av-start"),
+            "av-start wins over av-join when both are present"
+        );
+
+        let mut both = HashMap::new();
+        both.insert("+freeq.at/av-join".into(), String::new());
+        both.insert("+freeq.at/av-leave".into(), String::new());
+        assert_eq!(dispatch(&both), Some(&"+freeq.at/av-join"));
+
+        let mut both = HashMap::new();
+        both.insert("+freeq.at/av-leave".into(), String::new());
+        both.insert("+freeq.at/av-end".into(), String::new());
+        assert_eq!(dispatch(&both), Some(&"+freeq.at/av-leave"));
+    }
+}
+
+#[cfg(test)]
+mod av_state_tag_tests {
+    //! Presence signals must carry the actor's per-device `instance` so
+    //! clients key teardown on the stable id (matches the media path
+    //! `{session}/{nick}~{instance}`), not the nick — which can differ
+    //! between the media path and this signal for multi-nick accounts and
+    //! leave a ghost tile on disconnect.
+    use super::av_state_tag_map;
+
+    #[test]
+    fn left_signal_carries_actor_instance() {
+        let tags = av_state_tag_map("left", "sess-1", "chadfowler.com", "devABCD", 1, "");
+        assert_eq!(
+            tags.get("+freeq.at/av-instance").map(String::as_str),
+            Some("devABCD"),
+            "a `left` must name the exact device that dropped"
+        );
+        assert_eq!(
+            tags.get("+freeq.at/av-actor").map(String::as_str),
+            Some("chadfowler.com")
+        );
+        assert_eq!(tags.get("+freeq.at/av-state").map(String::as_str), Some("left"));
+    }
+
+    #[test]
+    fn joined_and_started_carry_instance() {
+        for action in ["joined", "started"] {
+            let tags = av_state_tag_map(action, "s", "nick", "inst9", 2, "");
+            assert_eq!(
+                tags.get("+freeq.at/av-instance").map(String::as_str),
+                Some("inst9"),
+                "{action} must carry the instance"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_empty_instance_omits_the_tag() {
+        // Older clients don't send an instance; the tag must be absent (not
+        // an empty string) so receivers cleanly fall back to nick matching.
+        let tags = av_state_tag_map("left", "s", "nick", "", 0, "");
+        assert!(
+            !tags.contains_key("+freeq.at/av-instance"),
+            "empty instance must omit the tag entirely"
+        );
+    }
+
+    #[test]
+    fn instance_does_not_leak_into_unrelated_tags() {
+        let tags = av_state_tag_map("started", "s", "nick", "inst9", 1, "standup");
+        assert_eq!(tags.get("+freeq.at/av-title").map(String::as_str), Some("standup"));
+        assert_eq!(tags.get("+freeq.at/av-participants").map(String::as_str), Some("1"));
     }
 }

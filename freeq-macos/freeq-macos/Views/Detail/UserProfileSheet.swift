@@ -6,11 +6,17 @@ struct UserProfileSheet: View {
     @Environment(\.dismiss) private var dismiss
     let nick: String
 
+    @State private var reportTarget: ReportTarget?
+    @State private var showProof = false
+
     private var profile: ProfileCache.Profile? {
         ProfileCache.shared.profile(for: nick)
     }
     private var did: String? {
         ProfileCache.shared.did(for: nick)
+    }
+    private var isSelf: Bool {
+        nick.lowercased() == appState.nick.lowercased()
     }
 
     var body: some View {
@@ -28,120 +34,174 @@ struct UserProfileSheet: View {
             .padding(.trailing, 12)
             .padding(.top, 8)
 
-            // Avatar
-            AvatarView(nick: nick, size: 72)
-                .padding(.top, 4)
+            // Scrollable body — content length varies (bio length, shared-channel
+            // count), so it must scroll rather than clip the pinned action buttons.
+            ScrollView {
+                VStack(spacing: 0) {
+                    // Avatar
+                    AvatarView(nick: nick, size: 72)
+                        .padding(.top, 4)
 
-            // Name
-            if let displayName = profile?.displayName, !displayName.isEmpty {
-                Text(displayName)
-                    .font(.title2.weight(.bold))
-                    .padding(.top, 8)
-                Text("@\(profile?.handle ?? nick)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(nick)
-                    .font(.title2.weight(.bold))
-                    .padding(.top, 8)
-            }
+                    // Name
+                    if let displayName = profile?.displayName, !displayName.isEmpty {
+                        Text(displayName)
+                            .font(.title2.weight(.bold))
+                            .padding(.top, 8)
+                        Text("@\(profile?.handle ?? nick)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(nick)
+                            .font(.title2.weight(.bold))
+                            .padding(.top, 8)
+                    }
 
-            // DID
-            if let did {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.caption)
-                        .foregroundStyle(.blue)
-                    Text(did)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .padding(.top, 4)
-                .textSelection(.enabled)
-            }
-
-            // Bio
-            if let bio = profile?.description, !bio.isEmpty {
-                Text(bio)
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 24)
-                    .padding(.top, 8)
-            }
-
-            // Stats
-            if let p = profile {
-                HStack(spacing: 24) {
-                    StatItem(label: "Posts", value: p.postsCount ?? 0)
-                    StatItem(label: "Followers", value: p.followersCount ?? 0)
-                    StatItem(label: "Following", value: p.followsCount ?? 0)
-                }
-                .padding(.top, 12)
-            }
-
-            Divider().padding(.vertical, 12)
-
-            // Shared channels
-            let sharedChannels = appState.channels.filter { ch in
-                ch.members.contains(where: { $0.nick.lowercased() == nick.lowercased() })
-            }
-            if !sharedChannels.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Shared Channels")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 24)
-                    ForEach(sharedChannels) { ch in
-                        Button {
-                            appState.activeChannel = ch.name
-                            dismiss()
-                        } label: {
-                            HStack {
-                                Image(systemName: "number")
+                    // DID — click for the identity/signing-key proof card
+                    if let did {
+                        Button { showProof = true } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.seal.fill")
                                     .font(.caption)
+                                    .foregroundStyle(.blue)
+                                Text(did)
+                                    .font(.caption2.monospaced())
                                     .foregroundStyle(.secondary)
-                                Text(ch.name.replacingOccurrences(of: "#", with: ""))
-                                    .font(.body)
-                                Spacer()
-                                Text("\(ch.members.count)")
-                                    .font(.caption)
-                                    .foregroundStyle(.tertiary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
                             }
-                            .padding(.horizontal, 24)
-                            .padding(.vertical, 4)
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
+                        .padding(.top, 4)
+                        .help("Verified via the AT Protocol — click for proof")
+                    }
+
+                    // Bio
+                    if let bio = profile?.description, !bio.isEmpty {
+                        Text(bio)
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                            .padding(.top, 8)
+                    }
+
+                    // Stats
+                    if let p = profile {
+                        HStack(spacing: 24) {
+                            StatItem(label: "Posts", value: p.postsCount ?? 0)
+                            StatItem(label: "Followers", value: p.followersCount ?? 0)
+                            StatItem(label: "Following", value: p.followsCount ?? 0)
+                        }
+                        .padding(.top, 12)
+                    }
+
+                    Divider().padding(.vertical, 12)
+
+                    // Shared channels
+                    let sharedChannels = appState.channels.filter { ch in
+                        ch.members.contains(where: { $0.nick.lowercased() == nick.lowercased() })
+                    }
+                    if !sharedChannels.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Shared Channels")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 24)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            ForEach(sharedChannels) { ch in
+                                Button {
+                                    appState.activeChannel = ch.name
+                                    dismiss()
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "number")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                        Text(ch.name.replacingOccurrences(of: "#", with: ""))
+                                            .font(.body)
+                                        Spacer()
+                                        Text("\(ch.members.count)")
+                                            .font(.caption)
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.vertical, 4)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
                 }
             }
 
-            Spacer()
+            // Actions — pinned below the scroll area so they never clip.
+            VStack(spacing: 8) {
+                HStack(spacing: 12) {
+                    Button("Send Message") {
+                        appState.openDM(with: nick)
+                        dismiss()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
 
-            // Actions
-            HStack(spacing: 12) {
-                Button("Send Message") {
-                    let dm = appState.getOrCreateDM(nick)
-                    appState.activeChannel = dm.name
-                    dismiss()
+                    if let handle = profile?.handle ?? did.map({ _ in nick }),
+                       let blueSkyURL = Validation.makeBlueSkyProfileURL(handle: handle) {
+                        Link("View on Bluesky", destination: blueSkyURL)
+                            .font(.body)
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.regular)
 
-                if let handle = profile?.handle ?? did.map({ _ in nick }) {
-                    Link("View on Bluesky", destination: URL(string: "https://bsky.app/profile/\(handle)")!)
-                        .font(.body)
+                // Safety
+                if !isSelf {
+                    HStack(spacing: 16) {
+                        if appState.isBlocked(nick: nick, did: did) {
+                            Button("Unblock") {
+                                appState.unblockUser(nick: nick, did: did)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Theme.accent)
+                        } else {
+                            Button("Report…") {
+                                reportTarget = ReportTarget(nick: nick, did: did)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                            Button("Block") {
+                                appState.blockUser(nick: nick, did: did)
+                                dismiss()
+                            }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                            .foregroundStyle(Theme.danger)
+                        }
+                    }
                 }
             }
+            .padding(.top, 12)
             .padding(.bottom, 16)
         }
         .frame(width: 340, height: 480)
+        .reportDialog($reportTarget) { t, reason in
+            appState.reportUser(nick: t.nick, did: t.did, reason: reason)
+            dismiss()
+        }
+        .sheet(isPresented: $showProof) {
+            VerifiedProofSheet(
+                did: did,
+                handle: profile?.handle,
+                displayName: profile?.displayName,
+                nick: nick
+            )
+            .environment(appState)
+        }
         .onAppear {
-            // Trigger WHOIS if we don't have DID
-            if did == nil { appState.sendWhois(nick) }
+            // Background hydration to discover the DID — display:false so it
+            // doesn't print the raw WHOIS into the conversation.
+            if did == nil { appState.sendWhois(nick, display: false) }
             // Fetch profile if we have DID
             if let did, profile == nil {
                 ProfileCache.shared.fetchProfile(nick: nick, did: did)

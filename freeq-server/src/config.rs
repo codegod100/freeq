@@ -4,8 +4,9 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(name = "freeq-server", version, about)]
 pub struct ServerConfig {
-    /// Plain TCP listener address.
-    #[arg(long, default_value = "127.0.0.1:6667")]
+    /// Plain TCP listener address. (`--bind` kept as an alias — older docs
+    /// and docker-compose files used it.)
+    #[arg(long, alias = "bind", default_value = "127.0.0.1:6667")]
     pub listen_addr: String,
 
     /// TLS listener address. Only active if --tls-cert and --tls-key are set.
@@ -47,7 +48,9 @@ pub struct ServerConfig {
     pub iroh_port: Option<u16>,
 
     /// S2S peer iroh endpoint IDs to connect to on startup.
-    /// Comma-separated list of hex endpoint IDs.
+    /// Comma-separated. Each entry is `<endpoint-id>` (resolved via discovery)
+    /// or `<endpoint-id>@<host:port>` to dial a direct address, bypassing
+    /// discovery (LAN/static deployments, and the federation test harness).
     #[arg(long, value_delimiter = ',')]
     pub s2s_peers: Vec<String>,
 
@@ -73,6 +76,14 @@ pub struct ServerConfig {
     /// Defaults to the directory containing --db-path, or current directory.
     #[arg(long)]
     pub data_dir: Option<String>,
+
+    /// TEST/DEV ONLY: resolve these DIDs from a static in-memory map instead of
+    /// the network. Comma-separated `did=<publicKeyMultibase>` entries. When set,
+    /// the server uses a static DID resolver (no HTTP/PLC lookups). Used by the
+    /// federation test harness to authenticate test identities offline. Empty in
+    /// production — leave unset to use the real network resolver.
+    #[arg(long, value_delimiter = ',')]
+    pub did_resolver_static: Vec<String>,
 
     /// Maximum messages to retain per channel in the database.
     /// When exceeded, oldest messages are pruned. 0 = unlimited.
@@ -136,6 +147,63 @@ pub struct ServerConfig {
     /// Comma-separated list.
     #[arg(long, value_delimiter = ',', env = "OPER_DIDS")]
     pub oper_dids: Vec<String>,
+
+    /// Connect-time allowlist (opt-in; for a company running its OWN instance).
+    /// If non-empty, ONLY these DIDs may authenticate. Empty = open (anyone with
+    /// a valid AT identity), the default for a public instance.
+    #[arg(long, value_delimiter = ',', env = "FREEQ_ALLOWED_DIDS")]
+    pub allowed_dids: Vec<String>,
+
+    /// Connect-time allowlist by handle domain (opt-in). If non-empty, only DIDs
+    /// whose handle ends in one of these domains (e.g. `acme.com`) may
+    /// authenticate. Empty = no domain restriction.
+    #[arg(long, value_delimiter = ',', env = "FREEQ_ALLOWED_DID_DOMAINS")]
+    pub allowed_did_domains: Vec<String>,
+
+    /// Refuse guest (unauthenticated) connections entirely. Default: guests
+    /// allowed. A company instance can set this to require AT identity.
+    #[arg(long, env = "FREEQ_NO_GUEST", default_value_t = false)]
+    pub no_guest: bool,
+
+    /// Periodically re-verify connected users' DIDs and disconnect any whose DID
+    /// document no longer contains a valid authentication key (offboarding /
+    /// key removal). Value is the interval in minutes; 0 = disabled (default).
+    /// SAFE by design: never disconnects on a resolution error (network/outage),
+    /// only on a DID that resolves successfully but is de-keyed.
+    #[arg(long, env = "FREEQ_REVERIFY_IDENTITY_MINS", default_value_t = 0)]
+    pub reverify_identity_mins: u64,
+
+    /// Delete stored messages older than this many days (compliance retention).
+    /// 0 = disabled (default) — keep everything up to the per-channel count cap.
+    #[arg(long, env = "FREEQ_MESSAGE_RETENTION_DAYS", default_value_t = 0)]
+    pub message_retention_days: u64,
+
+    // ── Agent Assistance Interface: LLM provider ───────────────────
+    /// LLM provider for the `POST /agent/session` free-form router.
+    /// `openai` = any OpenAI-compatible /chat/completions endpoint
+    /// (covers OpenAI itself, Together, Fireworks, Groq, vLLM,
+    /// llama.cpp server, Ollama with /v1, TGI, LMDeploy, etc).
+    /// `none` (or unset) = endpoint returns LLM_NOT_CONFIGURED.
+    #[arg(long, env = "FREEQ_LLM_PROVIDER")]
+    pub llm_provider: Option<String>,
+
+    /// Base URL for the OpenAI-compatible endpoint, e.g.
+    /// `https://api.openai.com/v1` or `http://127.0.0.1:11434/v1`.
+    #[arg(long, env = "FREEQ_LLM_BASE_URL")]
+    pub llm_base_url: Option<String>,
+
+    /// API key for the LLM provider (sent as `Authorization: Bearer`).
+    /// Many local OSS servers ignore this field.
+    #[arg(long, env = "FREEQ_LLM_API_KEY")]
+    pub llm_api_key: Option<String>,
+
+    /// Model name passed verbatim to the provider.
+    #[arg(long, env = "FREEQ_LLM_MODEL")]
+    pub llm_model: Option<String>,
+
+    /// Hard ceiling on each LLM HTTP call, in seconds. Default 8.
+    #[arg(long, env = "FREEQ_LLM_TIMEOUT_SECS", default_value = "8")]
+    pub llm_timeout_secs: u64,
 }
 
 impl Default for ServerConfig {
@@ -156,6 +224,7 @@ impl Default for ServerConfig {
             s2s_peer_trust: vec![],
             server_did: None,
             data_dir: None,
+            did_resolver_static: vec![],
             max_messages_per_channel: 10000,
             motd: None,
             motd_file: None,
@@ -168,6 +237,16 @@ impl Default for ServerConfig {
             broker_shared_secret: None,
             oper_password: None,
             oper_dids: vec![],
+            allowed_dids: vec![],
+            allowed_did_domains: vec![],
+            no_guest: false,
+            reverify_identity_mins: 0,
+            message_retention_days: 0,
+            llm_provider: None,
+            llm_base_url: None,
+            llm_api_key: None,
+            llm_model: None,
+            llm_timeout_secs: 8,
         }
     }
 }
@@ -216,10 +295,10 @@ impl ServerConfig {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            if let Ok(xdg) = std::env::var("XDG_STATE_HOME") {
-                if !xdg.is_empty() {
-                    return Some(std::path::PathBuf::from(xdg));
-                }
+            if let Ok(xdg) = std::env::var("XDG_STATE_HOME")
+                && !xdg.is_empty()
+            {
+                return Some(std::path::PathBuf::from(xdg));
             }
             if let Some(home) = std::env::var_os("HOME") {
                 return Some(std::path::PathBuf::from(home).join(".local/state"));

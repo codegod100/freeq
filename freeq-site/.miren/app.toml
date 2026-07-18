@@ -1,4 +1,5 @@
-name = 'freeq-site'
-post_import = ''
-env = []
-include = []
+name = "freeq-site"
+
+[services.web]
+command = "gunicorn --bind 0.0.0.0:8000 --workers 2 app:app"
+port = 8000

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use rusqlite::{Connection, Result as SqlResult, params};
+use rusqlite::{Connection, OptionalExtension, Result as SqlResult, params};
 
 use crate::server::{BanEntry, ChannelState, TopicInfo};
 
@@ -74,6 +74,18 @@ fn decrypt_at_rest(key: &[u8; 32], stored: &str) -> String {
     }
 }
 
+/// Convert a user-supplied search string into a safe FTS5 query.
+/// Each whitespace-separated term becomes a quoted phrase (embedded quotes
+/// doubled), joined by implicit AND. FTS5 operators (OR, NEAR, *, etc.) in
+/// user input are matched literally rather than interpreted.
+fn sanitize_fts_query(query: &str) -> String {
+    query
+        .split_whitespace()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Compute a canonical DM channel key from two DIDs.
 /// The key is `dm:<did_a>,<did_b>` where the DIDs are alphabetically sorted.
 /// This ensures both participants produce the same key regardless of who sends.
@@ -91,6 +103,17 @@ pub struct Db {
     /// AES-256-GCM key for encrypting message content at rest.
     /// Derived from the server's signing key. If None, messages stored as plaintext.
     encryption_key: Option<[u8; 32]>,
+}
+
+/// A persisted reaction row.
+#[derive(Debug, Clone)]
+pub struct ReactionRow {
+    pub target_msgid: String,
+    pub channel: String,
+    pub reactor_nick: String,
+    pub reactor_did: Option<String>,
+    pub emoji: String,
+    pub timestamp: u64,
 }
 
 /// A persisted message row.
@@ -112,39 +135,20 @@ pub struct MessageRow {
     pub sender_did: Option<String>,
 }
 
-/// A persisted reaction on a message (`+react` / unreact).
+/// A persisted private-media metadata row. The bytes themselves live
+/// encrypted-at-rest on disk (see `media_store`); this is just the index.
 #[derive(Debug, Clone)]
-pub struct ReactionRow {
-    pub target_msgid: String,
-    pub channel: String,
-    pub reactor_nick: String,
-    pub reactor_did: Option<String>,
-    pub emoji: String,
-    pub timestamp: u64,
-}
-
-/// Encode reaction rows as IRCv3 `+freeq.at/reactions` value:
-/// `emoji1:nick1,nick2;emoji2:nick3`.
-pub fn encode_reactions_tag(rows: &[ReactionRow]) -> Option<String> {
-    if rows.is_empty() {
-        return None;
-    }
-    let mut by_emoji: HashMap<&str, Vec<&str>> = HashMap::new();
-    for r in rows {
-        by_emoji
-            .entry(r.emoji.as_str())
-            .or_default()
-            .push(r.reactor_nick.as_str());
-    }
-    let encoded: Vec<String> = by_emoji
-        .iter()
-        .map(|(emoji, nicks)| format!("{}:{}", emoji, nicks.join(",")))
-        .collect();
-    if encoded.is_empty() {
-        None
-    } else {
-        Some(encoded.join(";"))
-    }
+pub struct MediaRow {
+    pub id: String,
+    pub uploader_did: String,
+    /// Channel name or `canonical_dm_key` the media was uploaded to.
+    pub scope: String,
+    pub mime: String,
+    pub size: u64,
+    pub alt: Option<String>,
+    pub filename: String,
+    pub created_at: u64,
+    pub deleted_at: Option<u64>,
 }
 
 /// A persisted identity (DID-nick binding).
@@ -199,6 +203,89 @@ impl Db {
         Ok(db)
     }
 
+    /// Test helper: an in-memory DB whose `signing_keys` starts in the OLD
+    /// (pre-kid, PK=did) schema with one row, so `init()`'s migration runs and
+    /// backfills the kid — mirrors a real pre-migration database on first open.
+    #[cfg(test)]
+    pub(crate) fn open_memory_with_legacy_signing_keys() -> SqlResult<Self> {
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE signing_keys (
+                 did           TEXT PRIMARY KEY,
+                 pubkey        BLOB NOT NULL,
+                 registered_at INTEGER NOT NULL
+             );",
+        )?;
+        conn.execute(
+            "INSERT INTO signing_keys (did, pubkey, registered_at) VALUES ('did:plc:legacy', ?1, 0)",
+            params![&[7u8; 32][..]],
+        )?;
+        let db = Self {
+            conn,
+            encryption_key: None,
+        };
+        db.init()?;
+        Ok(db)
+    }
+
+    /// One-time migration: the `signing_keys` table gained a `kid` column and a
+    /// composite PK `(did, kid)` so a DID's keys form an append-only history
+    /// (was PK `did`, overwrite-on-reregister). Old databases have no `kid`
+    /// column; since `ALTER` can't change a PK, copy the rows into a fresh table
+    /// and backfill `kid = derive_kid_bytes(pubkey)`. A no-op once migrated.
+    fn migrate_signing_keys_to_kid_history(&self) -> SqlResult<()> {
+        let has_kid: bool = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('signing_keys') WHERE name = 'kid'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|c| c > 0)
+            .unwrap_or(false);
+        if has_kid {
+            return Ok(());
+        }
+
+        let legacy: Vec<(String, Vec<u8>, i64)> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT did, pubkey, registered_at FROM signing_keys")?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })?;
+            rows.collect::<SqlResult<Vec<_>>>()?
+        };
+        // Transactional: DROP + CREATE + backfill commit atomically, so a crash
+        // mid-migration can't leave the table dropped with the keys unrestored —
+        // the durable signing keys are the exact asset this store exists for.
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TABLE signing_keys;
+             CREATE TABLE signing_keys (
+                 did            TEXT NOT NULL,
+                 kid            TEXT NOT NULL,
+                 pubkey         BLOB NOT NULL,
+                 registered_at  INTEGER NOT NULL,
+                 PRIMARY KEY (did, kid)
+             );",
+        )?;
+        for (did, pubkey, registered_at) in legacy {
+            let kid = freeq_sdk::act::derive_kid_bytes(&pubkey);
+            tx.execute(
+                "INSERT OR IGNORE INTO signing_keys (did, kid, pubkey, registered_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![did, kid, pubkey, registered_at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn init(&self) -> SqlResult<()> {
         self.conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         self.conn.execute_batch("PRAGMA foreign_keys=ON;")?;
@@ -219,6 +306,15 @@ impl Db {
             );
 
             CREATE TABLE IF NOT EXISTS bans (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel  TEXT NOT NULL,
+                mask     TEXT NOT NULL,
+                set_by   TEXT NOT NULL,
+                set_at   INTEGER NOT NULL,
+                UNIQUE(channel, mask)
+            );
+
+            CREATE TABLE IF NOT EXISTS invite_exceptions (
                 id       INTEGER PRIMARY KEY AUTOINCREMENT,
                 channel  TEXT NOT NULL,
                 mask     TEXT NOT NULL,
@@ -250,10 +346,52 @@ impl Db {
                 updated_at  INTEGER NOT NULL
             );
 
+            -- Sealed group keys for VC-bootstrapped E2E channels (EG1/EGK1).
+            -- Each row is a group secret sealed to ONE member's X25519 key at
+            -- ONE epoch. The server stores/relays these opaque blobs but can
+            -- never open them (see freeq-sdk::e2ee_group). Multiple epochs are
+            -- retained so a member can decrypt channel history across rotations.
+            CREATE TABLE IF NOT EXISTS group_keys (
+                channel     TEXT NOT NULL,
+                member_did  TEXT NOT NULL,
+                epoch       INTEGER NOT NULL,
+                sealed_wire TEXT NOT NULL,      -- EGK1:... opaque sealed blob
+                updated_at  INTEGER NOT NULL,
+                PRIMARY KEY (channel, member_did, epoch)
+            );
+
+            -- Append-only history of client message-signing keys. Keyed by
+            -- (did, kid) so re-registering never overwrites — every key a DID
+            -- has used stays verifiable after a reconnect. kid is
+            -- base64url(sha256(pubkey)[..16]) (freeq_sdk::act::derive_kid_bytes).
+            -- get_signing_key(did) returns the latest; get_signing_key_by_kid
+            -- fetches a specific one. Legacy did-keyed rows are migrated below.
+            CREATE TABLE IF NOT EXISTS signing_keys (
+                did            TEXT NOT NULL,
+                kid            TEXT NOT NULL,
+                pubkey         BLOB NOT NULL,         -- raw 32-byte ed25519 public key
+                registered_at  INTEGER NOT NULL,
+                PRIMARY KEY (did, kid)
+            );
+
             CREATE TABLE IF NOT EXISTS user_channels (
                 did     TEXT NOT NULL,
                 channel TEXT NOT NULL,
                 PRIMARY KEY (did, channel)
+            );
+
+            -- Cross-device read markers (IRCv3 draft/read-marker). One row per
+            -- (DID, target) — the last-read timestamp a user's clients have
+            -- converged on. The marker only ever moves forward (enforced by the
+            -- MARKREAD handler); `updated_at` records when the server last wrote
+            -- it. Guests (no DID) never land here — their markers are
+            -- session-local and never persisted.
+            CREATE TABLE IF NOT EXISTS read_markers (
+                did        TEXT NOT NULL,
+                target     TEXT NOT NULL,
+                timestamp  TEXT NOT NULL,      -- ISO 8601, as in server-time
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (did, target)
             );
             ",
         )?;
@@ -265,15 +403,30 @@ impl Db {
             "ALTER TABLE channels ADD COLUMN moderated INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE channels ADD COLUMN founder_did TEXT",
             "ALTER TABLE channels ADD COLUMN did_ops_json TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE channels ADD COLUMN encrypted_only INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE messages ADD COLUMN msgid TEXT",
             "ALTER TABLE messages ADD COLUMN replaces_msgid TEXT",
             "ALTER TABLE messages ADD COLUMN deleted_at INTEGER",
             "ALTER TABLE messages ADD COLUMN sender_did TEXT",
+            "ALTER TABLE identities ADD COLUMN last_auth_at INTEGER",
         ];
         for sql in &migrations {
             // Ignore "duplicate column name" errors — means column already exists
             let _ = self.conn.execute(sql, []);
         }
+
+        self.migrate_signing_keys_to_kid_history()?;
+        // Index the DID column added by the migration above. Created here (not
+        // in the initial schema block) because `sender_did` doesn't exist until
+        // the ALTER runs. Backs the DID→last-nick history lookup, whose miss
+        // case (a partner who never posted here) would otherwise full-scan the
+        // whole messages table under the global DB lock.
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_sender_did ON messages(sender_did)",
+            [],
+        )?;
+
+        self.init_fts()?;
 
         // Phase 2: agent governance tables
         self.conn.execute_batch(
@@ -389,7 +542,36 @@ impl Db {
             ",
         )?;
 
-        // Message reactions (+react TAGMSG with +reply=msgid)
+        // Phase 3: reactions + pins tables
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS pins (
+                channel      TEXT NOT NULL,
+                msgid        TEXT NOT NULL,
+                pinned_by    TEXT NOT NULL,
+                pinned_at    INTEGER NOT NULL,
+                UNIQUE(channel, msgid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_pins_channel ON pins(channel, pinned_at DESC);
+            ",
+        )?;
+        // Private media: metadata for blobs stored encrypted-at-rest on local
+        // disk and served via signed capability URLs. The bytes live on disk
+        // (see `media_store`), not in this table — only metadata is recorded.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS media (
+                id           TEXT PRIMARY KEY,
+                uploader_did TEXT NOT NULL,
+                scope        TEXT NOT NULL,   -- channel name or canonical_dm_key
+                mime         TEXT NOT NULL,
+                size         INTEGER NOT NULL,
+                alt          TEXT,
+                filename     TEXT NOT NULL,
+                created_at   INTEGER NOT NULL,
+                deleted_at   INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_media_scope ON media(scope, created_at DESC);
+            ",
+        )?;
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS reactions (
                 target_msgid TEXT NOT NULL,
@@ -405,7 +587,164 @@ impl Db {
             ",
         )?;
 
+        // AV sessions tables
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS av_sessions (
+                id               TEXT PRIMARY KEY,
+                channel          TEXT,
+                created_by       TEXT NOT NULL,
+                created_at       INTEGER NOT NULL,
+                ended_at         INTEGER,
+                ended_by         TEXT,
+                title            TEXT,
+                iroh_ticket      TEXT,
+                backend          TEXT NOT NULL DEFAULT '\"iroh-live\"',
+                recording        BOOLEAN NOT NULL DEFAULT FALSE,
+                max_participants INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_av_sessions_channel ON av_sessions(channel, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS av_participants (
+                session_id  TEXT NOT NULL REFERENCES av_sessions(id),
+                did         TEXT NOT NULL,
+                nick        TEXT NOT NULL,
+                joined_at   INTEGER NOT NULL,
+                left_at     INTEGER,
+                role        TEXT NOT NULL DEFAULT '\"speaker\"',
+                PRIMARY KEY (session_id, did)
+            );
+
+            CREATE TABLE IF NOT EXISTS av_artifacts (
+                id           TEXT PRIMARY KEY,
+                session_id   TEXT NOT NULL REFERENCES av_sessions(id),
+                kind         TEXT NOT NULL,
+                created_at   INTEGER NOT NULL,
+                created_by   TEXT,
+                content_ref  TEXT NOT NULL,
+                content_type TEXT NOT NULL,
+                visibility   TEXT NOT NULL DEFAULT '\"participants\"',
+                title        TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_av_artifacts_session ON av_artifacts(session_id);
+            ",
+        )?;
+
         Ok(())
+    }
+
+    // ── Full-text search (FTS5) ────────────────────────────────────────
+    //
+    // The FTS index holds message plaintext, so it only exists when at-rest
+    // encryption is OFF. Opening an encrypted database drops any index left
+    // behind by a previous plaintext run, ensuring no plaintext survives the
+    // switch to encryption. Encrypted databases fall back to a bounded
+    // decrypt-and-scan in `search_messages`.
+
+    /// Maximum rows decrypt-and-scanned per search on encrypted databases.
+    const SEARCH_SCAN_CAP: usize = 10_000;
+
+    fn fts_enabled(&self) -> bool {
+        self.encryption_key.is_none()
+    }
+
+    fn init_fts(&self) -> SqlResult<()> {
+        if self.encryption_key.is_some() {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS messages_fts;")?;
+            return Ok(());
+        }
+        self.conn
+            .execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text);")?;
+        // Backfill: index any messages that predate the FTS table (upgrade
+        // path, or a database previously run with encryption enabled).
+        self.conn.execute(
+            "INSERT INTO messages_fts (rowid, text)
+             SELECT id, text FROM messages
+             WHERE deleted_at IS NULL
+               AND id NOT IN (SELECT rowid FROM messages_fts)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Index one message row. No-op when encryption is on.
+    fn fts_index(&self, rowid: i64, text: &str) -> SqlResult<()> {
+        if self.fts_enabled() {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO messages_fts (rowid, text) VALUES (?1, ?2)",
+                params![rowid, text],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Search messages in a channel (or DM key), newest-first.
+    /// `before`: if Some, only messages with timestamp < value (pagination).
+    /// Terms are ANDed; FTS5 query syntax in `query` is treated literally.
+    pub fn search_messages(
+        &self,
+        channel: &str,
+        query: &str,
+        limit: usize,
+        before: Option<u64>,
+    ) -> SqlResult<Vec<MessageRow>> {
+        if self.fts_enabled() {
+            let fts_query = sanitize_fts_query(query);
+            if fts_query.is_empty() {
+                return Ok(vec![]);
+            }
+            let before_ts = before.map(|b| b as i64).unwrap_or(i64::MAX);
+            let mut stmt = self.conn.prepare(
+                "SELECT m.id, m.channel, m.sender, m.text, m.timestamp, m.tags_json,
+                        m.msgid, m.replaces_msgid, m.deleted_at, m.sender_did
+                 FROM messages_fts
+                 JOIN messages m ON m.id = messages_fts.rowid
+                 WHERE messages_fts MATCH ?1
+                   AND m.channel = ?2
+                   AND m.deleted_at IS NULL
+                   AND m.timestamp < ?3
+                 ORDER BY m.timestamp DESC, m.id DESC
+                 LIMIT ?4",
+            )?;
+            let rows = stmt.query_map(
+                params![fts_query, channel, before_ts, limit as i64],
+                map_message_row,
+            )?;
+            return rows.collect::<SqlResult<Vec<_>>>();
+        }
+
+        // Encrypted at rest: bounded decrypt-and-scan, newest-first.
+        let key = self.encryption_key.as_ref().expect("encrypted branch");
+        let terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        let before_ts = before.map(|b| b as i64).unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel, sender, text, timestamp, tags_json,
+                    msgid, replaces_msgid, deleted_at, sender_did
+             FROM messages
+             WHERE channel = ?1 AND deleted_at IS NULL AND timestamp < ?2
+             ORDER BY timestamp DESC, id DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![channel, before_ts, Self::SEARCH_SCAN_CAP as i64],
+            map_message_row,
+        )?;
+        let mut matches = Vec::new();
+        for row in rows {
+            let mut row = row?;
+            row.text = decrypt_at_rest(key, &row.text);
+            let haystack = row.text.to_lowercase();
+            if terms.iter().all(|t| haystack.contains(t)) {
+                matches.push(row);
+                if matches.len() >= limit {
+                    break;
+                }
+            }
+        }
+        Ok(matches)
     }
 
     // ── Channel state ──────────────────────────────────────────────────
@@ -415,8 +754,8 @@ impl Db {
         let did_ops_json = serde_json::to_string(&ch.did_ops.iter().collect::<Vec<_>>())
             .unwrap_or_else(|_| "[]".to_string());
         self.conn.execute(
-            "INSERT INTO channels (name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, no_ext_msg, moderated, key, founder_did, did_ops_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "INSERT INTO channels (name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, no_ext_msg, moderated, key, founder_did, did_ops_json, encrypted_only)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
              ON CONFLICT(name) DO UPDATE SET
                 topic_text=excluded.topic_text,
                 topic_set_by=excluded.topic_set_by,
@@ -427,7 +766,8 @@ impl Db {
                 moderated=excluded.moderated,
                 key=excluded.key,
                 founder_did=excluded.founder_did,
-                did_ops_json=excluded.did_ops_json",
+                did_ops_json=excluded.did_ops_json,
+                encrypted_only=excluded.encrypted_only",
             params![
                 name,
                 ch.topic.as_ref().map(|t| &t.text),
@@ -440,6 +780,7 @@ impl Db {
                 ch.key.as_deref(),
                 ch.founder_did.as_deref(),
                 did_ops_json,
+                ch.encrypted_only as i32,
             ],
         )?;
         Ok(())
@@ -451,6 +792,10 @@ impl Db {
             .execute("DELETE FROM channels WHERE name = ?1", params![name])?;
         self.conn
             .execute("DELETE FROM bans WHERE channel = ?1", params![name])?;
+        self.conn.execute(
+            "DELETE FROM invite_exceptions WHERE channel = ?1",
+            params![name],
+        )?;
         Ok(())
     }
 
@@ -460,7 +805,7 @@ impl Db {
         let mut channels = HashMap::new();
 
         let mut stmt = self.conn.prepare(
-            "SELECT name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, key, no_ext_msg, moderated, founder_did, did_ops_json
+            "SELECT name, topic_text, topic_set_by, topic_set_at, topic_locked, invite_only, key, no_ext_msg, moderated, founder_did, did_ops_json, encrypted_only
              FROM channels"
         )?;
         let rows = stmt.query_map([], |row| {
@@ -477,6 +822,7 @@ impl Db {
             let did_ops_json: String = row
                 .get::<_, Option<String>>(10)?
                 .unwrap_or_else(|| "[]".to_string());
+            let encrypted_only: bool = row.get::<_, Option<i32>>(11)?.unwrap_or(0) != 0;
 
             let topic = match (topic_text, topic_set_by, topic_set_at) {
                 (Some(text), Some(set_by), Some(set_at)) => Some(TopicInfo {
@@ -499,6 +845,7 @@ impl Db {
                 key,
                 founder_did,
                 did_ops,
+                encrypted_only,
                 ..Default::default()
             };
             Ok((name, ch))
@@ -535,6 +882,58 @@ impl Db {
             }
         }
 
+        // Load invite exceptions (+I)
+        let mut stmt = self
+            .conn
+            .prepare("SELECT channel, mask, set_by, set_at FROM invite_exceptions")?;
+        let invex_rows = stmt.query_map([], |row| {
+            let channel: String = row.get(0)?;
+            let mask: String = row.get(1)?;
+            let set_by: String = row.get(2)?;
+            let set_at: i64 = row.get(3)?;
+            Ok((
+                channel,
+                crate::server::InviteExceptionEntry {
+                    mask,
+                    set_by,
+                    set_at: set_at as u64,
+                },
+            ))
+        })?;
+
+        for row in invex_rows {
+            let (channel, entry) = row?;
+            if let Some(ch) = channels.get_mut(&channel) {
+                ch.invite_exceptions.push(entry);
+            }
+        }
+
+        // Load pins
+        let mut stmt = self.conn.prepare(
+            "SELECT channel, msgid, pinned_by, pinned_at FROM pins ORDER BY pinned_at DESC",
+        )?;
+        let pin_rows = stmt.query_map([], |row| {
+            let channel: String = row.get(0)?;
+            let msgid: String = row.get(1)?;
+            let pinned_by: String = row.get(2)?;
+            let pinned_at: i64 = row.get(3)?;
+            Ok((
+                channel,
+                crate::server::PinnedMessage {
+                    msgid,
+                    pinned_by,
+                    pinned_at: pinned_at as u64,
+                },
+            ))
+        })?;
+
+        for row in pin_rows {
+            let (channel, pin) = row?;
+            if let Some(ch) = channels.get_mut(&channel) {
+                ch.pins.push(pin);
+            }
+        }
+
         Ok(channels)
     }
 
@@ -553,6 +952,30 @@ impl Db {
     pub fn remove_ban(&self, channel: &str, mask: &str) -> SqlResult<()> {
         self.conn.execute(
             "DELETE FROM bans WHERE channel = ?1 AND mask = ?2",
+            params![channel, mask],
+        )?;
+        Ok(())
+    }
+
+    // ── Invite exceptions (+I) ─────────────────────────────────────────
+
+    /// Add an invite-exception entry to a channel.
+    pub fn add_invite_exception(
+        &self,
+        channel: &str,
+        entry: &crate::server::InviteExceptionEntry,
+    ) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO invite_exceptions (channel, mask, set_by, set_at) VALUES (?1, ?2, ?3, ?4)",
+            params![channel, entry.mask, entry.set_by, entry.set_at as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Remove an invite-exception entry from a channel.
+    pub fn remove_invite_exception(&self, channel: &str, mask: &str) -> SqlResult<()> {
+        self.conn.execute(
+            "DELETE FROM invite_exceptions WHERE channel = ?1 AND mask = ?2",
             params![channel, mask],
         )?;
         Ok(())
@@ -590,6 +1013,19 @@ impl Db {
                 sender_did
             ],
         )?;
+        // Record into the agent-assist diagnostic ring buffer. We
+        // capture only the fact that a message was accepted — never
+        // the body or tags. The auto-increment row id is the canonical
+        // server sequence used by `diagnose_message_ordering`.
+        let mut ev = crate::agent_assist::recorder::DiagnosticEvent::now(
+            crate::agent_assist::recorder::EventKind::MessageAccepted,
+        );
+        ev.channel = Some(channel.to_string());
+        ev.msgid = msgid.map(|s| s.to_string());
+        ev.did = sender_did.map(|s| s.to_string());
+        ev.server_sequence = Some(self.conn.last_insert_rowid());
+        crate::agent_assist::recorder::record(ev);
+        self.fts_index(self.conn.last_insert_rowid(), text)?;
         Ok(())
     }
 
@@ -694,6 +1130,16 @@ impl Db {
 
     /// Prune old messages for a channel, keeping only the most recent `max_keep`.
     pub fn prune_messages(&self, channel: &str, max_keep: usize) -> SqlResult<()> {
+        if self.fts_enabled() {
+            self.conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (
+                    SELECT id FROM messages WHERE channel = ?1 AND id NOT IN (
+                        SELECT id FROM messages WHERE channel = ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2
+                    )
+                )",
+                params![channel, max_keep as i64],
+            )?;
+        }
         self.conn.execute(
             "DELETE FROM messages WHERE channel = ?1 AND id NOT IN (
                 SELECT id FROM messages WHERE channel = ?1 ORDER BY timestamp DESC, id DESC LIMIT ?2
@@ -701,6 +1147,25 @@ impl Db {
             params![channel, max_keep as i64],
         )?;
         Ok(())
+    }
+
+    /// Retention: delete all messages older than `cutoff_ts` (unix seconds)
+    /// across every channel. Returns the number of rows removed. Keeps the FTS
+    /// index consistent. Used by the age-based retention task (opt-in).
+    pub fn prune_messages_older_than(&self, cutoff_ts: u64) -> SqlResult<usize> {
+        if self.fts_enabled() {
+            self.conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (
+                    SELECT id FROM messages WHERE timestamp < ?1
+                )",
+                params![cutoff_ts as i64],
+            )?;
+        }
+        let n = self.conn.execute(
+            "DELETE FROM messages WHERE timestamp < ?1",
+            params![cutoff_ts as i64],
+        )?;
+        Ok(n)
     }
 
     /// Find a message by its msgid. Returns the sender (hostmask) for authorship check.
@@ -755,6 +1220,14 @@ impl Db {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        if self.fts_enabled() {
+            self.conn.execute(
+                "DELETE FROM messages_fts WHERE rowid IN (
+                    SELECT id FROM messages WHERE channel = ?1 AND msgid = ?2 AND deleted_at IS NULL
+                )",
+                params![channel, msgid],
+            )?;
+        }
         let changed = self.conn.execute(
             "UPDATE messages SET deleted_at = ?1 WHERE channel = ?2 AND msgid = ?3 AND deleted_at IS NULL",
             params![now as i64, channel, msgid],
@@ -762,9 +1235,105 @@ impl Db {
         Ok(changed)
     }
 
+    /// Record metadata for a privately-stored media object.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_media(
+        &self,
+        id: &str,
+        uploader_did: &str,
+        scope: &str,
+        mime: &str,
+        size: u64,
+        alt: Option<&str>,
+        filename: &str,
+        created_at: u64,
+    ) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO media (id, uploader_did, scope, mime, size, alt, filename, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                uploader_did,
+                scope,
+                mime,
+                size as i64,
+                alt,
+                filename,
+                created_at as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch live (non-deleted) media metadata by id. Returns None if missing
+    /// or soft-deleted.
+    pub fn get_media(&self, id: &str) -> SqlResult<Option<MediaRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, uploader_did, scope, mime, size, alt, filename, created_at, deleted_at
+             FROM media WHERE id = ?1 AND deleted_at IS NULL LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![id], |row| {
+            Ok(MediaRow {
+                id: row.get(0)?,
+                uploader_did: row.get(1)?,
+                scope: row.get(2)?,
+                mime: row.get(3)?,
+                size: row.get::<_, i64>(4)? as u64,
+                alt: row.get(5)?,
+                filename: row.get(6)?,
+                created_at: row.get::<_, i64>(7)? as u64,
+                deleted_at: row.get::<_, Option<i64>>(8)?.map(|v| v as u64),
+            })
+        })?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Soft-delete a media object by id. Returns the number of rows changed.
+    pub fn soft_delete_media(&self, id: &str) -> SqlResult<usize> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let changed = self.conn.execute(
+            "UPDATE media SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            params![now as i64, id],
+        )?;
+        Ok(changed)
+    }
+
+    /// Store an edit (a new message that replaces an old one).
+    pub fn insert_edit(
+        &self,
+        channel: &str,
+        sender: &str,
+        text: &str,
+        timestamp: u64,
+        tags: &HashMap<String, String>,
+        msgid: &str,
+        replaces_msgid: &str,
+        sender_did: Option<&str>,
+    ) -> SqlResult<()> {
+        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "{}".to_string());
+        let stored_text = if let Some(ref key) = self.encryption_key {
+            encrypt_at_rest(key, text)
+        } else {
+            text.to_string()
+        };
+        self.conn.execute(
+            "INSERT INTO messages (channel, sender, text, timestamp, tags_json, msgid, replaces_msgid, sender_did)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![channel, sender, stored_text, timestamp as i64, tags_json, msgid, replaces_msgid, sender_did],
+        )?;
+        self.fts_index(self.conn.last_insert_rowid(), text)?;
+        Ok(())
+    }
+
     // ── Reactions ──────────────────────────────────────────────────────
 
-    /// Store a reaction. Duplicate (msgid, nick, emoji) is ignored.
+    /// Store a reaction. Upsert — duplicate (msgid, nick, emoji) is ignored.
     pub fn store_reaction(
         &self,
         target_msgid: &str,
@@ -777,19 +1346,12 @@ impl Db {
         self.conn.execute(
             "INSERT OR IGNORE INTO reactions (target_msgid, channel, reactor_nick, reactor_did, emoji, timestamp)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                target_msgid,
-                channel,
-                reactor_nick,
-                reactor_did,
-                emoji,
-                timestamp as i64
-            ],
+            params![target_msgid, channel, reactor_nick, reactor_did, emoji, timestamp as i64],
         )?;
         Ok(())
     }
 
-    /// Remove a reaction for (msgid, nick, emoji).
+    /// Remove a reaction.
     pub fn remove_reaction(
         &self,
         target_msgid: &str,
@@ -803,7 +1365,7 @@ impl Db {
         Ok(changed)
     }
 
-    /// Get reactions for message IDs, grouped by target_msgid.
+    /// Get reactions for a list of message IDs, grouped by msgid -> emoji -> nicks.
     pub fn get_reactions_for_messages(
         &self,
         msgids: &[&str],
@@ -811,7 +1373,11 @@ impl Db {
         if msgids.is_empty() {
             return Ok(HashMap::new());
         }
-        let placeholders: Vec<String> = (1..=msgids.len()).map(|i| format!("?{i}")).collect();
+        let placeholders: Vec<String> = msgids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("?{}", i + 1))
+            .collect();
         let sql = format!(
             "SELECT target_msgid, channel, reactor_nick, reactor_did, emoji, timestamp
              FROM reactions WHERE target_msgid IN ({})
@@ -842,30 +1408,48 @@ impl Db {
         Ok(result)
     }
 
-    /// Store an edit (a new message that replaces an old one).
-    pub fn insert_edit(
+    // ── Pins ──────────────────────────────────────────────────────────
+
+    /// Store a pin. Duplicate (channel, msgid) is ignored.
+    pub fn store_pin(
         &self,
         channel: &str,
-        sender: &str,
-        text: &str,
-        timestamp: u64,
-        tags: &HashMap<String, String>,
         msgid: &str,
-        replaces_msgid: &str,
-        sender_did: Option<&str>,
+        pinned_by: &str,
+        pinned_at: u64,
     ) -> SqlResult<()> {
-        let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "{}".to_string());
-        let stored_text = if let Some(ref key) = self.encryption_key {
-            encrypt_at_rest(key, text)
-        } else {
-            text.to_string()
-        };
         self.conn.execute(
-            "INSERT INTO messages (channel, sender, text, timestamp, tags_json, msgid, replaces_msgid, sender_did)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![channel, sender, stored_text, timestamp as i64, tags_json, msgid, replaces_msgid, sender_did],
+            "INSERT OR IGNORE INTO pins (channel, msgid, pinned_by, pinned_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![channel, msgid, pinned_by, pinned_at as i64],
         )?;
         Ok(())
+    }
+
+    /// Remove a pin.
+    pub fn remove_pin(&self, channel: &str, msgid: &str) -> SqlResult<usize> {
+        let changed = self.conn.execute(
+            "DELETE FROM pins WHERE channel = ?1 AND msgid = ?2",
+            params![channel, msgid],
+        )?;
+        Ok(changed)
+    }
+
+    /// Get all pins for a channel, most recent first.
+    pub fn get_pins(&self, channel: &str) -> SqlResult<Vec<crate::server::PinnedMessage>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT msgid, pinned_by, pinned_at FROM pins
+             WHERE channel = ?1
+             ORDER BY pinned_at DESC",
+        )?;
+        let rows = stmt.query_map(params![channel], |row| {
+            Ok(crate::server::PinnedMessage {
+                msgid: row.get(0)?,
+                pinned_by: row.get(1)?,
+                pinned_at: row.get::<_, i64>(2)? as u64,
+            })
+        })?;
+        rows.collect()
     }
 
     /// Get raw (potentially encrypted) message text for testing.
@@ -923,6 +1507,13 @@ impl Db {
                 params![stored_text, msgid],
             )?;
         }
+        if self.fts_enabled() {
+            self.conn.execute(
+                "INSERT OR REPLACE INTO messages_fts (rowid, text)
+                 SELECT id, ?1 FROM messages WHERE msgid = ?2",
+                params![new_text, msgid],
+            )?;
+        }
         Ok(())
     }
 
@@ -957,6 +1548,51 @@ impl Db {
         }
     }
 
+    /// Store a group key sealed to one member at one epoch (server-blind).
+    pub fn save_group_key(
+        &self,
+        channel: &str,
+        member_did: &str,
+        epoch: i64,
+        sealed_wire: &str,
+    ) -> SqlResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.conn.execute(
+            "INSERT INTO group_keys (channel, member_did, epoch, sealed_wire, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(channel, member_did, epoch)
+             DO UPDATE SET sealed_wire=excluded.sealed_wire, updated_at=excluded.updated_at",
+            params![
+                channel.to_lowercase(),
+                member_did,
+                epoch,
+                sealed_wire,
+                now as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Fetch all sealed group keys for one member of a channel, newest epoch
+    /// first. Returns `(epoch, sealed_wire)` pairs.
+    pub fn get_group_keys_for_member(
+        &self,
+        channel: &str,
+        member_did: &str,
+    ) -> SqlResult<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT epoch, sealed_wire FROM group_keys
+             WHERE channel = ?1 AND member_did = ?2 ORDER BY epoch DESC",
+        )?;
+        let rows = stmt.query_map(params![channel.to_lowercase(), member_did], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect()
+    }
+
     /// Load all pre-key bundles (for populating in-memory cache on startup).
     pub fn load_all_prekey_bundles(&self) -> SqlResult<Vec<(String, serde_json::Value)>> {
         let mut stmt = self
@@ -969,6 +1605,83 @@ impl Db {
             Ok((did, bundle))
         })?;
         rows.collect()
+    }
+
+    // ── Per-DID signing keys (MSGSIG) ────────────────────────────────
+    //
+    // When a session sends `MSGSIG <pubkey>`, the connection layer mirrors it
+    // here so we can verify signatures from that DID across server restarts
+    // and even when the DID has no active session. Used by:
+    //   • PROVENANCE FreeqBotDelegation/v1 cert verification
+    //   • (future) cross-session signature checks for offline signers
+
+    /// Record a client message-signing key for a DID, keyed by its kid.
+    /// Append-only: re-registering a *different* key adds a row (history);
+    /// re-registering the *same* key is idempotent. `pubkey` must be 32 bytes.
+    pub fn save_signing_key(&self, did: &str, pubkey: &[u8]) -> SqlResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let kid = freeq_sdk::act::derive_kid_bytes(pubkey);
+        // Append-only: a new (did, kid) is inserted, never overwriting a
+        // different key. Re-registering an *existing* kid bumps registered_at
+        // so "latest" (`get_signing_key`) tracks the most recently used key,
+        // not the first one ever seen — no key is lost either way.
+        self.conn.execute(
+            "INSERT INTO signing_keys (did, kid, pubkey, registered_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(did, kid) DO UPDATE SET registered_at = excluded.registered_at",
+            params![did, kid, pubkey, now as i64],
+        )?;
+        Ok(())
+    }
+
+    /// The DID's most-recently-registered signing key (raw 32-byte ed25519
+    /// public key), or None. Used by the existing verify path, which wants the
+    /// current key; a specific historical key is fetched via
+    /// [`Db::get_signing_key_by_kid`].
+    pub fn get_signing_key(&self, did: &str) -> SqlResult<Option<[u8; 32]>> {
+        // rowid DESC breaks ties: registered_at is second-granularity, so two
+        // keys registered in the same second must fall back to insertion order.
+        self.query_signing_key(
+            "SELECT pubkey FROM signing_keys WHERE did = ?1
+             ORDER BY registered_at DESC, rowid DESC LIMIT 1",
+            params![did],
+        )
+    }
+
+    /// The exact key a DID registered under `kid`, or None. This is the lookup
+    /// a verifier uses when a signature names its kid — the key stays available
+    /// after the signer reconnects (unlike the old overwrite-on-reregister).
+    pub fn get_signing_key_by_kid(&self, did: &str, kid: &str) -> SqlResult<Option<[u8; 32]>> {
+        self.query_signing_key(
+            "SELECT pubkey FROM signing_keys WHERE did = ?1 AND kid = ?2",
+            params![did, kid],
+        )
+    }
+
+    /// Shared read: run a single-column pubkey query, returning the 32-byte key
+    /// or None (also None if the stored blob is not 32 bytes — guards against a
+    /// manual edit or legacy corruption).
+    fn query_signing_key(
+        &self,
+        sql: &str,
+        params: impl rusqlite::Params,
+    ) -> SqlResult<Option<[u8; 32]>> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query_map(params, |row| row.get::<_, Vec<u8>>(0))?;
+        match rows.next() {
+            Some(row) => {
+                let bytes = row?;
+                if bytes.len() != 32 {
+                    return Ok(None);
+                }
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&bytes);
+                Ok(Some(out))
+            }
+            None => Ok(None),
+        }
     }
 
     // ── User channel persistence (auto-rejoin) ────────────────────────
@@ -1000,14 +1713,55 @@ impl Db {
         rows.collect()
     }
 
+    // ── Read markers (IRCv3 draft/read-marker) ─────────────────────────
+
+    /// Fetch the last-read timestamp a user's clients have converged on for a
+    /// target, if any. `None` means no marker has ever been set (`MARKREAD`
+    /// replies with `*`).
+    pub fn get_read_marker(&self, did: &str, target: &str) -> SqlResult<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT timestamp FROM read_markers WHERE did = ?1 AND target = ?2")?;
+        let mut rows = stmt.query_map(params![did, target], |row| row.get::<_, String>(0))?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Set (or advance) the read marker for `(did, target)`. Callers are
+    /// responsible for the forward-only check; this write is unconditional so
+    /// the handler stays the single authority on monotonicity.
+    pub fn set_read_marker(
+        &self,
+        did: &str,
+        target: &str,
+        timestamp: &str,
+        updated_at: u64,
+    ) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO read_markers (did, target, timestamp, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(did, target) DO UPDATE SET
+                 timestamp = excluded.timestamp,
+                 updated_at = excluded.updated_at",
+            params![did, target, timestamp, updated_at as i64],
+        )?;
+        Ok(())
+    }
+
     // ── Identities (DID-nick bindings) ─────────────────────────────────
 
     /// Bind a DID to a nick. Overwrites any previous binding for that DID.
     pub fn save_identity(&self, did: &str, nick: &str) -> SqlResult<()> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         self.conn.execute(
-            "INSERT INTO identities (did, nick) VALUES (?1, ?2)
-             ON CONFLICT(did) DO UPDATE SET nick=excluded.nick",
-            params![did, nick],
+            "INSERT INTO identities (did, nick, last_auth_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(did) DO UPDATE SET nick=excluded.nick, last_auth_at=excluded.last_auth_at",
+            params![did, nick, now],
         )?;
         Ok(())
     }
@@ -1057,6 +1811,35 @@ impl Db {
             None => Ok(None),
         }
     }
+
+    /// Recover the nick a DID last sent under, from stored message history.
+    /// The `sender` column holds a `nick!user@host` mask, so the bare nick is
+    /// the part before `!`. Covers DIDs that have no `identities` row — remote
+    /// DIDs whose messages were persisted on receipt, and threads that predate
+    /// durable identity binding. Only rows carrying a `sender_did` are visible:
+    /// messages persisted before that column existed are NULL and invisible, so
+    /// resolution needs at least one post-migration message from the DID.
+    /// Returns the most recent. Note the recovered nick may since have been
+    /// reassigned to a different DID — display-only, so a collision only mildly
+    /// misleads and never grants identity.
+    pub fn recent_nick_for_did(&self, did: &str) -> SqlResult<Option<String>> {
+        let mask: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT sender FROM messages WHERE sender_did = ?1 ORDER BY id DESC LIMIT 1",
+                params![did],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(mask.and_then(|m| {
+            let nick = m.split('!').next().unwrap_or(&m).trim();
+            if nick.is_empty() || nick == did {
+                None
+            } else {
+                Some(nick.to_string())
+            }
+        }))
+    }
 }
 
 fn map_message_row(row: &rusqlite::Row) -> SqlResult<MessageRow> {
@@ -1088,6 +1871,287 @@ fn map_message_row(row: &rusqlite::Row) -> SqlResult<MessageRow> {
 mod tests {
     use super::*;
     use crate::server::BanEntry;
+
+    fn msg(db: &Db, channel: &str, text: &str, ts: u64, msgid: &str) {
+        db.insert_message(
+            channel,
+            "alice!a@host",
+            text,
+            ts,
+            &HashMap::new(),
+            Some(msgid),
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn recent_nick_for_did_recovers_bare_nick_from_history() {
+        let db = Db::open_memory().unwrap();
+        // A DID with no `identities` row (old/remote), but message history.
+        db.insert_message(
+            "#dev",
+            "bob!b@freeq/plc/xxxx",
+            "hi",
+            100,
+            &HashMap::new(),
+            Some("m1"),
+            Some("did:plc:bob"),
+        )
+        .unwrap();
+        db.insert_message(
+            "#dev",
+            "bobby!b@freeq/plc/xxxx",
+            "renamed",
+            200,
+            &HashMap::new(),
+            Some("m2"),
+            Some("did:plc:bob"),
+        )
+        .unwrap();
+
+        // Most recent mask wins; the `!user@host` suffix is stripped.
+        assert_eq!(
+            db.recent_nick_for_did("did:plc:bob").unwrap().as_deref(),
+            Some("bobby")
+        );
+        // Unknown DID resolves to nothing.
+        assert_eq!(db.recent_nick_for_did("did:plc:nobody").unwrap(), None);
+    }
+
+    #[test]
+    fn recent_nick_for_did_skips_rows_without_sender_did() {
+        let db = Db::open_memory().unwrap();
+        // Pre-migration rows carry NULL sender_did (no backfill) and must be
+        // invisible to the DID-keyed lookup.
+        db.insert_message(
+            "#dev",
+            "dave!d@host",
+            "legacy",
+            100,
+            &HashMap::new(),
+            Some("l1"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(db.recent_nick_for_did("did:plc:dave").unwrap(), None);
+    }
+
+    #[test]
+    fn recent_nick_for_did_ignores_degenerate_masks() {
+        let db = Db::open_memory().unwrap();
+        // Sender mask that is literally the DID (defensive) resolves to None.
+        db.insert_message(
+            "#dev",
+            "did:plc:ghost",
+            "x",
+            100,
+            &HashMap::new(),
+            Some("g1"),
+            Some("did:plc:ghost"),
+        )
+        .unwrap();
+        assert_eq!(db.recent_nick_for_did("did:plc:ghost").unwrap(), None);
+    }
+
+    #[test]
+    fn search_finds_matching_messages_newest_first() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "deploy went fine", 100, "m1");
+        msg(&db, "#dev", "lunch plans anyone", 200, "m2");
+        msg(&db, "#dev", "the deploy failed again", 300, "m3");
+
+        let hits = db.search_messages("#dev", "deploy", 50, None).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].msgid.as_deref(), Some("m3"));
+        assert_eq!(hits[1].msgid.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn retention_prunes_by_age_across_channels_and_keeps_recent() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "ancient", 100, "a1");
+        msg(&db, "#ops", "also old", 150, "a2");
+        msg(&db, "#dev", "recent", 1_000, "r1");
+
+        // Cut off everything before ts 500: the two old rows go, the recent stays.
+        let removed = db.prune_messages_older_than(500).unwrap();
+        assert_eq!(removed, 2);
+
+        assert!(
+            db.get_messages("#dev", 50, None)
+                .unwrap()
+                .iter()
+                .all(|m| m.msgid.as_deref() == Some("r1"))
+        );
+        assert!(db.get_messages("#ops", 50, None).unwrap().is_empty());
+        // Pruned rows also leave the FTS index (no stale search hits).
+        assert!(
+            db.search_messages("#dev", "ancient", 50, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn search_is_channel_scoped_and_ands_terms() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "deploy failed", 100, "m1");
+        msg(&db, "#ops", "deploy failed", 110, "m2");
+        msg(&db, "#dev", "deploy succeeded", 120, "m3");
+
+        let hits = db
+            .search_messages("#dev", "deploy failed", 50, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].msgid.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn search_excludes_deleted_and_pruned() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "secret apple", 100, "m1");
+        msg(&db, "#dev", "banana", 200, "m2");
+        msg(&db, "#dev", "cherry", 300, "m3");
+
+        db.soft_delete_message("#dev", "m1").unwrap();
+        assert!(
+            db.search_messages("#dev", "apple", 50, None)
+                .unwrap()
+                .is_empty()
+        );
+
+        db.prune_messages("#dev", 1).unwrap();
+        assert!(
+            db.search_messages("#dev", "banana", 50, None)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            db.search_messages("#dev", "cherry", 50, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn search_pagination_with_before() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "build one", 100, "m1");
+        msg(&db, "#dev", "build two", 200, "m2");
+        msg(&db, "#dev", "build three", 300, "m3");
+
+        let page = db.search_messages("#dev", "build", 2, None).unwrap();
+        assert_eq!(page[0].msgid.as_deref(), Some("m3"));
+        assert_eq!(page[1].msgid.as_deref(), Some("m2"));
+
+        let next = db
+            .search_messages("#dev", "build", 2, Some(page[1].timestamp))
+            .unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].msgid.as_deref(), Some("m1"));
+    }
+
+    #[test]
+    fn search_treats_fts_operators_literally() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "a OR b syntax question", 100, "m1");
+        msg(&db, "#dev", "unrelated", 200, "m2");
+
+        // None of these may error or be interpreted as FTS5 syntax.
+        for q in ["OR", "\"quoted\"", "wild*", "(group)", "NEAR", "col:val"] {
+            let _ = db.search_messages("#dev", q, 50, None).unwrap();
+        }
+        let hits = db.search_messages("#dev", "OR", 50, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].msgid.as_deref(), Some("m1"));
+        assert!(
+            db.search_messages("#dev", "   ", 50, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn search_reflects_edits() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#dev", "original wording", 100, "m1");
+        db.edit_message("m1", "alice!a@host", "revised phrasing", Some("m2"))
+            .unwrap();
+
+        assert!(
+            db.search_messages("#dev", "original", 50, None)
+                .unwrap()
+                .is_empty()
+        );
+        let hits = db.search_messages("#dev", "revised", 50, None).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn search_works_on_encrypted_database_via_scan() {
+        let db = Db::open_encrypted_memory([7u8; 32]).unwrap();
+        msg(&db, "#dev", "Deploy Failed Loudly", 100, "m1");
+        msg(&db, "#dev", "all quiet", 200, "m2");
+        db.soft_delete_message("#dev", "m2").unwrap();
+
+        // Case-insensitive match on decrypted text; no FTS table involved.
+        let hits = db
+            .search_messages("#dev", "deploy failed", 50, None)
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].text, "Deploy Failed Loudly");
+        assert!(
+            db.search_messages("#dev", "quiet", 50, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn opening_encrypted_drops_plaintext_fts_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("freeq.db");
+        {
+            let db = Db::open(&path).unwrap();
+            msg(&db, "#dev", "plaintext indexed", 100, "m1");
+            assert_eq!(
+                db.search_messages("#dev", "plaintext", 50, None)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+        let db = Db::open_encrypted(&path, [9u8; 32]).unwrap();
+        let fts_exists: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'messages_fts'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            fts_exists, 0,
+            "plaintext FTS index must not survive encryption"
+        );
+    }
+
+    #[test]
+    fn reopening_plaintext_backfills_fts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("freeq.db");
+        {
+            let db = Db::open(&path).unwrap();
+            msg(&db, "#dev", "needle in history", 100, "m1");
+            // Simulate a pre-FTS database (or one previously run encrypted).
+            db.conn.execute_batch("DROP TABLE messages_fts;").unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let hits = db.search_messages("#dev", "needle", 50, None).unwrap();
+        assert_eq!(hits.len(), 1);
+    }
 
     #[test]
     fn roundtrip_channel_state() {
@@ -1154,6 +2218,43 @@ mod tests {
         let loaded_ch = loaded.get("#test").unwrap();
         assert_eq!(loaded_ch.bans.len(), 1);
         assert_eq!(loaded_ch.bans[0].mask, "did:plc:abc");
+    }
+
+    #[test]
+    fn media_insert_get_softdelete() {
+        let db = Db::open_memory().unwrap();
+
+        db.insert_media(
+            "abc123",
+            "did:plc:alice",
+            "#test",
+            "image/jpeg",
+            4096,
+            Some("a cat"),
+            "cat.jpg",
+            1000,
+        )
+        .unwrap();
+
+        let row = db.get_media("abc123").unwrap().expect("media should exist");
+        assert_eq!(row.id, "abc123");
+        assert_eq!(row.uploader_did, "did:plc:alice");
+        assert_eq!(row.scope, "#test");
+        assert_eq!(row.mime, "image/jpeg");
+        assert_eq!(row.size, 4096);
+        assert_eq!(row.alt.as_deref(), Some("a cat"));
+        assert_eq!(row.filename, "cat.jpg");
+        assert_eq!(row.created_at, 1000);
+        assert!(row.deleted_at.is_none());
+
+        // Unknown id → None.
+        assert!(db.get_media("nope").unwrap().is_none());
+
+        // Soft delete hides it from get_media.
+        assert_eq!(db.soft_delete_media("abc123").unwrap(), 1);
+        assert!(db.get_media("abc123").unwrap().is_none());
+        // Deleting again is a no-op.
+        assert_eq!(db.soft_delete_media("abc123").unwrap(), 0);
     }
 
     #[test]
@@ -1234,6 +2335,36 @@ mod tests {
     }
 
     #[test]
+    fn save_identity_records_last_auth_at() {
+        let db = Db::open_memory().unwrap();
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        db.save_identity("did:plc:alice", "alice").unwrap();
+
+        let ts: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT last_auth_at FROM identities WHERE did=?1",
+                rusqlite::params!["did:plc:alice"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let ts = ts.expect("last_auth_at should be set on save_identity");
+
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!(
+            ts >= before && ts <= after,
+            "last_auth_at {ts} not in [{before},{after}]"
+        );
+    }
+
+    #[test]
     fn channel_delete_cascades_bans() {
         let db = Db::open_memory().unwrap();
         let ch = ChannelState::default();
@@ -1249,6 +2380,76 @@ mod tests {
 
         let loaded = db.load_channels().unwrap();
         assert!(!loaded.contains_key("#test"));
+    }
+
+    #[test]
+    fn roundtrip_invite_exceptions() {
+        use crate::server::InviteExceptionEntry;
+        let db = Db::open_memory().unwrap();
+
+        // Channel must exist first.
+        let ch = ChannelState::default();
+        db.save_channel("#test", &ch).unwrap();
+
+        let entry1 = InviteExceptionEntry {
+            mask: "*!*@trusted.example".to_string(),
+            set_by: "op!o@host".to_string(),
+            set_at: 1700000000,
+        };
+        db.add_invite_exception("#test", &entry1).unwrap();
+
+        let entry2 = InviteExceptionEntry {
+            mask: "did:plc:bot1".to_string(),
+            set_by: "op!o@host".to_string(),
+            set_at: 1700000001,
+        };
+        db.add_invite_exception("#test", &entry2).unwrap();
+
+        // Duplicate insert must be a no-op (UNIQUE constraint, INSERT OR IGNORE).
+        db.add_invite_exception("#test", &entry2).unwrap();
+
+        let loaded = db.load_channels().unwrap();
+        let loaded_ch = loaded.get("#test").unwrap();
+        assert_eq!(loaded_ch.invite_exceptions.len(), 2);
+        let masks: Vec<_> = loaded_ch
+            .invite_exceptions
+            .iter()
+            .map(|e| e.mask.as_str())
+            .collect();
+        assert!(masks.contains(&"*!*@trusted.example"));
+        assert!(masks.contains(&"did:plc:bot1"));
+
+        // Remove one, the other persists.
+        db.remove_invite_exception("#test", "*!*@trusted.example")
+            .unwrap();
+        let loaded = db.load_channels().unwrap();
+        let loaded_ch = loaded.get("#test").unwrap();
+        assert_eq!(loaded_ch.invite_exceptions.len(), 1);
+        assert_eq!(loaded_ch.invite_exceptions[0].mask, "did:plc:bot1");
+    }
+
+    #[test]
+    fn channel_delete_cascades_invite_exceptions() {
+        use crate::server::InviteExceptionEntry;
+        let db = Db::open_memory().unwrap();
+        let ch = ChannelState::default();
+        db.save_channel("#test", &ch).unwrap();
+
+        let entry = InviteExceptionEntry {
+            mask: "*!*@host".to_string(),
+            set_by: "op".to_string(),
+            set_at: 0,
+        };
+        db.add_invite_exception("#test", &entry).unwrap();
+
+        db.delete_channel("#test").unwrap();
+
+        // Channel gone — and recreating it shouldn't carry orphan +I entries.
+        let ch2 = ChannelState::default();
+        db.save_channel("#test", &ch2).unwrap();
+        let loaded = db.load_channels().unwrap();
+        let loaded_ch = loaded.get("#test").unwrap();
+        assert!(loaded_ch.invite_exceptions.is_empty());
     }
 
     #[test]
@@ -1283,6 +2484,262 @@ mod tests {
 
         let loaded = db.load_channels().unwrap();
         assert_eq!(loaded.get("#test").unwrap().bans.len(), 1);
+    }
+
+    #[test]
+    fn store_and_get_reactions() {
+        let db = Db::open_memory().unwrap();
+        db.store_reaction(
+            "msg001",
+            "#test",
+            "alice",
+            Some("did:plc:alice"),
+            "👍",
+            1000,
+        )
+        .unwrap();
+        db.store_reaction("msg001", "#test", "bob", None, "👍", 1001)
+            .unwrap();
+        db.store_reaction(
+            "msg001",
+            "#test",
+            "alice",
+            Some("did:plc:alice"),
+            "❤️",
+            1002,
+        )
+        .unwrap();
+
+        let reactions = db.get_reactions_for_messages(&["msg001"]).unwrap();
+        let msg_reactions = reactions.get("msg001").unwrap();
+        assert_eq!(msg_reactions.len(), 3);
+        assert_eq!(msg_reactions[0].reactor_nick, "alice");
+        assert_eq!(msg_reactions[0].emoji, "👍");
+        assert_eq!(msg_reactions[1].reactor_nick, "bob");
+        assert_eq!(msg_reactions[2].emoji, "❤️");
+    }
+
+    #[test]
+    fn duplicate_reaction_ignored() {
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#test", "alice", None, "👍", 1000)
+            .unwrap();
+        db.store_reaction("msg001", "#test", "alice", None, "👍", 1001)
+            .unwrap(); // duplicate
+
+        let reactions = db.get_reactions_for_messages(&["msg001"]).unwrap();
+        assert_eq!(reactions.get("msg001").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn remove_reaction() {
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#test", "alice", None, "👍", 1000)
+            .unwrap();
+        db.store_reaction("msg001", "#test", "alice", None, "❤️", 1001)
+            .unwrap();
+
+        let removed = db.remove_reaction("msg001", "alice", "👍").unwrap();
+        assert_eq!(removed, 1);
+
+        let reactions = db.get_reactions_for_messages(&["msg001"]).unwrap();
+        let msg_reactions = reactions.get("msg001").unwrap();
+        assert_eq!(msg_reactions.len(), 1);
+        assert_eq!(msg_reactions[0].emoji, "❤️");
+    }
+
+    #[test]
+    fn get_reactions_multiple_messages() {
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#test", "alice", None, "👍", 1000)
+            .unwrap();
+        db.store_reaction("msg002", "#test", "bob", None, "🎉", 1001)
+            .unwrap();
+        db.store_reaction("msg003", "#test", "carol", None, "❤️", 1002)
+            .unwrap();
+
+        let reactions = db
+            .get_reactions_for_messages(&["msg001", "msg002", "msg003"])
+            .unwrap();
+        assert!(reactions.contains_key("msg001"));
+        assert!(reactions.contains_key("msg002"));
+        assert!(reactions.contains_key("msg003"));
+    }
+
+    #[test]
+    fn get_reactions_empty_input() {
+        let db = Db::open_memory().unwrap();
+        let reactions = db.get_reactions_for_messages(&[]).unwrap();
+        assert!(reactions.is_empty());
+    }
+
+    #[test]
+    fn get_reactions_no_matches() {
+        let db = Db::open_memory().unwrap();
+        let reactions = db.get_reactions_for_messages(&["nonexistent"]).unwrap();
+        assert!(reactions.is_empty());
+    }
+
+    // ── Pin persistence tests ──
+
+    #[test]
+    fn store_and_get_pins() {
+        let db = Db::open_memory().unwrap();
+        db.store_pin("#test", "msg001", "alice", 1000).unwrap();
+        db.store_pin("#test", "msg002", "bob", 1001).unwrap();
+
+        let pins = db.get_pins("#test").unwrap();
+        assert_eq!(pins.len(), 2);
+        // Most recent first
+        assert_eq!(pins[0].msgid, "msg002");
+        assert_eq!(pins[0].pinned_by, "bob");
+        assert_eq!(pins[1].msgid, "msg001");
+    }
+
+    #[test]
+    fn duplicate_pin_ignored() {
+        let db = Db::open_memory().unwrap();
+        db.store_pin("#test", "msg001", "alice", 1000).unwrap();
+        db.store_pin("#test", "msg001", "bob", 1001).unwrap(); // same msgid
+
+        let pins = db.get_pins("#test").unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].pinned_by, "alice"); // first pinner wins
+    }
+
+    #[test]
+    fn remove_pin() {
+        let db = Db::open_memory().unwrap();
+        db.store_pin("#test", "msg001", "alice", 1000).unwrap();
+        db.store_pin("#test", "msg002", "bob", 1001).unwrap();
+
+        let removed = db.remove_pin("#test", "msg001").unwrap();
+        assert_eq!(removed, 1);
+
+        let pins = db.get_pins("#test").unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].msgid, "msg002");
+    }
+
+    #[test]
+    fn remove_nonexistent_pin() {
+        let db = Db::open_memory().unwrap();
+        let removed = db.remove_pin("#test", "nonexistent").unwrap();
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn pins_separate_per_channel() {
+        let db = Db::open_memory().unwrap();
+        db.store_pin("#chan1", "msg001", "alice", 1000).unwrap();
+        db.store_pin("#chan2", "msg002", "bob", 1001).unwrap();
+
+        let pins1 = db.get_pins("#chan1").unwrap();
+        let pins2 = db.get_pins("#chan2").unwrap();
+        assert_eq!(pins1.len(), 1);
+        assert_eq!(pins2.len(), 1);
+        assert_eq!(pins1[0].msgid, "msg001");
+        assert_eq!(pins2[0].msgid, "msg002");
+    }
+
+    #[test]
+    fn load_pins_on_channel_startup() {
+        let db = Db::open_memory().unwrap();
+        let ch = ChannelState::default();
+        db.save_channel("#test", &ch).unwrap();
+        db.store_pin("#test", "msg001", "alice", 1000).unwrap();
+        db.store_pin("#test", "msg002", "bob", 1001).unwrap();
+
+        let channels = db.load_channels().unwrap();
+        let loaded = channels.get("#test").unwrap();
+        assert_eq!(loaded.pins.len(), 2);
+        assert_eq!(loaded.pins[0].msgid, "msg002"); // most recent first
+    }
+
+    #[test]
+    fn signing_key_roundtrip_and_get_latest() {
+        let db = Db::open_memory().unwrap();
+        let did = "did:plc:abc";
+        assert!(db.get_signing_key(did).unwrap().is_none());
+
+        let key1 = [1u8; 32];
+        db.save_signing_key(did, &key1).unwrap();
+        assert_eq!(db.get_signing_key(did).unwrap(), Some(key1));
+
+        // A newer key becomes the "latest" get_signing_key returns (key1 is
+        // retained as history — see signing_key_history_is_append_only).
+        let key2 = [2u8; 32];
+        db.save_signing_key(did, &key2).unwrap();
+        assert_eq!(db.get_signing_key(did).unwrap(), Some(key2));
+
+        // Different DID is independent
+        db.save_signing_key("did:plc:xyz", &[9u8; 32]).unwrap();
+        assert_eq!(db.get_signing_key(did).unwrap(), Some(key2));
+        assert_eq!(db.get_signing_key("did:plc:xyz").unwrap(), Some([9u8; 32]));
+    }
+
+    #[test]
+    fn signing_key_history_is_append_only() {
+        use freeq_sdk::act::derive_kid_bytes;
+        let db = Db::open_memory().unwrap();
+        let did = "did:plc:abc";
+        let (k1, k2) = ([1u8; 32], [2u8; 32]);
+        let (kid1, kid2) = (derive_kid_bytes(&k1), derive_kid_bytes(&k2));
+
+        db.save_signing_key(did, &k1).unwrap();
+        db.save_signing_key(did, &k2).unwrap(); // does NOT overwrite k1
+
+        // Both keys retained, each fetchable by its kid.
+        assert_eq!(db.get_signing_key_by_kid(did, &kid1).unwrap(), Some(k1));
+        assert_eq!(db.get_signing_key_by_kid(did, &kid2).unwrap(), Some(k2));
+
+        // Re-registering the same key is idempotent (no error, still resolves).
+        db.save_signing_key(did, &k1).unwrap();
+        assert_eq!(db.get_signing_key_by_kid(did, &kid1).unwrap(), Some(k1));
+    }
+
+    #[test]
+    fn signing_key_lookup_by_unknown_kid_or_did_is_none() {
+        use freeq_sdk::act::derive_kid_bytes;
+        let db = Db::open_memory().unwrap();
+        db.save_signing_key("did:plc:abc", &[1u8; 32]).unwrap();
+        let kid = derive_kid_bytes(&[1u8; 32]);
+        assert_eq!(
+            db.get_signing_key_by_kid("did:plc:abc", "nope").unwrap(),
+            None
+        );
+        assert_eq!(
+            db.get_signing_key_by_kid("did:plc:other", &kid).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn signing_key_legacy_rows_migrate_to_kid_history() {
+        // A DB created with the OLD schema (PK=did, no kid) must, after opening
+        // with the new code, have its key backfilled and fetchable by kid — and
+        // still returnable as the latest via get_signing_key.
+        let db = Db::open_memory_with_legacy_signing_keys().unwrap();
+        let did = "did:plc:legacy";
+        let key = [7u8; 32];
+        let kid = freeq_sdk::act::derive_kid_bytes(&key);
+        assert_eq!(db.get_signing_key_by_kid(did, &kid).unwrap(), Some(key));
+        assert_eq!(db.get_signing_key(did).unwrap(), Some(key));
+    }
+
+    #[test]
+    fn signing_key_rejects_wrong_length_on_read() {
+        // If somehow a non-32-byte blob ends up in the table, the read API
+        // returns None rather than panicking. This guards against a manual DB
+        // edit or legacy corruption.
+        let db = Db::open_memory().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO signing_keys (did, kid, pubkey, registered_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["did:plc:short", "somekid", &[1u8; 16][..], 0i64],
+            )
+            .unwrap();
+        assert!(db.get_signing_key("did:plc:short").unwrap().is_none());
     }
 }
 
@@ -2062,5 +3519,199 @@ impl Db {
             Ok(rows) => rows.filter_map(|r| r.ok()).collect(),
             Err(_) => Vec::new(),
         }
+    }
+
+    // ── AV sessions ────────────────────────────────────────────────────
+
+    pub fn save_av_session(&self, session: &crate::av::AvSession) -> SqlResult<()> {
+        use crate::av::AvSessionState;
+        let (ended_at, ended_by) = match &session.state {
+            AvSessionState::Active => (None, None),
+            AvSessionState::Ended { ended_at, ended_by } => (Some(*ended_at), ended_by.clone()),
+        };
+        self.conn.execute(
+            "INSERT INTO av_sessions (id, channel, created_by, created_at, ended_at, ended_by, title, iroh_ticket, backend, recording, max_participants)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(id) DO UPDATE SET
+                ended_at=excluded.ended_at,
+                ended_by=excluded.ended_by",
+            params![
+                session.id,
+                session.channel,
+                session.created_by,
+                session.created_at,
+                ended_at,
+                ended_by,
+                session.title,
+                session.iroh_ticket,
+                serde_json::to_string(&session.media_backend).unwrap_or_default(),
+                session.recording_enabled,
+                session.max_participants,
+            ],
+        )?;
+        for p in session.participants.values() {
+            self.conn.execute(
+                "INSERT INTO av_participants (session_id, did, nick, joined_at, left_at, role)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(session_id, did) DO UPDATE SET
+                    left_at=excluded.left_at, role=excluded.role",
+                params![
+                    session.id,
+                    p.did,
+                    p.nick,
+                    p.joined_at,
+                    p.left_at,
+                    serde_json::to_string(&p.role).unwrap_or_default(),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn save_av_artifact(&self, artifact: &crate::av::AvArtifact) -> SqlResult<()> {
+        self.conn.execute(
+            "INSERT INTO av_artifacts (id, session_id, kind, created_at, created_by, content_ref, content_type, visibility, title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                artifact.id, artifact.session_id,
+                serde_json::to_string(&artifact.kind).unwrap_or_default(),
+                artifact.created_at, artifact.created_by,
+                artifact.content_ref, artifact.content_type,
+                serde_json::to_string(&artifact.visibility).unwrap_or_default(),
+                artifact.title,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_av_artifacts(&self, session_id: &str) -> SqlResult<Vec<crate::av::AvArtifact>> {
+        use crate::av::{ArtifactKind, ArtifactVisibility, AvArtifact};
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, kind, created_at, created_by, content_ref, content_type, visibility, title
+             FROM av_artifacts WHERE session_id = ?1 ORDER BY created_at",
+        )?;
+        let rows = stmt.query_map([session_id], |row: &rusqlite::Row| {
+            let kind_str: String = row.get(2)?;
+            let vis_str: String = row.get(7)?;
+            Ok(AvArtifact {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                kind: serde_json::from_str(&kind_str).unwrap_or(ArtifactKind::Summary),
+                created_at: row.get(3)?,
+                created_by: row.get(4)?,
+                content_ref: row.get(5)?,
+                content_type: row.get(6)?,
+                visibility: serde_json::from_str(&vis_str)
+                    .unwrap_or(ArtifactVisibility::Participants),
+                title: row.get(8)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Load all active (non-ended) AV sessions with their participants. Used on server restart.
+    pub fn load_active_av_sessions(&self) -> SqlResult<Vec<crate::av::AvSession>> {
+        use crate::av::{
+            AvParticipant, AvSession, AvSessionState, MediaBackendType, ParticipantRole,
+        };
+        use std::collections::HashMap;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel, created_by, created_at, title, iroh_ticket, backend, recording, max_participants
+             FROM av_sessions WHERE ended_at IS NULL",
+        )?;
+        let mut sessions: Vec<AvSession> = stmt
+            .query_map([], |row: &rusqlite::Row| {
+                let backend_str: String = row.get(6)?;
+                Ok(AvSession {
+                    id: row.get(0)?,
+                    channel: row.get(1)?,
+                    created_by: row.get(2)?,
+                    created_by_nick: String::new(),
+                    created_at: row.get(3)?,
+                    state: AvSessionState::Active,
+                    participants: HashMap::new(),
+                    title: row.get(4)?,
+                    iroh_ticket: row.get(5)?,
+                    media_backend: serde_json::from_str(&backend_str)
+                        .unwrap_or(MediaBackendType::IrohLive),
+                    recording_enabled: row.get(7)?,
+                    max_participants: row.get(8)?,
+                })
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Load participants for each session
+        for session in &mut sessions {
+            let mut pstmt = self.conn.prepare(
+                "SELECT did, nick, joined_at, left_at, role FROM av_participants WHERE session_id = ?1",
+            )?;
+            let participants: Vec<AvParticipant> = pstmt
+                .query_map([&session.id], |row: &rusqlite::Row| {
+                    let role_str: String = row.get(4)?;
+                    Ok(AvParticipant {
+                        did: row.get(0)?,
+                        nick: row.get(1)?,
+                        joined_at: row.get(2)?,
+                        left_at: row.get(3)?,
+                        role: serde_json::from_str(&role_str).unwrap_or(ParticipantRole::Speaker),
+                        tracks: vec![],
+                        // Pre-instance-id sessions in the DB: hydrate as None.
+                        // New sessions write/read via the DB schema separately.
+                        instance_id: None,
+                    })
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            for p in participants {
+                // Also recover created_by_nick from the host participant
+                if p.did == session.created_by {
+                    session.created_by_nick = p.nick.clone();
+                }
+                session.participants.insert(p.did.clone(), p);
+            }
+        }
+        Ok(sessions)
+    }
+
+    pub fn list_channel_av_sessions(
+        &self,
+        channel: &str,
+        limit: u32,
+    ) -> SqlResult<Vec<crate::av::AvSession>> {
+        use crate::av::{AvSession, AvSessionState, MediaBackendType};
+        use std::collections::HashMap;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, channel, created_by, created_at, ended_at, ended_by, title, iroh_ticket, backend, recording, max_participants
+             FROM av_sessions WHERE channel = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![channel, limit], |row: &rusqlite::Row| {
+            let ended_at: Option<i64> = row.get(4)?;
+            let ended_by: Option<String> = row.get(5)?;
+            let backend_str: String = row.get(8)?;
+            let state = match ended_at {
+                Some(ea) => AvSessionState::Ended {
+                    ended_at: ea,
+                    ended_by,
+                },
+                None => AvSessionState::Active,
+            };
+            Ok(AvSession {
+                id: row.get(0)?,
+                channel: row.get(1)?,
+                created_by: row.get(2)?,
+                created_by_nick: String::new(),
+                created_at: row.get(3)?,
+                state,
+                participants: HashMap::new(),
+                title: row.get(6)?,
+                iroh_ticket: row.get(7)?,
+                media_backend: serde_json::from_str(&backend_str)
+                    .unwrap_or(MediaBackendType::IrohLive),
+                recording_enabled: row.get(9)?,
+                max_participants: row.get(10)?,
+            })
+        })?;
+        rows.collect()
     }
 }

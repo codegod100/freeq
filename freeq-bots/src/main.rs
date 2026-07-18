@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
         tls: args.tls,
         tls_insecure: false,
         web_token: None,
+        websocket_url: None,
     })
     .await?;
 
@@ -115,6 +116,7 @@ async fn main() -> Result<()> {
         tls: args.tls,
         tls_insecure: false,
         web_token: None,
+        websocket_url: None,
     };
 
     let (handle, mut events) = client::connect_with_stream(conn, config, None);
@@ -172,20 +174,17 @@ async fn handle_event(
         Event::Connected => tracing::info!("Connected"),
         Event::Registered { nick } => tracing::info!("Registered as {nick}"),
 
-        Event::Joined { channel, nick } => {
-            if nick == bot_nick {
-                output::status(handle, channel, &system_agent(), "🤖",
+        Event::Joined { channel, nick, .. } if nick == bot_nick => {
+            output::status(handle, channel, &system_agent(), "🤖",
                     "AI Factory online. Commands: /factory build <spec> | /audit <repo> | /prototype <spec> | /help"
                 ).await?;
-            }
         }
 
         Event::Message {
             from,
             target,
             text,
-            tags,
-        } => {
+            tags, .. } => {
             if tags.contains_key("batch") {
                 return Ok(());
             }

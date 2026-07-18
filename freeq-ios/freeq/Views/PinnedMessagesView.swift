@@ -24,7 +24,7 @@ struct PinnedMessagesView: View {
                 VStack(spacing: 12) {
                     ProgressView().tint(Theme.accent)
                     Text("Loading pins…")
-                        .font(.system(size: 14))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textMuted)
                 }
             } else if let error = error {
@@ -33,7 +33,7 @@ struct PinnedMessagesView: View {
                         .font(.system(size: 32))
                         .foregroundColor(Theme.warning)
                     Text(error)
-                        .font(.system(size: 14))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textSecondary)
                 }
             } else if pins.isEmpty {
@@ -42,10 +42,10 @@ struct PinnedMessagesView: View {
                         .font(.system(size: 36))
                         .foregroundColor(Theme.textMuted)
                     Text("No pinned messages")
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.fqCallout.weight(.medium))
                         .foregroundColor(Theme.textSecondary)
                     Text("Ops can pin messages with /pin <msgid>")
-                        .font(.system(size: 13))
+                        .font(.fqFootnote)
                         .foregroundColor(Theme.textMuted)
                 }
             } else {
@@ -57,10 +57,10 @@ struct PinnedMessagesView: View {
                                     UserAvatar(nick: pin.from, size: 32)
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(pin.from)
-                                            .font(.system(size: 14, weight: .semibold))
+                                            .font(.fqFootnote.weight(.semibold))
                                             .foregroundColor(Theme.nickColor(for: pin.from))
                                         Text(pin.timestamp, style: .relative)
-                                            .font(.system(size: 11))
+                                            .font(.fqCaption2)
                                             .foregroundColor(Theme.textMuted)
                                     }
                                     Spacer()
@@ -69,14 +69,13 @@ struct PinnedMessagesView: View {
                                         .foregroundColor(Theme.warning)
                                 }
 
-                                Text(pin.text)
-                                    .font(.system(size: 15))
+                                MarkdownText(raw: pin.text)
+                                    .font(.fqSubheadline)
                                     .foregroundColor(Theme.textPrimary)
-                                    .textSelection(.enabled)
 
                                 HStack {
                                     Text("Pinned by \(pin.pinnedBy)")
-                                        .font(.system(size: 11))
+                                        .font(.fqCaption2)
                                         .foregroundColor(Theme.textMuted)
                                     Spacer()
                                 }
@@ -93,7 +92,7 @@ struct PinnedMessagesView: View {
         }
         .navigationTitle("Pinned Messages")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(Theme.bgSecondary, for: .navigationBar)
+        .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .task { await fetchPins() }
     }

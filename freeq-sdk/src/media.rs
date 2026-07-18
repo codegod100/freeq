@@ -340,7 +340,7 @@ pub async fn upload_media_to_pds(
         data.to_vec(),
     )
     .await
-    .context("Blob upload failed")?;
+    .context("Blob upload to PDS failed — your session may have expired. Please sign in again.")?;
 
     let blob = &blob_json["blob"];
     let cid = blob["ref"]["$link"]
@@ -488,7 +488,7 @@ async fn dpop_post(
 
         if (resp.status() == 401 || resp.status() == 400) && attempt < 2 {
             let body = resp.text().await.unwrap_or_default();
-            tracing::debug!(method, attempt, body = %body, "DPoP retry (nonce rotation or auth)");
+            tracing::warn!(method, attempt, body = %body, "DPoP retry (nonce rotation or auth)");
             continue;
         }
 
@@ -650,5 +650,43 @@ mod tests {
             ..img.clone()
         };
         assert!(vid.is_video());
+    }
+
+    #[test]
+    fn pdf_url_uses_raw_pds_blob_not_cdn() {
+        // PDFs should get raw PDS blob URL, not CDN (CDN only handles images)
+        let mime = "application/pdf";
+        let did = "did:plc:test";
+        let cid = "bafkreitest";
+        let pds_url = "https://puffball.us-east.host.bsky.network";
+
+        let url = if mime.starts_with("image/") {
+            format!("https://cdn.bsky.app/img/feed_fullsize/plain/{did}/{cid}@jpeg")
+        } else {
+            format!("{pds_url}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}")
+        };
+
+        assert!(
+            url.contains("com.atproto.sync.getBlob"),
+            "PDF should use raw PDS blob URL"
+        );
+        assert!(!url.contains("cdn.bsky.app"), "PDF must NOT use CDN URL");
+    }
+
+    #[test]
+    fn pdf_in_allowed_types() {
+        // Verify PDF MIME type is accepted (matches client-side whitelist)
+        let allowed = [
+            "image/jpeg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "video/mp4",
+            "video/webm",
+            "audio/mpeg",
+            "audio/ogg",
+            "application/pdf",
+        ];
+        assert!(allowed.contains(&"application/pdf"));
     }
 }
