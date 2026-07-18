@@ -182,6 +182,12 @@
       .sidebar-channel:hover .sidebar-channel-part{opacity:1}
       .sidebar-channel-part:hover{color:var(--nick-6)}
 
+      /* ── DM list ──────────────────────────────────────────── */
+      #dm-list{list-style:none;margin:0;padding:0}
+      .msg[data-encrypted="true"] .body::before{
+        content:"🔒";font-size:.7rem;margin-right:.25rem;opacity:.7
+      }
+
       /* ── Policy modal ─────────────────────────────────────── */
       #policy-modal{
         display:none;position:fixed;inset:0;z-index:120;

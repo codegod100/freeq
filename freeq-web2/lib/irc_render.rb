@@ -229,7 +229,8 @@ module IrcRender
         elsif m[:voiced] then %(<span class="pfx voice">+</span>)
         else ""
         end
-      %(<div class="member">#{pfx}<span class="nick #{color}">#{safe_nick}</span></div>)
+      did_attr = m[:account] ? %( data-did="#{html_escape(m[:account])}" data-account="#{html_escape(m[:account])}") : ""
+      %(<div class="member" data-nick="#{safe_nick}"#{did_attr}>#{pfx}<span class="nick #{color}" onclick="window.openDm('#{safe_nick}')" style="cursor:pointer" title="Click to message">#{safe_nick}</span></div>)
     end.join
   end
 
@@ -411,7 +412,10 @@ module IrcRender
     case cmd
     when "JOIN"
       channel = parts[1].to_s.delete_prefix(":")
-      { kind: :join, channel: channel, nick: nick }
+      # extended-join: JOIN #channel account :realname
+      # account is the DID (or * for unauthenticated).
+      account = parts[2] && parts[2].start_with?("did:") ? parts[2] : nil
+      { kind: :join, channel: channel, nick: nick, account: account }
     when "PART"
       channel = parts[1].to_s.delete_prefix(":")
       { kind: :part, channel: channel, nick: nick }

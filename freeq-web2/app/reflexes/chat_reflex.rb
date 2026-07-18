@@ -14,13 +14,16 @@ class ChatReflex < ApplicationReflex
   # Optional form field `reply_to` (parent msgid) → `@+reply=<msgid> PRIVMSG …`.
   # Optional form field `edit_to` (original msgid) → `@+draft/edit=<msgid> PRIVMSG …`.
   def send_message
-    channel = canonical_channel(element.dataset[:channel])
+    raw_target = element.dataset[:channel].to_s
+    is_dm = element.dataset[:is_dm] == "true"
+    # DMs target a nick (no # prefix); channels get canonicalized.
+    target = is_dm ? raw_target : canonical_channel(raw_target)
     msg = params[:msg].to_s.strip
     reply_to = params[:reply_to].to_s.strip
     edit_to = params[:edit_to].to_s.strip
     return if msg.empty?
 
-    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
+    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, target)
     line =
       if msg.match?(/^\/nick\s+\S/)
         "NICK #{msg[6..].strip}\r\n"
@@ -29,11 +32,11 @@ class ChatReflex < ApplicationReflex
       elsif msg.start_with?("/")
         "#{msg[1..]}\r\n"
       elsif edit_to.present?
-        "@+draft/edit=#{IrcRender.escape_tag_value(edit_to)} PRIVMSG #{channel} :#{msg}\r\n"
+        "@+draft/edit=#{IrcRender.escape_tag_value(edit_to)} PRIVMSG #{target} :#{msg}\r\n"
       elsif reply_to.present?
-        "@+reply=#{IrcRender.escape_tag_value(reply_to)} PRIVMSG #{channel} :#{msg}\r\n"
+        "@+reply=#{IrcRender.escape_tag_value(reply_to)} PRIVMSG #{target} :#{msg}\r\n"
       else
-        "PRIVMSG #{channel} :#{msg}\r\n"
+        "PRIVMSG #{target} :#{msg}\r\n"
       end
     session.enqueue_outbound(line)
 

@@ -60,6 +60,41 @@ class ChatController < ApplicationController
     @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)
   end
 
+  # GET /chat/dm/:nick — DM chat shell for a direct message conversation.
+  # DMs are E2EE (browser-side Double Ratchet); the server only relays
+  # ciphertext. History comes via CHATHISTORY over WS, not REST.
+  def dm
+    @dm_nick = params[:nick]
+    @channel = @dm_nick  # reuse the show template's @channel for the nav
+    @bare = @dm_nick
+    @session = current_session
+
+    channels = SessionRegistry.instance.fetch_channels
+    mine = @session.channels.to_a
+    existing = channels.map { |c| c["name"].to_s.downcase }
+    mine.each do |ch|
+      next if existing.include?(ch.downcase)
+      channels << { "name" => ch, "topic" => "", "members" => 0 }
+    end
+    @topic = ""
+    @my_channels, @all_channels = channels.partition do |c|
+      mine.any? { |j| j.casecmp?(c["name"].to_s) }
+    end
+
+    # No REST history for DMs — request via CHATHISTORY over WS.
+    @history = []
+    @session.request_dm_backlog!(@dm_nick) if @session.ws_state == :ready
+
+    @parent_lookup = {}
+    @own_nick = @session.authenticated? ? @session.auth_nick : @session.current_nick
+    @known_nicks = @session.known_nicks
+    @members_html = nil
+    @is_dm = true
+
+    @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @dm_nick)
+    render :show
+  end
+
   # POST /chat/:channel/react  { msgid, emoji }
   def react
     enqueue_reaction(added: true)

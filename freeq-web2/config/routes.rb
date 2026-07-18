@@ -5,7 +5,7 @@ Rails.application.routes.draw do
 
   resources :chat, only: %i[index], path: "chat"
   get "chat/:channel", to: "chat#show", as: :chat_channel
-
+  get "chat/dm/:nick", to: "chat#dm", as: :chat_dm
   # Mutations used by the JS reaction picker (and available as plain POST APIs).
   post "chat/:channel/react", to: "chat#react"
   post "chat/:channel/unreact", to: "chat#unreact"

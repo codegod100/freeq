@@ -145,6 +145,13 @@ class SessionState
     enqueue_outbound("CHATHISTORY LATEST #{IrcRender.canonical_channel(channel)} * #{limit}\r\n")
   end
 
+  # Request DM history via CHATHISTORY over WS.
+  def request_dm_backlog!(nick, limit = 50)
+    return unless @ws_state == :ready
+
+    enqueue_outbound("CHATHISTORY LATEST #{nick} * #{limit}\r\n")
+  end
+
   # ── Recent message rows ──────────────────────────────────────────────
   #
   # The broadcaster caches the last N rendered message rows per channel.

@@ -104,6 +104,36 @@ module IrcBroadcaster
       return
     end
 
+    # account-notify: update the member's DID so DMs can resolve nick→DID.
+    if (acct = IrcRender.parse_account_did(line))
+      session.channel_members.each do |_ch, map|
+        # We don't know which nick from ACCOUNT alone; the prefix carries it.
+        prefix_nick = line[1..]&.split("!")&.first
+        entry = map[prefix_nick] if prefix_nick
+        if entry
+          entry[:account] = acct
+        end
+      end
+      # Re-render any member panel that has this nick.
+      prefix_nick = line[1..]&.split("!")&.first
+      session.channel_members.each do |ch, map|
+        next unless prefix_nick && map.key?(prefix_nick)
+        cable_for(ch).inner_html(selector: "#member-panel", html: IrcRender.render_member_list(map)).broadcast
+      end
+      return
+    end
+
+    # DM routing: nick-targeted PRIVMSG/NOTICE (not #channel).
+    # Route to the DM stream so the DM view renders it.
+    if (dm_target = dm_target_for(session, line))
+      html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup, own_nick: session.current_nick, known_nicks: session.known_nicks)
+      unless html.empty?
+        session.cache_row(dm_target, html)
+        cable_for(dm_target).append(selector: "#messages", html: html).broadcast
+      end
+      return
+    end
+
     # Channel-scoped messages: try each joined channel for should_emit.
     session.joined.each do |ch|
       if (topic = IrcRender.parse_topic_change(line, ch))
@@ -140,6 +170,39 @@ module IrcBroadcaster
     end
   rescue => e
     Rails.logger.warn("IrcBroadcaster error: #{e.class}: #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}")
+  end
+
+  # Extract the DM target (nick) from a nick-targeted PRIVMSG/NOTICE.
+  # Returns the nick if this is a DM (target doesn't start with # or &),
+  # and it involves us (either as sender or recipient). Returns nil otherwise.
+  def dm_target_for(session, line)
+    tags, rest_with_prefix = IrcRender.parse_irc_tags(line)
+    rest = rest_with_prefix[1..] or return nil
+    sp = rest.index(" ") or return nil
+    prefix = rest[0...sp]
+    cmd_and_args = rest[(sp + 1)..]
+    parts = cmd_and_args.split(" ", 3)
+    cmd = parts[0].to_s
+    return nil unless %w[PRIVMSG NOTICE].include?(cmd)
+
+    target = parts[1].to_s
+    return nil if target.start_with?("#", "&")
+
+    # Sender nick
+    sender = prefix.split("!").first
+    own = session.current_nick
+    return nil unless own
+
+    # Is this a DM involving us? Either we're the sender (echo) or the recipient.
+    if sender&.casecmp?(own)
+      # We sent it — the DM partner is the target
+      target
+    elsif target.casecmp?(own)
+      # We received it — the DM partner is the sender
+      sender
+    else
+      nil
+    end
   end
 
   def broadcast_reaction(channel, msgid, emoji, nick, added)
@@ -189,7 +252,8 @@ module IrcBroadcaster
     map = session.channel_members[channel] ||= {}
     case change[:kind]
     when :join
-      map[change[:nick]] ||= { nick: change[:nick], op: false, halfop: false, voiced: false }
+      entry = map[change[:nick]] ||= { nick: change[:nick], op: false, halfop: false, voiced: false }
+      entry[:account] = change[:account] if change[:account]
     when :part, :quit
       map.delete(change[:nick])
     when :mode

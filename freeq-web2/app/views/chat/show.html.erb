@@ -3,7 +3,8 @@
 <div id="freeq-chat"
      data-controller="chat"
      data-channel="<%= @bare %>"
-     data-auth-handle="<%= @session.auth.is_a?(Hash) ? @session.auth[:nick] : "" %>">
+     data-auth-handle="<%= @session.auth.is_a?(Hash) ? @session.auth[:nick] : "" %>"
+     data-auth-did="<%= @session.authenticated? ? @session.auth.did : "" %>">
   <nav>
     <span class="brand">freeq</span>
     <span style="font-size:.875rem;color:#7ab7ff"><%= @channel %></span>
@@ -50,6 +51,9 @@
             <%= render "chat/channel_link", ch: ch, active: @channel %>
           <% end %>
         </ul>
+        <p class="sidebar-toggle" data-target="dm-list"><span class="arrow">▾</span> DIRECT MESSAGES</p>
+        <ul id="dm-list" class="dm-list">
+        </ul>
       </div>
       <div id="user-info">
         <% if @session.authenticated? %>
@@ -82,7 +86,8 @@
               data-reflex-permanent
               data-reflex="submit->ChatReflex#send_message"
               data-reflex-serialize-form="true"
-              data-channel="<%= @bare %>">
+              data-channel="<%= @bare %>"
+              data-is-dm="<%= @is_dm ? "true" : "" %>">
           <input type="hidden" name="reply_to" id="reply-to-input" value="">
           <input type="hidden" name="edit_to" id="edit-to-input" value="">
           <input

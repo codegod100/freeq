@@ -2,7 +2,7 @@ import { Controller } from "@hotwired/stimulus";
 import consumer from "../channels/consumer";
 import CableReady from "cable_ready";
 import StimulusReflex from "stimulus_reflex";
-
+import * as dm from "../dm.js";
 // Client-side chat controller: ChatChannel live updates, reactions, replies.
 export default class ChatController extends Controller {
   connect() {
@@ -13,6 +13,7 @@ export default class ChatController extends Controller {
     this.setupSidebar();
     this.setupTopicEdit();
     this.setupTabComplete();
+    this.setupDm();
     this.hydrateReplyBadges();
     this.scrollToBottom();
 
@@ -488,6 +489,163 @@ export default class ChatController extends Controller {
       fromMsgs.push(n);
     });
     return fromMsgs;
+  }
+
+  // ── Direct Messages (E2EE) ──────────────────────────────────────────
+
+  setupDm() {
+    // Initialize E2EE when authenticated (DID available on the page).
+    const did = this.element.dataset.authDid;
+    if (did) {
+      dm.initE2ee(did, dm.getServerOrigin());
+    }
+
+    // Render the DM list in the sidebar.
+    this.renderDmList();
+
+    // Expose DM helpers globally for onclick handlers.
+    window.openDm = (nick) => {
+      dm.addDm(nick);
+      window.location.href = `/chat/dm/${encodeURIComponent(nick)}`;
+    };
+
+    window.removeDm = (nick) => {
+      dm.removeDm(nick);
+      this.renderDmList();
+      if (window.location.pathname === `/chat/dm/${encodeURIComponent(nick)}`) {
+        window.location.href = "/chat";
+      }
+    };
+
+    // Intercept DM form submit: encrypt the plaintext before the reflex
+    // serializes the form. StimulusReflex fires on submit, so we capture
+    // the event, encrypt, swap the input value, then re-dispatch.
+    const form = document.getElementById("send-form");
+    if (form && form.dataset.isDm === "true") {
+      form.addEventListener("submit", async (e) => {
+        // Only intercept if not already encrypted (avoid double-encrypt on retry)
+        const input = document.getElementById("message-input");
+        if (!input || input.dataset.encrypted === "true") return;
+
+        const plaintext = input.value.trim();
+        if (!plaintext || plaintext.startsWith("/")) return; // slash commands pass through
+
+        e.preventDefault();
+        e.stopPropagation();
+
+        const targetNick = form.dataset.channel;
+        const remoteDid = dm.nickToDid(targetNick);
+        if (!remoteDid) {
+          // Can't encrypt without the peer's DID — show error
+          const banner = document.getElementById("reply-banner");
+          if (banner) {
+            banner.innerHTML =
+              '<span class="reply-banner-label" style="color:var(--nick-6)">Cannot encrypt — unknown recipient identity</span>';
+          }
+          return;
+        }
+
+        const encrypted = await dm.encryptDm(remoteDid, plaintext, dm.getServerOrigin());
+        if (!encrypted) {
+          const banner = document.getElementById("reply-banner");
+          if (banner) {
+            banner.innerHTML =
+              '<span class="reply-banner-label" style="color:var(--nick-6)">Encryption failed</span>';
+          }
+          return;
+        }
+
+        // Swap the input with the ciphertext, mark as encrypted, and
+        // re-submit so the reflex picks up the encrypted payload.
+        input.value = encrypted;
+        input.dataset.encrypted = "true";
+        // Store plaintext for local echo display
+        input.dataset.plaintext = plaintext;
+
+        // Re-dispatch the submit — the reflex will fire with the encrypted value
+        form.requestSubmit();
+      }, true); // capture phase — runs before StimulusReflex
+    }
+
+    // After a DM message is sent, clear the encrypted flag and restore
+    // the input for the next message.
+    const input = document.getElementById("message-input");
+    if (input) {
+      const observer = new MutationObserver(() => {
+        if (input.value === "" && input.dataset.encrypted === "true") {
+          delete input.dataset.encrypted;
+          delete input.dataset.plaintext;
+        }
+      });
+      observer.observe(input, { attributes: true, attributeFilter: ["value"] });
+    }
+  }
+
+  // Render the DM section in the sidebar.
+  renderDmList() {
+    const list = document.getElementById("dm-list");
+    if (!list) return;
+    const dms = dm.loadDmList();
+    const currentPath = window.location.pathname;
+    list.innerHTML = dms
+      .map((nick) => {
+        const isActive = currentPath === `/chat/dm/${encodeURIComponent(nick)}`;
+        const safe = escapeHtml(nick);
+        return `<li class="sidebar-channel${isActive ? " active" : ""}" id="dm-${safe}">
+          <a href="/chat/dm/${encodeURIComponent(nick)}" class="sidebar-channel-link">💬 ${safe}</a>
+          <button type="button" class="sidebar-channel-part" title="Close DM"
+                  data-nick="${safe}"
+                  onclick="window.removeDm('${safe}')">×</button>
+        </li>`;
+      })
+      .join("");
+  }
+
+  // Decrypt any ENC3: messages in the message pane.
+  async decryptDmRows() {
+    const rows = document.querySelectorAll(
+      "#messages .msg[data-text^='ENC3:']"
+    );
+    for (const row of rows) {
+      const wire = row.dataset.text;
+      if (!wire || !dm.isEncryptedDm(wire)) continue;
+      const fromNick = row.dataset.nick;
+      if (!fromNick) continue;
+      const remoteDid = dm.nickToDid(fromNick);
+      if (!remoteDid) {
+        row.querySelector(".body").innerHTML =
+          '<span style="color:var(--muted)">[encrypted DM — unknown sender identity]</span>';
+        continue;
+      }
+      const plaintext = await dm.decryptDm(remoteDid, wire, dm.getServerOrigin());
+      if (plaintext) {
+        // Update the row's text and data-text attribute.
+        row.dataset.text = plaintext;
+        const body = row.querySelector(".body");
+        if (body) {
+          // Preserve nick span, replace text content after it.
+          const nickEl = body.querySelector(".nick");
+          const reactions = body.querySelector(".reactions");
+          const replyBadge = body.querySelector(".reply-badge");
+          const btns = body.querySelectorAll("button");
+          body.innerHTML = "";
+          if (replyBadge) body.appendChild(replyBadge);
+          if (nickEl) body.appendChild(nickEl);
+          body.appendChild(document.createTextNode(" "));
+          const textSpan = document.createElement("span");
+          textSpan.textContent = plaintext;
+          body.appendChild(textSpan);
+          if (reactions) body.appendChild(reactions);
+          btns.forEach((b) => body.appendChild(b));
+        }
+        row.setAttribute("data-encrypted", "true");
+      } else {
+        row.querySelector(".body")?.insertAdjacentHTML(
+          "beforeend",
+          '<span style="color:var(--muted)"> [could not decrypt]</span>'
+        );
+      }
+    }
   }
 }
 
