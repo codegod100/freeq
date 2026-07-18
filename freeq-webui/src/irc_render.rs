@@ -50,7 +50,50 @@ pub fn should_emit(line: &str, current_channel: &str) -> bool {
             return false;
         }
     }
+
+    // Suppress protocol / policy control NOTICEs directed at the nick
+    // (POLICY RULES, DPoP, API-BEARER, …) so they don't leak into chat.
+    if cmd == "NOTICE" {
+        if let Some(text) = notice_trailing(after_prefix) {
+            if is_control_notice(text) {
+                return false;
+            }
+        }
+    }
+
     true
+}
+
+/// Trailing text of `NOTICE target :text`.
+fn notice_trailing(after_prefix: &str) -> Option<&str> {
+    let rest = after_prefix.strip_prefix("NOTICE ")?;
+    let sp = rest.find(' ')?;
+    let trailing = rest[sp + 1..].trim_start();
+    Some(trailing.trim_start_matches(':'))
+}
+
+/// True for server control/policy NOTICEs that should not appear in chat.
+fn is_control_notice(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with("Rules for #")
+        || t.starts_with("Rules for &")
+        || t.contains("rules_hash=")
+        || t.contains("has no policy")
+        || t.contains("no rules text")
+        || t.contains("Rules text isn't available")
+        || t.starts_with("Policy for #")
+        || t.starts_with("Policy for &")
+        || t.starts_with("Policy error")
+        || t.starts_with("Version:")
+        || t.starts_with("Policy ID:")
+        || t.starts_with("Effective:")
+        || t.starts_with("Validity:")
+        || t.starts_with("Requirement:")
+        || t.starts_with("Role '")
+        || t.starts_with("Role ")
+        || t.starts_with("DPOP_NONCE ")
+        || t.starts_with("API-BEARER ")
+        || t.contains("SASL authentication")
 }
 
 /// Parse `BATCH +id type [args…]` / `BATCH -id`. Returns `(id, open, batch_type)`.
@@ -505,6 +548,24 @@ pub fn is_353(line: &str) -> bool {
     rest[sp + 1..].starts_with("353 ")
 }
 
+/// Extract the channel from a 353 (RPL_NAMREPLY) line.
+/// Format: `:server 353 nick = #channel :@nick1 @nick2`
+pub fn parse_353_channel(line: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    // server 353 nick = #channel :names
+    let mut parts = rest.split_whitespace();
+    let _server = parts.next()?;
+    let cmd = parts.next()?;
+    if cmd != "353" {
+        return None;
+    }
+    let _nick = parts.next()?;
+    let _visibility = parts.next()?; // =, *, or @
+    let channel = parts.next()?;
+    Some(channel.to_string())
+}
+
 pub fn parse_333_did(line: &str) -> Option<String> {
     let line = line.trim_end_matches(['\r', '\n']);
     let rest = line.strip_prefix(':')?;
@@ -550,6 +611,16 @@ pub fn parse_account_did(line: &str) -> Option<String> {
     Some(did.to_string())
 }
 
+/// Normalize a channel name for use as a map key (case-insensitive IRC).
+pub fn channel_key(channel: &str) -> String {
+    channel.to_lowercase()
+}
+
+/// Normalize a nick for use as a map key (case-insensitive IRC).
+pub fn nick_key(nick: &str) -> String {
+    nick.to_lowercase()
+}
+
 pub fn parse_353_members(line: &str) -> Vec<MemberEntry> {
     let line = line.trim_end_matches(['\r', '\n']);
     let names = match line.rfind(" :") {
@@ -574,6 +645,18 @@ pub fn parse_353_members(line: &str) -> Vec<MemberEntry> {
             }
         })
         .collect()
+}
+
+/// True for RPL_ENDOFNAMES (366).
+pub fn is_366(line: &str) -> bool {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let Some(rest) = line.strip_prefix(':') else {
+        return false;
+    };
+    let Some(sp) = rest.find(' ') else {
+        return false;
+    };
+    rest[sp + 1..].starts_with("366 ")
 }
 
 pub fn render_history_row(msg: &UpstreamHistoryMessage) -> String {

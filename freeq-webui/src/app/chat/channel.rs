@@ -197,31 +197,45 @@ async fn chat_channel(cx: &Cx) -> Result {
                     </form>
                 </section>
 
-                // Members
+                // Members — render cached roster at SSR so the panel isn't blank
+                // before the SSE pushes an update.
+                let cached_members_html = {
+                    let key = crate::irc_render::channel_key(&channel);
+                    let members = session.channel_members.lock();
+                    members
+                        .get(&key)
+                        .map(crate::irc_render::render_member_list)
+                        .unwrap_or_else(|| r#"<div class="text-zinc-500">—</div>"#.to_string())
+                };
                 <aside
                     id="member-panel"
                     class="w-40 shrink-0 overflow-y-auto border-l border-[#232932] p-2 text-xs"
                 >
-                    <div class="text-zinc-500">"—"</div>
+                    (Unescaped::new_unchecked(cached_members_html))
                 </aside>
             </div>
 
             <div id="react-picker" role="menu" aria-label="React with emoji"></div>
             <div id="mobile-backdrop" onclick="closeDrawers()"></div>
             <div id="policy-modal" onclick="if(event.target===this)closePolicy()">
-                <div class="mx-4 max-w-lg rounded-xl border border-[#232932] bg-[#151a22] p-4">
-                    <p class="mb-2 font-semibold">
-                        "Channel Policy: "
-                        <span id="policy-channel-name"></span>
-                    </p>
-                    <div id="policy-body" class="text-xs text-zinc-300"></div>
-                    <button
-                        type="button"
-                        class="mt-3 text-sm text-[#7ab7ff]"
-                        onclick="closePolicy()"
-                    >
-                        "Close"
-                    </button>
+                <div class="mx-4 w-full max-w-md rounded-xl border border-[#232932] bg-[#151a22] p-5 shadow-2xl">
+                    <div class="mb-3 flex items-center gap-2">
+                        <span class="text-base">"🛡️"</span>
+                        <span class="font-semibold text-sm text-white">"Channel policy"</span>
+                        <span
+                            id="policy-channel-name"
+                            class="rounded bg-[#1a1f28] px-1.5 py-0.5 text-[10px] text-zinc-400 font-mono"
+                        ></span>
+                        <button
+                            type="button"
+                            class="ml-auto text-zinc-500 hover:text-white text-lg leading-none px-1"
+                            onclick="closePolicy()"
+                            aria-label="Close"
+                        >
+                            "×"
+                        </button>
+                    </div>
+                    <div id="policy-body" class="text-sm text-zinc-300 max-h-[70vh] overflow-y-auto"></div>
                 </div>
             </div>
 

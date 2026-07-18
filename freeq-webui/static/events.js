@@ -33,6 +33,7 @@
   }
 
   function connect() {
+    console.log("[freeq] opening SSE for", channel, "membersEl:", !!membersEl);
     const es = new EventSource(
       "/chat/" + encodeURIComponent(channel) + "/events"
     );
@@ -57,6 +58,7 @@
     });
 
     es.addEventListener("members", (ev) => {
+      console.log("[freeq] members event:", ev.data.slice(0, 80));
       if (membersEl) membersEl.innerHTML = ev.data;
     });
 
@@ -407,20 +409,26 @@
   // After helpers exist and history SSR is in the DOM, re-apply cached chips.
   hydrateReactionsFromCache();
 
-  // Policy modal
+  // Policy modal — clean rules card (not raw NOTICE dump).
   window.showPolicy = async function (ch) {
     const modal = document.getElementById("policy-modal");
     const name = document.getElementById("policy-channel-name");
     const body = document.getElementById("policy-body");
-    if (name) name.textContent = "#" + ch;
-    if (body) body.innerHTML = '<p class="text-zinc-400">Loading…</p>';
+    if (name) name.textContent = "#" + String(ch || "").replace(/^#/, "");
+    if (body) {
+      body.innerHTML =
+        '<p class="text-zinc-500 text-sm animate-pulse">Loading policy…</p>';
+    }
     modal?.classList.add("open");
     try {
       const r = await fetch("/api/policy/" + encodeURIComponent(ch));
-      const t = await r.text();
-      if (body) body.innerHTML = "<pre class='text-xs whitespace-pre-wrap'>" + t + "</pre>";
+      const html = await r.text();
+      if (body) body.innerHTML = html;
     } catch {
-      if (body) body.innerHTML = '<p class="text-red-400">Failed to load policy</p>';
+      if (body) {
+        body.innerHTML =
+          '<p class="text-red-400 text-sm">Failed to load channel rules</p>';
+      }
     }
   };
   window.closePolicy = function () {

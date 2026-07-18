@@ -12,9 +12,10 @@ use tracing::debug;
 
 use crate::app::state;
 use crate::irc_render::{
-    MemberChange, canonical_channel, is_353, line_msgid, parse_333_did, parse_account_did,
-    parse_batch_line, parse_channel_error, parse_member_change, parse_tagmsg_reaction,
-    parse_topic_change, parse_whois_line, render_irc_line, render_member_list, should_emit,
+    MemberChange, canonical_channel, channel_key, is_353, line_msgid, nick_key, parse_333_did,
+    parse_353_channel, parse_account_did, parse_batch_line, parse_channel_error,
+    parse_member_change, parse_tagmsg_reaction, parse_topic_change, parse_whois_line,
+    render_irc_line, render_member_list, should_emit,
 };
 use crate::session_util::ensure_session_id;
 use crate::state::{AuthState, MemberEntry};
@@ -50,11 +51,40 @@ async fn channel_events(cx: &Cx) -> Result<SseResponse> {
     let mut lines_rx = session.lines_tx.subscribe();
     spawn_upstream_if_needed(&app, &sid, &session, app.upstream.clone(), &channel);
 
+    // Snapshot cached members (if any) so a freshly-subscribed SSE stream
+    // still shows the roster even when the upstream already sent 353 NAMES
+    // before this subscriber existed (e.g. page load triggered the JOIN).
+    let ch_key = channel_key(&channel);
+    let cached_members_html = {
+        let members = session.channel_members.lock();
+        members
+            .get(&ch_key)
+            .map(crate::irc_render::render_member_list)
+    };
+
+    // Re-request NAMES so the roster is fresh for this view (cache may be stale
+    // if we missed JOIN/PART while focused elsewhere). Clear first so multi-line
+    // 353 rebuilds cleanly without ghost members.
+    {
+        session
+            .channel_members
+            .lock()
+            .insert(ch_key.clone(), Default::default());
+        let tx = session.irc_tx.lock().clone();
+        let _ = tx.try_send(format!("NAMES {channel}\r\n"));
+    }
+
     let stream = async_stream::stream! {
         yield Ok::<_, Box<dyn std::error::Error + Send + Sync>>(Frame::data(sse_frame(
             "status",
             r#""connected""#,
         )));
+
+        // Replay the cached member roster so the panel isn't blank on a
+        // late SSE connect (the 353 was broadcast before we subscribed).
+        if let Some(html) = cached_members_html {
+            yield Ok(Frame::data(sse_frame("members", &html)));
+        }
 
         // Open chathistory batch ids — suppress message pane for those
         // (scrollback already came from REST on page load).
@@ -83,15 +113,24 @@ async fn channel_events(cx: &Cx) -> Result<SseResponse> {
 
                     if is_353(&line) {
                         let entries = crate::irc_render::parse_353_members(&line);
+                        let ch353 = parse_353_channel(&line).unwrap_or_else(|| canon.clone());
+                        let key = channel_key(&ch353);
+                        let for_view = key == channel_key(&canon);
                         let member_html = {
                             let mut members = session.channel_members.lock();
-                            let map = members.entry(canon.clone()).or_default();
+                            let map = members.entry(key).or_default();
                             for e in &entries {
-                                map.insert(e.nick.clone(), e.clone());
+                                map.insert(nick_key(&e.nick), e.clone());
                             }
-                            render_member_list(map)
+                            if for_view {
+                                Some(render_member_list(map))
+                            } else {
+                                None
+                            }
                         };
-                        yield Ok(Frame::data(sse_frame("members", &member_html)));
+                        if let Some(html) = member_html {
+                            yield Ok(Frame::data(sse_frame("members", &html)));
+                        }
                         continue;
                     }
 
@@ -132,39 +171,57 @@ async fn channel_events(cx: &Cx) -> Result<SseResponse> {
                     }
 
                     if let Some(change) = parse_member_change(&line) {
+                        // Always update the correct channel's cache; only push
+                        // HTML when the change affects the viewed channel.
                         let member_html: Option<String> = {
                             let mut members = session.channel_members.lock();
-                            let map = members.entry(canon.clone()).or_default();
+                            let view_key = channel_key(&canon);
                             match change {
-                                MemberChange::Join { channel: ch, nick }
-                                    if ch.eq_ignore_ascii_case(&canon) =>
-                                {
-                                    map.entry(nick.clone()).or_insert_with(|| MemberEntry {
+                                MemberChange::Join { channel: ch, nick } => {
+                                    let key = channel_key(&ch);
+                                    let map = members.entry(key.clone()).or_default();
+                                    map.entry(nick_key(&nick)).or_insert_with(|| MemberEntry {
                                         nick,
                                         ..Default::default()
                                     });
-                                    Some(render_member_list(map))
+                                    if key == view_key {
+                                        Some(render_member_list(map))
+                                    } else {
+                                        None
+                                    }
                                 }
-                                MemberChange::Part { channel: ch, nick }
-                                    if ch.eq_ignore_ascii_case(&canon) =>
-                                {
-                                    map.remove(&nick);
-                                    Some(render_member_list(map))
+                                MemberChange::Part { channel: ch, nick } => {
+                                    let key = channel_key(&ch);
+                                    if let Some(map) = members.get_mut(&key) {
+                                        map.remove(&nick_key(&nick));
+                                        if key == view_key {
+                                            Some(render_member_list(map))
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    }
                                 }
                                 MemberChange::Quit { nick } => {
-                                    map.remove(&nick);
-                                    Some(render_member_list(map))
+                                    let nk = nick_key(&nick);
+                                    for map in members.values_mut() {
+                                        map.remove(&nk);
+                                    }
+                                    members
+                                        .get(&view_key)
+                                        .map(render_member_list)
                                 }
-                                MemberChange::Mode { channel: ch, ops }
-                                    if ch.eq_ignore_ascii_case(&canon) =>
-                                {
+                                MemberChange::Mode { channel: ch, ops } => {
+                                    let key = channel_key(&ch);
+                                    let map = members.entry(key.clone()).or_default();
                                     for (mode_char, adding, target) in ops {
-                                        let entry = map.entry(target.clone()).or_insert_with(|| {
-                                            MemberEntry {
+                                        let entry = map
+                                            .entry(nick_key(&target))
+                                            .or_insert_with(|| MemberEntry {
                                                 nick: target.clone(),
                                                 ..Default::default()
-                                            }
-                                        });
+                                            });
                                         match mode_char {
                                             'o' => entry.op = adding,
                                             'h' => entry.halfop = adding,
@@ -172,9 +229,12 @@ async fn channel_events(cx: &Cx) -> Result<SseResponse> {
                                             _ => {}
                                         }
                                     }
-                                    Some(render_member_list(map))
+                                    if key == view_key {
+                                        Some(render_member_list(map))
+                                    } else {
+                                        None
+                                    }
                                 }
-                                _ => None,
                             }
                         };
                         if let Some(html) = member_html {

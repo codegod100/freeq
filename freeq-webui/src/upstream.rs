@@ -1,6 +1,7 @@
 //! Upstream WS bridge + REST client.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -396,6 +397,12 @@ pub async fn run_upstream_ws(
         }
 
         tokio::select! {
+            // Login/logout flips ws_state → Disconnected to request a reconnect
+            // with fresh credentials (e.g. to take over an authenticated nick).
+            _ = tokio::time::sleep(std::time::Duration::from_millis(250)), if session.ws_state.load(Ordering::SeqCst) == WsState::Disconnected as u8 => {
+                info!(session = %session_id, "ws_state → Disconnected (reconnect requested); closing guest WS");
+                break 'bridge;
+            }
             Some(cmd) = irc_rx.recv() => {
                 debug!(session = %session_id, dir = ">>", line = %cmd.trim_end_matches(['\r', '\n']), "upstream IRC");
                 match phase {
@@ -426,6 +433,39 @@ pub async fn run_upstream_ws(
                                 warn!("WS write failed on PONG: {e}"); break;
                             }
                             continue;
+                        }
+
+                        // Track channels we JOIN (including auto-rejoins after
+                        // SASL auth) so the channel list highlights them and the
+                        // sidebar "MY CHANNELS" section stays in sync.
+                        // Clear the roster so the following 353 lines rebuild it
+                        // cleanly (otherwise members accumulate forever).
+                        if let Some(joined_ch) = parse_self_join(trimmed, &nick) {
+                            let key = crate::irc_render::channel_key(&joined_ch);
+                            session.joined.lock().insert(joined_ch);
+                            session.channel_members.lock().insert(key, Default::default());
+                        }
+
+                        // Cache 353 (NAMES) rosters for ALL channels under a
+                        // case-insensitive channel key.
+                        if crate::irc_render::is_353(trimmed) {
+                            let entries = crate::irc_render::parse_353_members(trimmed);
+                            if let Some(ch353) = crate::irc_render::parse_353_channel(trimmed) {
+                                let key = crate::irc_render::channel_key(&ch353);
+                                let mut members = session.channel_members.lock();
+                                let map = members.entry(key).or_default();
+                                for e in &entries {
+                                    map.insert(crate::irc_render::nick_key(&e.nick), e.clone());
+                                }
+                            }
+                        }
+
+                        // Live JOIN/PART/QUIT/MODE for every channel (not only
+                        // the one an SSE subscriber is viewing).
+                        if let Some(change) =
+                            crate::irc_render::parse_member_change(trimmed)
+                        {
+                            apply_member_change(&session, change);
                         }
 
                         // Retry with a random nick on 433 (Nickname in use).
@@ -621,6 +661,75 @@ fn ping_token(line: &str) -> Option<&str> {
         return Some(token.trim_start_matches(':'));
     }
     None
+}
+
+/// Apply a JOIN/PART/QUIT/MODE to the session's channel_members cache.
+fn apply_member_change(session: &SessionHandle, change: crate::irc_render::MemberChange) {
+    use crate::irc_render::{MemberChange, channel_key, nick_key};
+    use crate::state::MemberEntry;
+
+    let mut members = session.channel_members.lock();
+    match change {
+        MemberChange::Join { channel, nick } => {
+            let key = channel_key(&channel);
+            let map = members.entry(key).or_default();
+            let nk = nick_key(&nick);
+            map.entry(nk).or_insert_with(|| MemberEntry {
+                nick,
+                ..Default::default()
+            });
+        }
+        MemberChange::Part { channel, nick } => {
+            let key = channel_key(&channel);
+            if let Some(map) = members.get_mut(&key) {
+                map.remove(&nick_key(&nick));
+            }
+        }
+        MemberChange::Quit { nick } => {
+            let nk = nick_key(&nick);
+            for map in members.values_mut() {
+                map.remove(&nk);
+            }
+        }
+        MemberChange::Mode { channel, ops } => {
+            let key = channel_key(&channel);
+            let map = members.entry(key).or_default();
+            for (mode_char, adding, target) in ops {
+                let nk = nick_key(&target);
+                let entry = map.entry(nk).or_insert_with(|| MemberEntry {
+                    nick: target.clone(),
+                    ..Default::default()
+                });
+                match mode_char {
+                    'o' => entry.op = adding,
+                    'h' => entry.halfop = adding,
+                    'v' => entry.voiced = adding,
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// Parse a self-JOIN line. Returns the channel name when the JOIN line's
+/// prefix nick matches our own nick (e.g. `:nandi.uk!... JOIN #freeq`).
+/// Used to track auto-rejoined channels after SASL auth.
+fn parse_self_join(line: &str, our_nick: &str) -> Option<String> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let sp = rest.find(' ')?;
+    let prefix = &rest[..sp];
+    let joiner = prefix.split('!').next()?;
+    if !joiner.eq_ignore_ascii_case(our_nick) {
+        return None;
+    }
+    let after = &rest[sp + 1..];
+    let mut parts = after.split_whitespace();
+    if parts.next()? != "JOIN" {
+        return None;
+    }
+    let channel = parts.next()?.trim_start_matches(':');
+    Some(channel.to_string())
 }
 
 /// Parse `CAP * ACK :sasl account-notify` into the list of acknowledged caps.

@@ -1,0 +1,83 @@
+<%# Chat shell for a single channel. StimulusReflex handles mutations;
+    CableReady broadcasts from the upstream IRC WS bridge morph/append. %>
+<div id="freeq-chat"
+     class="flex h-dvh flex-col"
+     data-controller="chat"
+     data-channel="<%= @bare %>"
+     data-auth-handle="<%= @session.auth.is_a?(Hash) ? @session.auth[:nick] : "" %>">
+  <nav class="flex shrink-0 items-center gap-2 border-b border-[#232932] px-2 py-2">
+    <span class="text-sm font-bold">freeq</span>
+    <span class="text-sm text-[#7ab7ff]"><%= @channel %></span>
+    <span id="channel-topic" class="ml-2 hidden truncate text-xs text-zinc-500 md:inline"><%= @topic %></span>
+    <div class="ml-auto flex items-center gap-2 text-xs">
+      <span id="status"><span class="dot"></span> <span>connecting…</span></span>
+    </div>
+  </nav>
+
+  <div class="relative flex min-h-0 flex-1">
+    <%# Sidebar %>
+    <aside id="sidebar" class="w-44 shrink-0 overflow-y-auto border-r border-[#232932] p-2 text-xs" data-reflex-permanent>
+      <form id="join-form"
+            class="mb-2 flex gap-1"
+            data-reflex="submit->ChatReflex#join"
+            data-reflex-serialize-form="true">
+        <input
+          class="min-w-0 flex-1 rounded border border-[#232932] bg-[#151a22] px-2 py-1"
+          type="text"
+          name="channel"
+          placeholder="join #…"
+          autocomplete="off">
+        <button type="submit" class="rounded bg-[#7ab7ff] px-2 py-1 font-semibold text-[#0e1116]">+</button>
+      </form>
+      <p class="sidebar-toggle mb-1 px-1 text-[0.65rem] tracking-wide text-zinc-500">MY CHANNELS</p>
+      <ul id="my-channels" class="mb-3 space-y-0.5">
+        <% @my_channels.each do |ch| %>
+          <%= render "chat/channel_link", ch: ch, active: @channel %>
+        <% end %>
+      </ul>
+      <p class="sidebar-toggle collapsed mb-1 px-1 text-[0.65rem] tracking-wide text-zinc-500">ALL CHANNELS</p>
+      <ul id="all-channels" class="space-y-0.5" style="display:none">
+        <% @all_channels.each do |ch| %>
+          <%= render "chat/channel_link", ch: ch, active: @channel %>
+        <% end %>
+      </ul>
+    </aside>
+
+    <%# Messages + compose %>
+    <section class="flex min-w-0 flex-1 flex-col">
+      <div id="messages" class="flex-1 overflow-y-auto px-3 py-2" data-reflex-permanent>
+        <% @history.each do |msg| %>
+          <%= raw(IrcRender.render_history_row(msg)) %>
+        <% end %>
+      </div>
+      <form id="send-form"
+            class="flex shrink-0 gap-2 border-t border-[#232932] px-2 py-2"
+            data-reflex-permanent
+            data-reflex="submit->ChatReflex#send_message"
+            data-reflex-serialize-form="true"
+            data-channel="<%= @bare %>">
+        <input
+          id="message-input"
+          class="min-w-0 flex-1 rounded-lg border border-[#232932] bg-[#151a22] px-3 py-2 text-sm outline-none focus:border-[#7ab7ff]"
+          type="text"
+          name="msg"
+          placeholder="Send to <%= @channel %>…"
+          autocomplete="off"
+          autofocus>
+        <button type="submit" class="rounded-lg bg-[#7ab7ff] px-3 py-2 text-sm font-semibold text-[#0e1116]">Send</button>
+        <button id="part-btn"
+                type="button"
+                class="rounded-lg border border-[#232932] px-3 py-2 text-sm text-zinc-400 hover:text-white"
+                data-channel="<%= @bare %>"
+                data-reflex="click->ChatReflex#part">×</button>
+      </form>
+    </section>
+
+    <%# Members %>
+    <aside id="member-panel" class="w-40 shrink-0 overflow-y-auto border-l border-[#232932] p-2 text-xs" data-reflex-permanent>
+      <div class="text-zinc-500">—</div>
+    </aside>
+  </div>
+
+  <div id="react-picker" role="menu" aria-label="React with emoji"></div>
+</div>

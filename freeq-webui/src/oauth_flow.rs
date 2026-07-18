@@ -355,11 +355,15 @@ async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Resul
             if state.as_deref() == Some(expected_state)
                 && let Some(code) = code
             {
-                let body =
-                    "<html><body><h1>Signed in</h1><p>You can close this window.</p></body></html>";
+                // Redirect the browser back to the app instead of showing a
+                // "close this window" page. The loopback listener is on a
+                // different port from the app, so we point at the app origin
+                // (FREEQ_WEBUI_BIND, default 127.0.0.1:8090).
+                let app_bind = std::env::var("FREEQ_WEBUI_BIND")
+                    .unwrap_or_else(|_| "127.0.0.1:8090".to_string());
+                let target = format!("http://{app_bind}/chat");
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
+                    "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 );
                 let _ = stream.write_all(resp.as_bytes()).await;
                 return Ok(code);

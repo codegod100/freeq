@@ -1,0 +1,17 @@
+# Dependencies
+.bundle/
+node_modules/
+vendor/bundle/
+
+# Build output
+app/assets/builds/
+
+# Rails
+log/*.log
+tmp/
+!tmp/.keep
+.cache/
+
+# Nix
+result
+flake.lock.bak
