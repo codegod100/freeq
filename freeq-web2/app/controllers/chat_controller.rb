@@ -33,6 +33,14 @@ class ChatController < ApplicationController
     # Keep a per-session lookup so live-rendered replies can show parent context.
     @session.parent_lookup.merge!(@parent_lookup)
 
+    # Cached member roster (may be empty on first visit; populated by 353 NAMES).
+    @members_html =
+      if @session.channel_members[@channel]
+        IrcRender.render_member_list(@session.channel_members[@channel])
+      else
+        nil
+      end
+
     # Spawn the upstream WS + per-session broadcaster (IrcBroadcaster).
     @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)
   end

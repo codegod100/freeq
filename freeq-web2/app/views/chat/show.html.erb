@@ -75,7 +75,11 @@
 
     <%# Members %>
     <aside id="member-panel" data-reflex-permanent>
-      <div class="text-zinc-500">—</div>
+      <% if @members_html %>
+        <%= raw(@members_html) %>
+      <% else %>
+        <div style="color:var(--muted)">—</div>
+      <% end %>
     </aside>
   </div>
 
