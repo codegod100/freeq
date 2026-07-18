@@ -58,9 +58,11 @@ class SessionState
   end
 
   # Force the WS task to reconnect so it picks up the new auth state.
-  # If any channels were previously joined, immediately respawn with the
-  # first one so the caller doesn't need to navigate to a channel page.
+  # Rejoins every channel still in @joined (part removes parted ones),
+  # so the user lands back in the same channels they were in — not a
+  # random single one.
   def request_reconnect(upstream_url = nil)
+    channels_to_rejoin = synchronize { @joined.to_a }
     @task_mutex.synchronize do
       if @task && @task.alive?
         @task.kill
@@ -71,11 +73,14 @@ class SessionState
       @reg_phase = :wait_cap_ack
     end
 
-    # Respawn outside the mutex — spawn_upstream_if_needed acquires @task_mutex.
-    if upstream_url && !@joined.empty?
-      first_channel = @joined.first
-      spawn_upstream_if_needed(upstream_url, first_channel)
-    end
+    return unless upstream_url && !channels_to_rejoin.empty?
+
+    # Spawn with the first channel (finish_registration joins it), then
+    # enqueue JOINs for the rest once the WS is ready.
+    first = channels_to_rejoin.first
+    rest = channels_to_rejoin[1..]
+    spawn_upstream_if_needed(upstream_url, first)
+    rest.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
   end
 
   # ── Reaction cache ────────────────────────────────────────────────────
