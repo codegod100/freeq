@@ -46,6 +46,7 @@ class ChatController < ApplicationController
     # Keep a per-session lookup so live-rendered replies can show parent context.
     @session.parent_lookup.merge!(@parent_lookup)
     @own_nick = @session.authenticated? ? @session.auth_nick : @session.current_nick
+    @known_nicks = @session.known_nicks
 
     # Cached member roster (may be empty on first visit; populated by 353 NAMES).
     @members_html =

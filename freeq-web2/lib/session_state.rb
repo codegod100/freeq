@@ -19,7 +19,7 @@ class SessionState
 
   attr_reader :session_id, :joined, :channels, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
-              :policy_response_queue, :current_nick
+              :policy_response_queue, :current_nick, :known_nicks
   attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
 
@@ -393,6 +393,8 @@ class SessionState
     driver.text("CAP LS 302\r\n")
     nick = authenticated? ? auth_nick : guest_nick
     @current_nick = nick
+    @known_nicks ||= Set.new
+    @known_nicks << nick
     driver.text("NICK #{nick}\r\n")
     driver.text("USER web2 0 * :freeq-web2\r\n")
     driver.text("CAP REQ :sasl account-notify message-tags batch server-time echo-message draft/chathistory\r\n")

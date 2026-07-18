@@ -64,7 +64,7 @@
     <section class="chat-main">
       <div id="messages" data-reflex-permanent>
         <% @history.each do |msg| %>
-          <%= raw(IrcRender.render_history_row(msg, parent_lookup: @parent_lookup, own_nick: @own_nick)) %>
+          <%= raw(IrcRender.render_history_row(msg, parent_lookup: @parent_lookup, own_nick: @own_nick, known_nicks: @known_nicks)) %>
         <% end %>
       </div>
       <div id="reply-banner" class="reply-banner" data-reflex-permanent></div>

@@ -236,8 +236,8 @@ module IrcRender
   # Parent msgid from IRCv3 reply tags. freeq uses `+reply`; some clients send
   # `draft/reply`.
   def reply_parent_msgid(tags)
-    tags = tags || {}
-    tags["+reply"].presence || tags["reply"].presence || tags["draft/reply"].presence
+    return nil unless tags
+    tags["+reply"] || tags["reply"] || tags["draft/reply"]
   end
 
   # Inline "↪ replying to …" badge. When parent_nick/parent_text are known
@@ -275,7 +275,7 @@ module IrcRender
   # Render a live IRC line (from the upstream WS) as an HTML row.
   # `own_nick`: the current user's nick — when it matches the sender,
   # an edit button is appended to the row.
-  def render_irc_line(line, parent_lookup: nil, own_nick: nil)
+  def render_irc_line(line, parent_lookup: nil, own_nick: nil, known_nicks: nil)
     line = line.chomp.delete_suffix("\r")
     ts = Time.now.utc.strftime("%H:%M:%S")
     ts_html = %(<span class="ts">#{ts}</span>)
@@ -314,7 +314,7 @@ module IrcRender
       reactions = parse_reactions_tag(tags["+freeq.at/reactions"]) if tags["+freeq.at/reactions"]
       reaction_html = render_reaction_chips(dom_msgid, reactions || {})
       reply_btn = render_reply_btn(dom_msgid)
-      edit_btn = own_nick && nick&.casecmp?(own_nick) ? render_edit_btn(dom_msgid) : ""
+      edit_btn = (own_nick && nick&.casecmp?(own_nick)) || (known_nicks && known_nicks.any? { |n| n&.casecmp?(nick) }) ? render_edit_btn(dom_msgid) : ""
       return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
     end
 
@@ -328,7 +328,7 @@ module IrcRender
   end
 
   # parent_lookup: { msgid => { nick:, text: } } built from the history set.
-  def render_history_row(msg, parent_lookup: nil, own_nick: nil)
+  def render_history_row(msg, parent_lookup: nil, own_nick: nil, known_nicks: nil)
     nick = msg[:sender].to_s.split("!").first
     color = nick_color_class(nick)
     ts = begin
@@ -352,7 +352,7 @@ module IrcRender
     reactions = msg[:reactions] || {}
     reaction_html = render_reaction_chips(msgid, reactions)
     reply_btn = render_reply_btn(msgid)
-    edit_btn = own_nick && nick&.casecmp?(own_nick) ? render_edit_btn(msgid) : ""
+    edit_btn = (own_nick && nick&.casecmp?(own_nick)) || (known_nicks && known_nicks.any? { |n| n&.casecmp?(nick) }) ? render_edit_btn(msgid) : ""
     ts_html = %(<span class="ts">#{ts}</span>)
     %(<div class="msg"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
   end
