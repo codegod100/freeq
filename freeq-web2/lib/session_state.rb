@@ -174,9 +174,10 @@ class SessionState
         return
       end
 
-      # Re-JOIN all previously joined channels except the target —
-      # finish_registration will JOIN the target directly.
-      (@joined - [target]).each { |c| enqueue_outbound("JOIN #{c}\r\n") }
+      # Spawn a fresh WS task. finish_registration will JOIN the target
+      # channel directly. We don't re-join all of @joined because it
+      # accumulates channels from browsing — only join what the user
+      # is currently viewing.
       @task = Thread.new { run_upstream(upstream_url.to_s, target) }
     end
   end
