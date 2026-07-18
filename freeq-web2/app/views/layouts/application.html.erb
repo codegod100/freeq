@@ -36,8 +36,6 @@
       #send-form input[type=text]::placeholder{color:var(--muted)}
       #send-form button[type=submit]{flex:0 0 auto;border:0;border-radius:.5rem;background:#7ab7ff;padding:.5rem .75rem;font-size:.875rem;font-weight:600;color:#0e1116;cursor:pointer}
       #send-form button[type=submit]:hover{background:#9cc8ff}
-      #part-btn{flex:0 0 auto;border:1px solid var(--border);border-radius:.5rem;background:transparent;color:var(--muted);padding:.5rem .75rem;font-size:.875rem;cursor:pointer}
-      #part-btn:hover{color:var(--fg);border-color:var(--muted)}
       #messages .msg{display:grid;grid-template-columns:48px 1fr;gap:.3rem;padding:1px 0;font-size:.8rem}
       #messages .ts{color:var(--muted);font-size:.65rem;text-align:right;user-select:none}
       #messages .body{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -165,6 +163,13 @@
         cursor:pointer;transition:color .12s
       }
       .sidebar-channel-count:hover{color:var(--fg)}
+      .sidebar-channel-part{
+        flex-shrink:0;border:0;background:transparent;color:var(--muted);
+        font-size:.85rem;line-height:1;padding:0 .25rem;cursor:pointer;
+        opacity:0;transition:opacity .12s,color .12s
+      }
+      .sidebar-channel:hover .sidebar-channel-part{opacity:1}
+      .sidebar-channel-part:hover{color:var(--nick-6)}
 
       /* ── Policy modal ─────────────────────────────────────── */
       #policy-modal{

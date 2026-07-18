@@ -3,6 +3,9 @@
 <% is_active = ch["name"].to_s.casecmp?(active) %>
 <li class="sidebar-channel<%= " active" if is_active %>">
   <a href="<%= href %>" class="sidebar-channel-link"><%= ch["name"] %></a>
+  <button type="button" class="sidebar-channel-part" title="Leave channel"
+          data-channel="<%= bare %>"
+          data-reflex="click->ChatReflex#part">×</button>
   <button type="button" class="sidebar-channel-count" title="Channel policy"
           onclick="event.stopPropagation();window.showPolicy('<%= bare %>')"><%= ch["members"] %></button>
 </li>
