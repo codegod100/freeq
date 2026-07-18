@@ -25,6 +25,12 @@ module IrcBroadcaster
       return
     end
 
+    # Forward WHOIS reply numerics (330/318/401) to the capture queue.
+    if session.whois_response_queue && (line.include?(" 330 ") || line.include?(" 318 ") || line.include?(" 401 "))
+      session.whois_response_queue << line
+      return
+    end
+
     # Track IRCv3 BATCH so JOIN chathistory is not re-appended (REST already
     # rendered scrollback on page load). When REST failed for the batch's
     # channel (+i/+k → 403), render the replay instead.
@@ -106,9 +112,9 @@ module IrcBroadcaster
 
     # account-notify: update the member's DID so DMs can resolve nick→DID.
     if (acct = IrcRender.parse_account_did(line))
+      prefix_nick = line[1..]&.split("!")&.first
+      session.record_nick_did(prefix_nick, acct) if prefix_nick
       session.channel_members.each do |_ch, map|
-        # We don't know which nick from ACCOUNT alone; the prefix carries it.
-        prefix_nick = line[1..]&.split("!")&.first
         entry = map[prefix_nick] if prefix_nick
         if entry
           entry[:account] = acct
@@ -123,7 +129,10 @@ module IrcBroadcaster
       return
     end
 
-    # DM routing: nick-targeted PRIVMSG/NOTICE (not #channel).
+    # Record nick→DID from the +account message tag (account-tag cap).
+    # This is the primary source for DM partners we've never seen in a channel.
+    record_account_from_tags(session, line)
+
     # Route to the DM stream so the DM view renders it.
     if (dm_target = dm_target_for(session, line))
       html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup, own_nick: session.current_nick, known_nicks: session.known_nicks)
@@ -230,10 +239,10 @@ module IrcBroadcaster
   def policy_notice?(line)
     return false unless line.include?("NOTICE")
     rest = line.to_s.sub(/\A@\S+\s+/, "") # strip tags
-    return false unless rest.start_with?(":")
-    after_prefix = rest[1..]
-    sp = after_prefix.index(" ") or return false
-    cmd_and_args = after_prefix[(sp + 1)..]
+    rest = rest[1..] || rest  # strip leading ':'
+    sp = rest.index(" ") or return false
+    after_prefix = rest[(sp + 1)..]
+    cmd_and_args = after_prefix
     return false unless cmd_and_args.start_with?("NOTICE ")
     # Only capture nick-directed (not channel-directed) NOTICEs.
     target = cmd_and_args.split(" ", 3)[1].to_s
@@ -254,6 +263,7 @@ module IrcBroadcaster
     when :join
       entry = map[change[:nick]] ||= { nick: change[:nick], op: false, halfop: false, voiced: false }
       entry[:account] = change[:account] if change[:account]
+      session.record_nick_did(change[:nick], change[:account]) if change[:account]
     when :part, :quit
       map.delete(change[:nick])
     when :mode
@@ -267,5 +277,19 @@ module IrcBroadcaster
       end
     end
     IrcRender.render_member_list(map)
+  end
+
+  # Extract the +account tag from a PRIVMSG/NOTICE and record nick→DID.
+  # The account-tag capability tags every message with the sender's DID.
+  def record_account_from_tags(session, line)
+    return unless line.include?("PRIVMSG") || line.include?("NOTICE")
+    tags, rest_with_prefix = IrcRender.parse_irc_tags(line)
+    acct = tags["account"] || tags["+account"]
+    return unless acct && acct.start_with?("did:")
+    rest = rest_with_prefix[1..] or return
+    sp = rest.index(" ") or return
+    prefix = rest[0...sp]
+    nick = prefix.split("!").first
+    session.record_nick_did(nick, acct) if nick
   end
 end

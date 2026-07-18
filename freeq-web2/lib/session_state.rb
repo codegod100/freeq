@@ -19,9 +19,11 @@ class SessionState
 
   attr_reader :session_id, :joined, :channels, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
-              :policy_response_queue, :current_nick, :known_nicks
+              :policy_response_queue, :current_nick, :known_nicks, :nick_to_did,
+              :whois_response_queue
   attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
+  attr_accessor :whois_response_queue  # set to a Queue when capturing WHOIS replies
 
   def initialize(session_id)
     super()
@@ -30,6 +32,7 @@ class SessionState
     @channels = Set.new      # client-authoritative joined list (persisted)
     @join_sent = Set.new     # channels with an in-flight JOIN (dedupe)
     @channel_members = {}
+    @nick_to_did = {}   # nick (lowercase) => DID, populated from extended-join/account-notify/account tags
     @irc_out = Queue.new
     @irc_in  = Queue.new
     @auth = :guest
@@ -150,6 +153,20 @@ class SessionState
     return unless @ws_state == :ready
 
     enqueue_outbound("CHATHISTORY LATEST #{nick} * #{limit}\r\n")
+  end
+
+  # Record a nick → DID mapping (from extended-join, account-notify, or
+  # the +account message tag). Case-insensitive nick key.
+  def record_nick_did(nick, did)
+    return if nick.nil? || nick.empty? || did.nil? || did.empty?
+    return unless did.start_with?("did:")
+    synchronize { @nick_to_did[nick.downcase] = did }
+  end
+
+  # Look up the DID for a nick, or nil if unknown.
+  def did_for_nick(nick)
+    return nil if nick.nil?
+    synchronize { @nick_to_did[nick.downcase] }
   end
 
   # ── Recent message rows ──────────────────────────────────────────────

@@ -517,30 +517,34 @@ export default class ChatController extends Controller {
       }
     };
 
-    // Intercept DM form submit: encrypt the plaintext before the reflex
-    // serializes the form. StimulusReflex fires on submit, so we capture
-    // the event, encrypt, swap the input value, then re-dispatch.
+    // DM send: encrypt in the browser, then POST to /api/dm/send.
+    // We bypass the StimulusReflex form handler entirely for DMs —
+    // the server only relays ciphertext.
     const form = document.getElementById("send-form");
     if (form && form.dataset.isDm === "true") {
       form.addEventListener("submit", async (e) => {
-        // Only intercept if not already encrypted (avoid double-encrypt on retry)
-        const input = document.getElementById("message-input");
-        if (!input || input.dataset.encrypted === "true") return;
-
-        const plaintext = input.value.trim();
-        if (!plaintext || plaintext.startsWith("/")) return; // slash commands pass through
-
         e.preventDefault();
         e.stopPropagation();
 
+        const input = document.getElementById("message-input");
+        if (!input) return;
+        const plaintext = input.value.trim();
+        if (!plaintext) return;
+
+        // Slash commands pass through to the reflex (e.g. /nick, /whois)
+        if (plaintext.startsWith("/")) {
+          input.dataset.skipDm = "true";
+          form.requestSubmit();
+          return;
+        }
+
         const targetNick = form.dataset.channel;
-        const remoteDid = dm.nickToDid(targetNick);
+        const remoteDid = await dm.nickToDidAsync(targetNick);
         if (!remoteDid) {
-          // Can't encrypt without the peer's DID — show error
           const banner = document.getElementById("reply-banner");
           if (banner) {
             banner.innerHTML =
-              '<span class="reply-banner-label" style="color:var(--nick-6)">Cannot encrypt — unknown recipient identity</span>';
+              '<span class="reply-banner-label" style="color:var(--nick-6)">Cannot encrypt — unknown recipient identity. Ask them to send a message first, or verify they are authenticated.</span>';
           }
           return;
         }
@@ -555,16 +559,31 @@ export default class ChatController extends Controller {
           return;
         }
 
-        // Swap the input with the ciphertext, mark as encrypted, and
-        // re-submit so the reflex picks up the encrypted payload.
-        input.value = encrypted;
-        input.dataset.encrypted = "true";
-        // Store plaintext for local echo display
-        input.dataset.plaintext = plaintext;
+        try {
+          const resp = await fetch("/api/dm/send", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')?.content || "",
+            },
+            body: JSON.stringify({ nick: targetNick, msg: encrypted }),
+          });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        } catch (err) {
+          const banner = document.getElementById("reply-banner");
+          if (banner) {
+            banner.innerHTML =
+              '<span class="reply-banner-label" style="color:var(--nick-6)">Send failed: ' + escapeHtml(err.message) + '</span>';
+          }
+          return;
+        }
 
-        // Re-dispatch the submit — the reflex will fire with the encrypted value
-        form.requestSubmit();
-      }, true); // capture phase — runs before StimulusReflex
+        // Clear the input on success. The server will echo the PRIVMSG
+        // back via CableReady, and decryptDmRows() will decrypt it.
+        input.value = "";
+        const banner = document.getElementById("reply-banner");
+        if (banner) banner.innerHTML = "";
+      }, true);
     }
 
     // After a DM message is sent, clear the encrypted flag and restore
@@ -611,7 +630,7 @@ export default class ChatController extends Controller {
       if (!wire || !dm.isEncryptedDm(wire)) continue;
       const fromNick = row.dataset.nick;
       if (!fromNick) continue;
-      const remoteDid = dm.nickToDid(fromNick);
+      const remoteDid = await dm.nickToDidAsync(fromNick);
       if (!remoteDid) {
         row.querySelector(".body").innerHTML =
           '<span style="color:var(--muted)">[encrypted DM — unknown sender identity]</span>';

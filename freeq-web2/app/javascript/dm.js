@@ -125,19 +125,21 @@ export async function getSafetyNumber(remoteDid) {
  * Resolve a nick to a DID using the member panel data.
  * Member rows carry data-did attributes when the user is authenticated.
  */
+/**
+ * Resolve a nick to a DID using the DOM (member panel + message rows).
+ * Synchronous — returns null if not found in the DOM.
+ */
 export function nickToDid(nick) {
   const lower = nick.toLowerCase();
   const panel = document.getElementById("member-panel");
-  if (!panel) return null;
-
-  // Check all joined channels' member panels (via cached channel_members)
-  // The member panel for the current channel is in the DOM.
-  const members = panel.querySelectorAll(".member");
-  for (const el of members) {
-    const memberNick = el.querySelector(".nick")?.textContent?.trim();
-    if (memberNick && memberNick.toLowerCase() === lower) {
-      const did = el.dataset.did;
-      if (did) return did;
+  if (panel) {
+    const members = panel.querySelectorAll(".member");
+    for (const el of members) {
+      const memberNick = el.querySelector(".nick")?.textContent?.trim();
+      if (memberNick && memberNick.toLowerCase() === lower) {
+        const did = el.dataset.did;
+        if (did) return did;
+      }
     }
   }
 
@@ -150,6 +152,26 @@ export function nickToDid(nick) {
     if (did) return did;
   }
 
+  return null;
+}
+
+export async function nickToDidAsync(nick) {
+  // Fast path: check the DOM (member panel + message rows).
+  const domDid = nickToDid(nick);
+  if (domDid) return domDid;
+
+  // Slow path: ask the server (cached nick→DID map, or WHOIS).
+  try {
+    const resp = await fetch(`/api/did/${encodeURIComponent(nick)}`, {
+      headers: { Accept: "application/json" },
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.did) return data.did;
+    }
+  } catch (err) {
+    console.warn("[dm] nickToDidAsync fetch failed:", err);
+  }
   return null;
 }
 

@@ -304,6 +304,8 @@ module IrcRender
       dom_msgid = edit_orig || tags["msgid"]
       msgid_attr = dom_msgid ? %( data-msgid="#{html_escape(dom_msgid)}") : ""
       nick_attr = %( data-nick="#{html_escape(nick)}")
+      account = tags["account"] || tags["+account"]
+      account_attr = account && account.start_with?("did:") ? %( data-account="#{html_escape(account)}") : ""
       text_attr = %( data-text="#{html_escape(text)}")
       parent = reply_parent_msgid(tags)
       parent_info = parent_lookup && parent ? parent_lookup[parent] : nil
@@ -316,7 +318,7 @@ module IrcRender
       reaction_html = render_reaction_chips(dom_msgid, reactions || {})
       reply_btn = render_reply_btn(dom_msgid)
       edit_btn = (own_nick && nick&.casecmp?(own_nick)) || (known_nicks && known_nicks.any? { |n| n&.casecmp?(nick) }) ? render_edit_btn(dom_msgid) : ""
-      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
+      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{account_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
     end
 
 
@@ -338,10 +340,10 @@ module IrcRender
       "--:--:--"
     end
     text = msg[:text].to_s
-    safe_text = linkify_urls(html_escape(text))
-    msgid = msg[:msgid]
     msgid_attr = msgid ? %( data-msgid="#{html_escape(msgid)}") : ""
     nick_attr = %( data-nick="#{html_escape(nick)}")
+    account = (msg[:tags] || {})["account"] || (msg[:tags] || {})["+account"]
+    account_attr = account && account.start_with?("did:") ? %( data-account="#{html_escape(account)}") : ""
     text_attr = %( data-text="#{html_escape(text)}")
     parent = reply_parent_msgid(msg[:tags] || {})
     parent_info = parent_lookup && parent ? parent_lookup[parent] : nil
@@ -354,8 +356,7 @@ module IrcRender
     reaction_html = render_reaction_chips(msgid, reactions)
     reply_btn = render_reply_btn(msgid)
     edit_btn = (own_nick && nick&.casecmp?(own_nick)) || (known_nicks && known_nicks.any? { |n| n&.casecmp?(nick) }) ? render_edit_btn(msgid) : ""
-    ts_html = %(<span class="ts">#{ts}</span>)
-    %(<div class="msg"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
+    %(<div class="msg"#{msgid_attr}#{nick_attr}#{account_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
   end
 
   def parse_reactions_tag(value)

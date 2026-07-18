@@ -11,8 +11,8 @@ Rails.application.routes.draw do
   post "chat/:channel/unreact", to: "chat#unreact"
 
   # Channel policy info.
-  get "api/policy/:channel", to: "api#policy"
-
+  get "api/did/:nick", to: "api#did_for_nick"
+  post "api/dm/send", to: "api#dm_send"
   # AT Protocol OAuth.
   get "login", to: "sessions#new"
   post "login", to: "sessions#create"

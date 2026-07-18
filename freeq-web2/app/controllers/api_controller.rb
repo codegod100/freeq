@@ -22,7 +22,76 @@ class ApiController < ApplicationController
     render html: render_policy_dialog(channel, rules_lines, info_lines).html_safe
   end
 
+  # POST /api/dm/send { nick, msg }
+  # Sends a PRIVMSG to a nick (DM). The msg is already encrypted by the browser.
+  def dm_send
+    nick = params[:nick].to_s
+    msg = params[:msg].to_s
+    if nick.empty? || msg.empty?
+      render json: { error: "nick and msg required" }, status: :bad_request
+      return
+    end
+    session = current_session
+    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, session.joined.first || "#freeq")
+    session.enqueue_outbound("PRIVMSG #{nick} :#{msg}\r\n")
+    render json: { ok: true }
+  end
+  # Returns cached DID if known, otherwise sends WHOIS upstream and waits
+  # briefly for the 330 (RPL_WHOISACCOUNT) numeric.
+  def did_for_nick
+    nick = params[:nick].to_s
+    session = current_session
+    # Ensure the upstream WS is connected (don't join a channel for DID lookup).
+    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, session.joined.first || "#freeq")
+    # Fast path: already cached from extended-join/account-notify/account-tag.
+    did = session.did_for_nick(nick)
+    if did
+      render json: { did: did, cached: true }
+      return
+    end
+
+    # Slow path: WHOIS the nick and wait for the account numeric.
+    did = resolve_did_via_whois(session, nick)
+    if did
+      render json: { did: did, cached: false }
+    else
+      render json: { did: nil, error: "Could not resolve DID for #{nick}" }, status: :not_found
+    end
+  end
+
   private
+
+  # which carries the account/DID. Gap-based timeout like fetch_policy_notices.
+  def resolve_did_via_whois(session, nick)
+    session.enqueue_outbound("WHOIS #{nick}\r\n")
+    deadline = Time.now + 3.0
+    did = nil
+    queue = Queue.new
+    session.whois_response_queue = queue
+    begin
+      while Time.now < deadline
+        begin
+          line = queue.pop(true) # non-blocking
+        rescue ThreadError
+          sleep 0.05
+          next
+        end
+        # :server 330 ournick nick did:plc:xxx :is logged in as
+        if line.include?(" 330 ") && line.include?("did:")
+          parts = line.split(" ")
+          idx = parts.index { |p| p.start_with?("did:") }
+          did = parts[idx] if idx
+          break if did
+        end
+        # End of WHOIS
+        break if line.include?(" 318 ") || line.include?(" 401 ")
+      end
+    ensure
+      session.whois_response_queue = nil
+    end
+    session.record_nick_did(nick, did) if did
+    did
+  end
 
   # ── Policy NOTICE collection ──────────────────────────────────────────
 
