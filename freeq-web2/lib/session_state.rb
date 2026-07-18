@@ -13,7 +13,7 @@ require "websocket/driver"
 class SessionState
   include MonitorMixin
 
-  attr_reader :session_id, :joined, :channel_members, :irc_out, :irc_in
+  attr_reader :session_id, :joined, :channel_members, :irc_out, :irc_in, :parent_lookup
   attr_accessor :auth   # :guest or { did:, nick:, handle:, oauth: ... } (OAuth port = TODO)
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
 
@@ -30,12 +30,25 @@ class SessionState
     # Open IRCv3 BATCH ids of type chathistory — suppress message-pane emit
     # (scrollback already loaded via REST).
     @suppress_history_batches = Set.new
+    # msgid → { nick:, text: } for reply badge context.
+    @parent_lookup = {}
     @task = nil
     @broadcaster = nil
     @task_mutex = Mutex.new
   end
 
   attr_reader :suppress_history_batches
+
+  def remember_message(msgid, nick, text)
+    return if msgid.to_s.empty?
+    synchronize do
+      @parent_lookup[msgid] = { nick: nick.to_s, text: text.to_s }
+      # Bound memory.
+      if @parent_lookup.size > 2000
+        @parent_lookup = @parent_lookup.to_a.last(1000).to_h
+      end
+    end
+  end
 
   def note_seen_msgids(ids)
     synchronize do

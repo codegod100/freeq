@@ -226,8 +226,38 @@ module IrcRender
     end.join
   end
 
+  # Parent msgid from IRCv3 reply tags. freeq uses `+reply`; some clients send
+  # `draft/reply`.
+  def reply_parent_msgid(tags)
+    tags = tags || {}
+    tags["+reply"].presence || tags["reply"].presence || tags["draft/reply"].presence
+  end
+
+  # Inline "↪ replying to …" badge. When parent_nick/parent_text are known
+  # (history index), show them; otherwise emit a stub the client hydrates
+  # from the live message map.
+  def render_reply_badge(parent_msgid, parent_nick: nil, parent_text: nil)
+    return "" if parent_msgid.to_s.empty?
+
+    mid = html_escape(parent_msgid)
+    if parent_nick.present?
+      snippet = parent_text.to_s.tr("\n", " ")
+      snippet = snippet.bytesize > 80 ? "#{snippet.byteslice(0, 80)}…" : snippet
+      label = %(<span class="reply-nick">#{html_escape(parent_nick)}</span> <span class="reply-text">#{html_escape(snippet)}</span>)
+    else
+      label = %(<span class="reply-nick">message</span> <span class="reply-text"></span>)
+    end
+    %(<button type="button" class="reply-badge" data-reply-to="#{mid}" onclick="window.scrollToMessage('#{mid}')" title="Jump to original">↪ #{label}</button>)
+  end
+
+  def render_reply_btn(msgid)
+    return "" if msgid.to_s.empty?
+    mid = html_escape(msgid)
+    %(<button type="button" class="reply-btn" title="Reply" onclick="window.startReply('#{mid}')">↩</button>)
+  end
+
   # Render a live IRC line (from the upstream WS) as an HTML row.
-  def render_irc_line(line)
+  def render_irc_line(line, parent_lookup: nil)
     line = line.chomp.delete_suffix("\r")
     ts = Time.now.utc.strftime("%H:%M:%S")
     ts_html = %(<span class="ts">#{ts}</span>)
@@ -250,9 +280,19 @@ module IrcRender
       safe_text = linkify_urls(html_escape(text))
       msgid = tags["msgid"]
       msgid_attr = msgid ? %( data-msgid="#{html_escape(msgid)}") : ""
+      nick_attr = %( data-nick="#{html_escape(nick)}")
+      text_attr = %( data-text="#{html_escape(text)}")
+      parent = reply_parent_msgid(tags)
+      parent_info = parent_lookup && parent ? parent_lookup[parent] : nil
+      reply_html = render_reply_badge(
+        parent,
+        parent_nick: parent_info && parent_info[:nick],
+        parent_text: parent_info && parent_info[:text]
+      )
       reactions = parse_reactions_tag(tags["+freeq.at/reactions"]) if tags["+freeq.at/reactions"]
       reaction_html = render_reaction_chips(msgid, reactions || {})
-      return %(<div class="#{cls}"#{msgid_attr}>#{ts_html}<span class="body"><span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}</span></div>)
+      reply_btn = render_reply_btn(msgid)
+      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}</span></div>)
     end
 
     if %w[JOIN PART QUIT].include?(cmd)
@@ -263,7 +303,8 @@ module IrcRender
     notice_row(line, ts_html)
   end
 
-  def render_history_row(msg)
+  # parent_lookup: { msgid => { nick:, text: } } built from the history set.
+  def render_history_row(msg, parent_lookup: nil)
     nick = msg[:sender].to_s.split("!").first
     color = nick_color_class(nick)
     ts = begin
@@ -271,12 +312,24 @@ module IrcRender
     rescue StandardError
       "--:--:--"
     end
-    safe_text = html_escape(msg[:text])
+    text = msg[:text].to_s
+    safe_text = linkify_urls(html_escape(text))
     msgid = msg[:msgid]
     msgid_attr = msgid ? %( data-msgid="#{html_escape(msgid)}") : ""
+    nick_attr = %( data-nick="#{html_escape(nick)}")
+    text_attr = %( data-text="#{html_escape(text)}")
+    parent = reply_parent_msgid(msg[:tags] || {})
+    parent_info = parent_lookup && parent ? parent_lookup[parent] : nil
+    reply_html = render_reply_badge(
+      parent,
+      parent_nick: parent_info && parent_info[:nick],
+      parent_text: parent_info && parent_info[:text]
+    )
     reactions = msg[:reactions] || {}
     reaction_html = render_reaction_chips(msgid, reactions)
-    %(<div class="msg"#{msgid_attr}><span class="ts">#{ts}</span><span class="body"><span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}</span></div>)
+    reply_btn = render_reply_btn(msgid)
+    ts_html = %(<span class="ts">#{ts}</span>)
+    %(<div class="msg"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}</span></div>)
   end
 
   def parse_reactions_tag(value)
@@ -306,6 +359,18 @@ module IrcRender
     end
     out << "</span>"
     out
+  end
+
+  # Build msgid → { nick:, text: } from a history list for reply badge fill-in.
+  def parent_lookup_from_history(history)
+    history.each_with_object({}) do |msg, map|
+      mid = msg[:msgid].to_s
+      next if mid.empty?
+      map[mid] = {
+        nick: msg[:sender].to_s.split("!").first,
+        text: msg[:text].to_s
+      }
+    end
   end
 
   # Returns [channel, ops_array] or nil. ops_array = [[mode_char, adding, target], ...]

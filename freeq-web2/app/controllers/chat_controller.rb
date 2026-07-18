@@ -27,8 +27,11 @@ class ChatController < ApplicationController
       joined.any? { |j| j.casecmp?(c["name"].to_s) } || c["name"].to_s.casecmp?(@channel)
     end
 
-    @history = SessionRegistry.instance.fetch_history(@channel, 25)
+    @history = SessionRegistry.instance.fetch_history(@channel, 50)
+    @parent_lookup = IrcRender.parent_lookup_from_history(@history)
     @session.note_seen_msgids(@history.filter_map { |m| m[:msgid] })
+    # Keep a per-session lookup so live-rendered replies can show parent context.
+    @session.parent_lookup.merge!(@parent_lookup)
 
     # Spawn the upstream WS + per-session broadcaster (IrcBroadcaster).
     @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)

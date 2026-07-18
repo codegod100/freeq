@@ -6,11 +6,15 @@ vendor/bundle/
 # Build output
 app/assets/builds/
 
+# Rails secrets — NEVER commit
+config/master.key
+
 # Rails
 log/*.log
 tmp/
 !tmp/.keep
 .cache/
+.dev-data/
 
 # Nix
 result

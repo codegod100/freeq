@@ -3,17 +3,17 @@ import consumer from "../channels/consumer";
 import CableReady from "cable_ready";
 import StimulusReflex from "stimulus_reflex";
 
-// Client-side chat controller: subscribes to ChatChannel for live CableReady
-// broadcasts, manages reaction picker + sidebar, and wires StimulusReflex.
+// Client-side chat controller: ChatChannel live updates, reactions, replies.
 export default class ChatController extends Controller {
   connect() {
     StimulusReflex.useReflex(this);
     this.setupChannel();
     this.setupReactions();
+    this.setupReplies();
     this.setupSidebar();
+    this.hydrateReplyBadges();
     this.scrollToBottom();
 
-    // Live reaction events from IrcBroadcaster.
     this._onReaction = (ev) => {
       const d = ev.detail || {};
       this.applyReaction(d.msgid, d.emoji, d.nick, !!d.added);
@@ -36,7 +36,9 @@ export default class ChatController extends Controller {
       {
         received: (data) => {
           if (data && data.cableReady) {
+            this.filterDupes(data.operations);
             CableReady.perform(data.operations);
+            this.hydrateReplyBadges();
             this.scrollToBottom();
           }
         },
@@ -64,6 +66,113 @@ export default class ChatController extends Controller {
     const el = document.getElementById("messages");
     if (el) el.scrollTop = el.scrollHeight;
   }
+
+  // Strip CableReady append ops whose HTML carries a data-msgid already
+  // present in #messages. Prevents REST scrollback + live echo / chathistory
+  // batch from double-rendering the same message.
+  filterDupes(operations) {
+    if (!Array.isArray(operations)) return;
+    const messages = document.getElementById("messages");
+    if (!messages) return;
+    const existing = new Set(
+      Array.from(messages.querySelectorAll("[data-msgid]")).map((el) =>
+        el.getAttribute("data-msgid")
+      )
+    );
+    for (let i = operations.length - 1; i >= 0; i--) {
+      const op = operations[i];
+      if (op.operation !== "append") continue;
+      const html = op.html || "";
+      const match = html.match(/data-msgid="([^"]+)"/);
+      if (match && existing.has(match[1])) {
+        operations.splice(i, 1);
+      }
+    }
+  }
+
+  // ── Replies ──────────────────────────────────────────────────────────
+
+  setupReplies() {
+    const self = this;
+
+    window.startReply = (msgid) => {
+      msgid = String(msgid || "");
+      if (!msgid) return;
+      const row = document.querySelector(
+        `.msg[data-msgid="${CSS.escape(msgid)}"]`
+      );
+      const nick = row?.dataset?.nick || "message";
+      const text = (row?.dataset?.text || "").replace(/\s+/g, " ").slice(0, 80);
+      const input = document.getElementById("reply-to-input");
+      if (input) input.value = msgid;
+      const banner = document.getElementById("reply-banner");
+      if (banner) {
+        banner.innerHTML =
+          '<span class="reply-banner-label">Replying to ' +
+          escapeHtml(nick) +
+          '</span><span class="reply-banner-text">' +
+          escapeHtml(text) +
+          '</span><button type="button" class="reply-banner-cancel" title="Cancel" onclick="window.cancelReply()">×</button>';
+      }
+      document.getElementById("message-input")?.focus();
+    };
+
+    window.cancelReply = () => {
+      const input = document.getElementById("reply-to-input");
+      if (input) input.value = "";
+      const banner = document.getElementById("reply-banner");
+      if (banner) banner.innerHTML = "";
+    };
+
+    window.scrollToMessage = (msgid) => {
+      msgid = String(msgid || "");
+      const row = document.querySelector(
+        `.msg[data-msgid="${CSS.escape(msgid)}"]`
+      );
+      if (!row) return;
+      row.scrollIntoView({ behavior: "smooth", block: "center" });
+      row.classList.add("highlight");
+      setTimeout(() => row.classList.remove("highlight"), 1200);
+    };
+
+    // Clear reply target after a successful send is handled server-side via
+    // CableReady; also clear on Escape.
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") window.cancelReply();
+    });
+
+    // After StimulusReflex send, the form may still have reply_to; server clears
+    // via CableReady. Also clear client-side on submit so a failed clear doesn't stick.
+    const form = document.getElementById("send-form");
+    form?.addEventListener("submit", () => {
+      // Leave reply_to set until after serialize; clear after a tick so the
+      // reflex still receives the field.
+      setTimeout(() => {
+        // Server CableReady also clears; this is a belt-and-suspenders for UX.
+      }, 0);
+    });
+  }
+
+  // Fill in reply badge nick/text from the parent .msg[data-msgid] if present.
+  hydrateReplyBadges() {
+    document.querySelectorAll(".reply-badge[data-reply-to]").forEach((badge) => {
+      const mid = badge.getAttribute("data-reply-to");
+      if (!mid) return;
+      const parent = document.querySelector(
+        `.msg[data-msgid="${CSS.escape(mid)}"]`
+      );
+      if (!parent) return;
+      const nickEl = badge.querySelector(".reply-nick");
+      const textEl = badge.querySelector(".reply-text");
+      if (nickEl && parent.dataset.nick) nickEl.textContent = parent.dataset.nick;
+      if (textEl && parent.dataset.text) {
+        const t = parent.dataset.text.replace(/\s+/g, " ");
+        textEl.textContent = t.length > 80 ? t.slice(0, 80) + "…" : t;
+      }
+    });
+  }
+
+  // ── Reactions ────────────────────────────────────────────────────────
 
   setupReactions() {
     const self = this;
@@ -101,7 +210,6 @@ export default class ChatController extends Controller {
         document.body.getAttribute("data-auth-handle") ||
         self.element.dataset.authHandle ||
         "you";
-      // Optimistic chip update (server echo may re-apply the same chip).
       self.applyReaction(msgid, emoji, me, !mine);
       const payload = new FormData();
       payload.append("msgid", msgid);
@@ -188,3 +296,10 @@ export default class ChatController extends Controller {
   }
 }
 
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}

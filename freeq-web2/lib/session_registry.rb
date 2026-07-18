@@ -52,13 +52,14 @@ class SessionRegistry
     uri = URI("#{rest_base}/api/v1/channels/#{encoded}/history?limit=#{limit}")
     msgs = JSON.parse(Net::HTTP.get(uri))
     msgs.map do |m|
+      tags = m["tags"] || {}
       {
         sender: m["sender"],
         text: m["text"],
         timestamp: m["timestamp"],
         msgid: m["msgid"],
-        tags: m["tags"] || {},
-        reactions: IrcRender.parse_reactions_tag(m["tags"]&.fetch("+freeq.at/reactions", ""))
+        tags: tags,
+        reactions: IrcRender.parse_reactions_tag(tags["+freeq.at/reactions"].to_s)
       }
     end
   rescue StandardError => e

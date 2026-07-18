@@ -100,7 +100,15 @@ module IrcBroadcaster
       if (mid = line_msgid(line)) && session.check_and_mark_msgid(mid)
         next
       end
-      html = IrcRender.render_irc_line(line)
+      # Remember for future reply badges.
+      tags, rest = IrcRender.parse_irc_tags(line)
+      if (mid = tags["msgid"]).present?
+        body = rest.to_s
+        nick = body[/\A:([^! ]+)/, 1]
+        text = body.split(" ", 4)[3].to_s.delete_prefix(":")
+        session.remember_message(mid, nick, text)
+      end
+      html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup)
       next if html.empty?
 
       cable_for(ch).append(selector: "#messages", html: html).broadcast

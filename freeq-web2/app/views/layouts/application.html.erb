@@ -16,11 +16,21 @@
         --nick-5:#06d6a0;--nick-6:#ef476f;--nick-7:#f4a261;--nick-8:#90e0ef;
         --self:#5cdb95;--bg:#0e1116;--fg:#d6d6d6;--muted:#6b7280;--border:#232932;
       }
-      html,body{height:100dvh;overflow:hidden;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
+      html,body{height:100dvh;max-height:100dvh;overflow:hidden;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
       ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:#1a1a2e}
       ::-webkit-scrollbar-thumb{background:#333;border-radius:3px}
-      *{scrollbar-width:thin;scrollbar-color:#333 #1a1a2e}
-      #messages{overflow-y:auto;flex:1}
+      *{scrollbar-width:thin;scrollbar-color:#333 #1a1a2e;box-sizing:border-box}
+      /* Layout shell (Tailwind utilities are not built — pure CSS here). */
+      #freeq-chat{display:flex;flex-direction:column;height:100dvh;max-height:100dvh;overflow:hidden}
+      #freeq-chat > nav{flex:0 0 auto;display:flex;align-items:center;gap:.5rem;border-bottom:1px solid var(--border);padding:.5rem}
+      #freeq-chat > .chat-body{display:flex;flex:1 1 0;min-height:0;position:relative}
+      #sidebar{flex:0 0 11rem;overflow-y:auto;border-right:1px solid var(--border);padding:.5rem;font-size:.75rem}
+      #member-panel{flex:0 0 10rem;overflow-y:auto;border-left:1px solid var(--border);padding:.5rem;font-size:.75rem}
+      #freeq-chat .chat-main{display:flex;flex-direction:column;flex:1 1 0;min-width:0;min-height:0}
+      #messages{flex:1 1 0;min-height:0;overflow-y:auto;padding:.5rem .75rem}
+      #reply-banner{flex:0 0 auto}
+      #send-form{flex:0 0 auto;display:flex;gap:.5rem;border-top:1px solid var(--border);padding:.5rem}
+      #send-form input[type=text]{flex:1 1 auto;min-width:0}
       #messages .msg{display:grid;grid-template-columns:48px 1fr;gap:.3rem;padding:1px 0;font-size:.8rem}
       #messages .ts{color:var(--muted);font-size:.65rem;text-align:right;user-select:none}
       #messages .body{white-space:pre-wrap;overflow-wrap:anywhere}
@@ -37,13 +47,27 @@
       .reaction-chip{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:999px;font-size:.75rem;cursor:pointer}
       .react-btn{opacity:.5;border:1px dashed var(--border);border-radius:999px;width:1.2rem;height:1.2rem;background:transparent;color:var(--muted);cursor:pointer}
       #messages .msg:hover .react-btn{opacity:1}
+      #messages .msg:hover .reply-btn{opacity:1}
+      .reply-badge{display:flex;align-items:center;gap:6px;width:100%;margin:0 0 2px;padding:1px 0 1px 6px;border:0;border-left:2px solid rgba(122,183,255,.35);background:transparent;color:var(--muted);font-size:.7rem;text-align:left;cursor:pointer}
+      .reply-badge:hover{background:rgba(122,183,255,.06)}
+      .reply-badge .reply-nick{font-weight:600;color:#9ca3af}
+      .reply-badge .reply-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:280px}
+      .reply-btn{opacity:0;border:0;background:transparent;color:var(--muted);cursor:pointer;padding:0 4px;font-size:.75rem;margin-left:4px}
+      .reply-btn:hover{color:#7ab7ff}
+      .reply-banner:empty{display:none}
+      .reply-banner{display:flex;align-items:center;gap:8px;padding:6px 12px;border-top:1px solid var(--border);background:#151a22;font-size:.75rem;color:var(--muted)}
+      .reply-banner .reply-banner-label{color:#7ab7ff;font-weight:600}
+      .reply-banner .reply-banner-text{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+      .reply-banner .reply-banner-cancel{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:1rem;padding:0 4px}
+      .reply-banner .reply-banner-cancel:hover{color:#fff}
+      #messages .msg.highlight{background:rgba(122,183,255,.12);transition:background .8s ease}
       #react-picker{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);display:none;z-index:100;background:var(--bg);border:1px solid var(--border);border-radius:.5rem;padding:.4rem;gap:4px}
       #react-picker.open{display:flex}
       #react-picker button{background:transparent;border:0;padding:.25rem .4rem;font-size:1.25rem;cursor:pointer}
       @media(max-width:1024px){
         #sidebar,#member-panel{position:fixed;top:0;bottom:0;width:260px;max-width:80vw;background:var(--bg);z-index:100;transition:transform .2s ease}
-        #sidebar{left:0;transform:translateX(-110%);border-right:1px solid var(--border)}
-        #member-panel{right:0;transform:translateX(110%);border-left:1px solid var(--border)}
+        #sidebar{left:0;transform:translateX(-110%);border-right:1px solid var(--border);flex:none}
+        #member-panel{right:0;transform:translateX(110%);border-left:1px solid var(--border);flex:none}
         #sidebar.open,#member-panel.open{transform:translateX(0)}
         .mobile-btn{display:flex!important}
       }
