@@ -84,7 +84,8 @@ module IrcRender
     rest = escaped.to_s
     while (pos = rest.index("https://"))
       out << rest[0...pos]
-      url_end = rest[pos..].index { |c| c.match?(/\s/) || c == "<" } || (rest.size - pos)
+      match = rest[pos..].match(/[\s<]/)
+      url_end = match ? match.begin(0) : (rest.size - pos)
       url = rest[pos...(pos + url_end)]
       out << %(<a href="#{url}" target="_blank" rel="noopener">#{url}</a>)
       rest = rest[(pos + url_end)..]
