@@ -53,8 +53,20 @@ class ChatReflex < ApplicationReflex
     channel = canonical_channel(element.dataset[:channel])
     session.joined.delete(channel)
     session.unconfirm_channel!(channel)
+    session.channel_members.delete(channel)
     session.enqueue_outbound("PART #{channel}\r\n")
-    cable_ready.redirect_to(url: "/chat").broadcast
+
+    bare = channel.delete("#")
+    current_bare = request.path.to_s[%r{\A/chat/([^/]+)\z}, 1]
+    if current_bare && current_bare.casecmp?(bare)
+      # Parting the channel we're viewing — go to the channel list.
+      cable_ready.redirect_to(url: "/chat").broadcast
+    else
+      # Parting a sidebar channel we're not viewing — just drop the row.
+      cable_ready
+        .remove(selector: "#sidebar-channel-#{bare}")
+        .broadcast
+    end
   end
 
   def set_topic

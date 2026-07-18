@@ -1,7 +1,7 @@
 <% bare = ch["name"].to_s.delete("#") %>
 <% href = "/chat/#{bare}" %>
 <% is_active = ch["name"].to_s.casecmp?(active) %>
-<li class="sidebar-channel<%= " active" if is_active %>">
+<li id="sidebar-channel-<%= bare %>" class="sidebar-channel<%= " active" if is_active %>">
   <a href="<%= href %>" class="sidebar-channel-link"><%= ch["name"] %></a>
   <button type="button" class="sidebar-channel-part" title="Leave channel"
           data-channel="<%= bare %>"
