@@ -17,16 +17,17 @@ require_relative "atproto/sasl"
 class SessionState
   include MonitorMixin
 
-  attr_reader :session_id, :joined, :channel_members, :irc_out, :irc_in,
+  attr_reader :session_id, :joined, :confirmed, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
-              :policy_response_queue
+              :policy_response_queue, :current_nick
   attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
 
   def initialize(session_id)
     super()
     @session_id = session_id
-    @joined = Set.new
+    @joined = Set.new        # routing table: channels we're emitting lines for
+    @confirmed = Set.new     # channels the upstream confirmed we're in
     @channel_members = {}
     @irc_out = Queue.new
     @irc_in  = Queue.new
@@ -57,12 +58,25 @@ class SessionState
     authenticated? ? @auth.handle : nil
   end
 
+  # ── Channel membership confirmation ──────────────────────────────────
+
+  # Mark a channel as confirmed-joined (upstream echoed our JOIN or listed
+  # us in 353 NAMES). Used by @my_channels and request_reconnect so
+  # browse-only channels don't leak into the "joined" set.
+  def confirm_channel!(channel)
+    synchronize { @confirmed << IrcRender.canonical_channel(channel) }
+  end
+
+  def unconfirm_channel!(channel)
+    synchronize { @confirmed.delete(IrcRender.canonical_channel(channel)) }
+  end
+
   # Force the WS task to reconnect so it picks up the new auth state.
-  # Rejoins every channel still in @joined (part removes parted ones),
-  # so the user lands back in the same channels they were in — not a
-  # random single one.
+  # Rejoins every channel the upstream confirmed we're in (not merely
+  # browsed), so the user lands back in the channels they actually
+  # occupied — not a random browse-only channel.
   def request_reconnect(upstream_url = nil)
-    channels_to_rejoin = synchronize { @joined.to_a }
+    channels_to_rejoin = synchronize { @confirmed.to_a }
     @task_mutex.synchronize do
       if @task && @task.alive?
         @task.kill
@@ -71,12 +85,11 @@ class SessionState
       end
       @ws_state = :disconnected
       @reg_phase = :wait_cap_ack
+      @confirmed.clear
     end
 
     return unless upstream_url && !channels_to_rejoin.empty?
 
-    # Spawn with the first channel (finish_registration joins it), then
-    # enqueue JOINs for the rest once the WS is ready.
     first = channels_to_rejoin.first
     rest = channels_to_rejoin[1..]
     spawn_upstream_if_needed(upstream_url, first)
@@ -288,6 +301,7 @@ class SessionState
   def send_registration(driver, channel)
     driver.text("CAP LS 302\r\n")
     nick = authenticated? ? auth_nick : guest_nick
+    @current_nick = nick
     driver.text("NICK #{nick}\r\n")
     driver.text("USER web2 0 * :freeq-web2\r\n")
     driver.text("CAP REQ :sasl account-notify message-tags batch server-time echo-message\r\n")

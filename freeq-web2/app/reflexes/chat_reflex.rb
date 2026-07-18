@@ -52,6 +52,7 @@ class ChatReflex < ApplicationReflex
   def part
     channel = canonical_channel(element.dataset[:channel])
     session.joined.delete(channel)
+    session.unconfirm_channel!(channel)
     session.enqueue_outbound("PART #{channel}\r\n")
     cable_ready.redirect_to(url: "/chat").broadcast
   end
