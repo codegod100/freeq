@@ -1,23 +1,55 @@
 # frozen_string_literal: true
-require "net/http"
-require "json"
-require "uri"
-require "securerandom"
-require "base64"
-require "openssl"
-
 require_relative "dpop_key"
+require_relative "o_auth_session"
 
 module Atproto
+  # Prepared in-flight OAuth login — carries everything needed for the
+  # callback to complete the token exchange.
+  class PreparedLogin
+    attr_reader :auth_url, :state, :redirect_uri, :client_id,
+                :code_verifier, :token_endpoint, :pds_url, :dpop_key,
+                :did, :handle
+
+    def initialize(handle, did, pds_url, token_endpoint, redirect_uri, client_id,
+                   code_verifier, dpop_key, state, auth_url)
+      @handle = handle
+      @did = did
+      @pds_url = pds_url
+      @token_endpoint = token_endpoint
+      @redirect_uri = redirect_uri
+      @client_id = client_id
+      @code_verifier = code_verifier
+      @dpop_key = dpop_key
+      @state = state
+      @auth_url = auth_url
+    end
+
+    # Complete the OAuth flow after the callback. Returns an OAuthSession.
+    def complete(auth_code)
+      access_token, token_did = OAuth.exchange_code(
+        @token_endpoint, auth_code, @code_verifier, @redirect_uri,
+        @client_id, @dpop_key
+      )
+      if token_did && token_did != @did
+        raise "DID mismatch: resolved #{@did} but token is for #{token_did}"
+      end
+      dpop_nonce = OAuth.probe_dpop_nonce(@pds_url, access_token, @dpop_key)
+      OAuthSession.new(
+        did: @did,
+        handle: @handle,
+        access_token: access_token,
+        pds_url: @pds_url,
+        dpop_key: @dpop_key,
+        dpop_nonce: dpop_nonce
+      )
+    end
+  end
+
   # OAuth flow: handle resolution → auth server discovery → PAR → callback →
   # token exchange. Mirrors freeq-webui/src/oauth_flow.rs.
   module OAuth
     module_function
 
-    # Resolve a handle (e.g. "nandi.bsky.social") to (did, pds_url).
-    # 1. Try DNS TXT _atproto.handle → DID
-    # 2. Try https://{handle}/.well-known/atproto-did
-    # 3. Resolve DID document → PDS endpoint
     def resolve_identity(handle)
       handle = handle.to_s.strip.sub(/^@/, "")
       did = resolve_handle(handle)
@@ -30,9 +62,7 @@ module Atproto
       [did, pds_url]
     end
 
-    # Resolve handle → DID via DNS TXT or .well-known.
     def resolve_handle(handle)
-      # Try DNS TXT first (more reliable when the host doesn't have a web server).
       begin
         require "resolv"
         dns = Resolv::DNS.new
@@ -45,7 +75,6 @@ module Atproto
         nil
       end
 
-      # Fallback: HTTPS .well-known/atproto-did.
       begin
         uri = URI("https://#{handle}/.well-known/atproto-did")
         res = Net::HTTP.get_response(uri)
@@ -59,7 +88,6 @@ module Atproto
       nil
     end
 
-    # Discover the authorization server from the PDS's protected resource metadata.
     def discover_auth_server(pds_url)
       pr_url = "#{pds_url.to_s.chomp('/')}/.well-known/oauth-protected-resource"
       pr_meta = fetch_json(pr_url)
@@ -71,15 +99,12 @@ module Atproto
       fetch_json(as_url)
     end
 
-    # Generate PKCE pair. Returns [code_verifier, code_challenge].
     def generate_pkce
       verifier = b64url(SecureRandom.random_bytes(32))
       challenge = b64url(OpenSSL::Digest::SHA256.digest(verifier))
       [verifier, challenge]
     end
 
-    # Pushed Authorization Request. Returns the authorization URL to redirect
-    # the browser to. Uses DPoP for sender-constrained PAR.
     def push_authorization_request(par_endpoint, authorization_endpoint, client_id,
                                    redirect_uri, code_challenge, state,
                                    login_hint, dpop_key)
@@ -97,7 +122,6 @@ module Atproto
       dpop_proof = dpop_key.proof("POST", par_endpoint)
       resp = http_post_form(par_endpoint, params, "DPoP" => dpop_proof)
 
-      # Handle DPoP nonce retry.
       if resp.code.to_i == 400 && (nonce = resp["dpop-nonce"])
         dpop_proof = dpop_key.proof("POST", par_endpoint, nonce: nonce)
         resp = http_post_form(par_endpoint, params, "DPoP" => dpop_proof)
@@ -112,8 +136,6 @@ module Atproto
       "#{authorization_endpoint}?client_id=#{urlencode(client_id)}&request_uri=#{urlencode(request_uri)}"
     end
 
-    # Exchange the authorization code for an access token. Returns
-    # [access_token, optional sub DID from token response].
     def exchange_code(token_endpoint, code, code_verifier, redirect_uri,
                       client_id, dpop_key)
       params = {
@@ -127,7 +149,6 @@ module Atproto
       dpop_proof = dpop_key.proof("POST", token_endpoint)
       resp = http_post_form(token_endpoint, params, "DPoP" => dpop_proof)
 
-      # Handle DPoP nonce retry.
       if [400, 401].include?(resp.code.to_i) && (nonce = resp["dpop-nonce"])
         dpop_proof = dpop_key.proof("POST", token_endpoint, nonce: nonce)
         resp = http_post_form(token_endpoint, params, "DPoP" => dpop_proof)
@@ -139,7 +160,6 @@ module Atproto
       [token_resp["access_token"], token_resp["sub"]]
     end
 
-    # Probe the PDS for a DPoP nonce. Returns the nonce string or nil.
     def probe_dpop_nonce(pds_url, access_token, dpop_key)
       url = "#{pds_url.to_s.chomp('/')}/xrpc/com.atproto.server.getSession"
       proof = dpop_key.proof("GET", url, access_token: access_token)
@@ -153,6 +173,38 @@ module Atproto
       resp["dpop-nonce"]
     rescue StandardError
       nil
+    end
+
+    # Start the OAuth flow for a handle. Returns a PreparedLogin.
+    def prepare(handle, public_url = nil)
+      did, pds_url = resolve_identity(handle)
+      auth_meta = discover_auth_server(pds_url)
+
+      redirect_uri = public_url ? "#{public_url.chomp('/')}/auth/callback" : "http://127.0.0.1:0/callback"
+      client_id = if public_url
+        "#{public_url.chomp('/')}/.well-known/oauth-client-metadata"
+      else
+        scope = "atproto transition:generic"
+        "http://localhost?redirect_uri=#{urlencode(redirect_uri)}&scope=#{urlencode(scope)}"
+      end
+
+      code_verifier, code_challenge = generate_pkce
+      dpop_key = DpopKey.new
+      state = b64url(SecureRandom.random_bytes(16))
+
+      par_endpoint = auth_meta["pushed_authorization_request_endpoint"]
+      raise "Authorization server does not support PAR" unless par_endpoint
+
+      auth_url = push_authorization_request(
+        par_endpoint, auth_meta["authorization_endpoint"], client_id,
+        redirect_uri, code_challenge, state, handle, dpop_key
+      )
+
+      PreparedLogin.new(
+        handle, did, pds_url, auth_meta["token_endpoint"],
+        redirect_uri, client_id,
+        code_verifier, dpop_key, state, auth_url
+      )
     end
 
     # ── Helpers ──────────────────────────────────────────────────────────
@@ -200,126 +252,6 @@ module Atproto
         else
           out << format("%%%02X", byte)
         end
-      end
-    end
-  end
-
-  # Prepared in-flight OAuth login — carries everything needed for the
-  # callback to complete the token exchange.
-  class PreparedLogin
-    attr_reader :auth_url, :state, :redirect_uri, :client_id,
-                :code_verifier, :token_endpoint, :pds_url, :dpop_key,
-                :did, :handle
-
-    def initialize(handle, did, pds_url, auth_meta, redirect_uri, client_id,
-                   code_verifier, dpop_key, state, auth_url)
-      @handle = handle
-      @did = did
-      @pds_url = pds_url
-      @token_endpoint = auth_meta["token_endpoint"]
-      @redirect_uri = redirect_uri
-      @client_id = client_id
-      @code_verifier = code_verifier
-      @dpop_key = dpop_key
-      @state = state
-      @auth_url = auth_url
-    end
-
-    # Complete the OAuth flow after the callback. Returns an OAuthSession.
-    def complete(auth_code)
-      access_token, token_did = OAuth.exchange_code(
-        @token_endpoint, auth_code, @code_verifier, @redirect_uri,
-        @client_id, @dpop_key
-      )
-      if token_did && token_did != @did
-        raise "DID mismatch: resolved #{@did} but token is for #{token_did}"
-      end
-      dpop_nonce = OAuth.probe_dpop_nonce(@pds_url, access_token, @dpop_key)
-      OAuthSession.new(
-        did: @did,
-        handle: @handle,
-        access_token: access_token,
-        pds_url: @pds_url,
-        dpop_key: @dpop_key,
-        dpop_nonce: dpop_nonce
-      )
-    end
-  end
-
-  # Authenticated AT Protocol session. Carried by SessionState for SASL.
-  class OAuthSession
-    attr_accessor :did, :handle, :access_token, :pds_url, :dpop_key, :dpop_nonce
-
-    def initialize(did:, handle:, access_token:, pds_url:, dpop_key:, dpop_nonce: nil)
-      @did = did
-      @handle = handle
-      @access_token = access_token
-      @pds_url = pds_url
-      @dpop_key = dpop_key
-      @dpop_nonce = dpop_nonce
-    end
-
-    def nick
-      IrcRender.sanitize_nick(handle)
-    end
-
-    # Serialize for cookie/session storage.
-    def to_h
-      {
-        did: @did,
-        handle: @handle,
-        access_token: @access_token,
-        pds_url: @pds_url,
-        dpop_key_serialized: @dpop_key.serialize,
-        dpop_nonce: @dpop_nonce
-      }
-    end
-
-    def self.from_h(h)
-      new(
-        did: h[:did],
-        handle: h[:handle],
-        access_token: h[:access_token],
-        pds_url: h[:pds_url],
-        dpop_key: DpopKey.deserialize(h[:dpop_key_serialized]),
-        dpop_nonce: h[:dpop_nonce]
-      )
-    end
-  end
-
-  # Build a PreparedLogin for a web redirect flow.
-  module OAuth
-    class << self
-      # Start the OAuth flow for a handle. Returns a PreparedLogin.
-      def prepare(handle, public_url = nil)
-        did, pds_url = resolve_identity(handle)
-        auth_meta = discover_auth_server(pds_url)
-
-        redirect_uri = public_url ? "#{public_url.chomp('/')}/auth/callback" : "http://127.0.0.1:0/callback"
-        client_id = if public_url
-          "#{public_url.chomp('/')}/.well-known/oauth-client-metadata"
-        else
-          scope = "atproto transition:generic"
-          "http://localhost?redirect_uri=#{urlencode(redirect_uri)}&scope=#{urlencode(scope)}"
-        end
-
-        code_verifier, code_challenge = generate_pkce
-        dpop_key = DpopKey.new
-        state = b64url(SecureRandom.random_bytes(16))
-
-        par_endpoint = auth_meta["pushed_authorization_request_endpoint"] ||
-                       auth_meta["pushed_authorization_request_endpoint"]
-        raise "Authorization server does not support PAR" unless par_endpoint
-
-        auth_url = push_authorization_request(
-          par_endpoint, auth_meta["authorization_endpoint"], client_id,
-          redirect_uri, code_challenge, state, handle, dpop_key
-        )
-
-        PreparedLogin.new(
-          handle, did, pds_url, auth_meta, redirect_uri, client_id,
-          code_verifier, dpop_key, state, auth_url
-        )
       end
     end
   end

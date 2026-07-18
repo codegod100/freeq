@@ -66,9 +66,8 @@ class SessionsController < ApplicationController
       end
 
       dpop_key = Atproto::DpopKey.deserialize(data["dpop_key"])
-      auth_meta = { "token_endpoint" => data["token_endpoint"] }
       prepared = Atproto::PreparedLogin.new(
-        data["handle"], data["did"], data["pds_url"], auth_meta,
+        data["handle"], data["did"], data["pds_url"], data["token_endpoint"],
         data["redirect_uri"], data["client_id"],
         data["code_verifier"], dpop_key, data["state"], ""
       )
