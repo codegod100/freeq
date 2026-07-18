@@ -28,6 +28,11 @@ class ChatController < ApplicationController
     end
 
     @history = SessionRegistry.instance.fetch_history(@channel, 50)
+    # Merge cached reactions (from live TAGMSG +react events) into history
+    # so chips survive page refresh within the same session.
+    @history.each do |msg|
+      msg[:reactions] = @session.merged_reactions(msg[:msgid], msg[:reactions])
+    end
     @parent_lookup = IrcRender.parent_lookup_from_history(@history)
     @session.note_seen_msgids(@history.filter_map { |m| m[:msgid] })
     # Keep a per-session lookup so live-rendered replies can show parent context.

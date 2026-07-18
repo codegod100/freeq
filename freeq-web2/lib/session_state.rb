@@ -32,12 +32,44 @@ class SessionState
     @suppress_history_batches = Set.new
     # msgid → { nick:, text: } for reply badge context.
     @parent_lookup = {}
+    # msgid → { emoji => Set<nick> } — cached reactions so chips survive refresh.
+    @reaction_cache = {}
     @task = nil
     @broadcaster = nil
     @task_mutex = Mutex.new
   end
 
-  attr_reader :suppress_history_batches
+  attr_reader :suppress_history_batches, :reaction_cache
+
+  # Record a reaction event (from IrcBroadcaster) so chips persist across
+  # page refreshes within the same session.
+  def apply_reaction(msgid, emoji, nick, added)
+    return if msgid.to_s.empty? || emoji.to_s.empty?
+    synchronize do
+      @reaction_cache[msgid] ||= {}
+      if added
+        @reaction_cache[msgid][emoji] ||= Set.new
+        @reaction_cache[msgid][emoji] << nick
+      else
+        @reaction_cache[msgid][emoji]&.delete(nick)
+        @reaction_cache[msgid].delete(emoji) if @reaction_cache[msgid][emoji]&.empty?
+        @reaction_cache.delete(msgid) if @reaction_cache[msgid].empty?
+      end
+    end
+  end
+
+  # Merge cached reactions into a history message's reactions hash.
+  def merged_reactions(msgid, rest_reactions)
+    cached = @reaction_cache[msgid]
+    merged = {}
+    rest_reactions&.each { |emoji, nicks| merged[emoji] = nicks.dup }
+    cached&.each do |emoji, nicks|
+      set = (merged[emoji] || []).to_set
+      set.merge(nicks)
+      merged[emoji] = set.to_a
+    end
+    merged
+  end
 
   def remember_message(msgid, nick, text)
     return if msgid.to_s.empty?

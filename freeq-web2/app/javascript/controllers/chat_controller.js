@@ -206,11 +206,8 @@ export default class ChatController extends Controller {
       );
       const mine = el?.classList.contains("mine");
       const path = mine ? "unreact" : "react";
-      const me =
-        document.body.getAttribute("data-auth-handle") ||
-        self.element.dataset.authHandle ||
-        "you";
-      self.applyReaction(msgid, emoji, me, !mine);
+      // No optimistic update — wait for the server echo via freeq:reaction
+      // event so the nick matches exactly and we don't double-count.
       const payload = new FormData();
       payload.append("msgid", msgid);
       payload.append("emoji", emoji);

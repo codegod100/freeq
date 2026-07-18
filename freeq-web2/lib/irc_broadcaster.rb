@@ -52,6 +52,8 @@ module IrcBroadcaster
     # Reactions are channel-scoped TAGMSG.
     if (rx = IrcRender.parse_tagmsg_reaction(line))
       msgid, emoji, nick, added, ch = rx
+      # Cache so chips survive page refresh.
+      session.apply_reaction(msgid, emoji, nick, added)
       broadcast_reaction(ch, msgid, emoji, nick, added)
       return
     end
