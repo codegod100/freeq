@@ -1924,6 +1924,47 @@ fn handle_chathistory_targets(
 
 // ── Message editing ─────────────────────────────────────────────────
 
+/// Canonical DB storage key for a DM wire target from the sender's
+/// perspective. DM messages live under `dm:<didA>,<didB>` (see
+/// [`crate::db::canonical_dm_key`]), never under the wire target, which
+/// may be the peer's nick OR their DID. Returns None for guests (no
+/// sender DID) or an unresolvable nick.
+fn dm_canonical_key(conn: &Connection, target: &str, state: &Arc<SharedState>) -> Option<String> {
+    let sender_did = conn.authenticated_did.as_deref()?;
+    let recipient_did = if target.starts_with("did:") {
+        target.to_string()
+    } else {
+        state.nick_owners.lock().get(&target.to_lowercase()).cloned()?
+    };
+    Some(crate::db::canonical_dm_key(sender_did, &recipient_did))
+}
+
+/// Look up an original message by msgid for an edit/delete. Channels key
+/// by the wire target; DMs key by the canonical dm_key, so a DM tries the
+/// target, then the canonical key, then a global msgid search (a ULID is
+/// unique, and the caller re-checks authorship). Returns the row so the
+/// caller can write back under `row.channel` — the key it actually lives
+/// under — rather than re-deriving it.
+fn find_original_message(
+    conn: &Connection,
+    target: &str,
+    msgid: &str,
+    is_channel: bool,
+    state: &Arc<SharedState>,
+) -> Option<Option<crate::db::MessageRow>> {
+    let by_target = state.with_db(|db| db.get_message_by_msgid(target, msgid));
+    if matches!(&by_target, Some(Some(_))) || is_channel {
+        return by_target;
+    }
+    if let Some(dm_key) = dm_canonical_key(conn, target, state) {
+        let by_dm = state.with_db(|db| db.get_message_by_msgid(&dm_key, msgid));
+        if matches!(&by_dm, Some(Some(_))) {
+            return by_dm;
+        }
+    }
+    state.with_db(|db| db.find_message_by_msgid(msgid))
+}
+
 /// Handle a PRIVMSG with +draft/edit=<msgid> tag.
 /// Verifies authorship, stores the edit, and broadcasts to channel or DM recipient.
 ///
@@ -1947,46 +1988,17 @@ fn handle_edit(
     let nick = conn.nick_or_star();
     let is_channel = target.starts_with('#') || target.starts_with('&');
 
-    // Verify authorship: look up original message by msgid
-    // For DMs, messages are stored under the canonical dm_key, not the nick.
-    // Try the target first (works for channels), then fall back to a global lookup.
-    let original = {
-        let by_target = state.with_db(|db| db.get_message_by_msgid(target, original_msgid));
-        match &by_target {
-            Some(Some(_)) => by_target,
-            _ => {
-                // Channel lookup failed — try DM key if this is a DM
-                if !is_channel {
-                    if let Some(sender_did) = conn.authenticated_did.as_deref() {
-                        if let Some(recipient_did) = state
-                            .nick_owners
-                            .lock()
-                            .get(&target.to_lowercase())
-                            .cloned()
-                        {
-                            let dm_key = crate::db::canonical_dm_key(sender_did, &recipient_did);
-                            let by_dm = state
-                                .with_db(|db| db.get_message_by_msgid(&dm_key, original_msgid));
-                            if matches!(&by_dm, Some(Some(_))) {
-                                by_dm
-                            } else {
-                                // Final fallback: global msgid search
-                                state.with_db(|db| db.find_message_by_msgid(original_msgid))
-                            }
-                        } else {
-                            state.with_db(|db| db.find_message_by_msgid(original_msgid))
-                        }
-                    } else {
-                        state.with_db(|db| db.find_message_by_msgid(original_msgid))
-                    }
-                } else {
-                    by_target
-                }
-            }
-        }
+    // Verify authorship: look up original message by msgid, resolving the
+    // canonical dm_key for DMs (target may be a nick or a DID).
+    let original = find_original_message(conn, target, original_msgid, is_channel, state);
+    // The key the row actually lives under — the edit must be written back
+    // here (a DM lives under `dm:<a>,<b>`, not the wire target).
+    let store_channel = match &original {
+        Some(Some(row)) => row.channel.clone(),
+        _ => target.to_string(),
     };
     match original {
-        Some(Some(row)) => {
+        Some(Some(ref row)) => {
             // Prefer DID-based authorship check to prevent nick-reuse attacks
             let is_author = if let (Some(msg_did), Some(conn_did)) =
                 (&row.sender_did, &conn.authenticated_did)
@@ -2132,22 +2144,7 @@ fn handle_edit(
         .collect();
     // For DMs, store under the canonical dm_key (not the nick) so
     // edits appear in CHATHISTORY alongside the original message.
-    let store_channel = if is_channel {
-        target.to_string()
-    } else if let Some(sender_did) = conn.authenticated_did.as_deref() {
-        if let Some(recipient_did) = state
-            .nick_owners
-            .lock()
-            .get(&target.to_lowercase())
-            .cloned()
-        {
-            crate::db::canonical_dm_key(sender_did, &recipient_did)
-        } else {
-            target.to_string()
-        }
-    } else {
-        target.to_string()
-    };
+    // store_channel was captured from the original row above.
     let editor_did = conn.authenticated_did.as_deref();
     state.with_db(|db| {
         db.insert_edit(
@@ -2400,10 +2397,17 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
     let nick = conn.nick_or_star();
     let is_channel = target.starts_with('#') || target.starts_with('&');
 
-    // Verify authorship
-    let original = state.with_db(|db| db.get_message_by_msgid(target, original_msgid));
+    // Verify authorship, resolving the canonical dm_key for DMs (target
+    // may be a nick or a DID).
+    let original = find_original_message(conn, target, original_msgid, is_channel, state);
+    // The key the row actually lives under — soft-delete must target this,
+    // not the wire target.
+    let storage_key = match &original {
+        Some(Some(row)) => row.channel.clone(),
+        _ => target.to_string(),
+    };
     match original {
-        Some(Some(row)) => {
+        Some(Some(ref row)) => {
             // Prefer DID-based authorship check to prevent nick-reuse attacks
             let is_author = if let (Some(msg_did), Some(conn_did)) =
                 (&row.sender_did, &conn.authenticated_did)
@@ -2462,7 +2466,7 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
     }
 
     // Soft-delete in DB
-    state.with_db(|db| db.soft_delete_message(target, original_msgid));
+    state.with_db(|db| db.soft_delete_message(&storage_key, original_msgid));
 
     // Remove from in-memory history and pins (channels only)
     if is_channel {
