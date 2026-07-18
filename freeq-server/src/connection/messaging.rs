@@ -1929,7 +1929,11 @@ fn handle_chathistory_targets(
 /// [`crate::db::canonical_dm_key`]), never under the wire target, which
 /// may be the peer's nick OR their DID. Returns None for guests (no
 /// sender DID) or an unresolvable nick.
-fn dm_canonical_key(conn: &Connection, target: &str, state: &Arc<SharedState>) -> Option<String> {
+pub(super) fn dm_canonical_key(
+    conn: &Connection,
+    target: &str,
+    state: &Arc<SharedState>,
+) -> Option<String> {
     let sender_did = conn.authenticated_did.as_deref()?;
     let recipient_did = if target.starts_with("did:") {
         target.to_string()

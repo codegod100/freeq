@@ -15,6 +15,7 @@ use freeq_sdk::crypto::PrivateKey;
 use freeq_sdk::did::{self, DidResolver};
 
 const DID_ALICE: &str = "did:plc:rm_alice";
+const DID_BOB: &str = "did:plc:rm_bob";
 
 fn resolver_with(entries: Vec<(&str, &PrivateKey)>) -> DidResolver {
     let mut docs = HashMap::new();
@@ -426,6 +427,45 @@ async fn malformed_timestamp_fails() {
         a.tx("MARKREAD #room");
         let got = a.maybe(|l| l.starts_with("MARKREAD #room"), 1500);
         assert_eq!(got.as_deref(), Some("MARKREAD #room *"));
+    })
+    .await;
+}
+
+/// A DM read marker is tied to the conversation, not the alias used to
+/// address it. A marker set addressing the peer by DID must be readable
+/// addressing them by nick (both resolve to the canonical dm key).
+#[tokio::test]
+async fn dm_marker_keys_by_conversation_not_alias() {
+    let key_a = PrivateKey::generate_ed25519();
+    let key_b = PrivateKey::generate_ed25519();
+    let ka = key_a.secret_bytes();
+    let kb = key_b.secret_bytes();
+    let (addr, _h) = start(resolver_with(vec![
+        (DID_ALICE, &key_a),
+        (DID_BOB, &key_b),
+    ]))
+    .await;
+    run(addr, move |addr| {
+        // Bob connects so the server learns his nick<->DID binding.
+        let mut bob = C::sasl(addr, "bob", DID_BOB, &kb);
+        bob.reg();
+        bob.drain();
+
+        let mut alice = C::sasl(addr, "alice", DID_ALICE, &ka);
+        alice.reg();
+        alice.drain();
+
+        // Set the marker addressing Bob by his DID.
+        alice.tx(&format!("MARKREAD {DID_BOB} timestamp=2026-07-02T21:00:00.000Z"));
+        alice.rx(|l| l.starts_with("MARKREAD"), "set by DID");
+
+        // Read it back addressing Bob by his nick — same conversation.
+        alice.tx("MARKREAD bob");
+        let got = alice.rx(|l| l.starts_with("MARKREAD bob"), "get by nick");
+        assert_eq!(
+            got, "MARKREAD bob timestamp=2026-07-02T21:00:00.000Z",
+            "DM marker set by DID must be readable by nick: {got}"
+        );
     })
     .await;
 }
