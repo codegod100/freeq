@@ -22,7 +22,6 @@ class ChatController < ApplicationController
       next if existing.include?(ch.downcase)
       channels << { "name" => ch, "topic" => "", "members" => 0 }
     end
-    @session.joined << @channel
 
     @topic = channels.find { |c| c["name"].to_s.casecmp?(@channel) }&.dig("topic") || ""
     @my_channels, @all_channels = channels.partition do |c|
