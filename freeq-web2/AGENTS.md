@@ -59,6 +59,16 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
   upstream WS when authenticated. OAuth blobs AES-GCM encrypted under
   `FREEQ_WEB2_SESSIONS_DIR` (default `.dev-data/web2-sessions`) so identity
   survives process restart; encrypted cookie is a secondary path.
+- **Client-authoritative channel list**: freeq-web2 owns the user's
+  joined-channel list (`SessionState#channels`), persisted encrypted as
+  `<sid>.channels` in the sessions dir. The upstream server is a dumb
+  relay — on every fresh WS connect we re-assert the whole list, and
+  MY CHANNELS renders from our list, never from upstream room state.
+  Join/part mutate the list and persist immediately.
+- **`morph :nothing` on redirecting reflexes**: StimulusReflex re-renders
+  the current page after a reflex by default; without opting out, a part
+  reflex's re-render re-adds the parted channel via `show` →
+  `spawn_upstream_if_needed` → `add_channel!`.
 - **Per-session Thread for upstream WS + per-(session,channel) broadcaster
   Thread**, mirroring `freeq-webui`'s tokio tasks.
 - **Inline CSS in the layout** (ported from `app.rs`), not Tailwind classes,

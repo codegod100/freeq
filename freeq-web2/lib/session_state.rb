@@ -17,7 +17,7 @@ require_relative "atproto/sasl"
 class SessionState
   include MonitorMixin
 
-  attr_reader :session_id, :joined, :confirmed, :channel_members, :irc_out, :irc_in,
+  attr_reader :session_id, :joined, :channels, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
               :policy_response_queue, :current_nick
   attr_accessor :auth   # :guest or Atproto::OAuthSession
@@ -27,7 +27,7 @@ class SessionState
     super()
     @session_id = session_id
     @joined = Set.new        # routing table: channels we're emitting lines for
-    @confirmed = Set.new     # channels the upstream confirmed we're in
+    @channels = Set.new      # client-authoritative joined list (persisted)
     @join_sent = Set.new     # channels with an in-flight JOIN (dedupe)
     @channel_members = {}
     @irc_out = Queue.new
@@ -59,29 +59,55 @@ class SessionState
     authenticated? ? @auth.handle : nil
   end
 
-  # ── Channel membership confirmation ──────────────────────────────────
+  # ── Client-authoritative channel list ──────────────────────────────
+  #
+  # freeq-web2 owns the user's joined-channel list. The upstream server
+  # is a dumb relay: we persist the list to disk and re-assert it on
+  # every fresh WS connect instead of trusting upstream room state.
 
-  # Mark a channel as confirmed-joined (upstream echoed our JOIN or listed
-  # us in 353 NAMES). Used by @my_channels and request_reconnect so
-  # browse-only channels don't leak into the "joined" set.
-  def confirm_channel!(channel)
-    synchronize { @confirmed << IrcRender.canonical_channel(channel) }
-  end
-
-  def unconfirm_channel!(channel)
+  # Seed the list from disk (SessionRegistry#get). Adds to @joined too so
+  # the broadcaster routes lines for restored channels.
+  def restore_channels!(channels)
     synchronize do
-      c = IrcRender.canonical_channel(channel)
-      @confirmed.delete(c)
-      @join_sent.delete(c)
+      channels.each do |ch|
+        c = IrcRender.canonical_channel(ch)
+        @channels << c
+        @joined << c
+      end
     end
   end
 
+  # Join (or re-join) a channel: record it, persist, and route its lines.
+  def add_channel!(channel)
+    c = IrcRender.canonical_channel(channel)
+    synchronize do
+      @channels << c
+      @joined << c
+    end
+    persist_channels!
+  end
+
+  # Leave a channel: drop from the list, persist, stop routing its lines.
+  def remove_channel!(channel)
+    c = IrcRender.canonical_channel(channel)
+    synchronize do
+      @channels.delete(c)
+      @joined.delete(c)
+      @join_sent.delete(c)
+    end
+    persist_channels!
+  end
+
+  def persist_channels!
+    SessionRegistry.instance.persist_channels(@session_id, @channels.to_a)
+  rescue StandardError => e
+    Rails.logger.warn("persist_channels! failed: #{e.class}: #{e.message}") if defined?(Rails)
+  end
+
   # Force the WS task to reconnect so it picks up the new auth state.
-  # Rejoins every channel the upstream confirmed we're in (not merely
-  # browsed), so the user lands back in the channels they actually
-  # occupied — not a random browse-only channel.
+  # Re-asserts the full client-owned channel list upstream.
   def request_reconnect(upstream_url = nil)
-    channels_to_rejoin = synchronize { @confirmed.to_a }
+    channels_to_rejoin = synchronize { @channels.to_a }
     @task_mutex.synchronize do
       if @task && @task.alive?
         @task.kill
@@ -94,9 +120,12 @@ class SessionState
 
     return unless upstream_url && !channels_to_rejoin.empty?
 
-    # spawn_upstream_if_needed covers every channel in @confirmed — the
-    # primary via finish_registration, the rest as queued JOINs.
+    # spawn_upstream_if_needed JOINs only the primary (via
+    # finish_registration); queue the rest to flush after registration.
     spawn_upstream_if_needed(upstream_url, channels_to_rejoin.first)
+    rest = channels_to_rejoin[1..]
+    @join_sent.merge(rest)
+    rest.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
   end
 
   # ── Reaction cache ────────────────────────────────────────────────────
@@ -179,7 +208,7 @@ class SessionState
 
   def spawn_upstream_if_needed(upstream_url, channel)
     target = IrcRender.canonical_channel(channel)
-    synchronize { @joined << target }
+    add_channel!(target) # record + persist (client-authoritative)
     ensure_broadcaster!
 
     @task_mutex.synchronize do
@@ -187,6 +216,7 @@ class SessionState
       if @task && !@task.alive?
         @task = nil
         @ws_state = :disconnected
+        @join_sent.clear # dead WS — its JOINs are void
       end
 
       if @task && @task.alive?
@@ -198,16 +228,14 @@ class SessionState
         return
       end
 
-      # Fresh WS: join the target plus any other channels the upstream
-      # previously confirmed we were in (so a WS respawn doesn't drop
-      # them). finish_registration joins the primary; the rest are
-      # enqueued and flushed once registration completes.
-      primary = target
-      extras = synchronize { @confirmed.to_a } - [primary]
-      # finish_registration JOINs primary; extras flush after CAP END.
-      @join_sent << primary
+      # Fresh WS: re-assert our whole channel list — the upstream keeps
+      # no reliable room state, so we tell it what we're in on every
+      # connect. finish_registration JOINs the primary; the rest flush
+      # after registration.
+      extras = synchronize { @channels.to_a } - [target]
+      @join_sent << target
       @join_sent.merge(extras)
-      @task = Thread.new { run_upstream(upstream_url.to_s, primary) }
+      @task = Thread.new { run_upstream(upstream_url.to_s, target) }
       extras.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
     end
   end

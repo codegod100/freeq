@@ -47,15 +47,19 @@ class ChatReflex < ApplicationReflex
     # spawn_upstream_if_needed owns the JOIN (deduped via @join_sent) —
     # don't enqueue a second one here.
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
+    morph :nothing # skip SR page re-render; we redirect instead
     cable_ready.redirect_to(url: "/chat/#{channel.delete('#')}").broadcast
   end
 
   def part
     channel = canonical_channel(element.dataset[:channel])
-    session.joined.delete(channel)
-    session.unconfirm_channel!(channel)
+    session.remove_channel!(channel)
     session.channel_members.delete(channel)
     session.enqueue_outbound("PART #{channel}\r\n")
+    # StimulusReflex re-renders the current page after a reflex by default,
+    # which would re-run show → spawn → add_channel! and resurrect the
+    # parted channel. Skip the morph; we redirect or remove the row.
+    morph :nothing
 
     bare = channel.delete("#")
     current_bare = request.path.to_s[%r{\A/chat/([^/]+)\z}, 1]

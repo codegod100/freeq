@@ -14,18 +14,18 @@ class ChatController < ApplicationController
     @session = current_session
 
     channels = SessionRegistry.instance.fetch_channels
-    confirmed = @session.confirmed.to_a
+    mine = @session.channels.to_a
     existing = channels.map { |c| c["name"].to_s.downcase }
-    # Show confirmed-joined channels under MY CHANNELS even if the REST
-    # channel list doesn't include them yet.
-    confirmed.each do |ch|
+    # MY CHANNELS is client-authoritative: show our own list even when the
+    # upstream REST channel list is stale or missing entries.
+    mine.each do |ch|
       next if existing.include?(ch.downcase)
       channels << { "name" => ch, "topic" => "", "members" => 0 }
     end
 
     @topic = channels.find { |c| c["name"].to_s.casecmp?(@channel) }&.dig("topic") || ""
     @my_channels, @all_channels = channels.partition do |c|
-      confirmed.any? { |j| j.casecmp?(c["name"].to_s) } || c["name"].to_s.casecmp?(@channel)
+      mine.any? { |j| j.casecmp?(c["name"].to_s) } || c["name"].to_s.casecmp?(@channel)
     end
 
     @history = SessionRegistry.instance.fetch_history(@channel, 50)

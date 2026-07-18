@@ -72,16 +72,12 @@ module IrcBroadcaster
       members = IrcRender.parse_353_members(line)
       map = session.channel_members[ch] ||= {}
       members.each { |e| map[e[:nick]] = e }
-      # If our own nick is in the roster, the upstream confirmed our JOIN.
-      own = session.current_nick
-      session.confirm_channel!(ch) if own && members.any? { |m| m[:nick].casecmp?(own) }
       cable_for(ch).inner_html(selector: "#member-panel", html: IrcRender.render_member_list(map)).broadcast
       return
     end
 
     if (change = IrcRender.parse_member_change(line))
       ch = change[:channel] || session.joined.find { true }
-      own = session.current_nick
       # Quit has no channel — apply to all joined.
       targets =
         if change[:kind] == :quit
@@ -89,14 +85,6 @@ module IrcBroadcaster
         else
           [change[:channel]].compact
         end
-      # Track confirmed membership for our own nick.
-      if own && change[:nick]&.casecmp?(own)
-        case change[:kind]
-        when :join then session.confirm_channel!(ch) if ch
-        when :part then session.unconfirm_channel!(ch) if ch
-        when :quit then targets.each { |t| session.unconfirm_channel!(t) }
-        end
-      end
       targets.each do |target|
         html = apply_member_change(session, target, change)
         cable_for(target).inner_html(selector: "#member-panel", html: html).broadcast if html

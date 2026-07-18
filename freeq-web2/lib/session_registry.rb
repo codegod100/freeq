@@ -52,9 +52,21 @@ class SessionRegistry
           "session=#{session_id[0, 8]}… did=#{oauth.did}"
         ) if defined?(Rails)
       end
+      # Client-authoritative channel list — restored from disk and
+      # re-asserted to the upstream on the next WS connect.
+      if @session_store
+        state.restore_channels!(@session_store.load_channels(session_id))
+      end
       @states[session_id] = state
       state
     end
+  end
+
+  # Persist the user's channel list (client-authoritative).
+  def persist_channels(session_id, channels)
+    @session_store&.save_channels(session_id, channels)
+  rescue StandardError => e
+    Rails.logger.warn("persist_channels failed: #{e.class}: #{e.message}") if defined?(Rails)
   end
 
   # Persist (or refresh) an authenticated OAuth session to disk.

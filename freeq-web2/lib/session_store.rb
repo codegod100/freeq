@@ -76,8 +76,40 @@ class SessionStore
 
     path = session_path(sid)
     path.delete if path.exist?
+    channels_path(sid).delete if channels_path(sid).exist?
   rescue StandardError => e
     warn_log("remove session #{sid[0, 8]}… failed: #{e.class}: #{e.message}")
+  end
+
+  # ── Channel list (client-authoritative) ────────────────────────────
+  #
+  # freeq-web2 owns the user's joined-channel list — the upstream server
+  # is treated as a dumb relay. Persisted (encrypted like the OAuth blob)
+  # so the list survives process restarts and can be re-asserted on every
+  # fresh WS connect.
+
+  def save_channels(sid, channels)
+    return if sid.to_s.empty?
+
+    key = derive_key(sid)
+    plaintext = JSON.generate(channels.map(&:to_s))
+    atomic_write(channels_path(sid), encrypt(plaintext, key))
+  rescue StandardError => e
+    warn_log("save channels #{sid[0, 8]}… failed: #{e.class}: #{e.message}")
+  end
+
+  def load_channels(sid)
+    return [] if sid.to_s.empty?
+
+    path = channels_path(sid)
+    return [] unless path.exist?
+
+    key = derive_key(sid)
+    data = JSON.parse(decrypt(path.binread, key))
+    data.is_a?(Array) ? data.map(&:to_s) : []
+  rescue StandardError => e
+    warn_log("load channels #{sid[0, 8]}… failed: #{e.class}: #{e.message}")
+    []
   end
 
   private
@@ -85,6 +117,11 @@ class SessionStore
   def session_path(sid)
     safe = sid.to_s.gsub(%r{[/\\.]}, "_")
     @dir.join("#{safe}.bin")
+  end
+
+  def channels_path(sid)
+    safe = sid.to_s.gsub(%r{[/\\.]}, "_")
+    @dir.join("#{safe}.channels")
   end
 
   def load_or_create_machine_key
