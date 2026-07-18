@@ -35,10 +35,10 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Always go to the network for API, events, and uploads.
+  // Always go to the network for API, SSE, and uploads.
   if (
     url.pathname.startsWith('/api/') ||
-    url.pathname.startsWith('/chat/') && url.pathname.endsWith('/events') ||
+    url.pathname === '/events' ||
     url.pathname.startsWith('/upload') ||
     url.pathname.startsWith('/auth/')
   ) {

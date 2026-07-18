@@ -36,6 +36,17 @@ async fn chat_channel(cx: &Cx) -> Result {
             });
         }
     }
+    // Ensure upstream WS is connected and JOINs this channel.
+    // Call before adding to joined so spawn_upstream_if_needed sees the
+    // channel is NOT yet joined and actually sends JOIN.
+    crate::upstream::spawn_upstream_if_needed(
+        &app,
+        &sid,
+        &session,
+        app.upstream.clone(),
+        &channel,
+    );
+
     // Ensure current channel appears in joined list for sidebar.
     session.joined.lock().insert(channel.clone());
 
@@ -256,16 +267,18 @@ async fn channel_link(ch: &crate::upstream::UpstreamChannel, active: &str) -> Re
     };
     let members = ch.members;
     let name = ch.name.clone();
+    let onclick_nav = format!("switchChannel('{bare}');return false");
+    let onclick_policy = format!("event.stopPropagation();showPolicy('{bare}')");
     view! {
         <li class="flex items-center gap-1">
-            <a href=(href) class=(cls) style="flex:1;min-width:0;overflow-wrap:anywhere">
+            <a href=(href) class=(cls) style="flex:1;min-width:0;overflow-wrap:anywhere" onclick=(onclick_nav)>
                 (name.clone())
             </a>
             <button
                 type="button"
                 class="rounded bg-[#1a1f28] px-1.5 py-0.5 text-[0.65rem] text-zinc-400 hover:text-white"
                 title="Channel policy"
-                onclick=(format!("event.stopPropagation();showPolicy('{}')", bare))
+                onclick=(onclick_policy)
             >
                 (members)
             </button>

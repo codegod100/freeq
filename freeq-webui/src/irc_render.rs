@@ -64,6 +64,124 @@ pub fn should_emit(line: &str, current_channel: &str) -> bool {
     true
 }
 
+/// Like `should_emit` but for the session-scoped SSE — returns the channel
+/// the line belongs to (so the client can filter), or `None` for session-wide
+/// lines that should not be shown as channel messages.
+pub fn should_emit_any(line: &str) -> EmitInfo {
+    let line = line.trim_end_matches(['\r', '\n']);
+    if line.starts_with("PING ") || line.starts_with("PONG ") {
+        return EmitInfo::Skip;
+    }
+    let after_tags = parse_irc_tags(line).1;
+    let Some(rest) = after_tags.strip_prefix(':') else {
+        return EmitInfo::Skip;
+    };
+    let Some(sp) = rest.find(' ') else {
+        return EmitInfo::Skip;
+    };
+    let after_prefix = &rest[sp + 1..];
+    let cmd = after_prefix.split_whitespace().next().unwrap_or("");
+
+    if cmd.len() == 3 && cmd.bytes().all(|b| b.is_ascii_digit()) {
+        return EmitInfo::Skip;
+    }
+
+    match cmd {
+        "CAP" | "AUTHENTICATE" | "BATCH" | "PING" | "PONG" | "ERROR" | "TAGMSG" => EmitInfo::Skip,
+        "PRIVMSG" | "NOTICE" => {
+            // Suppress control NOTICEs
+            if cmd == "NOTICE" {
+                if let Some(text) = notice_trailing(after_prefix) {
+                    if is_control_notice(text) {
+                        return EmitInfo::Skip;
+                    }
+                }
+            }
+            match extract_irc_target(after_prefix) {
+                Some(ch) => EmitInfo::Channel(ch.to_string()),
+                None => EmitInfo::Session, // NOTICE to nick, etc.
+            }
+        }
+        "JOIN" => {
+            let ch = after_prefix
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or("")
+                .trim_start_matches(':');
+            if ch.starts_with('#') || ch.starts_with('&') {
+                EmitInfo::Channel(ch.to_string())
+            } else {
+                EmitInfo::Skip
+            }
+        }
+        "PART" => {
+            let ch = after_prefix.split_whitespace().nth(1).unwrap_or("");
+            if ch.starts_with('#') || ch.starts_with('&') {
+                EmitInfo::Channel(ch.to_string())
+            } else {
+                EmitInfo::Skip
+            }
+        }
+        "QUIT" | "NICK" => EmitInfo::Session, // No specific channel
+        "TOPIC" | "MODE" | "KICK" => {
+            match extract_irc_target(after_prefix) {
+                Some(ch) => EmitInfo::Channel(ch.to_string()),
+                None => EmitInfo::Skip,
+            }
+        }
+        _ => EmitInfo::Skip,
+    }
+}
+
+pub enum EmitInfo {
+    Skip,
+    Session,
+    Channel(String),
+}
+
+/// Parse a topic change or 332 numeric, returning (channel, topic).
+/// Unlike `parse_topic_change`, does not filter by a specific channel.
+pub fn parse_topic_any(line: &str) -> Option<(String, String)> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let colon_idx = rest.find(" :")?;
+    let before = &rest[..colon_idx];
+    let text = &rest[colon_idx + 2..];
+    let mut tokens = before.split_whitespace();
+    let _source = tokens.next()?;
+    let second = tokens.next()?;
+    let channel = if second.eq_ignore_ascii_case("TOPIC") {
+        tokens.next()?
+    } else if second == "332" {
+        let _nick = tokens.next()?;
+        tokens.next()?
+    } else {
+        return None;
+    };
+    Some((channel.to_string(), text.to_string()))
+}
+
+/// Parse a channel error numeric (442/482), returning (channel, message).
+/// Unlike `parse_channel_error`, does not filter by a specific channel.
+pub fn parse_channel_error_any(line: &str) -> Option<(String, &'static str)> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let rest = line.strip_prefix(':')?;
+    let mut tokens = rest.split_whitespace();
+    let _server = tokens.next()?;
+    let numeric = tokens.next()?;
+    if !matches!(numeric, "442" | "482") {
+        return None;
+    }
+    let _nick = tokens.next()?;
+    let channel = tokens.next()?;
+    let msg = match numeric {
+        "442" => "You are not on that channel.",
+        "482" => "You must be a channel operator to change the topic.",
+        _ => return None,
+    };
+    Some((channel.to_string(), msg))
+}
+
 /// Trailing text of `NOTICE target :text`.
 fn notice_trailing(after_prefix: &str) -> Option<&str> {
     let rest = after_prefix.strip_prefix("NOTICE ")?;

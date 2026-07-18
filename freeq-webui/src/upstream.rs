@@ -128,6 +128,7 @@ where
     W: futures_util::Sink<WsMessage, Error = tokio_tungstenite::tungstenite::Error> + Unpin + Send,
 {
     const SASL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    let has_initial_channel = channel.len() > 1;
     let creds = auth_creds
         .as_mut()
         .expect("respond_to_sasl_challenge without creds");
@@ -139,7 +140,7 @@ where
             auth_creds.take();
             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
             let _ = write
-                .send(WsMessage::Text(format!("JOIN {channel}\r\n").into()))
+                .send(WsMessage::Text(if has_initial_channel { format!("JOIN {channel}\r\n") } else { String::new() }.into()))
                 .await;
             session.set_ws_state(crate::state::WsState::Ready);
             *session.reg_phase.lock() = String::new();
@@ -164,7 +165,7 @@ where
             auth_creds.take();
             let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
             let _ = write
-                .send(WsMessage::Text(format!("JOIN {channel}\r\n").into()))
+                .send(WsMessage::Text(if has_initial_channel { format!("JOIN {channel}\r\n") } else { String::new() }.into()))
                 .await;
             session.set_ws_state(crate::state::WsState::Ready);
             *session.reg_phase.lock() = String::new();
@@ -221,12 +222,15 @@ pub fn spawn_upstream_if_needed(
     if let Some(handle) = task_guard.as_ref() {
         if !handle.is_finished() {
             drop(task_guard);
-            let already = session.joined.lock().contains(&target);
-            if !already {
-                session.joined.lock().insert(target.clone());
-                let tx = session.irc_tx.lock().clone();
-                let _ = tx.try_send(format!("JOIN {target}\r\n"));
-                debug!(session = %sid, channel = %target, "JOINing new channel on live WS");
+            // Only JOIN if a real channel was specified (not empty / "#").
+            if target.len() > 1 {
+                let already = session.joined.lock().contains(&target);
+                if !already {
+                    session.joined.lock().insert(target.clone());
+                    let tx = session.irc_tx.lock().clone();
+                    let _ = tx.try_send(format!("JOIN {target}\r\n"));
+                    debug!(session = %sid, channel = %target, "JOINing new channel on live WS");
+                }
             }
             // Already in channel: leave the socket alone (send path queues PRIVMSG).
             return;
@@ -247,7 +251,10 @@ pub fn spawn_upstream_if_needed(
         }
     };
 
-    session.joined.lock().insert(target.clone());
+    // Only track the channel in joined if it's a real channel (not empty / "#").
+    if target.len() > 1 {
+        session.joined.lock().insert(target.clone());
+    }
 
     // Snapshot the user's OAuth session. The DPoP proof for SASL is built
     // inside the WS task so this function stays synchronous and no
@@ -349,6 +356,10 @@ pub async fn run_upstream_ws(
         .map(|a| crate::irc_render::sanitize_nick(&a.nick))
         .unwrap_or_else(|| format!("webui{:x}", rand::random::<u32>()));
     debug!(session = %session_id, %nick, authenticated = auth.is_some(), "upstream IRC registration");
+    // If the initial channel is just "#" (from canonical_channel("")),
+    // skip the initial JOIN — re-JOINs from the joined set handle it.
+    let has_initial_channel = channel.len() > 1;
+
     // Start CAP negotiation before NICK/USER so the server delays
     // registration until CAP END, giving us time to complete SASL.
     ws.send(WsMessage::Text("CAP LS 302\r\n".into())).await?;
@@ -497,7 +508,7 @@ pub async fn run_upstream_ws(
                                     }
                                     // No SASL (guest mode or server didn't ACK sasl) — finish reg.
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
-                                    let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    if has_initial_channel { let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await; }
                                     session.set_ws_state(WsState::Ready);
                                     *session.reg_phase.lock() = String::new();
                                     phase = RegPhase::Ready;
@@ -515,7 +526,7 @@ pub async fn run_upstream_ws(
                                 if trimmed.contains(" 001 ") || trimmed.contains(" 002 ") || trimmed.contains(" 003 ") || trimmed.contains(" 004 ") {
                                     info!("server sent numeric registration reply without CAP ACK — proceeding as guest");
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
-                                    let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    if has_initial_channel { let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await; }
                                     session.set_ws_state(WsState::Ready);
                                     *session.reg_phase.lock() = String::new();
                                     phase = RegPhase::Ready;
@@ -552,7 +563,7 @@ pub async fn run_upstream_ws(
                                     info!("SASL authentication successful");
                                     sasl_deadline = None;
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
-                                    let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    if has_initial_channel { let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await; }
                                     session.set_ws_state(WsState::Ready);
                                     *session.reg_phase.lock() = "SASL(ok)".to_string();
                                     phase = RegPhase::Ready;
@@ -567,7 +578,7 @@ pub async fn run_upstream_ws(
                                     warn!("SASL authentication failed; proceeding as guest");
                                     auth_creds.take();
                                     let _ = write.send(WsMessage::Text("CAP END\r\n".into())).await;
-                                    let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await;
+                                    if has_initial_channel { let _ = write.send(WsMessage::Text(format!("JOIN {channel}\r\n").into())).await; }
                                     debug!(session = %session_id, "ws_state → Ready");
                                     session.set_ws_state(WsState::Ready);
                                     *session.reg_phase.lock() = "SASL(failed,guest)".to_string();

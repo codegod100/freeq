@@ -3,9 +3,9 @@ use topcoat::context::Cx;
 use topcoat::router::{Html, Json, path_param, route};
 
 use crate::app::state;
-use crate::irc_render::canonical_channel;
+use crate::irc_render::{canonical_channel, channel_key, render_history_row, render_member_list};
 use crate::session_util::ensure_session_id;
-use crate::upstream::{UpstreamChannel, fetch_channels, spawn_upstream_if_needed};
+use crate::upstream::{UpstreamChannel, fetch_channels, fetch_history, spawn_upstream_if_needed};
 
 #[path_param]
 struct Channel(str);
@@ -18,6 +18,124 @@ async fn api_channels(cx: &Cx) -> Result<Json<Vec<UpstreamChannel>>> {
     let app = state(cx);
     let channels = fetch_channels(&app).await.unwrap_or_default();
     Ok(Json(channels))
+}
+
+/// JSON payload for client-side channel switching.
+#[derive(serde::Serialize)]
+struct ChannelData {
+    messages_html: String,
+    members_html: String,
+    topic: String,
+}
+
+/// Returns initial data for a channel (history, members, topic) as JSON.
+/// Used by the client when switching channels without a full page reload.
+#[route(GET "/api/channel/{channel}")]
+async fn api_channel(cx: &Cx) -> Result<Json<ChannelData>> {
+    let raw = path_param::<Channel>(cx);
+    let channel = canonical_channel(&raw);
+    let app = state(cx);
+    let sid = ensure_session_id(cx);
+    let session = app.session(&sid);
+
+    spawn_upstream_if_needed(&app, &sid, &session, app.upstream.clone(), &channel);
+
+    // Fetch 25 messages from upstream REST API.
+    let history = fetch_history(&app, &channel, 25).await.unwrap_or_default();
+
+    // Seed dedup so JOIN chathistory replay over SSE is not appended again.
+    session.note_seen_msgids(
+        history
+            .iter()
+            .filter_map(|m| m.msgid.clone())
+            .filter(|id| !id.is_empty()),
+    );
+
+    let messages_html = history.iter().map(render_history_row).collect::<String>();
+
+    // Read cached members.
+    let ch_key = channel_key(&channel);
+    let members_html = {
+        let members = session.channel_members.lock();
+        members
+            .get(&ch_key)
+            .map(render_member_list)
+            .unwrap_or_else(|| r#"<div class="member empty">—</div>"#.to_string())
+    };
+
+    // Request fresh NAMES so the roster updates.
+    let tx = session.irc_tx.lock().clone();
+    let _ = tx.try_send(format!("NAMES {channel}\r\n"));
+
+    // Fetch topic from channels list.
+    let channels = fetch_channels(&app).await.unwrap_or_default();
+    let topic = channels
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case(&channel))
+        .map(|c| c.topic.clone())
+        .unwrap_or_default();
+
+    Ok(Json(ChannelData {
+        messages_html,
+        members_html,
+        topic,
+    }))
+}
+
+/// Returns rendered sidebar HTML for client-side refresh after join/part.
+#[derive(serde::Serialize)]
+struct SidebarData {
+    my_channels_html: String,
+    all_channels_html: String,
+}
+
+#[route(GET "/api/sidebar/{channel}")]
+async fn api_sidebar(cx: &Cx) -> Result<Json<SidebarData>> {
+    let raw = path_param::<Channel>(cx);
+    let channel = canonical_channel(&raw);
+    let app = state(cx);
+    let sid = ensure_session_id(cx);
+    let session = app.session(&sid);
+
+    let channels = fetch_channels(&app).await.unwrap_or_default();
+    let joined: Vec<String> = session.joined.lock().iter().cloned().collect();
+
+    let (my_channels, all_channels): (Vec<&UpstreamChannel>, Vec<&UpstreamChannel>) =
+        channels
+            .iter()
+            .partition(|ch| {
+                joined.iter().any(|j| j.eq_ignore_ascii_case(&ch.name))
+                    || ch.name.eq_ignore_ascii_case(&channel)
+            });
+
+    let render_link = |ch: &UpstreamChannel, active: &str| -> String {
+        let bare = ch.name.trim_start_matches('#');
+        let is_active = ch.name.eq_ignore_ascii_case(active);
+        let cls = if is_active {
+            "block rounded px-2 py-1 bg-[#7ab7ff] text-[#0e1116] font-medium"
+        } else {
+            "block rounded px-2 py-1 text-zinc-300 hover:bg-[#151a22]"
+        };
+        let members = ch.members;
+        let name = ch.name.clone();
+        format!(
+            r#"<li class="flex items-center gap-1"><a href="/chat/{bare}" class="{cls}" style="flex:1;min-width:0;overflow-wrap:anywhere" onclick="switchChannel('{bare}');return false">{name}</a><button type="button" class="rounded bg-[#1a1f28] px-1.5 py-0.5 text-[0.65rem] text-zinc-400 hover:text-white" title="Channel policy" onclick="event.stopPropagation();showPolicy('{bare}')">{members}</button></li>"#
+        )
+    };
+
+    let my_channels_html = my_channels
+        .iter()
+        .map(|ch| render_link(ch, &channel))
+        .collect::<String>();
+    let all_channels_html = all_channels
+        .iter()
+        .map(|ch| render_link(ch, &channel))
+        .collect::<String>();
+
+    Ok(Json(SidebarData {
+        my_channels_html,
+        all_channels_html,
+    }))
 }
 
 #[route(GET "/api/policy/{channel}")]
