@@ -28,6 +28,7 @@ class SessionState
     @session_id = session_id
     @joined = Set.new        # routing table: channels we're emitting lines for
     @confirmed = Set.new     # channels the upstream confirmed we're in
+    @join_sent = Set.new     # channels with an in-flight JOIN (dedupe)
     @channel_members = {}
     @irc_out = Queue.new
     @irc_in  = Queue.new
@@ -68,7 +69,11 @@ class SessionState
   end
 
   def unconfirm_channel!(channel)
-    synchronize { @confirmed.delete(IrcRender.canonical_channel(channel)) }
+    synchronize do
+      c = IrcRender.canonical_channel(channel)
+      @confirmed.delete(c)
+      @join_sent.delete(c)
+    end
   end
 
   # Force the WS task to reconnect so it picks up the new auth state.
@@ -85,15 +90,13 @@ class SessionState
       end
       @ws_state = :disconnected
       @reg_phase = :wait_cap_ack
-      @confirmed.clear
     end
 
     return unless upstream_url && !channels_to_rejoin.empty?
 
-    first = channels_to_rejoin.first
-    rest = channels_to_rejoin[1..]
-    spawn_upstream_if_needed(upstream_url, first)
-    rest.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
+    # spawn_upstream_if_needed covers every channel in @confirmed — the
+    # primary via finish_registration, the rest as queued JOINs.
+    spawn_upstream_if_needed(upstream_url, channels_to_rejoin.first)
   end
 
   # ── Reaction cache ────────────────────────────────────────────────────
@@ -187,8 +190,11 @@ class SessionState
       end
 
       if @task && @task.alive?
-        # Already connected — just JOIN the new channel.
-        enqueue_outbound("JOIN #{target}\r\n")
+        # Already connected — JOIN unless one's already in flight.
+        unless @join_sent.include?(target)
+          @join_sent << target
+          enqueue_outbound("JOIN #{target}\r\n")
+        end
         return
       end
 
@@ -198,6 +204,9 @@ class SessionState
       # enqueued and flushed once registration completes.
       primary = target
       extras = synchronize { @confirmed.to_a } - [primary]
+      # finish_registration JOINs primary; extras flush after CAP END.
+      @join_sent << primary
+      @join_sent.merge(extras)
       @task = Thread.new { run_upstream(upstream_url.to_s, primary) }
       extras.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
     end

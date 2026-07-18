@@ -44,8 +44,9 @@ class ChatReflex < ApplicationReflex
 
   def join
     channel = canonical_channel(params[:channel].presence || element.dataset[:channel])
+    # spawn_upstream_if_needed owns the JOIN (deduped via @join_sent) —
+    # don't enqueue a second one here.
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
-    session.enqueue_outbound("JOIN #{channel}\r\n")
     cable_ready.redirect_to(url: "/chat/#{channel.delete('#')}").broadcast
   end
 
