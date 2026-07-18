@@ -339,7 +339,10 @@ module IrcRender
     rescue StandardError
       "--:--:--"
     end
+    ts_html = %(<span class="ts">#{ts}</span>)
     text = msg[:text].to_s
+    safe_text = linkify_urls(html_escape(text))
+    msgid = msg[:msgid]
     msgid_attr = msgid ? %( data-msgid="#{html_escape(msgid)}") : ""
     nick_attr = %( data-nick="#{html_escape(nick)}")
     account = (msg[:tags] || {})["account"] || (msg[:tags] || {})["+account"]
