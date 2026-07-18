@@ -5,6 +5,10 @@ class SessionsController < ApplicationController
   # GET /login — login form.
   def new
     @session = current_session
+    if @session.authenticated?
+      redirect_to "/chat", notice: "Signed in as #{@session.auth_handle}"
+      return
+    end
   end
 
   # POST /login — start OAuth flow.
