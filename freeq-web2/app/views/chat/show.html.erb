@@ -20,15 +20,6 @@
              style="width:100%;font-size:.7rem;padding:2px 6px;border:1px solid var(--border);border-radius:4px;background:#151a22;color:var(--fg)">
     </form>
     <div class="nav-right">
-      <% if @session.authenticated? %>
-        <span class="auth-badge">🔒 <%= @session.auth_handle %></span>
-        <form method="POST" action="/logout" style="display:inline">
-          <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
-          <button type="submit" class="btn-link">Sign out</button>
-        </form>
-      <% else %>
-        <a href="/login" class="btn-link">Sign in</a>
-      <% end %>
       <span id="status"><span class="dot"></span> <span>connecting…</span></span>
     </div>
   </nav>
@@ -36,28 +27,46 @@
   <div class="chat-body">
     <%# Sidebar %>
     <aside id="sidebar" data-reflex-permanent>
-      <form id="join-form"
-            data-reflex="submit->ChatReflex#join"
-            data-reflex-serialize-form="true">
-        <input
-          type="text"
-          name="channel"
-          placeholder="join #…"
-          autocomplete="off">
-        <button type="submit">+</button>
-      </form>
-      <p class="sidebar-toggle" data-target="my-channels"><span class="arrow">▾</span> MY CHANNELS</p>
-      <ul id="my-channels">
-        <% @my_channels.each do |ch| %>
-          <%= render "chat/channel_link", ch: ch, active: @channel %>
+      <div class="sidebar-scroll">
+        <form id="join-form"
+              data-reflex="submit->ChatReflex#join"
+              data-reflex-serialize-form="true">
+          <input
+            type="text"
+            name="channel"
+            placeholder="join #…"
+            autocomplete="off">
+          <button type="submit">+</button>
+        </form>
+        <p class="sidebar-toggle" data-target="my-channels"><span class="arrow">▾</span> MY CHANNELS</p>
+        <ul id="my-channels">
+          <% @my_channels.each do |ch| %>
+            <%= render "chat/channel_link", ch: ch, active: @channel %>
+          <% end %>
+        </ul>
+        <p class="sidebar-toggle collapsed" data-target="all-channels"><span class="arrow">▾</span> ALL CHANNELS</p>
+        <ul id="all-channels" style="display:none">
+          <% @all_channels.each do |ch| %>
+            <%= render "chat/channel_link", ch: ch, active: @channel %>
+          <% end %>
+        </ul>
+      </div>
+      <div id="user-info">
+        <% if @session.authenticated? %>
+          <div class="user-handle">🔒 <%= @session.auth_handle %></div>
+          <div class="user-actions">
+            <form method="POST" action="/logout" style="display:inline">
+              <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+              <button type="submit" class="btn-link">Sign out</button>
+            </form>
+          </div>
+        <% else %>
+          <div class="user-handle guest">👤 guest</div>
+          <div class="user-actions">
+            <a href="/login" class="btn-link">Sign in</a>
+          </div>
         <% end %>
-      </ul>
-      <p class="sidebar-toggle collapsed" data-target="all-channels"><span class="arrow">▾</span> ALL CHANNELS</p>
-      <ul id="all-channels" style="display:none">
-        <% @all_channels.each do |ch| %>
-          <%= render "chat/channel_link", ch: ch, active: @channel %>
-        <% end %>
-      </ul>
+      </div>
     </aside>
 
     <%# Messages + compose — min-height:0 so #messages scrolls instead of growing. %>

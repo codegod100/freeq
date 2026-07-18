@@ -24,8 +24,13 @@
       #freeq-chat{display:flex;flex-direction:column;height:100dvh;max-height:100dvh;overflow:hidden}
       #freeq-chat > nav{flex:0 0 auto;display:flex;align-items:center;gap:.5rem;border-bottom:1px solid var(--border);padding:.5rem}
       #freeq-chat > .chat-body{display:flex;flex:1 1 0;min-height:0;position:relative}
-      #sidebar{flex:0 0 11rem;overflow-y:auto;border-right:1px solid var(--border);padding:.5rem;font-size:.75rem}
+      #sidebar{flex:0 0 11rem;overflow:hidden;border-right:1px solid var(--border);padding:.5rem;font-size:.75rem;display:flex;flex-direction:column;min-height:0}
       #member-panel{flex:0 0 10rem;overflow-y:auto;border-left:1px solid var(--border);padding:.5rem;font-size:.75rem}
+      #sidebar .sidebar-scroll{flex:1 1 0;min-height:0;overflow-y:auto}
+      #user-info{flex:0 0 auto;border-top:1px solid var(--border);margin-top:.5rem;padding-top:.5rem;font-size:.7rem}
+      #user-info .user-handle{color:var(--fg);font-weight:600;display:flex;align-items:center;gap:.25rem}
+      #user-info .user-handle.guest{color:var(--muted)}
+      #user-info .user-actions{margin-top:.25rem;display:flex;gap:.5rem;align-items:center}
       #freeq-chat .chat-main{display:flex;flex-direction:column;flex:1 1 0;min-width:0;min-height:0}
       #messages{flex:1 1 0;min-height:0;overflow-y:auto;padding:.5rem .75rem}
       #reply-banner{flex:0 0 auto}
