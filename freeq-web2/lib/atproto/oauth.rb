@@ -1,4 +1,11 @@
 # frozen_string_literal: true
+require "net/http"
+require "json"
+require "uri"
+require "base64"
+require "securerandom"
+require "openssl"
+
 require_relative "dpop_key"
 require_relative "o_auth_session"
 
@@ -176,16 +183,21 @@ module Atproto
     end
 
     # Start the OAuth flow for a handle. Returns a PreparedLogin.
+    # When public_url is publicly reachable, uses the web redirect flow
+    # with a client metadata URL. When it's localhost, uses the loopback
+    # client_id format (inline params, no metadata fetch required).
     def prepare(handle, public_url = nil)
       did, pds_url = resolve_identity(handle)
       auth_meta = discover_auth_server(pds_url)
 
-      redirect_uri = public_url ? "#{public_url.chomp('/')}/auth/callback" : "http://127.0.0.1:0/callback"
-      client_id = if public_url
-        "#{public_url.chomp('/')}/.well-known/oauth-client-metadata"
-      else
+      redirect_uri = "#{public_url.chomp('/')}/auth/callback"
+
+      if public_url.to_s.match?(/localhost|127\.0\.0\.1/)
+        # Loopback client_id: encodes redirect_uri + scope inline.
         scope = "atproto transition:generic"
-        "http://localhost?redirect_uri=#{urlencode(redirect_uri)}&scope=#{urlencode(scope)}"
+        client_id = "http://localhost?redirect_uri=#{urlencode(redirect_uri)}&scope=#{urlencode(scope)}"
+      else
+        client_id = "#{public_url.chomp('/')}/.well-known/oauth-client-metadata"
       end
 
       code_verifier, code_challenge = generate_pkce

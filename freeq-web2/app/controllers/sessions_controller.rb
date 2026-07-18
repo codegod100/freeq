@@ -17,7 +17,10 @@ class SessionsController < ApplicationController
     session = current_session
 
     begin
-      public_url = ENV["FREEQ_PUBLIC_URL"].presence
+      # Use FREEQ_PUBLIC_URL if set, otherwise derive from the request.
+      # The OAuth callback must be reachable by the browser, so we always
+      # use a web redirect (not loopback) — the Rails server handles /auth/callback.
+      public_url = ENV["FREEQ_PUBLIC_URL"].presence || request.base_url
       prepared = Atproto::OAuth.prepare(handle, public_url)
 
       # Stash the PreparedLogin in the session cookie (encrypted via Rails).
