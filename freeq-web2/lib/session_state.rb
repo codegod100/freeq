@@ -385,7 +385,7 @@ class SessionState
     @current_nick = nick
     driver.text("NICK #{nick}\r\n")
     driver.text("USER web2 0 * :freeq-web2\r\n")
-    driver.text("CAP REQ :sasl account-notify message-tags batch server-time echo-message\r\n")
+    driver.text("CAP REQ :sasl account-notify message-tags batch server-time echo-message draft/chathistory\r\n")
     @reg_phase = :wait_cap_ack
   end
 

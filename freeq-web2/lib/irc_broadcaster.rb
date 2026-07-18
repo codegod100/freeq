@@ -47,9 +47,11 @@ module IrcBroadcaster
     tags, _ = IrcRender.parse_irc_tags(line)
 
     # While a suppressed chathistory batch is open (BATCH +id), or the line
-    # itself carries a suppressed batch= tag, skip message-pane emit. Still
-    # mark msgids so later dups are ignored. Batches we're replaying (REST
-    # scrollback failed) render normally.
+    # itself carries a suppressed batch= tag, skip message-pane emit.
+    # Deliberately do NOT mark msgids seen here: a suppressed replay (e.g.
+    # the login-time JOIN replay) would poison the seen-set, and a later
+    # replay we're actually rendering (REST scrollback failed →
+    # CHATHISTORY) would be deduped away to nothing.
     bid = tags["batch"].to_s
     in_history_batch =
       if bid.empty?
@@ -60,9 +62,6 @@ module IrcBroadcaster
       end
 
     if in_history_batch
-      if (mid = tags["msgid"])
-        session.check_and_mark_msgid(mid)
-      end
       # Still process NAMES / member changes / reactions.
       unless IrcRender.is_353?(line) || IrcRender.parse_member_change(line) || IrcRender.parse_tagmsg_reaction(line)
         return
