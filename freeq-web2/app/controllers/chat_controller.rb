@@ -77,12 +77,4 @@ class ChatController < ApplicationController
     session.enqueue_outbound(line)
     render json: { ok: true }
   end
-
-  def current_session
-    SessionRegistry.instance.get(session_id)
-  end
-
-  def session_id
-    cookies.signed[:freeq_session] ||= SecureRandom.hex(16)
-  end
 end

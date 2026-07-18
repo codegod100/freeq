@@ -85,6 +85,16 @@ class SessionsController < ApplicationController
       session.auth = oauth_session
       session.request_reconnect(SessionRegistry.instance.upstream_url)
 
+      # Persist in encrypted cookie so auth survives server restarts.
+      cookies.encrypted[:oauth_session] = JSON.generate(
+        did: oauth_session.did,
+        handle: oauth_session.handle,
+        access_token: oauth_session.access_token,
+        pds_url: oauth_session.pds_url,
+        dpop_key: oauth_session.dpop_key.serialize,
+        dpop_nonce: oauth_session.dpop_nonce
+      )
+
       cookies.encrypted[:pending_oauth] = nil
       redirect_to "/chat", notice: "Signed in as #{oauth_session.handle}"
     rescue => e
@@ -99,6 +109,7 @@ class SessionsController < ApplicationController
     session.auth = :guest
     session.request_reconnect(SessionRegistry.instance.upstream_url)
     cookies.encrypted[:pending_oauth] = nil
+    cookies.encrypted[:oauth_session] = nil
     redirect_to "/chat", notice: "Signed out"
   end
 
