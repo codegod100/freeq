@@ -11,6 +11,7 @@ export default class ChatController extends Controller {
     this.setupReactions();
     this.setupReplies();
     this.setupSidebar();
+    this.setupTabComplete();
     this.hydrateReplyBadges();
     this.scrollToBottom();
 
@@ -290,6 +291,72 @@ export default class ChatController extends Controller {
         el.classList.toggle("collapsed", !hidden);
       });
     });
+  }
+
+  // ── Tab completion ───────────────────────────────────────────────────
+
+  setupTabComplete() {
+    const input = document.getElementById("message-input");
+    if (!input) return;
+
+    this._tabCycle = null; // { matches, index, start, end }
+
+    input.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab") {
+        this._tabCycle = null;
+        return;
+      }
+      e.preventDefault();
+
+      const pos = input.selectionStart;
+      const before = input.value.substring(0, pos);
+      const after = input.value.substring(pos);
+
+      // Find the word boundary before the cursor.
+      const m = before.match(/(\w[\w.\-]*)$/);
+      if (!m) return;
+      const wordStart = before.length - m[1].length;
+      const partial = m[1].toLowerCase();
+
+      // Get nicks from the member panel.
+      const nicks = this.getChannelNicks();
+      if (!nicks.length) return;
+
+      // Filter or use cached cycle.
+      if (!this._tabCycle || this._tabCycle.partial !== partial) {
+        let matches;
+        if (partial === "") {
+          matches = nicks.slice();
+        } else {
+          matches = nicks.filter((n) => n.toLowerCase().startsWith(partial));
+        }
+        if (!matches.length) return;
+        // Sort: ops first, then alphabetically — already sorted by the renderer.
+        this._tabCycle = { matches, index: 0, partial, wordStart };
+      } else {
+        this._tabCycle.index =
+          (this._tabCycle.index + 1) % this._tabCycle.matches.length;
+      }
+
+      const nick = this._tabCycle.matches[this._tabCycle.index];
+      // If completing at the start of the line, append ": " for a mention.
+      const isStart = wordStart === 0;
+      const suffix = isStart ? ": " : "";
+      const replacement = nick + suffix;
+
+      input.value =
+        input.value.substring(0, wordStart) + replacement + after;
+      const newCursor = wordStart + replacement.length;
+      input.setSelectionRange(newCursor, newCursor);
+    });
+  }
+
+  getChannelNicks() {
+    const panel = document.getElementById("member-panel");
+    if (!panel) return [];
+    return Array.from(panel.querySelectorAll(".member .nick"))
+      .map((el) => el.textContent.trim())
+      .filter(Boolean);
   }
 }
 
