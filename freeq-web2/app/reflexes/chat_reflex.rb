@@ -9,7 +9,6 @@
 # their field values into `params`. Read form fields via `params[:name]`;
 # read static attributes via `element.dataset[:name]`.
 class ChatReflex < ApplicationReflex
-  delegate :url_helpers, to: "Rails.application.routes"
 
   # Send a PRIVMSG (or a slash command) to the current channel.
   # Optional form field `reply_to` (parent msgid) → `@+reply=<msgid> PRIVMSG …`.
@@ -47,14 +46,14 @@ class ChatReflex < ApplicationReflex
     channel = canonical_channel(params[:channel].presence || element.dataset[:channel])
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
     session.enqueue_outbound("JOIN #{channel}\r\n")
-    cable_ready.redirect_to(url: url_helpers.chat_channel_path(channel.delete("#"))).broadcast
+    cable_ready.redirect_to(url: "/chat/#{channel.delete('#')}").broadcast
   end
 
   def part
     channel = canonical_channel(element.dataset[:channel])
     session.joined.delete(channel)
     session.enqueue_outbound("PART #{channel}\r\n")
-    cable_ready.redirect_to(url: url_helpers.chat_path).broadcast
+    cable_ready.redirect_to(url: "/chat").broadcast
   end
 
   def set_topic
