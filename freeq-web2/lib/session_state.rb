@@ -36,6 +36,8 @@ class SessionState
     @ws_state = :disconnected
     @seen_msgids = Set.new
     @suppress_history_batches = Set.new
+    @replay_channels = Set.new  # REST scrollback failed — let JOIN replay render
+    @replay_batches = Set.new   # batch ids we're rendering (not suppressing)
     @parent_lookup = {}
     @reaction_cache = {}
     @policy_response_queue = nil  # Set to a Queue when capturing policy NOTICEs
@@ -102,6 +104,45 @@ class SessionState
     SessionRegistry.instance.persist_channels(@session_id, @channels.to_a)
   rescue StandardError => e
     Rails.logger.warn("persist_channels! failed: #{e.class}: #{e.message}") if defined?(Rails)
+  end
+
+  # ── History replay fallback ──────────────────────────────────────────
+  #
+  # Normally JOIN chathistory replay is suppressed because REST scrollback
+  # already rendered it. When REST fails (e.g. 403 on +i/+k channels),
+  # allow the replay for that channel to render instead.
+
+  def allow_replay!(channel)
+    synchronize { @replay_channels << IrcRender.canonical_channel(channel) }
+  end
+
+  def replay_allowed?(channel)
+    synchronize { @replay_channels.include?(IrcRender.canonical_channel(channel)) }
+  end
+
+  def clear_replay!(channel)
+    synchronize { @replay_channels.delete(IrcRender.canonical_channel(channel)) }
+  end
+
+  def track_replay_batch(id)
+    synchronize { @replay_batches << id }
+  end
+
+  def untrack_replay_batch(id)
+    synchronize { @replay_batches.delete(id) }
+  end
+
+  def replay_batch?(id)
+    synchronize { @replay_batches.include?(id) }
+  end
+
+  # Fetch backlog explicitly for a channel we're already joined to (no
+  # fresh JOIN → no automatic history replay). Used when REST scrollback
+  # is unavailable (e.g. 403 on +i/+k channels).
+  def request_backlog!(channel, limit = 50)
+    return unless @ws_state == :ready
+
+    enqueue_outbound("CHATHISTORY LATEST #{IrcRender.canonical_channel(channel)} * #{limit}\r\n")
   end
 
   # Force the WS task to reconnect so it picks up the new auth state.

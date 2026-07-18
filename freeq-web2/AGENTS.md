@@ -91,9 +91,11 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
   endpoint not ported.
 - **No WHOIS rendering** — `/whois` slash command enqueues but the result
   numerics aren't rendered to the message pane.
-- **No msgid dedup on CHATHISTORY batch** — `freeq-webui` suppresses JOIN
-  chathistory replay via BATCH tracking; this port relies on REST scrollback
-  + `check_and_mark_msgid` for live lines but doesn't track BATCH ids.
+- **CHATHISTORY fallback for protected channels** — REST scrollback is the
+  primary backlog source; when it fails (403 on +i/+k/auth-gated channels),
+  the JOIN chathistory replay renders instead (or an explicit
+  `CHATHISTORY LATEST` when already joined). Join-failure numerics
+  (471/473/474/475/477) render as error notices in the message pane.
 - **Reaction live updates** — `ChatReflex#react`/`#unreact` enqueue the
   TAGMSG but the broadcaster doesn't yet parse `parse_tagmsg_reaction` to
   emit `reaction` CableReady events. Client-side optimistic toggle is

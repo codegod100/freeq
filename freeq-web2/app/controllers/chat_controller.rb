@@ -28,7 +28,15 @@ class ChatController < ApplicationController
       mine.any? { |j| j.casecmp?(c["name"].to_s) } || c["name"].to_s.casecmp?(@channel)
     end
 
-    @history = SessionRegistry.instance.fetch_history(@channel, 50)
+    rest_history = SessionRegistry.instance.fetch_history(@channel, 50)
+    # REST failed (e.g. 403 on +i/+k channels) — fall back to the JOIN
+    # chathistory replay instead of suppressing it. If we're already
+    # joined (no fresh JOIN → no auto replay), fetch backlog explicitly.
+    if rest_history.nil?
+      @session.allow_replay!(@channel)
+      @session.request_backlog!(@channel)
+    end
+    @history = rest_history || []
     # Merge cached reactions (from live TAGMSG +react events) into history
     # so chips survive page refresh within the same session.
     @history.each do |msg|

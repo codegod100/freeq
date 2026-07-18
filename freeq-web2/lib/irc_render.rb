@@ -108,7 +108,7 @@ module IrcRender
   end
 
   # Parse `BATCH +id type [args…]` / `BATCH -id`.
-  # Returns [id, open, batch_type] or nil.
+  # Returns [id, open, batch_type, channel] or nil.
   def parse_batch_line(line)
     line = line.chomp.delete_suffix("\r")
     _tags, after_tags = parse_irc_tags(line)
@@ -127,7 +127,7 @@ module IrcRender
         return nil
       end
     batch_type = open ? parts[2] : nil
-    [id, open, batch_type]
+    [id, open, batch_type, parts[3]]
   end
 
   # Should a raw IRC line be emitted to the message pane for this channel?
@@ -440,12 +440,17 @@ module IrcRender
     tokens = rest.split
     _server = tokens[0]
     numeric = tokens[1]
-    return nil unless %w[442 482].include?(numeric)
+    return nil unless %w[442 471 473 474 475 477 482].include?(numeric)
     _nick = tokens[2]
     channel = tokens[3]
     return nil unless channel.to_s.casecmp?(current_channel)
     case numeric
     when "442" then "You are not on that channel."
+    when "471" then "#{channel} is full."
+    when "473" then "#{channel} is invite-only."
+    when "474" then "You are banned from #{channel}."
+    when "475" then "#{channel} requires a channel key."
+    when "477" then "#{channel} requires authentication — sign in to join."
     when "482" then "You must be a channel operator to change the topic."
     end
   end

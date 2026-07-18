@@ -26,25 +26,38 @@ module IrcBroadcaster
     end
 
     # Track IRCv3 BATCH so JOIN chathistory is not re-appended (REST already
-    # rendered scrollback on page load).
+    # rendered scrollback on page load). When REST failed for the batch's
+    # channel (+i/+k → 403), render the replay instead.
     if (batch = IrcRender.parse_batch_line(line))
-      id, open, batch_type = batch
+      id, open, batch_type, batch_channel = batch
       if open && batch_type.to_s.casecmp?("chathistory")
-        session.suppress_history_batches << id
+        if batch_channel && session.replay_allowed?(batch_channel)
+          session.clear_replay!(batch_channel)
+          session.track_replay_batch(id)
+        else
+          session.suppress_history_batches << id
+        end
       elsif !open
         session.suppress_history_batches.delete(id)
+        session.untrack_replay_batch(id)
       end
       return
     end
 
     tags, _ = IrcRender.parse_irc_tags(line)
 
-    # While a chathistory batch is open (BATCH +id), or the line itself carries
-    # a batch= tag (server-stamped history), skip message-pane emit. Still
-    # mark msgids so later dups are ignored.
+    # While a suppressed chathistory batch is open (BATCH +id), or the line
+    # itself carries a suppressed batch= tag, skip message-pane emit. Still
+    # mark msgids so later dups are ignored. Batches we're replaying (REST
+    # scrollback failed) render normally.
+    bid = tags["batch"].to_s
     in_history_batch =
-      session.suppress_history_batches.any? ||
-      tags["batch"].to_s.start_with?("hist")
+      if bid.empty?
+        session.suppress_history_batches.any?
+      else
+        !session.replay_batch?(bid) &&
+          (session.suppress_history_batches.include?(bid) || bid.start_with?("hist"))
+      end
 
     if in_history_batch
       if (mid = tags["msgid"])

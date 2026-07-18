@@ -95,12 +95,20 @@ class SessionRegistry
   end
 
   # Fetch scrollback history for a channel from the upstream REST API.
+  # Returns nil when the fetch fails (e.g. 403 on a +i/+k channel) so the
+  # caller can fall back to the JOIN chathistory replay; an array
+  # (possibly empty) when the fetch succeeded.
   def fetch_history(channel, limit = 25)
     require "net/http"
     require "json"
     encoded = channel.delete("#")
     uri = URI("#{rest_base}/api/v1/channels/#{encoded}/history?limit=#{limit}")
-    msgs = JSON.parse(Net::HTTP.get(uri))
+    resp = Net::HTTP.get_response(uri)
+    unless resp.is_a?(Net::HTTPSuccess)
+      Rails.logger.info("fetch_history #{channel}: HTTP #{resp.code}") if defined?(Rails)
+      return nil
+    end
+    msgs = JSON.parse(resp.body)
     msgs.map do |m|
       tags = m["tags"] || {}
       {
@@ -114,6 +122,6 @@ class SessionRegistry
     end
   rescue StandardError => e
     Rails.logger.warn("fetch_history failed: #{e.class}: #{e.message}")
-    []
+    nil
   end
 end
