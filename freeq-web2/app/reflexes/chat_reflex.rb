@@ -18,7 +18,6 @@ class ChatReflex < ApplicationReflex
     msg = params[:msg].to_s.strip
     reply_to = params[:reply_to].to_s.strip
     edit_to = params[:edit_to].to_s.strip
-    logger.info "[ChatReflex#send_message] channel=#{channel} msg=#{msg.inspect} reply_to=#{reply_to.inspect} edit_to=#{edit_to.inspect}"
     return if msg.empty?
 
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
@@ -45,6 +44,9 @@ class ChatReflex < ApplicationReflex
       .set_value(selector: "#edit-to-input", value: "")
       .inner_html(selector: "#reply-banner", html: "")
       .broadcast
+    # Skip the SR PageMorph — it re-renders the full page (all 70+
+    # sidebar channel links) on every message send for nothing.
+    morph :nothing
   end
 
   def join
@@ -94,8 +96,8 @@ class ChatReflex < ApplicationReflex
     msgid = element.dataset[:msgid].to_s
     emoji = element.dataset[:emoji].to_s
     return if msgid.empty? || emoji.empty?
-    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
     session.enqueue_outbound("@+react=#{IrcRender.escape_tag_value(emoji)};+reply=#{IrcRender.escape_tag_value(msgid)} TAGMSG #{channel}\r\n")
+    morph :nothing
   end
 
   def unreact
@@ -103,8 +105,8 @@ class ChatReflex < ApplicationReflex
     msgid = element.dataset[:msgid].to_s
     emoji = element.dataset[:emoji].to_s
     return if msgid.empty? || emoji.empty?
-    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
     session.enqueue_outbound("@+freeq.at/unreact=#{IrcRender.escape_tag_value(emoji)};+reply=#{IrcRender.escape_tag_value(msgid)} TAGMSG #{channel}\r\n")
+    morph :nothing
   end
 
   private
