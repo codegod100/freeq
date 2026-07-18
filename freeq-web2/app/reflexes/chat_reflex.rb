@@ -12,11 +12,13 @@ class ChatReflex < ApplicationReflex
 
   # Send a PRIVMSG (or a slash command) to the current channel.
   # Optional form field `reply_to` (parent msgid) → `@+reply=<msgid> PRIVMSG …`.
+  # Optional form field `edit_to` (original msgid) → `@+draft/edit=<msgid> PRIVMSG …`.
   def send_message
     channel = canonical_channel(element.dataset[:channel])
     msg = params[:msg].to_s.strip
     reply_to = params[:reply_to].to_s.strip
-    logger.info "[ChatReflex#send_message] channel=#{channel} msg=#{msg.inspect} reply_to=#{reply_to.inspect}"
+    edit_to = params[:edit_to].to_s.strip
+    logger.info "[ChatReflex#send_message] channel=#{channel} msg=#{msg.inspect} reply_to=#{reply_to.inspect} edit_to=#{edit_to.inspect}"
     return if msg.empty?
 
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
@@ -27,6 +29,8 @@ class ChatReflex < ApplicationReflex
         "WHOIS #{msg[7..].strip}\r\n"
       elsif msg.start_with?("/")
         "#{msg[1..]}\r\n"
+      elsif edit_to.present?
+        "@+draft/edit=#{IrcRender.escape_tag_value(edit_to)} PRIVMSG #{channel} :#{msg}\r\n"
       elsif reply_to.present?
         "@+reply=#{IrcRender.escape_tag_value(reply_to)} PRIVMSG #{channel} :#{msg}\r\n"
       else
@@ -34,10 +38,11 @@ class ChatReflex < ApplicationReflex
       end
     session.enqueue_outbound(line)
 
-    # Clear the input + reply target via CableReady.
+    # Clear the input + reply/edit target via CableReady.
     cable_ready
       .set_value(selector: "#message-input", value: "")
       .set_value(selector: "#reply-to-input", value: "")
+      .set_value(selector: "#edit-to-input", value: "")
       .inner_html(selector: "#reply-banner", html: "")
       .broadcast
   end

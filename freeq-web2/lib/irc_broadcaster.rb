@@ -116,23 +116,25 @@ module IrcBroadcaster
         session.cache_row(ch, html)
         cable_for(ch).append(selector: "#messages", html: html).broadcast
       end
-
       next unless IrcRender.should_emit?(line, ch)
+
+      # Edit: +draft/edit=<orig_msgid> on a PRIVMSG updates the original
+      # message's body in place rather than appending a new row.
+      if (edit_target = IrcRender.edit_target(line))
+        html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup)
+        next if html.empty?
+        cable_for(ch)
+          .morph(selector: ".msg[data-msgid=\"#{edit_target}\"]", html: html)
+          .broadcast
+        next
+      end
 
       # No msgid seen-set: this is IRC, not email. Replay-vs-REST overlap
       # is handled by batch suppression, and DOM-level dups by the client's
       # filterDupes. Requested history (CHATHISTORY) must re-render on
       # every page load.
       # Remember for future reply badges.
-      tags, rest = IrcRender.parse_irc_tags(line)
-      if (mid = tags["msgid"]).present?
-        body = rest.to_s
-        nick = body[/\A:([^! ]+)/, 1]
-        text = body.split(" ", 4)[3].to_s.delete_prefix(":")
-        session.remember_message(mid, nick, text)
-      end
-      html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup)
-      next if html.empty?
+      html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup, own_nick: session.current_nick)
 
       session.cache_row(ch, html)
       cable_for(ch).append(selector: "#messages", html: html).broadcast

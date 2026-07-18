@@ -64,7 +64,7 @@
     <section class="chat-main">
       <div id="messages" data-reflex-permanent>
         <% @history.each do |msg| %>
-          <%= raw(IrcRender.render_history_row(msg, parent_lookup: @parent_lookup)) %>
+          <%= raw(IrcRender.render_history_row(msg, parent_lookup: @parent_lookup, own_nick: @own_nick)) %>
         <% end %>
       </div>
       <div id="reply-banner" class="reply-banner" data-reflex-permanent></div>
@@ -75,6 +75,7 @@
               data-reflex-serialize-form="true"
               data-channel="<%= @bare %>">
           <input type="hidden" name="reply_to" id="reply-to-input" value="">
+          <input type="hidden" name="edit_to" id="edit-to-input" value="">
           <input
             id="message-input"
             type="text"

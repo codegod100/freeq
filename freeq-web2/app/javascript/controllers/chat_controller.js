@@ -159,6 +159,40 @@ export default class ChatController extends Controller {
         // Server CableReady also clears; this is a belt-and-suspenders for UX.
       }, 0);
     });
+
+    // ── Editing ──────────────────────────────────────────────────────
+
+    window.startEdit = (msgid) => {
+      msgid = String(msgid || "");
+      if (!msgid) return;
+      const row = document.querySelector(
+        `.msg[data-msgid="${CSS.escape(msgid)}"]`
+      );
+      if (!row) return;
+      const input = document.getElementById("message-input");
+      if (!input) return;
+      input.value = row.dataset.text || "";
+      input.focus();
+      const editInput = document.getElementById("edit-to-input");
+      if (editInput) editInput.value = msgid;
+      const replyInput = document.getElementById("reply-to-input");
+      if (replyInput) replyInput.value = "";
+      const banner = document.getElementById("reply-banner");
+      if (banner) {
+        banner.innerHTML =
+          '<span class="reply-banner-label">Editing message</span>' +
+          '<button type="button" class="reply-banner-cancel" title="Cancel" onclick="window.cancelEdit()">×</button>';
+      }
+    };
+
+    window.cancelEdit = () => {
+      const input = document.getElementById("message-input");
+      if (input) input.value = "";
+      const editInput = document.getElementById("edit-to-input");
+      if (editInput) editInput.value = "";
+      const banner = document.getElementById("reply-banner");
+      if (banner) banner.innerHTML = "";
+    };
   }
 
   // Fill in reply badge nick/text from the parent .msg[data-msgid] if present.

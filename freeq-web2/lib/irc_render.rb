@@ -131,6 +131,12 @@ module IrcRender
   end
 
   # Should a raw IRC line be emitted to the message pane for this channel?
+  # Returns the original msgid if this line is a +draft/edit=<msgid> PRIVMSG.
+  def edit_target(line)
+    tags, _ = parse_irc_tags(line)
+    tags["+draft/edit"]
+  end
+
   def should_emit?(line, current_channel)
     line = line.chomp.delete_suffix("\r")
     return false if line.start_with?("PING ", "PONG ")
@@ -257,8 +263,19 @@ module IrcRender
     %(<button type="button" class="reply-btn" title="Reply" onclick="window.startReply('#{mid}')">↩</button>)
   end
 
+  # Edit button — only rendered on messages sent by the current user.
+  # `own` is checked by the caller (render_irc_line / render_history_row)
+  # against the session's auth nick / guest nick.
+  def render_edit_btn(msgid)
+    return "" if msgid.to_s.empty?
+    mid = html_escape(msgid)
+    %(<button type="button" class="reply-btn edit-btn" title="Edit" onclick="window.startEdit('#{mid}')">✎</button>)
+  end
+
   # Render a live IRC line (from the upstream WS) as an HTML row.
-  def render_irc_line(line, parent_lookup: nil)
+  # `own_nick`: the current user's nick — when it matches the sender,
+  # an edit button is appended to the row.
+  def render_irc_line(line, parent_lookup: nil, own_nick: nil)
     line = line.chomp.delete_suffix("\r")
     ts = Time.now.utc.strftime("%H:%M:%S")
     ts_html = %(<span class="ts">#{ts}</span>)
@@ -279,8 +296,12 @@ module IrcRender
       cls = cmd == "NOTICE" ? "notice" : "msg"
       color = nick_color_class(nick)
       safe_text = linkify_urls(html_escape(text))
-      msgid = tags["msgid"]
-      msgid_attr = msgid ? %( data-msgid="#{html_escape(msgid)}") : ""
+      # For edits (+draft/edit), the original msgid is the DOM identity —
+      # the edit replaces the row in place. The new msgid is used for
+      # reply/edit targeting but doesn't change the row's position.
+      edit_orig = tags["+draft/edit"]
+      dom_msgid = edit_orig || tags["msgid"]
+      msgid_attr = dom_msgid ? %( data-msgid="#{html_escape(dom_msgid)}") : ""
       nick_attr = %( data-nick="#{html_escape(nick)}")
       text_attr = %( data-text="#{html_escape(text)}")
       parent = reply_parent_msgid(tags)
@@ -291,10 +312,12 @@ module IrcRender
         parent_text: parent_info && parent_info[:text]
       )
       reactions = parse_reactions_tag(tags["+freeq.at/reactions"]) if tags["+freeq.at/reactions"]
-      reaction_html = render_reaction_chips(msgid, reactions || {})
-      reply_btn = render_reply_btn(msgid)
-      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}</span></div>)
+      reaction_html = render_reaction_chips(dom_msgid, reactions || {})
+      reply_btn = render_reply_btn(dom_msgid)
+      edit_btn = own_nick && nick&.casecmp?(own_nick) ? render_edit_btn(dom_msgid) : ""
+      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
     end
+
 
     if %w[JOIN PART QUIT].include?(cmd)
       cls = cmd == "JOIN" ? "join" : "part"
@@ -305,7 +328,7 @@ module IrcRender
   end
 
   # parent_lookup: { msgid => { nick:, text: } } built from the history set.
-  def render_history_row(msg, parent_lookup: nil)
+  def render_history_row(msg, parent_lookup: nil, own_nick: nil)
     nick = msg[:sender].to_s.split("!").first
     color = nick_color_class(nick)
     ts = begin
@@ -329,8 +352,9 @@ module IrcRender
     reactions = msg[:reactions] || {}
     reaction_html = render_reaction_chips(msgid, reactions)
     reply_btn = render_reply_btn(msgid)
+    edit_btn = own_nick && nick&.casecmp?(own_nick) ? render_edit_btn(msgid) : ""
     ts_html = %(<span class="ts">#{ts}</span>)
-    %(<div class="msg"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}</span></div>)
+    %(<div class="msg"#{msgid_attr}#{nick_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
   end
 
   def parse_reactions_tag(value)

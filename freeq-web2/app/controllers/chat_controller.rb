@@ -45,6 +45,7 @@ class ChatController < ApplicationController
     @parent_lookup = IrcRender.parent_lookup_from_history(@history)
     # Keep a per-session lookup so live-rendered replies can show parent context.
     @session.parent_lookup.merge!(@parent_lookup)
+    @own_nick = @session.authenticated? ? @session.auth_nick : @session.current_nick
 
     # Cached member roster (may be empty on first visit; populated by 353 NAMES).
     @members_html =
