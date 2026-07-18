@@ -524,7 +524,13 @@ pub(super) fn handle_tagmsg(
         // tags. Emitting an `S2sMessage::Tagmsg` unconditionally (peers dedup
         // by event_id; a peer with no local session for the target just no-ops)
         // is the same shape the PRIVMSG DM path already uses.
-        let sessions = super::routing::local_sessions_for_target(state, target);
+        let mut sessions = super::routing::local_sessions_for_target(state, target);
+        // Echo to the sender, same as the channel branch: a client holding
+        // echo-message renders its own reaction from the echo, not
+        // optimistically.
+        if state.cap_echo_message.lock().contains(&conn.id) && !sessions.contains(&conn.id) {
+            sessions.push(conn.id.clone());
+        }
         {
             let tag_caps = state.cap_message_tags.lock();
             let time_caps = state.cap_server_time.lock();

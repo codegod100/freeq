@@ -3087,6 +3087,77 @@ async fn tagmsg_and_reactions() {
     server_handle.abort();
 }
 
+// ── Test: a DM TAGMSG echoes back to a sender with echo-message ──
+//
+// The channel branch echoes TAGMSG to senders holding echo-message; the
+// user-target branch must too, or a client that renders reactions from its
+// echo (rather than optimistically) never shows the sender their own
+// reaction in a DM thread.
+#[tokio::test]
+async fn dm_tagmsg_echoes_to_sender() {
+    let (addr, server_handle) = start_test_server(empty_resolver()).await;
+
+    let config1 = ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: "alice".to_string(),
+        user: "alice".to_string(),
+        realname: "Alice".to_string(),
+        ..Default::default()
+    };
+    let (handle1, mut events1) = client::connect(config1, None);
+    expect_event(
+        &mut events1,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "Alice registered",
+    )
+    .await;
+
+    let config2 = ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: "bob".to_string(),
+        user: "bob".to_string(),
+        realname: "Bob".to_string(),
+        ..Default::default()
+    };
+    let (_handle2, mut events2) = client::connect(config2, None);
+    expect_event(
+        &mut events2,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "Bob registered",
+    )
+    .await;
+
+    let reaction = freeq_sdk::media::Reaction {
+        emoji: "🔥".to_string(),
+        msgid: None,
+    };
+    handle1.send_tagmsg("bob", reaction.to_tags()).await.unwrap();
+
+    // Recipient delivery (already worked).
+    expect_event(
+        &mut events2,
+        2000,
+        |e| matches!(e, Event::TagMsg { from, target, .. } if from == "alice" && target == "bob"),
+        "Bob receives DM TAGMSG",
+    )
+    .await;
+
+    // Sender echo — the SDK negotiates echo-message, so alice must see her
+    // own TAGMSG back, same as she would in a channel.
+    expect_event(
+        &mut events1,
+        2000,
+        |e| matches!(e, Event::TagMsg { from, target, .. } if from == "alice" && target == "bob"),
+        "Alice receives her own DM TAGMSG echo",
+    )
+    .await;
+
+    handle1.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
 // ── Test: TAGMSG with +freeq.at/unreact removes a previously stored reaction
 //
 // Wire shape: TAGMSG <channel> +freeq.at/unreact=<emoji> +reply=<msgid>
