@@ -299,7 +299,10 @@ export default class ChatController extends Controller {
     const input = document.getElementById("message-input");
     if (!input) return;
 
-    this._tabCycle = null; // { matches, index, start, end }
+    // Cycle state survives across Tab presses until the user types or moves
+    // the caret outside the completed token.
+    // { matches, index, wordStart, insertedLen, basePartial }
+    this._tabCycle = null;
 
     input.addEventListener("keydown", (e) => {
       if (e.key !== "Tab") {
@@ -308,55 +311,107 @@ export default class ChatController extends Controller {
       }
       e.preventDefault();
 
-      const pos = input.selectionStart;
-      const before = input.value.substring(0, pos);
-      const after = input.value.substring(pos);
+      const pos = input.selectionStart ?? 0;
+      const value = input.value;
+      const before = value.substring(0, pos);
+      const after = value.substring(pos);
 
-      // Find the word boundary before the cursor.
-      const m = before.match(/(\w[\w.\-]*)$/);
+      // Continuing a cycle: only if the prior insertion is still intact.
+      if (this._tabCycle) {
+        const { wordStart, insertedLen, matches, inserted } = this._tabCycle;
+        const stillThere =
+          pos >= wordStart &&
+          pos <= wordStart + insertedLen &&
+          value.substring(wordStart, wordStart + insertedLen) === inserted;
+        if (stillThere) {
+          this._tabCycle.index =
+            (this._tabCycle.index + 1) % matches.length;
+          this.applyTabMatch(input, wordStart, after, this._tabCycle);
+          return;
+        }
+        this._tabCycle = null;
+      }
+
+      // Fresh completion: word before caret, optional leading "@".
+      // IRC nicks: letter/digit/._- ; leading @ is the mention prefix.
+      const m = before.match(/(?:^|[\s,])(@?[\w.\-]*)$/);
       if (!m) return;
-      const wordStart = before.length - m[1].length;
-      const partial = m[1].toLowerCase();
 
-      // Get nicks from the member panel.
+      const token = m[1];
+      const wordStart = before.length - token.length;
+      const hasAt = token.startsWith("@");
+      const partial = (hasAt ? token.slice(1) : token).toLowerCase();
+
       const nicks = this.getChannelNicks();
       if (!nicks.length) return;
 
-      // Filter or use cached cycle.
-      if (!this._tabCycle || this._tabCycle.partial !== partial) {
-        let matches;
-        if (partial === "") {
-          matches = nicks.slice();
-        } else {
-          matches = nicks.filter((n) => n.toLowerCase().startsWith(partial));
-        }
-        if (!matches.length) return;
-        // Sort: ops first, then alphabetically — already sorted by the renderer.
-        this._tabCycle = { matches, index: 0, partial, wordStart };
-      } else {
-        this._tabCycle.index =
-          (this._tabCycle.index + 1) % this._tabCycle.matches.length;
-      }
+      const matches =
+        partial === ""
+          ? nicks.slice()
+          : nicks.filter((n) => n.toLowerCase().startsWith(partial));
+      if (!matches.length) return;
 
-      const nick = this._tabCycle.matches[this._tabCycle.index];
-      // If completing at the start of the line, append ": " for a mention.
+      // Start-of-line (after optional @) → "nick: "; mid-line → keep @ if typed.
       const isStart = wordStart === 0;
-      const suffix = isStart ? ": " : "";
-      const replacement = nick + suffix;
-
-      input.value =
-        input.value.substring(0, wordStart) + replacement + after;
-      const newCursor = wordStart + replacement.length;
-      input.setSelectionRange(newCursor, newCursor);
+      this._tabCycle = {
+        matches,
+        index: 0,
+        wordStart,
+        insertedLen: 0,
+        inserted: "",
+        hasAt,
+        isStart,
+        basePartial: partial,
+      };
+      this.applyTabMatch(input, wordStart, after, this._tabCycle);
     });
+  }
+
+  // Write the current cycle match into the input and advance the caret.
+  applyTabMatch(input, wordStart, after, cycle) {
+    const nick = cycle.matches[cycle.index];
+    // freeq-app style: keep a typed "@", use "nick: " only at line start.
+    const prefix = cycle.hasAt ? "@" : "";
+    const suffix = cycle.isStart ? ": " : " ";
+    const replacement = prefix + nick + suffix;
+
+    // Drop any leftover tail of the previous longer match when cycling.
+    // `after` is whatever sat after the caret; if the caret was mid-token
+    // from a prior insert, strip the remainder of that insert first.
+    let rest = after;
+    if (cycle.insertedLen > 0) {
+      const already =
+        (input.selectionStart ?? wordStart) - wordStart;
+      const leftover = cycle.insertedLen - already;
+      if (leftover > 0) rest = rest.slice(leftover);
+    }
+
+    input.value =
+      input.value.substring(0, wordStart) + replacement + rest;
+    cycle.insertedLen = replacement.length;
+    cycle.inserted = replacement;
+    const newCursor = wordStart + replacement.length;
+    input.setSelectionRange(newCursor, newCursor);
   }
 
   getChannelNicks() {
     const panel = document.getElementById("member-panel");
     if (!panel) return [];
-    return Array.from(panel.querySelectorAll(".member .nick"))
+    // Prefer live member panel; fall back to distinct nicks seen in history.
+    const fromPanel = Array.from(panel.querySelectorAll(".member .nick"))
       .map((el) => el.textContent.trim())
       .filter(Boolean);
+    if (fromPanel.length) return fromPanel;
+
+    const seen = new Set();
+    const fromMsgs = [];
+    document.querySelectorAll("#messages .msg[data-nick]").forEach((el) => {
+      const n = (el.dataset.nick || "").trim();
+      if (!n || seen.has(n.toLowerCase())) return;
+      seen.add(n.toLowerCase());
+      fromMsgs.push(n);
+    });
+    return fromMsgs;
   }
 }
 
