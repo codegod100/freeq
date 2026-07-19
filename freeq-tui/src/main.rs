@@ -1972,16 +1972,39 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                         app.status_msg("  Messages are encrypted client-side — the server only sees ciphertext.");
                     }
                 } else {
-                    let key = freeq_sdk::e2ee::derive_key(arg, &channel);
-                    app.channel_keys.insert(channel.clone(), key);
-                    app.buffer_mut(&channel).push_system(
-                        "🔒 End-to-end encryption enabled. Messages in this channel are now encrypted."
-                    );
-                    app.buffer_mut(&channel).push_system(
-                        "   All members must use the same passphrase to read messages.",
-                    );
-                    app.buffer_mut(&channel)
-                        .push_system("   The server cannot read encrypted messages.");
+                    let is_channel = channel.starts_with('#') || channel.starts_with('&');
+                    // Channels salt by the shared channel name; DMs need a
+                    // symmetric salt (canonical conversation key) so both
+                    // peers derive the same key. Refuse a DM we can't key
+                    // symmetrically rather than store a one-sided key that
+                    // silently produces unreadable messages.
+                    let salt = if is_channel {
+                        Some(channel.clone())
+                    } else {
+                        app.dm_e2ee_salt(&channel)
+                    };
+                    match salt {
+                        Some(salt) => {
+                            let key = freeq_sdk::e2ee::derive_key(arg, &salt);
+                            app.channel_keys.insert(channel.clone(), key);
+                            app.buffer_mut(&channel).push_system(
+                                "🔒 End-to-end encryption enabled. Messages here are now encrypted."
+                            );
+                            app.buffer_mut(&channel).push_system(
+                                "   The other side must /encrypt with the same passphrase to read them.",
+                            );
+                            app.buffer_mut(&channel)
+                                .push_system("   The server cannot read encrypted messages.");
+                        }
+                        None => {
+                            app.buffer_mut(&channel).push_system(
+                                "Can't enable E2EE here: this DM needs both sides DID-authenticated.",
+                            );
+                            app.buffer_mut(&channel).push_system(
+                                "   Exchange a message first so the peer's identity is known, then retry.",
+                            );
+                        }
+                    }
                 }
             }
             "/decrypt" | "/noencrypt" => {

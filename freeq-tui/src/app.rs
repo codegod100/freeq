@@ -667,8 +667,27 @@ impl App {
         self.buffers.entry(key).or_insert_with(|| Buffer::new(name))
     }
 
+    /// Symmetric E2EE salt for a DM buffer: the canonical conversation key
+    /// (both DIDs, sorted) so each peer derives the *same* key from a shared
+    /// passphrase. Passphrase E2EE was built for channels (salt = the shared
+    /// channel name); a DM salted by the local buffer name uses the peer's
+    /// identity, which differs per side, so keys never matched. Returns None
+    /// when we can't resolve both DIDs (a guest, or a peer whose DID we
+    /// haven't learned) — symmetric E2EE isn't possible then.
+    pub fn dm_e2ee_salt(&self, buffer_key: &str) -> Option<String> {
+        let my_did = self.authenticated_did.as_deref()?;
+        let peer_did = if freeq_sdk::address::is_did(buffer_key) {
+            buffer_key.to_string()
+        } else {
+            self.did_for_nick(buffer_key)?
+        };
+        let mut pair = [my_did.to_string(), peer_did];
+        pair.sort();
+        Some(format!("dm:{},{}", pair[0], pair[1]))
+    }
+
     /// Reverse of the display map: the DID whose learned nick is `nick`, if
-    /// we've seen that binding. Lets `/query <nick>` open the DID-keyed
+    /// we've seen that binding. Lets `/switch <nick>` open the DID-keyed
     /// thread rather than minting a separate nick-keyed one.
     pub fn did_for_nick(&self, nick: &str) -> Option<String> {
         self.did_names
@@ -1929,6 +1948,33 @@ mod tests {
         // Older prepended, the live one kept its single copy.
         assert_eq!(buf.messages.front().unwrap().msgid.as_deref(), Some("01OLD"));
         assert_eq!(buf.messages.back().unwrap().msgid.as_deref(), Some("01LIVE"));
+    }
+
+    #[test]
+    fn dm_e2ee_salt_is_symmetric() {
+        let alice = "did:plc:alice";
+        let bob = "did:key:z6MkBobBobBob";
+
+        // Alice's DM buffer with Bob is keyed by Bob's DID; Bob's by Alice's.
+        let mut a = App::new("alice", false);
+        a.authenticated_did = Some(alice.to_string());
+        let salt_a = a.dm_e2ee_salt(bob).expect("alice salt");
+
+        let mut b = App::new("bob", false);
+        b.authenticated_did = Some(bob.to_string());
+        let salt_b = b.dm_e2ee_salt(alice).expect("bob salt");
+
+        // Same canonical salt → same derived key from a shared passphrase.
+        assert_eq!(salt_a, salt_b, "both peers derive the same DM salt");
+        assert_eq!(
+            freeq_sdk::e2ee::derive_key("hunter2", &salt_a),
+            freeq_sdk::e2ee::derive_key("hunter2", &salt_b),
+        );
+
+        // No symmetric salt when the peer DID is unknown, or we're a guest.
+        assert!(a.dm_e2ee_salt("someguest").is_none(), "unknown peer DID");
+        let mut guest = App::new("g", false);
+        assert!(guest.dm_e2ee_salt(bob).is_none(), "guest has no own DID");
     }
 
     #[test]
