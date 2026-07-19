@@ -208,13 +208,18 @@ export async function initialize(did: string, serverOrigin: string): Promise<voi
   const allSessions: RatchetSession[] = await db.getAll('sessions');
   for (const s of allSessions) sessions.set(s.remoteDid, s);
 
+  // Always mark local keys ready — encrypt/decrypt can work offline once
+  // identity exists. Upload is separate and may race IRC SASL on freeq-web2.
+  initialized = true;
+
   try {
     await uploadPreKeyBundle(serverOrigin, did, identityKeys);
   } catch (e) {
     console.warn('[e2ee] Failed to upload pre-key bundle:', e);
+    // Re-throw so callers (freeq-web2) can retry after API-BEARER is ready.
+    // FreeqClient already .catch()'s the post-SASL re-initialize path.
+    throw e;
   }
-
-  initialized = true;
 }
 
 /** Shut down E2EE and clear state. */

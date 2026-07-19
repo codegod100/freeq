@@ -1,5 +1,5 @@
 # frozen_string_literal: true
-require_relative "../../lib/atproto/oauth"
+require_relative "../../lib/atproto/o_auth"
 
 class SessionsController < ApplicationController
   # GET /login — login form.

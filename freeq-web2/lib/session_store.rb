@@ -150,6 +150,8 @@ class SessionStore
     )
   end
 
+  # Must include refresh fields — without them restored sessions skip
+  # refresh_oauth_before_sasl! and SASL 904s once the access token expires.
   def payload(oauth)
     {
       "did" => oauth.did,
@@ -157,7 +159,10 @@ class SessionStore
       "access_token" => oauth.access_token,
       "pds_url" => oauth.pds_url,
       "dpop_key" => oauth.dpop_key.serialize,
-      "dpop_nonce" => oauth.dpop_nonce
+      "dpop_nonce" => oauth.dpop_nonce,
+      "refresh_token" => oauth.refresh_token,
+      "token_endpoint" => oauth.token_endpoint,
+      "client_id" => oauth.client_id
     }
   end
 

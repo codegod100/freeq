@@ -228,6 +228,39 @@ module IrcBroadcaster
     candidates.any? { |n| n.to_s.casecmp?(nick) }
   end
 
+  # Push IRC connection status into #status (session-wide + each joined room).
+  # Call when ws_state changes — ChatChannel#subscribed only snapshots once.
+  def broadcast_connection_status(session)
+    text, connected =
+      case session.ws_state
+      when :ready then ["connected", true]
+      when :connecting, :registering then ["connecting…", false]
+      else ["disconnected", false]
+      end
+    html = %(<span class="dot"></span> <span>#{text}</span>)
+
+    apply = lambda do |cable|
+      cable.inner_html(selector: "#status", html: html)
+      if connected
+        cable.add_css_class(selector: "#status", name: "connected")
+      else
+        cable.remove_css_class(selector: "#status", name: "connected")
+      end
+    end
+
+    session_cable = CableReady::Channel.new("freeq:session:#{session.session_id}")
+    apply.call(session_cable)
+    session_cable.broadcast
+
+    session.joined.each do |ch|
+      c = cable_for(ch)
+      apply.call(c)
+      c.broadcast
+    end
+  rescue => e
+    Rails.logger.warn("broadcast_connection_status: #{e.class}: #{e.message}") if defined?(Rails)
+  end
+
   # Push current IRC identity into the sidebar #user-handle widget on every
   # stream this session is subscribed to (per-room + session stream).
   def broadcast_user_identity(session)

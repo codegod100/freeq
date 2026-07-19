@@ -53,7 +53,13 @@ export default class ChatController extends Controller {
             this.scrollToBottom();
           }
         },
-        connected: () => this.setStatus("connected", true),
+        // ActionCable (browser↔Rails) only — IRC status is pushed from the
+        // BFF via CableReady when the upstream WS reaches :ready.
+        connected: () => {
+          // Don't claim "connected" here; that races ChatChannel#subscribed
+          // which snapshots IRC state (often still connecting) and was
+          // leaving the UI stuck if no later status broadcast fired.
+        },
         disconnected: () => this.setStatus("reconnecting…", false),
       }
     );
@@ -497,41 +503,40 @@ export default class ChatController extends Controller {
 
   /**
    * Generate identity keys and publish the pre-key bundle.
-   * Server-side upload_keys already waits for API-BEARER (~12s), so we only
-   * retry a few times with long gaps — no tight status polling.
+   *
+   * No /api/irc_status polling — that spammed the network when SASL stalled
+   * (and previously re-spawned a dead upstream on every poll). Instead POST
+   * once; the BFF waits up to ~15s for API-BEARER (with throttled re-spawn),
+   * then one sparse retry if needed.
    */
   async ensureE2ee(did) {
     // Dedupe concurrent calls (Stimulus reconnect / Turbo can re-enter).
     if (this._e2eePromise) return this._e2eePromise;
     this._e2eePromise = this._ensureE2eeOnce(did).finally(() => {
-      this._e2eePromise = null;
+      // Keep the settled promise so Turbo/Stimulus re-connect does not
+      // re-fire a failed upload loop for the whole page lifetime.
+      // Cleared only on full page navigation (new controller instance).
     });
     return this._e2eePromise;
   }
 
   async _ensureE2eeOnce(did) {
     const origin = dm.getServerOrigin();
-    // 3 attempts: immediate (server waits for SASL), then 4s, then 10s.
-    const delays = [0, 4000, 10000];
+    // Server-side upload_keys waits for SASL bearer (~15s). Sparse retry only.
+    const delays = [0, 3000];
     for (let i = 0; i < delays.length; i++) {
       if (delays[i] > 0) {
         await new Promise((r) => setTimeout(r, delays[i]));
       }
-      await dm.initE2ee(did, origin);
-      try {
-        const resp = await fetch(
-          `${origin}/api/v1/keys/${encodeURIComponent(did)}`
-        );
-        if (resp.ok) {
-          console.log("[dm] E2EE pre-key published for", did);
-          return;
-        }
-      } catch {
-        // ignore transient network errors
+      const uploaded = await dm.initE2ee(did, origin);
+      if (uploaded) {
+        console.log("[dm] E2EE pre-key published for", did);
+        return;
       }
     }
     console.warn(
-      "[dm] E2EE pre-key not published — IRC SASL may have failed. Sign out and sign in again."
+      "[dm] E2EE pre-key not published — IRC SASL may have failed or upstream is down. " +
+        "Check that freeq-server is reachable (FREEQ_UPSTREAM), then sign out and sign in again."
     );
   }
 

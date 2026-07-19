@@ -116,15 +116,32 @@ export function removeDm(nick) {
 /**
  * Initialize E2EE for the authenticated user.
  * Generates identity keys, uploads pre-key bundle to the server.
- * Called after SASL authentication succeeds.
+ * Caller should wait until the BFF has an IRC API-BEARER (post-SASL).
+ * @returns {Promise<boolean>} true when the pre-key bundle uploaded successfully
  */
 export async function initE2ee(did, serverOrigin) {
-  if (!did || !serverOrigin) return;
+  if (!did || !serverOrigin) return false;
   try {
     await e2ee.initialize(did, serverOrigin);
     console.log("[dm] E2EE initialized for", did);
+    // initialize() soft-fails upload internally — verify the bundle is live.
+    try {
+      const resp = await fetch(
+        `${serverOrigin}/api/v1/keys/${encodeURIComponent(did)}`,
+        { credentials: "same-origin" }
+      );
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      // Only count as published if our identity key is present (not a stale
+      // empty/error body). GET is public so this can also hit keys from an
+      // earlier successful session — that's fine for "can others encrypt to me".
+      return !!(data && (data.bundle || data.identity_key));
+    } catch {
+      return false;
+    }
   } catch (err) {
     console.warn("[dm] E2EE init failed:", err);
+    return false;
   }
 }
 

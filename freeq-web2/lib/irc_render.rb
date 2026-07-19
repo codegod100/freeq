@@ -533,7 +533,14 @@ module IrcRender
     when "473" then "#{channel} is invite-only."
     when "474" then "You are banned from #{channel}."
     when "475" then "#{channel} requires a channel key."
-    when "477" then "#{channel} requires authentication — sign in to join."
+    when "477"
+      # Server distinguishes guest vs policy-gated (ACCEPT required).
+      trailing = line.split(" :", 2)[1].to_s
+      if trailing.include?("policy acceptance")
+        "#{channel} requires policy acceptance — open the policy dialog and accept, or wait for auto-accept."
+      else
+        "#{channel} requires authentication — sign in to join."
+      end
     when "482" then "You must be a channel operator to change the topic."
     end
   end

@@ -22,13 +22,23 @@ class ChatChannel < ApplicationCable::Channel
 
     cr = CableReady::Channel.new(broadcasting_for(bare))
     cr.inner_html(selector: "#member-panel", html: IrcRender.render_member_list(members)) if members
-    status_text =
+    # Snapshot IRC status (not ActionCable). finish_registration broadcasts
+    # again when the upstream becomes ready so we don't stay on connecting….
+    status_text, status_ok =
       case session.ws_state
-      when :ready then "connected"
-      when :connecting, :registering then "connecting…"
-      else "disconnected"
+      when :ready then ["connected", true]
+      when :connecting, :registering then ["connecting…", false]
+      else ["disconnected", false]
       end
-    cr.text_content(selector: "#status", text: status_text)
+    cr.inner_html(
+      selector: "#status",
+      html: %(<span class="dot"></span> <span>#{status_text}</span>)
+    )
+    if status_ok
+      cr.add_css_class(selector: "#status", name: "connected")
+    else
+      cr.remove_css_class(selector: "#status", name: "connected")
+    end
     # Replay cached message rows (one-shot). Broadcasts that fired before
     # this subscription confirmed (page-load race, chathistory replay)
     # are otherwise dropped by the pubsub. Client-side filterDupes strips

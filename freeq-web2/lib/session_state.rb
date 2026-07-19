@@ -10,6 +10,8 @@ require "json"
 require "websocket/driver"
 
 require_relative "atproto/sasl"
+# Explicit load (o_auth.rb → Atproto::OAuth under Zeitwerk).
+require_relative "atproto/o_auth"
 
 # In-memory per-session state. One upstream WebSocket per browser session.
 # When authenticated (OAuth), the WS task performs SASL ATPROTO-CHALLENGE;
@@ -20,7 +22,7 @@ class SessionState
   attr_reader :session_id, :joined, :channels, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
               :policy_response_queue, :current_nick, :known_nicks, :nick_to_did,
-              :whois_response_queue, :api_bearer
+              :whois_response_queue, :api_bearer, :last_upstream_error
   attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
   attr_accessor :whois_response_queue  # set to a Queue when capturing WHOIS replies
@@ -31,6 +33,8 @@ class SessionState
     @joined = Set.new        # routing table: channels we're emitting lines for
     @channels = Set.new      # client-authoritative joined list (persisted)
     @join_sent = Set.new     # channels with an in-flight JOIN (dedupe)
+    @join_failed = Set.new   # channels rejected (477 etc.) — allow re-JOIN
+    @policy_accept_sent = Set.new # POLICY ACCEPT already issued for channel
     @channel_members = {}
     @nick_to_did = {}   # nick (lowercase) => DID, populated from extended-join/account-notify/account tags
     @irc_out = Queue.new
@@ -45,6 +49,7 @@ class SessionState
     @policy_response_queue = nil  # Set to a Queue when capturing policy NOTICEs
     @recent_rows = {}             # channel => [html rows] for subscribe replay
     @api_bearer = nil             # freeq-server IRC session_id (from API-BEARER NOTICE)
+    @last_upstream_error = nil    # last connect/run failure (for diagnostics)
     @task = nil
     @broadcaster = nil
     @reg_phase = :wait_cap_ack  # :wait_cap_ack, :sasl_challenge, :sasl_result
@@ -236,14 +241,20 @@ class SessionState
       end
       @ws_state = :disconnected
       @reg_phase = :wait_cap_ack
+      # Old freeq-server session_id is dead with the socket — do not reuse it
+      # for REST (pre-key upload would 401 against a closed IRC session).
+      @api_bearer = nil
     end
 
-    return unless upstream_url && !channels_to_rejoin.empty?
+    return unless upstream_url
 
     # spawn_upstream_if_needed JOINs only the primary (via
     # finish_registration); queue the rest to flush after registration.
-    spawn_upstream_if_needed(upstream_url, channels_to_rejoin.first)
-    rest = channels_to_rejoin[1..]
+    # Fall back to #freeq when the user has no channel list yet (DM-only
+    # or first login) so SASL still re-runs after OAuth restore.
+    primary = channels_to_rejoin.first || "#freeq"
+    spawn_upstream_if_needed(upstream_url, primary)
+    rest = channels_to_rejoin[1..] || []
     @join_sent.merge(rest)
     rest.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
   end
@@ -305,6 +316,98 @@ class SessionState
     q = @policy_response_queue
     @policy_response_queue = nil
     q
+  end
+
+  # Update the live IRC nick (after 433 retry or server force-rename).
+  # Public: IrcBroadcaster calls this when painting Guest* renames.
+  def apply_nick!(nick)
+    return if nick.nil? || nick.empty?
+    @current_nick = nick
+    @known_nicks ||= Set.new
+    @known_nicks << nick
+  end
+
+  # Wait for freeq-server's API-BEARER NOTICE after SASL.
+  # Re-spawns a dead upstream at most once per SPAWN_COOLDOWN so a down
+  # freeq-server cannot thrash. Used by REST history + pre-key upload.
+  SPAWN_COOLDOWN = 2.0
+
+  def wait_for_api_bearer(timeout: 10.0, primary: "#freeq")
+    b = @api_bearer
+    return b if b && !b.empty?
+
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    upstream = SessionRegistry.instance.upstream_url
+    last_spawn = 0.0
+    loop do
+      b = @api_bearer
+      return b if b && !b.empty?
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      if @ws_state == :disconnected && (now - last_spawn) >= SPAWN_COOLDOWN
+        spawn_upstream_if_needed(upstream, primary)
+        last_spawn = now
+      end
+      sleep 0.2
+    end
+    nil
+  end
+
+  # freeq-server authorize_channel_read requires the caller's DID to be a
+  # *current* channel member. Wait until we see a 353 NAMES roster (proof
+  # JOIN landed), or timeout. Issues at most one JOIN (+ policy ACCEPT path
+  # may trigger one more from the IRC thread).
+  def wait_until_joined(channel, timeout: 8.0)
+    ch = IrcRender.canonical_channel(channel)
+    return true if channel_members[ch]&.any?
+
+    force_join!(ch) if @ws_state == :ready
+
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      return true if channel_members[ch]&.any?
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep 0.15
+    end
+    channel_members[ch]&.any? || false
+  end
+
+  # Send JOIN even if we already "sent" one (clears sticky join_sent).
+  def force_join!(channel)
+    ch = IrcRender.canonical_channel(channel)
+    add_channel!(ch)
+    @join_sent << ch
+    @join_failed&.delete(ch)
+    enqueue_outbound("JOIN #{ch}\r\n")
+    Rails.logger.info("force_join #{ch} (bearer=#{@api_bearer.to_s != ''})") if defined?(Rails)
+  end
+
+  # After SASL 903 the connection has a DID — re-assert every channel so a
+  # prior guest-time JOIN 477 cannot leave us stuck out of +policy channels.
+  def rejoin_all_after_sasl!(driver)
+    # Drop JOINs queued while we were still a guest (would 477 again).
+    keep = []
+    begin
+      loop do
+        line = @irc_out.pop(true)
+        keep << line unless line.to_s.start_with?("JOIN ")
+      end
+    rescue ThreadError
+      nil
+    end
+    keep.each { |l| @irc_out << l }
+
+    chans = synchronize { (@channels.to_a | @joined.to_a).map { |c| IrcRender.canonical_channel(c) } }
+    chans = ["#freeq"] if chans.empty?
+    @join_sent.clear
+    @join_failed = Set.new
+    # Keep @policy_accept_sent — ACCEPT is durable per DID; no need to re-spam.
+    chans.each do |ch|
+      @join_sent << ch
+      driver.text("JOIN #{ch}\r\n")
+      Rails.logger.info("post-SASL JOIN #{ch}") if defined?(Rails)
+    end
   end
 
   # ── Upstream WS ───────────────────────────────────────────────────────
@@ -439,6 +542,7 @@ class SessionState
 
     driver.start
     self.ws_state = :connecting
+    @last_upstream_error = nil
 
     loop do
       chunk =
@@ -465,10 +569,19 @@ class SessionState
       end
     end
   rescue => e
+    @last_upstream_error = "#{e.class}: #{e.message}"
     Rails.logger.warn("upstream WS error: #{e.class}: #{e.message}")
   ensure
+    was_up = @ws_state != :disconnected
     self.ws_state = :disconnected
     @socket&.close
+    if was_up
+      begin
+        IrcBroadcaster.broadcast_connection_status(self)
+      rescue StandardError
+        nil
+      end
+    end
   end
 
   private
@@ -516,6 +629,33 @@ class SessionState
       # Fall through so the notice still appears in the message pane.
     end
 
+    # 477/473/… — JOIN rejected. Clear sticky join_sent so we can re-JOIN
+    # after SASL. Policy-gated channels need POLICY ACCEPT before JOIN.
+    if (failed_ch = parse_join_failure_channel(line))
+      @join_sent.delete(failed_ch)
+      @join_failed ||= Set.new
+      @join_failed << failed_ch
+      Rails.logger.warn("JOIN rejected for #{failed_ch}: #{line.to_s[0, 200]}") if defined?(Rails)
+
+      trailing = line.to_s.split(" :", 2)[1].to_s
+      if authenticated? && trailing.include?("policy acceptance")
+        @policy_accept_sent ||= Set.new
+        unless @policy_accept_sent.include?(failed_ch)
+          @policy_accept_sent << failed_ch
+          Rails.logger.info("POLICY #{failed_ch} ACCEPT (then re-JOIN)") if defined?(Rails)
+          driver.text("POLICY #{failed_ch} ACCEPT\r\n")
+          # Server needs a beat to store the attestation before JOIN succeeds.
+          Thread.new do
+            sleep 0.6
+            force_join!(failed_ch) if @ws_state == :ready
+          rescue StandardError => e
+            Rails.logger.warn("policy re-JOIN failed: #{e.class}: #{e.message}") if defined?(Rails)
+          end
+        end
+      end
+      # Fall through so the user sees the notice in chat.
+    end
+
     # Registration state machine — each phase may consume the line or
     # fall through to forward it to the broadcaster.
     consumed = false
@@ -534,12 +674,12 @@ class SessionState
           Rails.logger.info("Starting SASL ATPROTO-CHALLENGE for #{auth_handle}")
         else
           # No SASL or not authenticated — guest mode.
-          finish_registration(driver, channel)
+          finish_registration(driver, channel, after_sasl: false)
         end
         consumed = true
       elsif line =~ / 00[1-4] /
         # Server sent numeric registration without CAP → proceed as guest.
-        finish_registration(driver, channel)
+        finish_registration(driver, channel, after_sasl: false)
         # Don't consume — let user see the welcome numeric.
       end
 
@@ -558,7 +698,7 @@ class SessionState
           Rails.logger.info("SASL challenge response sent for #{auth_handle}")
         rescue => e
           Rails.logger.warn("SASL challenge response failed: #{e.class}: #{e.message}")
-          finish_registration(driver, channel)
+          finish_registration(driver, channel, after_sasl: false)
         end
         consumed = true
       end
@@ -566,7 +706,7 @@ class SessionState
     when :sasl_result
       if line.include?(" 903 ")
         Rails.logger.info("SASL authentication successful for #{auth_handle}")
-        finish_registration(driver, channel)
+        finish_registration(driver, channel, after_sasl: true)
         # Widget already shows 🔒 handle from page render; re-assert after SASL.
         begin
           IrcBroadcaster.broadcast_user_identity(self)
@@ -581,7 +721,7 @@ class SessionState
         )
         @api_bearer = nil
         @reg_phase = :wait_cap_ack
-        finish_registration(driver, channel)
+        finish_registration(driver, channel, after_sasl: false)
         # Guest rename NOTICE often follows; if not, still flip widget off 🔒.
         begin
           IrcBroadcaster.broadcast_user_identity(self)
@@ -600,7 +740,7 @@ class SessionState
           driver.text("AUTHENTICATE #{response}\r\n")
         rescue => e
           Rails.logger.warn("SASL retry failed: #{e.class}: #{e.message}")
-          finish_registration(driver, channel)
+          finish_registration(driver, channel, after_sasl: false)
         end
         consumed = true
       end
@@ -611,13 +751,42 @@ class SessionState
     irc_in << line unless consumed
   end
 
-  def finish_registration(driver, channel)
+  def finish_registration(driver, channel, after_sasl: false)
     driver.text("CAP END\r\n")
-    driver.text("JOIN #{channel}\r\n")
     self.ws_state = :ready
     @reg_phase = :ready
+    if after_sasl
+      # Connection now has a DID — re-JOIN everything (guest 477 is sticky
+      # via join_sent otherwise and leaves roster empty forever).
+      rejoin_all_after_sasl!(driver)
+    else
+      driver.text("JOIN #{channel}\r\n")
+      @join_sent << IrcRender.canonical_channel(channel)
+    end
     flush_pending_dm_backlog!
     flush_outbound(driver)
+    # Page subscribed while we were still :connecting — push the final
+    # status so the UI does not stay on "connecting…" forever.
+    begin
+      IrcBroadcaster.broadcast_connection_status(self)
+      IrcBroadcaster.broadcast_user_identity(self)
+    rescue StandardError => e
+      Rails.logger.warn("post-registration broadcast: #{e.class}: #{e.message}") if defined?(Rails)
+    end
+  end
+
+  # :server 477 nick #chan :need regged nick  → "#chan"
+  def parse_join_failure_channel(line)
+    line = line.to_s.chomp.delete_suffix("\r")
+    # Strip tags
+    line = line.sub(/\A@\S+\s+/, "")
+    rest = line.start_with?(":") ? line[1..] : line
+    parts = rest.split
+    return nil unless parts.length >= 4
+    return nil unless %w[471 473 474 475 477].include?(parts[1])
+    ch = parts[3]
+    return nil unless ch.start_with?("#", "&")
+    IrcRender.canonical_channel(ch)
   end
 
   def flush_outbound(driver)
@@ -687,20 +856,34 @@ class SessionState
     "web" + rand(0xffffffff).to_s(16)
   end
 
-  # Update the live IRC nick (after 433 retry or server force-rename).
-  def apply_nick!(nick)
-    return if nick.nil? || nick.empty?
-    @current_nick = nick
-    @known_nicks ||= Set.new
-    @known_nicks << nick
-  end
-
   # Best-effort token refresh before SASL. Existing sessions without a
   # refresh_token (logged in before we stored them) skip this — user must
   # re-sign-in once to pick up a refresh_token.
+  #
+  # Refresh tokens are single-use (ATProto rotates them). Serialize so two
+  # concurrent WS reconnects cannot burn the same RT ("Refresh token replayed").
   def refresh_oauth_before_sasl!
     return unless authenticated?
-    return if @auth.refresh_token.to_s.empty?
+
+    @refresh_mutex ||= Mutex.new
+    @refresh_mutex.synchronize { refresh_oauth_before_sasl_locked! }
+  rescue StandardError => e
+    # Never let refresh kill the upstream WS thread (was: NameError Atproto::OAuth).
+    Rails.logger.warn(
+      "refresh_oauth_before_sasl! error for #{auth_handle}: #{e.class}: #{e.message}"
+    )
+  end
+
+  def refresh_oauth_before_sasl_locked!
+    if @auth.refresh_token.to_s.empty? ||
+       @auth.token_endpoint.to_s.empty? ||
+       @auth.client_id.to_s.empty?
+      Rails.logger.warn(
+        "OAuth session for #{auth_handle} has no refresh_token/endpoint/client_id " \
+        "(old disk payload?) — SASL will use the access token as-is; re-login if 904"
+      )
+      return
+    end
 
     ok = Atproto::OAuth.refresh!(@auth)
     if ok
@@ -712,7 +895,9 @@ class SessionState
       end
     else
       Rails.logger.warn(
-        "OAuth refresh failed for #{auth_handle} — SASL may fail until re-login"
+        "OAuth refresh failed for #{auth_handle} — SASL may fail until re-login. " \
+        "Sign out and sign in again (refresh tokens are single-use; a stale cookie " \
+        "or double-refresh burns them)."
       )
     end
   end

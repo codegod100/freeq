@@ -70,10 +70,24 @@ class SessionRegistry
   end
 
   # Persist (or refresh) an authenticated OAuth session to disk.
+  # Marks the session so the next HTTP request can rewrite the encrypted
+  # oauth_session cookie (WS-thread refreshes cannot set cookies).
   def persist_auth(session_id, oauth)
     @session_store&.save(session_id, oauth)
+    synchronize do
+      @cookie_sync_needed ||= {}
+      @cookie_sync_needed[session_id] = true
+    end
   rescue StandardError => e
     Rails.logger.warn("persist_auth failed: #{e.class}: #{e.message}") if defined?(Rails)
+  end
+
+  # True once after a disk write — ApplicationController rewrites the cookie.
+  def take_cookie_sync!(session_id)
+    synchronize do
+      @cookie_sync_needed ||= {}
+      @cookie_sync_needed.delete(session_id)
+    end
   end
 
   # Drop a persisted session (logout).
@@ -95,17 +109,44 @@ class SessionRegistry
   end
 
   # Fetch scrollback history for a channel from the upstream REST API.
-  # Returns nil when the fetch fails (e.g. 403 on a +i/+k channel) so the
-  # caller can fall back to the JOIN chathistory replay; an array
-  # (possibly empty) when the fetch succeeded.
-  def fetch_history(channel, limit = 25)
+  # Pass `bearer:` (IRC session_id from API-BEARER) so restricted channels
+  # (+i/+k/policy) authorize the caller as a member. Returns nil when the
+  # fetch fails so the caller can fall back to JOIN chathistory replay.
+  #
+  # Retries 403 briefly when authed — freeq-server only grants access once
+  # the IRC session is in ch.members, which can lag the API-BEARER NOTICE.
+  def fetch_history(channel, limit = 25, bearer: nil, retries: nil)
+    retries = bearer.to_s.empty? ? 0 : 4 if retries.nil?
+    attempt = 0
+    loop do
+      result = fetch_history_once(channel, limit, bearer)
+      return result if result
+
+      break if attempt >= retries
+      attempt += 1
+      sleep 0.35 * attempt
+    end
+    nil
+  end
+
+  def fetch_history_once(channel, limit, bearer)
     require "net/http"
     require "json"
     encoded = channel.delete("#")
-    uri = URI("#{rest_base}/api/v1/channels/#{encoded}/history?limit=#{limit}")
-    resp = Net::HTTP.get_response(uri)
+    uri = URI("#{rest_base}/api/v1/channels/#{URI.encode_www_form_component(encoded)}/history?limit=#{limit}")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == "https")
+    http.open_timeout = 3
+    http.read_timeout = 5
+    req = Net::HTTP::Get.new(uri.request_uri)
+    req["Authorization"] = "Bearer #{bearer}" if bearer && !bearer.to_s.empty?
+    resp = http.request(req)
     unless resp.is_a?(Net::HTTPSuccess)
-      Rails.logger.info("fetch_history #{channel}: HTTP #{resp.code}") if defined?(Rails)
+      Rails.logger.info(
+        "fetch_history #{channel}: HTTP #{resp.code}" \
+        "#{bearer.to_s.empty? ? ' (anonymous)' : ' (authed)'}" \
+        "#{resp.code == '403' && !bearer.to_s.empty? ? ' — not a member yet or no access' : ''}"
+      ) if defined?(Rails)
       return nil
     end
     msgs = JSON.parse(resp.body)
@@ -124,4 +165,5 @@ class SessionRegistry
     Rails.logger.warn("fetch_history failed: #{e.class}: #{e.message}")
     nil
   end
+  private :fetch_history_once
 end

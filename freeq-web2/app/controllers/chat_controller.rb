@@ -13,6 +13,9 @@ class ChatController < ApplicationController
     @bare = @channel.delete("#")
     @session = current_session
 
+    # Kick IRC early so SASL can finish before we request restricted history.
+    @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)
+
     channels = SessionRegistry.instance.fetch_channels
     mine = @session.channels.to_a
     existing = channels.map { |c| c["name"].to_s.downcase }
@@ -28,10 +31,41 @@ class ChatController < ApplicationController
       mine.any? { |j| j.casecmp?(c["name"].to_s) } || c["name"].to_s.casecmp?(@channel)
     end
 
-    rest_history = SessionRegistry.instance.fetch_history(@channel, 50)
-    # REST failed (e.g. 403 on +i/+k channels) — fall back to the JOIN
-    # chathistory replay instead of suppressing it. If we're already
-    # joined (no fresh JOIN → no auto replay), fetch backlog explicitly.
+    # Restricted channels need Bearer = IRC session_id (API-BEARER after SASL)
+    # AND the DID must be a current channel member on freeq-server. Wait for
+    # bearer → :ready → 353 NAMES (JOIN landed), then fetch with retries.
+    bearer =
+      if @session.authenticated?
+        @session.wait_for_api_bearer(timeout: 8.0, primary: @channel)
+      else
+        @session.api_bearer # guests never get one; public channels still work
+      end
+    if bearer
+      if @session.ws_state != :ready
+        ready_deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3.0
+        while @session.ws_state != :ready &&
+              Process.clock_gettime(Process::CLOCK_MONOTONIC) < ready_deadline
+          sleep 0.1
+        end
+      end
+      # After SASL, force re-JOIN (clears sticky guest 477) then wait for 353.
+      joined = @session.wait_until_joined(@channel, timeout: 8.0)
+      Rails.logger.info(
+        "history preflight #{@channel}: bearer=yes ready=#{@session.ws_state} " \
+        "roster=#{joined ? 'yes' : 'no'}"
+      )
+    end
+    # Only hammer REST history when we actually joined; otherwise 403 is certain.
+    rest_history =
+      if bearer && @session.channel_members[@channel]&.any?
+        SessionRegistry.instance.fetch_history(@channel, 50, bearer: bearer)
+      elsif !bearer
+        SessionRegistry.instance.fetch_history(@channel, 50, bearer: nil, retries: 0)
+      else
+        Rails.logger.info("fetch_history #{@channel}: skipped (not in channel yet)")
+        nil
+      end
+    # REST failed / skipped — fall back to JOIN chathistory replay.
     if rest_history.nil?
       @session.allow_replay!(@channel)
       @session.request_backlog!(@channel)
@@ -55,9 +89,6 @@ class ChatController < ApplicationController
       else
         nil
       end
-
-    # Spawn the upstream WS + per-session broadcaster (IrcBroadcaster).
-    @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)
   end
 
   # GET /chat/dm/:nick — DM chat shell for a direct message conversation.
