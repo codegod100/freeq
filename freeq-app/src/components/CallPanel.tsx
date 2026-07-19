@@ -37,7 +37,19 @@ type MoqDeviceSource = {
 // Each video rendition (hd/sd) is an `Encoder` whose `config` is a public
 // @moq/signals Signal accepting `EncoderConfig` — the library's documented
 // knob for pinning the published codec. See @moq/publish video/encoder.d.ts.
-type MoqEncoderConfigSignal = { set(c: { codec?: string; keyframeInterval?: number }): void };
+type MoqEncoderConfigSignal = { set(c: { codec?: string; maxPixels?: number; keyframeInterval?: number }): void };
+
+// Cap the encode to ~1080p worth of pixels. moq's top H.264 profile is
+// avc1.640028 (High @ Level 4.0), which maxes out around 1080p of macroblocks.
+// Screens are routinely 4K / ultrawide, which NO offered avc1 profile can
+// encode — VideoEncoder.isConfigSupported rejects every candidate and the
+// encoder throws "no supported codec", so the broadcast publishes no video
+// track at all (the sharer still sees their local preview — raw capture — so
+// the failure is invisible on the sending side). Capping keeps H.264 always
+// encodable, cuts bandwidth, and lightens native decode. moq scales down
+// proportionally and 16-aligns; a 720p camera is under the cap so it's
+// untouched.
+const MAX_PUBLISH_PIXELS = 1920 * 1080;
 type MoqPublishEl = HTMLElement & {
   audio?: MoqSignal<MoqDeviceSource | undefined>;
   video?: MoqSignal<MoqDeviceSource | undefined>;
@@ -65,9 +77,10 @@ type MoqPublishEl = HTMLElement & {
 // Idempotent and defensive: a bundle predating the `config` signal simply
 // keeps its default heuristic.
 function pinPublishCodecH264(pub: MoqPublishEl): void {
+  const cfg = { codec: 'avc1', maxPixels: MAX_PUBLISH_PIXELS };
   try {
-    pub.broadcast?.video?.hd?.config?.set({ codec: 'avc1' });
-    pub.broadcast?.video?.sd?.config?.set({ codec: 'avc1' });
+    pub.broadcast?.video?.hd?.config?.set(cfg);
+    pub.broadcast?.video?.sd?.config?.set(cfg);
   } catch {
     /* older component bundle without EncoderConfig.codec — leave default */
   }
