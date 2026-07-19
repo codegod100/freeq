@@ -248,32 +248,6 @@ final class CallScreenCapture: NSObject {
     private let queue = DispatchQueue(label: "at.freeq.macos.screen")
     private var stream: SCStream?
 
-    /// Enumerate pickable sources: every display, then on-screen windows
-    /// (skipping tiny/untitled ones — palettes, tooltips, our own overlay).
-    static func availableTargets() async -> [ScreenShareTarget] {
-        guard let content = try? await SCShareableContent.excludingDesktopWindows(
-            false, onScreenWindowsOnly: true) else { return [] }
-
-        let displays = content.displays.enumerated().map { i, d in
-            ScreenShareTarget(
-                kind: .display(d.displayID),
-                title: content.displays.count == 1 ? "Entire Screen" : "Display \(i + 1) (\(d.width)×\(d.height))"
-            )
-        }
-        let windows = content.windows.compactMap { w -> ScreenShareTarget? in
-            guard let title = w.title, !title.isEmpty,
-                  w.frame.width >= 200, w.frame.height >= 150,
-                  w.windowLayer == 0  // normal app windows only
-            else { return nil }
-            let app = w.owningApplication?.applicationName ?? ""
-            return ScreenShareTarget(
-                kind: .window(w.windowID),
-                title: app.isEmpty ? title : "\(app) — \(title)"
-            )
-        }
-        return displays + windows
-    }
-
     func start() {
         Task { [weak self] in
             await self?.startAsync()

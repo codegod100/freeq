@@ -261,15 +261,18 @@ struct CallView: View {
                 CameraPickerMenu()
             }
 
-            // Screen share + source picker
-            splitControl(
+            // Screen share — one button that opens the native macOS picker
+            // (SCContentSharingPicker), the same basic experience as the web
+            // client's system getDisplayMedia picker: pick a whole display or
+            // a window there, with live thumbnails. No app-specific window
+            // list (a bare menu of window titles was confusing and couldn't
+            // show what you were about to share).
+            controlButton(
                 systemName: appState.isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle",
                 active: appState.isScreenSharing, activeColor: Theme.accent,
-                help: "Share screen (⇧⌘S)",
+                help: appState.isScreenSharing ? "Stop sharing (⇧⌘S)" : "Share screen (⇧⌘S)",
                 action: { appState.toggleScreenShare() }
-            ) {
-                ScreenSourcePickerMenu()
-            }
+            )
 
             controlButton(systemName: "phone.down.fill", active: true, activeColor: .red,
                           help: "Leave call") {
@@ -434,39 +437,6 @@ struct CameraPickerMenu: View {
         panel.message = "Choose a background image for your camera"
         if panel.runModal() == .OK, let url = panel.url {
             appState.cameraBackgroundEffect = .image(url)
-        }
-    }
-}
-
-struct ScreenSourcePickerMenu: View {
-    @Environment(AppState.self) private var appState
-    @State private var targets: [ScreenShareTarget] = []
-
-    var body: some View {
-        Group {
-            if targets.isEmpty {
-                Text("Loading sources…")
-            } else {
-                let displays = targets.filter { if case .display = $0.kind { return true }; return false }
-                let windows = targets.filter { if case .window = $0.kind { return true }; return false }
-                Section("Share a Display") {
-                    ForEach(displays) { target in
-                        Button(target.title) { appState.startScreenShare(target: target) }
-                    }
-                }
-                Section("Share a Window") {
-                    ForEach(windows) { target in
-                        Button(target.title) { appState.startScreenShare(target: target) }
-                    }
-                }
-                if appState.isScreenSharing {
-                    Divider()
-                    Button("Stop Sharing") { appState.toggleScreenShare() }
-                }
-            }
-        }
-        .task {
-            targets = await CallScreenCapture.availableTargets()
         }
     }
 }
