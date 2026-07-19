@@ -70,9 +70,17 @@ class ChannelState: Identifiable {
     }
 
     /// Append a message only if its ID hasn't been seen before.
+    ///
+    /// An edit and its original are the same logical message that can arrive
+    /// under two different msgids: the local cache keeps the original id (it
+    /// edits the row in place), while server CHATHISTORY replays the edit
+    /// under a fresh msgid. Dedup on both the current id and the original
+    /// (`editOf`) so those two copies collapse instead of rendering twice.
     func appendIfNew(_ msg: ChatMessage) {
         guard !messageIds.contains(msg.id) else { return }
+        if let editOf = msg.editOf, messageIds.contains(editOf) { return }
         messageIds.insert(msg.id)
+        if let editOf = msg.editOf { messageIds.insert(editOf) }
 
         if let last = messages.last, msg.timestamp < last.timestamp {
             let idx = messages.firstIndex(where: { $0.timestamp > msg.timestamp }) ?? messages.endIndex
@@ -86,9 +94,16 @@ class ChannelState: Identifiable {
     }
 
     func applyEdit(originalId: String, newId: String?, newText: String) {
-        if let idx = findMessage(byId: originalId) {
+        // Match on the current id OR a prior editOf: chained edits keep
+        // referencing the original msgid even after the first edit rewrote
+        // the in-memory id.
+        if let idx = messages.firstIndex(where: { $0.id == originalId || $0.editOf == originalId }) {
             messages[idx].text = newText
             messages[idx].isEdited = true
+            messages[idx].editOf = messages[idx].editOf ?? originalId
+            // Keep the original id registered so a later cache-loaded copy
+            // keyed under it is recognized as a duplicate.
+            messageIds.insert(originalId)
             if let newId {
                 messages[idx].id = newId
                 messageIds.insert(newId)

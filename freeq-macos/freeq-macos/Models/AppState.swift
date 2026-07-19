@@ -1388,16 +1388,18 @@ extension AppState {
                 isEdited: msg.editOf != nil,
                 isSigned: msg.isSigned,
                 isEncrypted: wasEncrypted,
-                origin: msg.origin
+                origin: msg.origin,
+                editOf: msg.editOf
             )
 
             // Handle edits
             if let editOf = msg.editOf {
                 if let batchId = msg.batchId, var batch = batches[batchId] {
                     batch.learnTarget(from: msg.target)
-                    if let idx = batch.messages.firstIndex(where: { $0.id == editOf }) {
+                    if let idx = batch.messages.firstIndex(where: { $0.id == editOf || $0.editOf == editOf }) {
                         batch.messages[idx].text = displayText
                         batch.messages[idx].isEdited = true
+                        batch.messages[idx].editOf = batch.messages[idx].editOf ?? editOf
                         if let newId = msg.msgid { batch.messages[idx].id = newId }
                     } else {
                         batch.messages.append(message)
