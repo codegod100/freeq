@@ -70,7 +70,14 @@ struct OpenFreeqConversationIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         guard let app = AppState.current else { throw FreeqIntentError.notRunning }
-        app.activeChannel = channel
+        if channel.hasPrefix("#") {
+            app.activeChannel = channel
+        } else {
+            // A person: route through openDM so a spoken/typed nick lands on
+            // the canonical (DID-keyed) thread instead of a nonexistent
+            // nick-keyed buffer.
+            app.openDM(with: channel)
+        }
         return .result()
     }
 }

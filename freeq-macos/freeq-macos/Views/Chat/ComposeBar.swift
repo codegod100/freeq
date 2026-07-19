@@ -170,7 +170,7 @@ struct ComposeBar: View {
                 // Text editor — full width
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text("Message \(appState.activeChannel ?? "")…")
+                        Text("Message \(appState.activeChannel.map { appState.displayNameForKey($0) } ?? "")…")
                             .foregroundStyle(Theme.textTertiary)
                             .lineLimit(1)
                             .truncationMode(.tail)

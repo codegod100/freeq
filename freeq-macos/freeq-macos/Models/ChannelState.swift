@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+import Observation
 
 /// A channel with its messages and members.
 @Observable

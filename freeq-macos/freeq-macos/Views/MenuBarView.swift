@@ -92,7 +92,7 @@ struct MenuBarView: View {
                     Self.activateMainWindow()
                     appState.activeChannel = entry.name
                 } label: {
-                    Text("\(entry.mention ? "@ " : "")\(entry.name)  (\(entry.count))")
+                    Text("\(entry.mention ? "@ " : "")\(appState.displayNameForKey(entry.name))  (\(entry.count))")
                 }
             }
         }

@@ -44,6 +44,7 @@ let package = Package(
                 "ServerConfig.swift",
                 "ChatMessage.swift",
                 "ChannelState.swift",
+                "DidDisplay.swift",
                 "ChannelPolicy.swift",
                 "AvStartRace.swift",
                 "AvLeftResolve.swift",

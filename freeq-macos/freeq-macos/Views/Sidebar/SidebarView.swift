@@ -75,8 +75,10 @@ struct SidebarView: View {
         .onChange(of: appState.activeChannel) { _, newValue in
             if let ch = newValue {
                 appState.clearUnread(ch)
-                // Request DM history if no messages loaded yet
-                if !ch.hasPrefix("#") {
+                // Request DM history if no messages loaded yet. Guests skip
+                // it: guest DMs are never persisted server-side, so the
+                // request can only fail (ACCOUNT_REQUIRED noise).
+                if !ch.hasPrefix("#"), appState.authenticatedDID != nil {
                     if let dm = appState.dmBuffers.first(where: { $0.name.lowercased() == ch.lowercased() }),
                        dm.messages.isEmpty {
                         appState.requestHistory(channel: ch)
@@ -291,8 +293,14 @@ struct DMRow: View {
     @Environment(AppState.self) private var appState
     let dm: ChannelState
 
+    /// The human name for this thread — a DID-keyed buffer resolves to the
+    /// peer's nick (never renders raw); nick-keyed buffers pass through.
+    private var displayNick: String {
+        appState.displayNameForKey(dm.name)
+    }
+
     private var isOnline: Bool {
-        appState.isNickOnline(dm.name)
+        appState.isNickOnline(displayNick)
     }
 
     private var unread: Int {
@@ -300,7 +308,7 @@ struct DMRow: View {
     }
 
     private var profile: ProfileCache.Profile? {
-        ProfileCache.shared.profile(for: dm.name)
+        ProfileCache.shared.profile(for: displayNick)
     }
 
     private var isActive: Bool {
@@ -315,7 +323,7 @@ struct DMRow: View {
         Label {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(profile?.displayName ?? dm.name)
+                    Text(profile?.displayName ?? displayNick)
                         .lineLimit(1)
                         .font(.system(.body, weight: unread > 0 || isActive ? .semibold : .medium))
                         .foregroundStyle(isActive ? Theme.textPrimary : Theme.textSecondary)
@@ -344,7 +352,7 @@ struct DMRow: View {
                 }
             }
         } icon: {
-            AvatarView(nick: dm.name, size: 22)
+            AvatarView(nick: displayNick, size: 22)
                 .overlay(alignment: .bottomTrailing) {
                     Circle()
                         .fill(isOnline ? Theme.success : Theme.textTertiary.opacity(0.35))

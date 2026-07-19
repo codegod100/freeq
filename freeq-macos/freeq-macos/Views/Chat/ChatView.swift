@@ -213,7 +213,10 @@ struct ChannelWelcomeView: View {
     private var isChannel: Bool { channel?.isChannel ?? false }
     private var displayName: String {
         guard let name = channel?.name else { return "freeq" }
-        return isChannel ? name.replacingOccurrences(of: "#", with: "") : name
+        // DID-keyed DM threads render as the peer's nick, never a raw did:….
+        return isChannel
+            ? name.replacingOccurrences(of: "#", with: "")
+            : appState.displayNameForKey(name)
     }
 
     var body: some View {
@@ -306,7 +309,8 @@ struct TopBarView: View {
                 }
             } else {
                 if let name = channel?.name {
-                    AvatarView(nick: name, size: 30)
+                    let dmNick = appState.displayNameForKey(name)
+                    AvatarView(nick: dmNick, size: 30)
                         .overlay(alignment: .bottomTrailing) {
                             Circle()
                                 .fill(isOnline ? (awayMsg != nil ? Theme.warning : Theme.success) : Theme.textTertiary.opacity(0.45))
@@ -315,7 +319,7 @@ struct TopBarView: View {
                         }
 
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(name)
+                        Text(dmNick)
                             .font(.headline.weight(.semibold))
                             .foregroundStyle(Theme.textPrimary)
                         Text(isOnline ? (awayMsg != nil ? "away" : "online") : "offline")
@@ -336,9 +340,11 @@ struct TopBarView: View {
                 }
 
                 if !isChannel {
-                    // E2EE badge for DMs
-                    if let did = ProfileCache.shared.did(for: channel?.name ?? ""),
-                       E2eeManager.shared.hasSession(remoteDid: did) {
+                    // E2EE badge for DMs — a DID-keyed thread IS the DID.
+                    let bufName = channel?.name ?? ""
+                    let dmDid = DidDisplay.isDid(bufName)
+                        ? bufName : ProfileCache.shared.did(for: bufName)
+                    if let did = dmDid, E2eeManager.shared.hasSession(remoteDid: did) {
                         encryptedBadge
                     }
                 } else if channel?.isEncrypted == true {
@@ -422,12 +428,12 @@ struct TopBarView: View {
 
     private var isOnline: Bool {
         guard let name = channel?.name else { return false }
-        return appState.isNickOnline(name)
+        return appState.isNickOnline(appState.displayNameForKey(name))
     }
 
     private var awayMsg: String? {
         guard let name = channel?.name else { return nil }
-        return appState.awayStatus(for: name)
+        return appState.awayStatus(for: appState.displayNameForKey(name))
     }
 
     private var encryptedBadge: some View {

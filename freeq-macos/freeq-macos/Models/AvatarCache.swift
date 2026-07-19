@@ -33,6 +33,12 @@ class ProfileCache {
         didMap[nick.lowercased()]
     }
 
+    /// Reverse lookup: the display nick last seen for a DID (from WHOIS,
+    /// account tags, or profile fetches). Used by DID-keyed DM display.
+    func nick(for did: String) -> String? {
+        nickForDid[did]
+    }
+
     /// Set DID for a nick (from WHOIS 330 or account-notify).
     func setDid(_ did: String, for nick: String) {
         let lower = nick.lowercased()

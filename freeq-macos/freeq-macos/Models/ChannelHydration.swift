@@ -190,6 +190,16 @@ enum ServerNoticeRoute: Equatable {
 enum ServerNoticeRouter {
     static func route(_ text: String) -> ServerNoticeRoute {
         if text.isEmpty { return .ignore }
+        // Speculative-history failures: the client requests DM history on its
+        // own when a conversation opens; a guest (or a DM with a guest peer)
+        // gets `CHATHISTORY <CODE> <target> …` back for a request the user
+        // never made — showing it reads as an error in the thread. Per-target
+        // failures are swallowed; a TARGETS (`*`) failure answers an explicit
+        // conversation-list request and stays visible.
+        if text.hasPrefix("CHATHISTORY ") {
+            let parts = text.split(separator: " ", maxSplits: 3, omittingEmptySubsequences: true)
+            if parts.count >= 3, parts[2] != "*" { return .ignore }
+        }
         if text == "MOTD:START" { return .motdStart }
         if text == "MOTD:END" { return .motdEnd }
         if text.hasPrefix("MOTD:") {

@@ -122,7 +122,11 @@ private struct QuickSendView: View {
                 Spacer()
                 if !targets.isEmpty {
                     Picker("", selection: $target) {
-                        ForEach(targets, id: \.self) { Text($0).tag($0) }
+                        // Tag by the buffer key; show the display name so a
+                        // DID-keyed DM lists as its peer's nick.
+                        ForEach(targets, id: \.self) {
+                            Text(AppState.current?.displayNameForKey($0) ?? $0).tag($0)
+                        }
                     }
                     .labelsHidden()
                     .frame(maxWidth: 220)
@@ -130,7 +134,7 @@ private struct QuickSendView: View {
             }
 
             if AppState.current?.connectionState == .registered || AppState.current?.connectionState == .connected {
-                TextField("Message \(target.isEmpty ? "" : target)…", text: $text, axis: .vertical)
+                TextField("Message \(target.isEmpty ? "" : (AppState.current?.displayNameForKey(target) ?? target))…", text: $text, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.title3)
                     .focused($fieldFocused)

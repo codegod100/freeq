@@ -237,6 +237,45 @@ class AppState {
     // MARK: - Profile cache
     var profileCache = ProfileCache.shared
 
+    // MARK: - DID-keyed DM identity
+    /// DID → display nick, learned from the conversation list's partner-did,
+    /// account tags, WHOIS, and MemberDid events. Display-grade: survives the
+    /// peer going offline, so a DID-keyed thread keeps rendering as a name.
+    var didDisplayNames: [String: String] = [:]
+
+    /// Human label for a thread key that may be a raw DID (see DidDisplay).
+    func displayNameForKey(_ key: String) -> String {
+        DidDisplay.displayName(
+            key: key,
+            bindings: didDisplayNames,
+            reverseNick: { [weak self] did in self?.profileCache.nick(for: did) }
+        )
+    }
+
+    /// The DID bound to a nick, when known. Used to open/address DM threads
+    /// under their canonical (DID) key.
+    func didForNick(_ nick: String) -> String? {
+        profileCache.did(for: nick)
+    }
+
+    /// Record a learned nick↔DID binding everywhere identity is consumed:
+    /// the profile cache (avatar pipeline), the display map (DID-keyed thread
+    /// labels), and channel member entries (DID-gated UI).
+    func recordUserDid(nick: String, did: String) {
+        profileCache.setDid(did, for: nick)
+        didDisplayNames[did] = nick
+        for ch in channels {
+            if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == nick.lowercased() }) {
+                let m = ch.members[idx]
+                if m.did == nil {
+                    ch.members[idx] = MemberInfo(
+                        nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop,
+                        isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: did)
+                }
+            }
+        }
+    }
+
     // MARK: - Typing debounce
     private var lastTypingSent: [String: Date] = [:]
 
@@ -874,6 +913,14 @@ class AppState {
     // MARK: - Channel helpers
 
     func getOrCreateChannel(_ name: String) -> ChannelState {
+        // Channels start with #/&; anything else is a DM. Creating a
+        // non-channel ChannelState here plants it in `channels`, where it
+        // shadows the identically-named DM buffer in every lookup
+        // (activeChannelState checks channels first) — the phantom-buffer bug.
+        guard name.hasPrefix("#") || name.hasPrefix("&") else {
+            Log.irc.error("getOrCreateChannel called with non-channel name \(name, privacy: .public) — routing to DM")
+            return getOrCreateDM(name)
+        }
         let lower = name.lowercased()
         if let ch = channels.first(where: { $0.name.lowercased() == lower }) {
             return ch
@@ -990,8 +1037,12 @@ class AppState {
     func openDM(with nick: String) {
         let trimmed = nick.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return }
+        // Open under the canonical key (peer DID when known) so the thread
+        // the echo lands in is the one on screen.
+        let key = DidDisplay.isDid(trimmed) ? trimmed : (didForNick(trimmed) ?? trimmed)
         closedDMs.remove(trimmed.lowercased())
-        let dm = getOrCreateDM(trimmed)
+        closedDMs.remove(key.lowercased())
+        let dm = getOrCreateDM(key)
         activeChannel = dm.name
     }
 
@@ -1011,8 +1062,11 @@ class AppState {
             }
         }
         for dm in dmBuffers {
-            let key = dm.name.lowercased()
-            if key != me, seen.insert(key).inserted { out.append(dm.name) }
+            // DID-keyed threads suggest their display nick (openDM maps it
+            // back to the DID); never surface a raw did:… in the picker.
+            let label = displayNameForKey(dm.name)
+            let key = label.lowercased()
+            if key != me, seen.insert(key).inserted { out.append(label) }
         }
         return out.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
@@ -1366,8 +1420,13 @@ extension AppState {
             // iOS already takes — macOS was just ignoring `msg.account`
             // and so no Bluesky avatars ever resolved.
             if let did = msg.account, did.hasPrefix("did:") {
-                profileCache.setDid(did, for: msg.fromNick)
+                recordUserDid(nick: msg.fromNick, did: did)
             }
+
+            // One person, one thread: DMs key by the SDK's canonical
+            // conversation key (peer DID when known, else nick); fallback
+            // preserves behavior against an older SDK build.
+            let dmBufName = msg.dmKey ?? (isSelf ? msg.target : msg.fromNick)
 
             // Channel E2EE: map ENC1 ciphertext to its display form (decrypted
             // plaintext, our own echo-cached plaintext, or a placeholder when
@@ -1378,9 +1437,13 @@ extension AppState {
                 (displayText, wasEncrypted) = channelE2ee.incoming(text: msg.text, channel: msg.target)
             }
 
+            // Attribute our own messages to our current nick, whichever
+            // client alias sent them (a web session under the handle nick, a
+            // TUI under -n <nick> — same DID, one visible identity). Also
+            // what makes edit/delete "my last message" selection find them.
             let message = ChatMessage(
                 id: msg.msgid ?? UUID().uuidString,
-                from: msg.fromNick,
+                from: isSelf ? nick : msg.fromNick,
                 text: displayText,
                 isAction: msg.isAction,
                 timestamp: Date(timeIntervalSince1970: Double(msg.timestampMs) / 1000.0),
@@ -1414,8 +1477,7 @@ extension AppState {
                     ch.applyEdit(originalId: editOf, newId: msg.msgid, newText: displayText)
                     Task { await MessageStore.shared.markEdited(msgId: editOf, newText: displayText) }
                 } else {
-                    let bufName = isSelf ? target : msg.fromNick
-                    let dm = getOrCreateDM(bufName)
+                    let dm = getOrCreateDM(dmBufName)
                     dm.applyEdit(originalId: editOf, newId: msg.msgid, newText: displayText)
                     Task { await MessageStore.shared.markEdited(msgId: editOf, newText: displayText) }
                 }
@@ -1431,8 +1493,12 @@ extension AppState {
 
             // Route to channel or DM
             let target = msg.target
-            // Persist to local DB
-            Task { await MessageStore.shared.store(message, channel: target) }
+            // Persist to local DB under the buffer key. For DMs that is the
+            // conversation key (dm_key / peer nick) — NOT the wire target,
+            // which for an incoming DM is our own nick and used to strand
+            // half of every cached conversation under an unread key.
+            let storeKey = target.hasPrefix("#") ? target : dmBufName
+            Task { await MessageStore.shared.store(message, channel: storeKey) }
 
             // Blocked senders: the message still lands in the buffer (the
             // list filters it out on display, so unblocking restores it) but
@@ -1475,7 +1541,7 @@ extension AppState {
                     }
                 }
             } else {
-                let bufName = isSelf ? target : msg.fromNick
+                let bufName = dmBufName
                 closedDMs.remove(bufName.lowercased())
                 let dm = getOrCreateDM(bufName)
                 dm.appendIfNew(message)
@@ -1500,7 +1566,9 @@ extension AppState {
             let from = tagMsg.from
             let tagAccount = tags["account"] ?? tags["+freeq.at/account"]
             let isSelf = isSelfSender(nick: from, account: tagAccount)
-            let dmBuffer = isSelf ? target : from
+            // Same conversation keying as .message: the SDK's dm_key (peer
+            // DID when known), with the legacy nick fallback.
+            let dmBuffer = tagMsg.dmKey ?? (isSelf ? target : from)
             let bufferName = target.hasPrefix("#") ? target : dmBuffer
 
             // Typing indicators
@@ -1607,6 +1675,10 @@ extension AppState {
                 UserDefaults.standard.set(newNick, forKey: "freeq.nick")
             }
             profileCache.renameUser(from: oldNick, to: newNick)
+            // Keep DID-keyed thread labels current across the rename.
+            if let did = profileCache.did(for: newNick) {
+                didDisplayNames[did] = newNick
+            }
             for ch in allBuffers {
                 if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == oldNick.lowercased() }) {
                     let old = ch.members[idx]
@@ -1646,14 +1718,39 @@ extension AppState {
             guard let batch = batches.removeValue(forKey: id) else { return }
             HistoryBatchRouting.apply(buffer: batch, channels: &channels, dmBuffers: &dmBuffers)
 
-        case .memberDid:
-            // Emitted by the updated SDK when a nick<->DID binding is
-            // learned. Adopted in the macOS DID-DM pass; ignored until then.
-            break
+        case .memberDid(let bindNick, let bindDid):
+            // A nick↔DID binding was learned (join/whois/account tag): record
+            // it and fold any nick-keyed DM thread into the DID-keyed one —
+            // a cold first DM keys by nick until the peer's reply teaches the
+            // binding.
+            recordUserDid(nick: bindNick, did: bindDid)
+            if DidDisplay.mergeDmBuffers(
+                dmBuffers: &dmBuffers, unreadCounts: &unreadCounts,
+                mentionCounts: &mentionCounts, nick: bindNick, did: bindDid
+            ) {
+                // The open thread, closed-state, and the local message cache
+                // all follow the re-key.
+                if activeChannel?.lowercased() == bindNick.lowercased() {
+                    activeChannel = bindDid
+                }
+                if closedDMs.contains(bindNick.lowercased()) {
+                    closedDMs.insert(bindDid.lowercased())
+                }
+                Task { await MessageStore.shared.renameChannel(from: bindNick, to: bindDid) }
+            }
 
-        case .chatHistoryTarget(let targetNick, let timestamp, _):
-            if closedDMs.contains(targetNick.lowercased()) { return }
-            let dm = getOrCreateDM(targetNick)
+        case .chatHistoryTarget(let targetNick, let timestamp, let partnerDid):
+            // Key the conversation by its stable identity when the server
+            // names it (freeq.at/partner-did); the nick renders via
+            // displayNameForKey. Honor closed state under BOTH keys — a DM
+            // closed before this pass is nick-keyed.
+            let key = partnerDid ?? targetNick
+            if closedDMs.contains(key.lowercased())
+                || closedDMs.contains(targetNick.lowercased()) { return }
+            if let did = partnerDid {
+                didDisplayNames[did] = targetNick
+            }
+            let dm = getOrCreateDM(key)
             profileCache.fetchProfileIfPossible(nick: targetNick)
             if let ts = timestamp,
                let parsed = ISO8601DateFormatter.freeqTargets.date(from: ts) {
@@ -1668,17 +1765,7 @@ extension AppState {
             if info.contains("authenticated as ") || info.contains("logged in as ") {
                 let parts = info.split(separator: " ")
                 if let did = parts.last, did.hasPrefix("did:") {
-                    let didStr = String(did)
-                    profileCache.setDid(didStr, for: whoisNick)
-                    // Update member DID in all channels
-                    for ch in channels {
-                        if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == whoisNick.lowercased() }) {
-                            let m = ch.members[idx]
-                            if m.did == nil {
-                                ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: didStr)
-                            }
-                        }
-                    }
+                    recordUserDid(nick: whoisNick, did: String(did))
                 }
             }
             // Background WHOIS is for identity hydration only. Only explicit
@@ -1707,6 +1794,11 @@ extension AppState {
                 if !motd.isEmpty { showMotd = true }
                 return
             case .namesEnd(let channel):
+                // A NAMES reply for a non-channel (e.g. `/names` typed in a
+                // DM — the server echoes the bare nick back) must not mint a
+                // phantom ChannelState that then shadows the DM in every
+                // buffer lookup.
+                guard channel.hasPrefix("#") || channel.hasPrefix("&") else { return }
                 let key = channel.lowercased()
                 // Ensure channel exists before flushing
                 let ch = getOrCreateChannel(channel)

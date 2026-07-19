@@ -28,7 +28,11 @@ struct QuickSwitcher: View {
             return all.map(Item.buffer)
         }
         let q = query.lowercased()
-        let buffers = all.filter { $0.name.lowercased().contains(q) }.map(Item.buffer)
+        // Match the key OR its display name — a DID-keyed DM matches by nick.
+        let buffers = all.filter {
+            $0.name.lowercased().contains(q)
+                || appState.displayNameForKey($0.name).lowercased().contains(q)
+        }.map(Item.buffer)
         let commands = CommandMatcher.rank(query: query, in: CommandRegistry.all)
             .filter { CommandActions.isEnabled($0.id, appState) }
             .map(Item.command)
@@ -101,11 +105,11 @@ struct QuickSwitcher: View {
                         .frame(width: 20)
                 } else {
                     Circle()
-                        .fill(appState.isNickOnline(ch.name) ? .green : Color.secondary.opacity(0.3))
+                        .fill(appState.isNickOnline(appState.displayNameForKey(ch.name)) ? .green : Color.secondary.opacity(0.3))
                         .frame(width: 10, height: 10)
                         .frame(width: 20)
                 }
-                Text(ch.name)
+                Text(ch.isChannel ? ch.name : appState.displayNameForKey(ch.name))
                     .lineLimit(1)
                 Spacer()
                 if let unread = appState.unreadCounts[ch.name.lowercased()], unread > 0 {

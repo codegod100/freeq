@@ -228,9 +228,11 @@ struct FreeqApp: App {
     }
 
     private func updateWindowTitle(_ channel: String?) {
+        // Resolve DID-keyed DM buffers to the peer's nick for the title.
+        let title = channel.map { AppState.current?.displayNameForKey($0) ?? $0 }
         DispatchQueue.main.async {
-            if let channel {
-                NSApplication.shared.mainWindow?.title = "\(channel) — freeq"
+            if let title {
+                NSApplication.shared.mainWindow?.title = "\(title) — freeq"
             } else {
                 NSApplication.shared.mainWindow?.title = "freeq"
             }

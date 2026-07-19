@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		02A3083762112F16B4DE3F31 /* CommandRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7C14C09FE9CB53438535F9C /* CommandRegistry.swift */; };
 		035849CB7A13552E1686B4F8 /* CameraFrameRatePolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = ECC9CABA22036B8DCCD1C135 /* CameraFrameRatePolicy.swift */; };
+		07D5F9F88AB063BD44F20162 /* DidDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 635E43C3825BFA51AFB89DF6 /* DidDisplay.swift */; };
 		0BDB4364770D6AEE882147B6 /* AudioOutputDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = D17E048D6D4D5A5BBEA1FABA /* AudioOutputDevices.swift */; };
 		0E3E54335587949B09D9D9DA /* CameraEffectsProcessor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53BCB3D151F95995B9DD7E8C /* CameraEffectsProcessor.swift */; };
 		111A631DD747383DB85200BF /* DebugBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BD56638DA817D921B8F261C /* DebugBridge.swift */; };
@@ -169,6 +170,7 @@
 		5EEDAC2E0378A5BD8D01E7F8 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		61EB9E0F12CF280B8BADFA41 /* MainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainView.swift; sourceTree = "<group>"; };
 		62B0B9FB9D87D335C6B9327D /* MessageBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBlocks.swift; sourceTree = "<group>"; };
+		635E43C3825BFA51AFB89DF6 /* DidDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DidDisplay.swift; sourceTree = "<group>"; };
 		68D19F735EC72757A61B1D6C /* DetailPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailPanel.swift; sourceTree = "<group>"; };
 		6AD26F0F8B6173EE7643F964 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		6D0D657E5F637E5EFD232E19 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
@@ -397,6 +399,7 @@
 				06360D5F1B334245B936F78F /* ComposeHistory.swift */,
 				AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */,
 				0BD56638DA817D921B8F261C /* DebugBridge.swift */,
+				635E43C3825BFA51AFB89DF6 /* DidDisplay.swift */,
 				20B3BED9F9A6237942DD0971 /* E2eeManager.swift */,
 				F0D2221C3627158CF392EC73 /* FrameHitchMonitor.swift */,
 				99635569CD2711503B3DCF7E /* FreeqAppIntents.swift */,
@@ -501,10 +504,9 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = BD9DC688F0069EE17592B144 /* Build configuration list for PBXProject "freeq-macos" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -514,7 +516,6 @@
 			mainGroup = 20C10B5BC807908C13D0B198;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = B3F2C852EDD7824E6CA1537D /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -605,6 +606,7 @@
 				D29F998C6DF599EA13C38C85 /* ConnectView.swift in Sources */,
 				111A631DD747383DB85200BF /* DebugBridge.swift in Sources */,
 				40B19B4620E1FFA3196FBFAD /* DetailPanel.swift in Sources */,
+				07D5F9F88AB063BD44F20162 /* DidDisplay.swift in Sources */,
 				E1AB7FC16F690AF9462DBBAC /* E2eeManager.swift in Sources */,
 				3ACCE0099E0E97EC7A321EDC /* FileUpload.swift in Sources */,
 				6DDB3CED329F29FC4C691EAD /* FormatToolbar.swift in Sources */,
