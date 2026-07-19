@@ -394,8 +394,16 @@ struct AppKitMessageListView: NSViewRepresentable {
                 let action = onLoadOlder
                 return AnyView(LoadMoreRowContent(action: action).frame(width: width))
             case .entry(let row):
+                // Fix the width to the column AND force the content to claim its
+                // full natural height (`fixedSize` vertical). Width-only left the
+                // hosting view free to under-report height — a wrapped/multi-line
+                // message would measure ~1 line while rendering 2+, so the
+                // reaction badge below it sat at the short mark and painted over
+                // the wrapped text (and the row-below). Fixing height at the
+                // hosting boundary makes the self-sized row always tall enough.
                 let view = MessageTimelineRowContent(row: row)
                     .frame(width: width, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
                 if let appState {
                     return AnyView(view.environment(appState))
                 }
