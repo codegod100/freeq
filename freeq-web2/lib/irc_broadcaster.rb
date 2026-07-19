@@ -189,11 +189,12 @@ module IrcBroadcaster
     Rails.logger.warn("IrcBroadcaster error: #{e.class}: #{e.message}\n#{e.backtrace&.first(5)&.join("\n")}")
   end
 
-  # Extract the DM target (nick) from a nick-targeted PRIVMSG/NOTICE.
-  # Returns the nick if this is a DM (target doesn't start with # or &),
-  # and it involves us (either as sender or recipient). Returns nil otherwise.
+  # Extract the DM partner nick from a nick-targeted PRIVMSG/NOTICE.
+  # Returns the partner nick if this is a DM involving us, else nil.
+  # Matches current_nick, auth_nick, and known_nicks so Guest renames
+  # and CHATHISTORY addressed to a prior nick still route correctly.
   def dm_target_for(session, line)
-    tags, rest_with_prefix = IrcRender.parse_irc_tags(line)
+    _tags, rest_with_prefix = IrcRender.parse_irc_tags(line)
     rest = rest_with_prefix[1..] or return nil
     sp = rest.index(" ") or return nil
     prefix = rest[0...sp]
@@ -205,21 +206,26 @@ module IrcBroadcaster
     target = parts[1].to_s
     return nil if target.start_with?("#", "&")
 
-    # Sender nick
     sender = prefix.split("!").first
-    own = session.current_nick
-    return nil unless own
+    return nil if sender.to_s.empty?
 
-    # Is this a DM involving us? Either we're the sender (echo) or the recipient.
-    if sender&.casecmp?(own)
-      # We sent it — the DM partner is the target
-      target
-    elsif target.casecmp?(own)
-      # We received it — the DM partner is the sender
-      sender
+    if our_nick?(session, sender)
+      target # we sent — partner is the target
+    elsif our_nick?(session, target)
+      sender # we received — partner is the sender
     else
       nil
     end
+  end
+
+  def our_nick?(session, nick)
+    return false if nick.nil? || nick.empty?
+
+    candidates = []
+    candidates << session.current_nick if session.current_nick
+    candidates << session.auth_nick if session.respond_to?(:auth_nick) && session.auth_nick
+    candidates.concat(session.known_nicks.to_a) if session.known_nicks
+    candidates.any? { |n| n.to_s.casecmp?(nick) }
   end
 
   # Push current IRC identity into the sidebar #user-handle widget on every

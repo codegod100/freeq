@@ -199,11 +199,25 @@ module IrcRender
     end
 
     target = extract_irc_target(after_prefix)
-    return true unless target # server-wide or nick-targeted — pass through
+
+    # PRIVMSG/NOTICE to a *nick* (DM) must never fan out into channel
+    # panes. extract_irc_target only returns channel targets; a nil
+    # target on PRIVMSG/NOTICE means nick-directed (or malformed).
+    # Previously we `return true unless target`, which dumped ENC3 DMs
+    # into every joined channel when dm_target_for missed (e.g. Guest rename).
+    if %w[PRIVMSG NOTICE].include?(cmd)
+      return false unless target
+
+      return canonical_channel(target).casecmp?(canonical_channel(current_channel))
+    end
+
+    return true unless target # QUIT/NICK/etc. without a channel — fan out
 
     canonical_channel(target).casecmp?(canonical_channel(current_channel))
   end
 
+  # Channel target only (#/&/+/!). Nick targets return nil so callers can
+  # treat them as DMs rather than channel messages.
   def extract_irc_target(after_prefix)
     cmd_end = after_prefix.index(" ") or return nil
     command = after_prefix[0...cmd_end]
