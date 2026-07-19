@@ -2321,8 +2321,23 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                         .map(|(_, n)| n);
                     if let Some(name) = best {
                         app.switch_to(&name);
+                    } else if arg.starts_with('#') || arg.starts_with('&') {
+                        // Channels have a distinct open step — /join. Don't
+                        // conjure one from /switch.
+                        app.status_msg(&format!("Not in {arg} — use /join to enter it"));
                     } else {
-                        app.status_msg(&format!("No buffer matching '{arg}'"));
+                        // A DM has no join: switching to it IS opening it.
+                        // Key by the peer's DID when known so it lands on the
+                        // persisted (DID-keyed) thread; history backfills via
+                        // maybe_fetch_dm_history once it's active.
+                        let raw = arg.trim();
+                        let key = if freeq_sdk::address::is_did(raw) {
+                            raw.to_string()
+                        } else {
+                            app.did_for_nick(raw).unwrap_or_else(|| raw.to_string())
+                        };
+                        app.buffer_mut(&key);
+                        app.switch_to(&key);
                     }
                 }
             }

@@ -667,6 +667,16 @@ impl App {
         self.buffers.entry(key).or_insert_with(|| Buffer::new(name))
     }
 
+    /// Reverse of the display map: the DID whose learned nick is `nick`, if
+    /// we've seen that binding. Lets `/query <nick>` open the DID-keyed
+    /// thread rather than minting a separate nick-keyed one.
+    pub fn did_for_nick(&self, nick: &str) -> Option<String> {
+        self.did_names
+            .iter()
+            .find(|(_, n)| n.eq_ignore_ascii_case(nick))
+            .map(|(did, _)| did.clone())
+    }
+
     /// Human name for a buffer key that may be a raw DID: the learned
     /// display binding, else the compacted DID. Plain names pass through.
     pub fn display_name(&self, key: &str) -> String {
