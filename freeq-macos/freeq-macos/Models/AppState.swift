@@ -258,6 +258,27 @@ class AppState {
         profileCache.did(for: nick)
     }
 
+    /// Record a nick↔DID binding and fold any nick-keyed DM thread into the
+    /// DID-keyed one; the open thread, closed-state, and local message cache
+    /// follow the re-key. Shared by MemberDid (live learning) and the
+    /// conversation list's partner-did (covers OFFLINE peers, which never
+    /// produce a live MemberDid).
+    func adoptDmBinding(nick: String, did: String) {
+        recordUserDid(nick: nick, did: did)
+        if DidDisplay.mergeDmBuffers(
+            dmBuffers: &dmBuffers, unreadCounts: &unreadCounts,
+            mentionCounts: &mentionCounts, nick: nick, did: did
+        ) {
+            if activeChannel?.lowercased() == nick.lowercased() {
+                activeChannel = did
+            }
+            if closedDMs.contains(nick.lowercased()) {
+                closedDMs.insert(did.lowercased())
+            }
+            Task { await MessageStore.shared.renameChannel(from: nick, to: did) }
+        }
+    }
+
     /// Record a learned nick↔DID binding everywhere identity is consumed:
     /// the profile cache (avatar pipeline), the display map (DID-keyed thread
     /// labels), and channel member entries (DID-gated UI).
@@ -1723,21 +1744,7 @@ extension AppState {
             // it and fold any nick-keyed DM thread into the DID-keyed one —
             // a cold first DM keys by nick until the peer's reply teaches the
             // binding.
-            recordUserDid(nick: bindNick, did: bindDid)
-            if DidDisplay.mergeDmBuffers(
-                dmBuffers: &dmBuffers, unreadCounts: &unreadCounts,
-                mentionCounts: &mentionCounts, nick: bindNick, did: bindDid
-            ) {
-                // The open thread, closed-state, and the local message cache
-                // all follow the re-key.
-                if activeChannel?.lowercased() == bindNick.lowercased() {
-                    activeChannel = bindDid
-                }
-                if closedDMs.contains(bindNick.lowercased()) {
-                    closedDMs.insert(bindDid.lowercased())
-                }
-                Task { await MessageStore.shared.renameChannel(from: bindNick, to: bindDid) }
-            }
+            adoptDmBinding(nick: bindNick, did: bindDid)
 
         case .chatHistoryTarget(let targetNick, let timestamp, let partnerDid):
             // Key the conversation by its stable identity when the server
@@ -1748,7 +1755,11 @@ extension AppState {
             if closedDMs.contains(key.lowercased())
                 || closedDMs.contains(targetNick.lowercased()) { return }
             if let did = partnerDid {
-                didDisplayNames[did] = targetNick
+                // Record the binding AND merge, exactly like MemberDid — an
+                // OFFLINE peer never emits a live MemberDid, so without this
+                // a leftover nick-keyed thread and the DID-keyed one coexist
+                // as duplicate rows with the same name.
+                adoptDmBinding(nick: targetNick, did: did)
             }
             let dm = getOrCreateDM(key)
             profileCache.fetchProfileIfPossible(nick: targetNick)
