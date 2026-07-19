@@ -14,6 +14,21 @@ import * as e2ee from "@freeq/sdk/e2ee";
 
 const DM_LIST_KEY = "freeq-dm-list";
 
+// Ciphertext → plaintext for our own outbound DMs. The Double Ratchet only
+// lets us decrypt the *partner's* send chain; freeq-app uses the same
+// pattern (cacheEchoPlaintext) so the server echo renders as readable text.
+const echoPlaintext = new Map();
+
+/** Remember plaintext for a wire ENC3: body we just encrypted. */
+export function cacheEcho(wire, plaintext) {
+  if (wire && plaintext != null) echoPlaintext.set(wire, plaintext);
+}
+
+/** Look up (and keep) cached plaintext for an outbound ENC3 body. */
+export function getEcho(wire) {
+  return echoPlaintext.get(wire) || null;
+}
+
 // ── DM list persistence ──
 
 /** Load the persisted DM list (array of nicks). */
@@ -81,14 +96,31 @@ export function hasDmSession(did) {
 
 /**
  * Encrypt a DM message for the given remote DID.
- * Returns the ENC3: wire-format string, or null on failure.
+ * Returns `{ ok: wire }` or `{ error: "no_prekey" | "encrypt_failed", message }`.
  */
 export async function encryptDm(remoteDid, plaintext, serverOrigin) {
   try {
-    return await e2ee.encryptMessage(remoteDid, plaintext, serverOrigin);
+    const wire = await e2ee.encryptMessage(remoteDid, plaintext, serverOrigin);
+    if (wire) return { ok: wire };
+
+    // encryptMessage returns null when the remote pre-key is missing (or
+    // session setup failed). Distinguish the common "they never published
+    // keys" case so the UI can show an actionable message.
+    const hasKey =
+      typeof e2ee.hasRemotePreKey === "function"
+        ? await e2ee.hasRemotePreKey(remoteDid, serverOrigin)
+        : false;
+    if (!hasKey) {
+      return {
+        error: "no_prekey",
+        message:
+          "Cannot encrypt — recipient has not published encryption keys yet. Ask them to open freeq while signed in (any client), then try again.",
+      };
+    }
+    return { error: "encrypt_failed", message: "Encryption failed" };
   } catch (err) {
     console.warn("[dm] encrypt failed:", err);
-    return null;
+    return { error: "encrypt_failed", message: "Encryption failed" };
   }
 }
 

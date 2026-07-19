@@ -48,6 +48,8 @@ export default class ChatController extends Controller {
             this.filterDupes(data.operations);
             CableReady.perform(data.operations);
             this.hydrateReplyBadges();
+            // Live PRIVMSG rows arrive as ENC3: ciphertext — decrypt in place.
+            this.decryptDmRows();
             this.scrollToBottom();
           }
         },
@@ -493,11 +495,38 @@ export default class ChatController extends Controller {
 
   // ── Direct Messages (E2EE) ──────────────────────────────────────────
 
+  /**
+   * Generate identity keys and publish the pre-key bundle. Retries while
+   * the Rails BFF is still waiting for SASL / API-BEARER from freeq-server.
+   */
+  async ensureE2ee(did) {
+    const origin = dm.getServerOrigin();
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (attempt > 0) {
+        await new Promise((r) => setTimeout(r, 1000 + attempt * 500));
+      }
+      await dm.initE2ee(did, origin);
+      try {
+        const resp = await fetch(
+          `${origin}/api/v1/keys/${encodeURIComponent(did)}`
+        );
+        if (resp.ok) return;
+      } catch {
+        // network blip — retry
+      }
+    }
+    console.warn(
+      "[dm] E2EE pre-key not published yet; DMs may fail until the page reloads after connect"
+    );
+  }
+
   setupDm() {
     // Initialize E2EE when authenticated (DID available on the page).
+    // Pre-key upload needs the BFF to hold an IRC API-BEARER (arrives
+    // after SASL), so retry until our bundle is published upstream.
     const did = this.element.dataset.authDid;
     if (did) {
-      dm.initE2ee(did, dm.getServerOrigin());
+      this.ensureE2ee(did);
     }
 
     // Render the DM list in the sidebar.
@@ -549,15 +578,20 @@ export default class ChatController extends Controller {
           return;
         }
 
-        const encrypted = await dm.encryptDm(remoteDid, plaintext, dm.getServerOrigin());
-        if (!encrypted) {
+        const encResult = await dm.encryptDm(remoteDid, plaintext, dm.getServerOrigin());
+        if (!encResult.ok) {
           const banner = document.getElementById("reply-banner");
           if (banner) {
             banner.innerHTML =
-              '<span class="reply-banner-label" style="color:var(--nick-6)">Encryption failed</span>';
+              '<span class="reply-banner-label" style="color:var(--nick-6)">' +
+              escapeHtml(encResult.message || "Encryption failed") +
+              "</span>";
           }
           return;
         }
+
+        // Own echoes can't be Double-Ratchet-decrypted; stash plaintext.
+        dm.cacheEcho(encResult.ok, plaintext);
 
         try {
           const resp = await fetch("/api/dm/send", {
@@ -566,7 +600,7 @@ export default class ChatController extends Controller {
               "Content-Type": "application/json",
               "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')?.content || "",
             },
-            body: JSON.stringify({ nick: targetNick, msg: encrypted }),
+            body: JSON.stringify({ nick: targetNick, msg: encResult.ok }),
           });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
         } catch (err) {
@@ -579,12 +613,16 @@ export default class ChatController extends Controller {
         }
 
         // Clear the input on success. The server will echo the PRIVMSG
-        // back via CableReady, and decryptDmRows() will decrypt it.
+        // back via CableReady, and decryptDmRows() will restore plaintext.
         input.value = "";
         const banner = document.getElementById("reply-banner");
         if (banner) banner.innerHTML = "";
       }, true);
     }
+
+    // Decrypt any ENC3 rows already in the pane (CHATHISTORY / page load).
+    // E2EE init is async — retry a few times until keys/sessions are ready.
+    this.scheduleDecryptPass();
 
     // After a DM message is sent, clear the encrypted flag and restore
     // the input for the next message.
@@ -620,51 +658,101 @@ export default class ChatController extends Controller {
       .join("");
   }
 
-  // Decrypt any ENC3: messages in the message pane.
+  /** Retry decrypt while E2EE init / CHATHISTORY rows are still settling. */
+  scheduleDecryptPass() {
+    const delays = [0, 400, 1200, 3000];
+    delays.forEach((ms) => {
+      setTimeout(() => this.decryptDmRows(), ms);
+    });
+  }
+
+  /**
+   * Decrypt any ENC3: messages in the message pane.
+   * - Outbound (our nick): use send-time echo cache (can't ratchet-decrypt own).
+   * - Inbound: Double Ratchet with the partner DID.
+   */
   async decryptDmRows() {
-    const rows = document.querySelectorAll(
-      "#messages .msg[data-text^='ENC3:']"
-    );
+    const form = document.getElementById("send-form");
+    const isDm = form?.dataset.isDm === "true";
+    if (!isDm) return;
+
+    const partnerNick = form.dataset.channel || this.bare;
+    const ownNick = (this.element.dataset.authNick || "").trim();
+    const ownHandle = (this.element.dataset.authHandle || "").trim();
+    const ownDid = this.element.dataset.authDid || "";
+
+    const rows = document.querySelectorAll("#messages .msg");
     for (const row of rows) {
-      const wire = row.dataset.text;
+      const wire = row.dataset.text || "";
       if (!wire || !dm.isEncryptedDm(wire)) continue;
-      const fromNick = row.dataset.nick;
-      if (!fromNick) continue;
-      const remoteDid = await dm.nickToDidAsync(fromNick);
-      if (!remoteDid) {
-        row.querySelector(".body").innerHTML =
-          '<span style="color:var(--muted)">[encrypted DM — unknown sender identity]</span>';
+      if (row.dataset.decrypted === "true") continue;
+
+      const fromNick = (row.dataset.nick || "").trim();
+      const fromDid = row.dataset.account || row.dataset.did || "";
+
+      // 1) Own echo — restore from cache.
+      const cached = dm.getEcho(wire);
+      if (cached != null) {
+        this.applyDecryptedRow(row, cached);
         continue;
       }
+
+      // 2) Own row without cache (reload / other tab): show placeholder.
+      //    Double Ratchet cannot decrypt our own outbound ciphertext.
+      const fromLower = fromNick.toLowerCase();
+      const isSelf =
+        (ownDid && fromDid && fromDid === ownDid) ||
+        (ownNick && fromLower === ownNick.toLowerCase()) ||
+        (ownHandle && fromLower === ownHandle.toLowerCase());
+      if (isSelf) {
+        this.applyDecryptedRow(row, "[encrypted message]", { placeholder: true });
+        continue;
+      }
+
+      // 3) Partner message — decrypt with session for their DID.
+      const remoteDid =
+        fromDid && fromDid.startsWith("did:")
+          ? fromDid
+          : await dm.nickToDidAsync(fromNick || partnerNick);
+      if (!remoteDid) {
+        this.applyDecryptedRow(row, "[encrypted DM — unknown sender identity]", {
+          placeholder: true,
+        });
+        continue;
+      }
+
       const plaintext = await dm.decryptDm(remoteDid, wire, dm.getServerOrigin());
       if (plaintext) {
-        // Update the row's text and data-text attribute.
-        row.dataset.text = plaintext;
-        const body = row.querySelector(".body");
-        if (body) {
-          // Preserve nick span, replace text content after it.
-          const nickEl = body.querySelector(".nick");
-          const reactions = body.querySelector(".reactions");
-          const replyBadge = body.querySelector(".reply-badge");
-          const btns = body.querySelectorAll("button");
-          body.innerHTML = "";
-          if (replyBadge) body.appendChild(replyBadge);
-          if (nickEl) body.appendChild(nickEl);
-          body.appendChild(document.createTextNode(" "));
-          const textSpan = document.createElement("span");
-          textSpan.textContent = plaintext;
-          body.appendChild(textSpan);
-          if (reactions) body.appendChild(reactions);
-          btns.forEach((b) => body.appendChild(b));
-        }
-        row.setAttribute("data-encrypted", "true");
-      } else {
-        row.querySelector(".body")?.insertAdjacentHTML(
-          "beforeend",
-          '<span style="color:var(--muted)"> [could not decrypt]</span>'
-        );
+        this.applyDecryptedRow(row, plaintext);
+      } else if (!row.dataset.decryptTried) {
+        row.dataset.decryptTried = "true";
+        // Leave ciphertext visible; a later scheduleDecryptPass may succeed
+        // once the session is established from another message.
       }
     }
+  }
+
+  applyDecryptedRow(row, plaintext, { placeholder = false } = {}) {
+    row.dataset.text = placeholder ? row.dataset.text : plaintext;
+    row.dataset.decrypted = "true";
+    row.setAttribute("data-encrypted", "true");
+    const body = row.querySelector(".body");
+    if (!body) return;
+
+    const nickEl = body.querySelector(".nick");
+    const reactions = body.querySelector(".reactions");
+    const replyBadge = body.querySelector(".reply-badge");
+    const btns = body.querySelectorAll("button");
+    body.innerHTML = "";
+    if (replyBadge) body.appendChild(replyBadge);
+    if (nickEl) body.appendChild(nickEl);
+    body.appendChild(document.createTextNode(" "));
+    const textSpan = document.createElement("span");
+    textSpan.textContent = plaintext;
+    if (placeholder) textSpan.style.color = "var(--muted)";
+    body.appendChild(textSpan);
+    if (reactions) body.appendChild(reactions);
+    btns.forEach((b) => body.appendChild(b));
   }
 }
 

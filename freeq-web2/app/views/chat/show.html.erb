@@ -3,7 +3,8 @@
 <div id="freeq-chat"
      data-controller="chat"
      data-channel="<%= @bare %>"
-     data-auth-handle="<%= @session.auth.is_a?(Hash) ? @session.auth[:nick] : "" %>"
+     data-auth-handle="<%= @session.authenticated? ? @session.auth_handle : "" %>"
+     data-auth-nick="<%= @session.authenticated? ? @session.auth_nick : (@session.current_nick || "") %>"
      data-auth-did="<%= @session.authenticated? ? @session.auth.did : "" %>">
   <nav>
     <span class="brand">freeq</span>

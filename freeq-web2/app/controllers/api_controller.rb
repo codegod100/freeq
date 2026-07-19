@@ -4,6 +4,10 @@ require "net/http"
 
 # API endpoints for client-side interactions.
 class ApiController < ApplicationController
+  # E2EE SDK posts pre-key bundles without a CSRF header; these endpoints
+  # are same-origin proxies to freeq-server's public keys API.
+  skip_before_action :verify_authenticity_token, only: %i[upload_keys get_keys]
+
   # GET /api/policy/:channel — fetch channel policy via POLICY RULES + INFO.
   def policy
     channel = IrcRender.canonical_channel(params[:channel])
@@ -68,7 +72,58 @@ class ApiController < ApplicationController
     end
   end
 
+  # GET /api/v1/keys/*did — proxy pre-key bundle fetch to upstream freeq-server.
+  def get_keys
+    did = params[:did].to_s
+    if did.empty?
+      render json: { error: "did required" }, status: :bad_request
+      return
+    end
+    proxy_upstream_json(:get, "/api/v1/keys/#{URI.encode_www_form_component(did)}")
+  end
+
+  # POST /api/v1/keys — proxy pre-key bundle upload to upstream freeq-server.
+  # freeq-server requires Bearer = IRC session_id (from API-BEARER NOTICE).
+  def upload_keys
+    bearer = current_session.api_bearer
+    if bearer.nil? || bearer.empty?
+      render json: {
+        error: "Not authenticated to IRC yet — wait for connection, then reload."
+      }, status: :unauthorized
+      return
+    end
+    proxy_upstream_json(:post, "/api/v1/keys", body: request.raw_post, bearer: bearer)
+  end
+
   private
+
+  # Forward a JSON request to FREEQ_UPSTREAM_REST and return the response as-is.
+  def proxy_upstream_json(method, path, body: nil, bearer: nil)
+    base = SessionRegistry.instance.rest_base
+    uri = URI("#{base}#{path}")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == "https")
+    http.read_timeout = 5
+    http.open_timeout = 3
+    req =
+      case method
+      when :get then Net::HTTP::Get.new(uri.request_uri)
+      when :post
+        r = Net::HTTP::Post.new(uri.request_uri)
+        r["Content-Type"] = "application/json"
+        r.body = body.to_s
+        r
+      else
+        raise ArgumentError, "unsupported method #{method}"
+      end
+    req["Authorization"] = "Bearer #{bearer}" if bearer && !bearer.empty?
+    resp = http.request(req)
+    render json: (JSON.parse(resp.body) rescue { "error" => resp.body.to_s }),
+           status: resp.code.to_i
+  rescue StandardError => e
+    Rails.logger.warn("proxy_upstream_json #{path}: #{e.class}: #{e.message}")
+    render json: { error: "upstream unavailable" }, status: :bad_gateway
+  end
 
   # which carries the account/DID. Gap-based timeout like fetch_policy_notices.
   def resolve_did_via_whois(session, nick)

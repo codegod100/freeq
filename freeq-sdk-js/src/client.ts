@@ -1737,6 +1737,15 @@ export class FreeqClient extends EventEmitter {
         const bearerMatch = text.match(/^API-BEARER (\S+)$/);
         if (bearerMatch) {
           this._apiBearer = bearerMatch[1];
+          // Pre-key upload requires this bearer (server-side CTF-19 check).
+          // E2EE may have started on 900 before the NOTICE arrived — re-run
+          // initialize so the pre-key bundle is published with auth.
+          e2ee.setAuthBearer(this._apiBearer);
+          if (this._authDid) {
+            e2ee.initialize(this._authDid, this.serverOrigin).catch((e) =>
+              console.warn('[e2ee] Init/upload after API-BEARER failed:', e),
+            );
+          }
           break; // suppress; do not surface to systemMessage
         }
 

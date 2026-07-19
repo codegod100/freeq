@@ -20,7 +20,7 @@ class SessionState
   attr_reader :session_id, :joined, :channels, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
               :policy_response_queue, :current_nick, :known_nicks, :nick_to_did,
-              :whois_response_queue
+              :whois_response_queue, :api_bearer
   attr_accessor :auth   # :guest or Atproto::OAuthSession
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
   attr_accessor :whois_response_queue  # set to a Queue when capturing WHOIS replies
@@ -44,6 +44,7 @@ class SessionState
     @reaction_cache = {}
     @policy_response_queue = nil  # Set to a Queue when capturing policy NOTICEs
     @recent_rows = {}             # channel => [html rows] for subscribe replay
+    @api_bearer = nil             # freeq-server IRC session_id (from API-BEARER NOTICE)
     @task = nil
     @broadcaster = nil
     @reg_phase = :wait_cap_ack  # :wait_cap_ack, :sasl_challenge, :sasl_result
@@ -432,6 +433,14 @@ class SessionState
       return
     end
 
+    # Capture freeq-server session_id for REST auth (E2EE key upload, etc.).
+    # NOTICE * :API-BEARER <session_id> arrives after successful SASL.
+    if (bearer = parse_api_bearer_notice(line))
+      @api_bearer = bearer
+      Rails.logger.info("Captured API-BEARER for session=#{@session_id[0, 8]}…")
+      return
+    end
+
     # 433 nick in use → retry, but still forward so user sees the error.
     if line.include?(" 433 ")
       irc_in << line
@@ -561,6 +570,14 @@ class SessionState
     return nil unless line.include?("NOTICE") && line.include?("DPOP_NONCE")
     # :server NOTICE target :DPOP_NONCE <nonce>
     if (m = line.match(/DPOP_NONCE\s+(\S+)/))
+      m[1]
+    end
+  end
+
+  # :server NOTICE * :API-BEARER <session_id>
+  def parse_api_bearer_notice(line)
+    return nil unless line.include?("NOTICE") && line.include?("API-BEARER")
+    if (m = line.match(/API-BEARER\s+(\S+)/))
       m[1]
     end
   end
