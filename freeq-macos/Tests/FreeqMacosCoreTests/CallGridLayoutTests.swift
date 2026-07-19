@@ -63,4 +63,44 @@ final class CallGridLayoutTests: XCTestCase {
         let negative = CallGridLayout.columns(for: 4, in: CGSize(width: -10, height: 5))
         XCTAssertTrue((1...4).contains(negative))
     }
+
+    // MARK: - tileSize: the fit-to-space gallery invariant
+
+    /// The core promise: for any tile count, the whole grid (tiles + gaps)
+    /// fits inside the container on BOTH axes. This is what the old
+    /// width-only LazyVGrid violated (rows overflowed and got clipped).
+    func testTileGridAlwaysFitsContainer() {
+        let spacing: CGFloat = 8
+        for n in 1...30 {
+            let size = CallGridLayout.tileSize(for: n, in: wide, spacing: spacing)
+            let cols = CallGridLayout.columns(for: n, in: wide)
+            let rows = Int(ceil(Double(n) / Double(cols)))
+            let usedW = size.width * CGFloat(cols) + spacing * CGFloat(cols - 1)
+            let usedH = size.height * CGFloat(rows) + spacing * CGFloat(rows - 1)
+            XCTAssertLessThanOrEqual(usedW, wide.width + 0.5, "row of \(n) overflows width")
+            XCTAssertLessThanOrEqual(usedH, wide.height + 0.5, "\(n) tiles overflow height")
+        }
+    }
+
+    func testTileSizeKeeps16by9() {
+        for n in [1, 2, 3, 5, 7, 12, 20] {
+            let size = CallGridLayout.tileSize(for: n, in: wide)
+            XCTAssertEqual(size.width / size.height, CallGridLayout.tileAspect, accuracy: 0.001)
+        }
+    }
+
+    func testMoreTilesNeverLargerTiles() {
+        var prev = CGFloat.greatestFiniteMagnitude
+        for n in 1...30 {
+            let w = CallGridLayout.tileSize(for: n, in: wide).width
+            XCTAssertLessThanOrEqual(w, prev + 0.5, "tiles must not grow as count grows")
+            prev = w
+        }
+    }
+
+    func testTileSizeDegenerateContainerIsZero() {
+        XCTAssertEqual(CallGridLayout.tileSize(for: 4, in: .zero), .zero)
+        XCTAssertEqual(CallGridLayout.tileSize(for: 0, in: wide), .zero)
+        XCTAssertEqual(CallGridLayout.tileSize(for: 4, in: CGSize(width: -10, height: 5)), .zero)
+    }
 }
