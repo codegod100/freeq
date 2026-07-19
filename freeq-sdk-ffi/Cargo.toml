@@ -32,6 +32,11 @@ aes-gcm = "0.10"
 #   opus       — Opus audio codec (required for audio)
 #   h264       — H.264 video codec (required; gates moq-media's video codec
 #                paths via the `any_video_codec` cfg)
+#   av1        — AV1 decode/encode via pure-Rust rav1d/rav1e (no system libs).
+#                Required because browsers publish screen/camera video as AV1;
+#                without it native clients reject the track and show no video
+#                ("AV1 support requires the `av1` feature"). We still ENCODE
+#                H.264 outbound; this is purely to DECODE inbound AV1.
 #   videotoolbox — Apple hardware H.264 encode/decode via VideoToolbox
 # Deliberately omitted:
 #   capture    — pulls rusty-capture; the Apple camera backend is stubbed
@@ -40,7 +45,7 @@ aes-gcm = "0.10"
 #                handles rendering via AVSampleBufferDisplayLayer
 moq-native = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", default-features = false, features = ["noq", "websocket", "aws-lc-rs"], optional = true }
 moq-lite = { git = "https://github.com/Frando/moq", branch = "deps/iroh-main", optional = true }
-iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = ["opus", "h264", "videotoolbox"], optional = true }
+iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = ["opus", "h264", "av1", "videotoolbox"], optional = true }
 rustls = { version = "0.23", features = ["aws-lc-rs"], default-features = false, optional = true }
 url = { version = "2", optional = true }
 anyhow = { workspace = true, optional = true }
