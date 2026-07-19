@@ -1338,6 +1338,21 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             }
         }
         Event::ServerNotice { text } => {
+            // Swallow the failure of a speculative "fetch history on view"
+            // (maybe_fetch_history): a DM with a guest peer, or a not-yet-
+            // persisted conversation, answers CHATHISTORY with INVALID_TARGET/
+            // ACCOUNT_REQUIRED naming that same target. The user didn't ask
+            // for history, so surfacing it as an error is just noise. A
+            // user-initiated /msgs targets `*`, so its failure still shows.
+            let is_speculative_history_fail = {
+                let mut t = text.split_whitespace();
+                t.next() == Some("CHATHISTORY")
+                    && t.next().is_some() // error code
+                    && t.next() == Some(app.active_buffer.as_str())
+            };
+            if is_speculative_history_fail {
+                return;
+            }
             // Show in the buffer the user is actually looking at — a FAIL (or
             // any server notice) responding to a command run from a channel/DM
             // was invisible when it only ever landed in the status buffer.
@@ -2725,10 +2740,18 @@ fn parse_timestamp_ms(tags: &std::collections::HashMap<String, String>) -> i64 {
 /// but no history push, so without this an attaching device is blank. The
 /// batch flush dedups by msgid, so overlap with a fresh-join push is
 /// harmless. No-op for status/P2P buffers and anything already requested.
+///
+/// Guests skip *DM* history: guest DMs aren't persisted (both sides need a
+/// DID), so the request has nothing to return and the server rejects it with
+/// ACCOUNT_REQUIRED — which would then surface as an error in the DM window.
+/// Channel history is fine for guests.
 async fn maybe_fetch_history(app: &mut crate::app::App, handle: &client::ClientHandle) {
     let key = app.active_buffer.clone();
-    let eligible =
-        key != "status" && !key.starts_with("p2p:") && app.buffers.contains_key(&key);
+    let is_channel = key.starts_with('#') || key.starts_with('&');
+    let eligible = key != "status"
+        && !key.starts_with("p2p:")
+        && app.buffers.contains_key(&key)
+        && (is_channel || app.authenticated_did.is_some());
     if !eligible || app.history_requested.contains(&key) {
         return;
     }
