@@ -1,0 +1,5 @@
+# Rust / Topcoat build output
+/target/
+
+# Encrypted OAuth session store (local dev)
+.dev-data/

@@ -8,6 +8,18 @@ freeq.db*
 tests.log
 scripts/pi-bridge.env
 
+# Local toolchains / sessions (never commit)
+.bundle/
+.dev-data/
+.venv/
+venv/
+**/.dev-data/
+
+# Per-crate Rust build dirs (workspace root /target is already ignored)
+freeq-webui/target/
+freeq-web2/target/
+freeq-server/target/
+
 # Secrets / keys
 freeq-server/certs/*.pem
 freeq-server/certs/*.key
