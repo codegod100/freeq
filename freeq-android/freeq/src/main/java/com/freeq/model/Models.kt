@@ -801,6 +801,20 @@ class AppState(application: Application) : AndroidViewModel(application) {
     /** Record a server-verified DID (from a message account-tag) on the
      *  nick's channel member entries. NAMES carries no DID over the FFI, so
      *  this is what makes DID-gated UI (verified badge, profile sheet) work. */
+    /** Record a nick↔DID binding and fold any nick-keyed DM thread into the
+     *  DID-keyed one, repointing the active thread. Shared by MemberDid (live
+     *  learning) and the conversation list's partner-did — an OFFLINE peer
+     *  never produces a live MemberDid, so without the TARGETS path a stale
+     *  nick-keyed thread and the DID-keyed one coexist as duplicate rows. */
+    fun adoptDmBinding(nick: String, did: String) {
+        recordUserDid(nick, did)
+        if (DidDisplay.mergeDmBuffers(dmBuffers, unreadCounts, nick, did)
+            && activeChannel.value.equals(nick, ignoreCase = true)
+        ) {
+            activeChannel.value = did
+        }
+    }
+
     fun recordUserDid(nick: String, did: String) {
         knownDids[nick.lowercase()] = did
         didDisplayNames[did] = nick
@@ -1379,7 +1393,10 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 // names it (freeq.at/partner-did); the display nick renders
                 // via displayNameForKey.
                 val key = event.partnerDid ?: event.nick
-                event.partnerDid?.let { state.didDisplayNames[it] = event.nick }
+                // Record the binding AND merge, exactly like MemberDid — an
+                // offline peer never emits one, so a leftover nick-keyed
+                // thread would otherwise duplicate the DID-keyed row.
+                event.partnerDid?.let { state.adoptDmBinding(event.nick, it) }
                 state.getOrCreateDM(key).seedActivityFromTarget(event.timestamp)
             }
 
@@ -1387,13 +1404,7 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                 // A nick↔DID binding was learned (join/whois/account tag).
                 // Record it and fold any nick-keyed DM thread into the
                 // DID-keyed one — a cold first DM keys by nick until now.
-                state.recordUserDid(event.nick, event.did)
-                if (DidDisplay.mergeDmBuffers(
-                        state.dmBuffers, state.unreadCounts, event.nick, event.did
-                    ) && state.activeChannel.value.equals(event.nick, ignoreCase = true)
-                ) {
-                    state.activeChannel.value = event.did
-                }
+                state.adoptDmBinding(event.nick, event.did)
             }
 
             is FreeqEvent.WhoisReply -> {
