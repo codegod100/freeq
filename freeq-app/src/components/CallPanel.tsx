@@ -33,10 +33,45 @@ type MoqDeviceSource = {
   device?: { preferred: { set(id: string): void } };
   source?: MoqSignal<MediaStreamTrack | undefined>;
 };
+// The publish element exposes its underlying hang `Broadcast` at `.broadcast`.
+// Each video rendition (hd/sd) is an `Encoder` whose `config` is a public
+// @moq/signals Signal accepting `EncoderConfig` — the library's documented
+// knob for pinning the published codec. See @moq/publish video/encoder.d.ts.
+type MoqEncoderConfigSignal = { set(c: { codec?: string; keyframeInterval?: number }): void };
 type MoqPublishEl = HTMLElement & {
   audio?: MoqSignal<MoqDeviceSource | undefined>;
   video?: MoqSignal<MoqDeviceSource | undefined>;
+  broadcast?: {
+    video?: {
+      hd?: { config?: MoqEncoderConfigSignal };
+      sd?: { config?: MoqEncoderConfigSignal };
+    };
+  };
 };
+
+// Pin the *published* video codec to H.264 (avc1).
+//
+// Left to its own heuristic the browser probes hardware encoders and, on
+// machines without H.264 hardware *encode* (common on Windows Chrome), lands
+// on hardware AV1. That's great browser↔browser, but the native macOS/iOS/
+// Windows clients have no hardware AV1 *decode* path — they software-decode
+// AV1, fall behind, back up, and the tile stalls to black. H.264 is the one
+// codec every freeq client hardware-decodes (browsers, and native via
+// VideoToolbox), so it's our interop baseline (the same reason WebRTC makes
+// H.264 mandatory-to-implement). `codec: "avc1"` filters the encoder's
+// candidate list to H.264 variants (hardware first, then Chrome's bundled
+// OpenH264 software encoder), guaranteeing an H.264 broadcast.
+//
+// Idempotent and defensive: a bundle predating the `config` signal simply
+// keeps its default heuristic.
+function pinPublishCodecH264(pub: MoqPublishEl): void {
+  try {
+    pub.broadcast?.video?.hd?.config?.set({ codec: 'avc1' });
+    pub.broadcast?.video?.sd?.config?.set({ codec: 'avc1' });
+  } catch {
+    /* older component bundle without EncoderConfig.codec — leave default */
+  }
+}
 // moq-watch exposes a `broadcast` object whose `status` Signal transitions
 // offline → loading → live as a broadcast announces and its catalog
 // arrives. We use it to reveal a screen-share tile only once the
@@ -232,6 +267,9 @@ export function CallPanel() {
     const myBroadcast = broadcastName(sessionId, myNick, myInstance);
     pub.setAttribute('url', moqUrlRef.current);
     pub.setAttribute('name', myBroadcast);
+    // Pin H.264 before `source` starts the encoder, so the codec is chosen
+    // once (no AV1 that native clients can't hardware-decode).
+    pinPublishCodecH264(pub);
     // `invisible` BEFORE `source`: moq-publish reacts to `source` by opening a
     // single getUserMedia. With `invisible` set first it grabs audio only, so a
     // busy/denied camera can't fail the whole (audio) call. When withVideo, we
@@ -483,6 +521,10 @@ export function CallPanel() {
     screenPubElRef.current = pub;
     pub.setAttribute('url', moqUrlRef.current);
     pub.setAttribute('name', screenName);
+    // Pin H.264 before `source` starts the screen encoder — screen share is
+    // where AV1 hurt most (static, high-res content the browser loves to send
+    // as hardware AV1, which native can only software-decode → stall → black).
+    pinPublishCodecH264(pub);
     // Video only — mute before `source` so no audio rendition is ever
     // published even if the browser hands us a display-audio track.
     pub.setAttribute('muted', '');
