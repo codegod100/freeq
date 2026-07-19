@@ -350,7 +350,7 @@ struct AppKitMessageListView: NSViewRepresentable {
                 c.identifier = cellIdentifier
                 return c
             }()
-            cell.host(content(for: items[row]))
+            cell.host(content(for: items[row]), id: items[row].id)
             cell.clamp.overscroll = overscroll(forRow: row)
             return cell
         }
@@ -439,11 +439,24 @@ private final class HostingCellView: NSTableCellView {
     /// real change (not every layout pass) and never loop.
     private var lastIntrinsicHeight: CGFloat = -1
     private var heightSyncScheduled = false
+    /// The row id currently hosted, so we can tell a scroll-reuse (different
+    /// message) apart from a reload-in-place of the SAME row.
+    private var currentItemId: String?
 
-    func host(_ view: AnyView) {
-        // New content → new baseline height; don't treat its first measure as a
-        // change (which would fire a spurious re-measure during reuse/paint).
-        lastIntrinsicHeight = -1
+    func host(_ view: AnyView, id: String) {
+        // Only reset the height baseline when this cell is REUSED for a
+        // different row (scroll recycling): then we skip its first post-layout
+        // measure to avoid a spurious re-measure / scroll jump. When the SAME
+        // row is reloaded in place (a reaction badge added/removed, an edit),
+        // KEEP the baseline so the intrinsic-size backstop notices the height
+        // change and re-measures the row — otherwise the taller content (the
+        // reaction pill) overflows into the row below. This is timing-
+        // independent: it fires on whatever layout pass SwiftUI finally settles
+        // on, so it also covers rows whose neighbour is a taller reply row.
+        if id != currentItemId {
+            currentItemId = id
+            lastIntrinsicHeight = -1
+        }
         let rooted = AnyView(view.environment(clamp))
         // On hover: stop clipping the (taller-than-row) action bar and lift this
         // row's z above its neighbours so the overflow draws on top of them.
