@@ -567,10 +567,9 @@ pub struct App {
     /// `Event::MemberDid` and the conversation list's partner DIDs.
     /// Display-grade only — never used to address outgoing messages.
     pub did_names: HashMap<String, String>,
-    /// DM buffer keys we've already requested history for this session, so
-    /// activating a DM fetches its backlog exactly once (channels get theirs
-    /// pushed on JOIN; DMs have no JOIN).
-    pub dm_history_requested: HashSet<String>,
+    /// Buffer keys (channels and DMs) we've already requested history for
+    /// this session, so activating one fetches its backlog exactly once.
+    pub history_requested: HashSet<String>,
 }
 
 /// Canonical buffer-map key for a name. Nicks and channels are
@@ -657,7 +656,7 @@ impl App {
             pending_url: None,
             nick_hosts: HashMap::new(),
             did_names: HashMap::new(),
-            dm_history_requested: HashSet::new(),
+            history_requested: HashSet::new(),
         }
     }
 
@@ -1363,7 +1362,7 @@ mod tests {
             pending_url: None,
             nick_hosts: HashMap::new(),
             did_names: HashMap::new(),
-            dm_history_requested: HashSet::new(),
+            history_requested: HashSet::new(),
         };
         app.start_batch("b1", "#test");
         app.end_batch("b1");

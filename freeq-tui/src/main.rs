@@ -739,7 +739,7 @@ async fn run_app(
         // pulled its history this session, request it once. Channels get
         // history pushed on JOIN; DMs have no JOIN, so opening one would
         // otherwise show only messages that arrive live.
-        maybe_fetch_dm_history(app, handle).await;
+        maybe_fetch_history(app, handle).await;
 
         // Drain background task results
         if let Some(mut bg_rx) = app.bg_result_rx.take() {
@@ -2352,7 +2352,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                         // A DM has no join: switching to it IS opening it.
                         // Key by the peer's DID when known so it lands on the
                         // persisted (DID-keyed) thread; history backfills via
-                        // maybe_fetch_dm_history once it's active.
+                        // maybe_fetch_history once it's active.
                         let raw = arg.trim();
                         let key = if freeq_sdk::address::is_did(raw) {
                             raw.to_string()
@@ -2703,22 +2703,21 @@ fn parse_timestamp_ms(tags: &std::collections::HashMap<String, String>) -> i64 {
     chrono::Local::now().timestamp_millis()
 }
 
-/// If the active buffer is a DM we haven't fetched history for yet, request
-/// `CHATHISTORY LATEST` once. No-op for channels (history arrives on JOIN),
-/// the status/P2P buffers, and DMs already requested this session. The wire
-/// target is the buffer key (a DID for a DID-keyed DM); the server resolves
-/// it to the canonical conversation.
-async fn maybe_fetch_dm_history(app: &mut crate::app::App, handle: &client::ClientHandle) {
+/// When a channel or DM buffer becomes active, request `CHATHISTORY LATEST`
+/// once — the same "fetch history on view" the web client does. Channels
+/// only receive a server-side history push on a *fresh* JOIN; a multi-device
+/// attach (a second session of a DID already in the channel) gets JOIN/NAMES
+/// but no history push, so without this an attaching device is blank. The
+/// batch flush dedups by msgid, so overlap with a fresh-join push is
+/// harmless. No-op for status/P2P buffers and anything already requested.
+async fn maybe_fetch_history(app: &mut crate::app::App, handle: &client::ClientHandle) {
     let key = app.active_buffer.clone();
-    let is_dm = key != "status"
-        && !key.starts_with('#')
-        && !key.starts_with('&')
-        && !key.starts_with("p2p:")
-        && app.buffers.contains_key(&key);
-    if !is_dm || app.dm_history_requested.contains(&key) {
+    let eligible =
+        key != "status" && !key.starts_with("p2p:") && app.buffers.contains_key(&key);
+    if !eligible || app.history_requested.contains(&key) {
         return;
     }
-    app.dm_history_requested.insert(key.clone());
+    app.history_requested.insert(key.clone());
     let _ = handle.raw(&format!("CHATHISTORY LATEST {key} * 50")).await;
 }
 
