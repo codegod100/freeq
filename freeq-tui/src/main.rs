@@ -936,6 +936,21 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             text,
             tags,
             dm_key, .. } => {
+            // DID is the identity. Render our own messages under our current
+            // nick no matter which client alias sent them — a TUI as `-n nap`,
+            // a web session as the handle nick `zapnap` — so one DID reads as
+            // one person, and /edit and /delete (which select own messages by
+            // nick) then find them all. Guarded by the `account` tag equalling
+            // our DID so a peer with no account tag is never mistaken for us.
+            let from = if app
+                .authenticated_did
+                .as_deref()
+                .is_some_and(|my| tags.get("account").map(String::as_str) == Some(my))
+            {
+                app.nick.clone()
+            } else {
+                from
+            };
             // One conversation, one buffer: channels key by name; DMs key
             // by the SDK's dm_key (peer DID when known, else nick) so an
             // echo and the peer's reply land in the same thread.
