@@ -350,7 +350,7 @@ struct AppKitMessageListView: NSViewRepresentable {
                 c.identifier = cellIdentifier
                 return c
             }()
-            cell.host(content(for: items[row]), id: items[row].id)
+            cell.host(content(for: items[row]))
             cell.clamp.overscroll = overscroll(forRow: row)
             return cell
         }
@@ -435,28 +435,9 @@ private final class HostingCellView: NSTableCellView {
     /// action bar stays inside the viewport. Injected into the hosted content.
     let clamp = RowClamp()
     private var hosting: ReportingHostingView?
-    /// Last intrinsic height we synced to the table, so we only re-measure on a
-    /// real change (not every layout pass) and never loop.
-    private var lastIntrinsicHeight: CGFloat = -1
     private var heightSyncScheduled = false
-    /// The row id currently hosted, so we can tell a scroll-reuse (different
-    /// message) apart from a reload-in-place of the SAME row.
-    private var currentItemId: String?
 
-    func host(_ view: AnyView, id: String) {
-        // Only reset the height baseline when this cell is REUSED for a
-        // different row (scroll recycling): then we skip its first post-layout
-        // measure to avoid a spurious re-measure / scroll jump. When the SAME
-        // row is reloaded in place (a reaction badge added/removed, an edit),
-        // KEEP the baseline so the intrinsic-size backstop notices the height
-        // change and re-measures the row — otherwise the taller content (the
-        // reaction pill) overflows into the row below. This is timing-
-        // independent: it fires on whatever layout pass SwiftUI finally settles
-        // on, so it also covers rows whose neighbour is a taller reply row.
-        if id != currentItemId {
-            currentItemId = id
-            lastIntrinsicHeight = -1
-        }
+    func host(_ view: AnyView) {
         let rooted = AnyView(view.environment(clamp))
         // On hover: stop clipping the (taller-than-row) action bar and lift this
         // row's z above its neighbours so the overflow draws on top of them.
@@ -511,16 +492,24 @@ private final class HostingCellView: NSTableCellView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.heightSyncScheduled = false
-            guard let h = self.hosting else { return }
-            let newHeight = h.intrinsicContentSize.height
-            guard newHeight >= 0, abs(newHeight - self.lastIntrinsicHeight) > 0.5 else { return }
-            let hadBaseline = self.lastIntrinsicHeight >= 0
-            self.lastIntrinsicHeight = newHeight
-            // Skip the first measure (baseline set on host()); only real
-            // subsequent changes trigger a re-measure.
-            guard hadBaseline, let table = self.enclosingTableView() else { return }
+            guard let h = self.hosting, let table = self.enclosingTableView() else { return }
             let row = table.row(for: self)
             guard row >= 0 else { return }
+            // Compare the SwiftUI content's settled intrinsic height to the
+            // height the table currently gives this row. They diverge exactly
+            // when the hosted content changed in place (a reaction badge added,
+            // an edit, a coalesced pill expanding) but the row hasn't been
+            // re-measured yet — so the taller content overflows into the next
+            // row. Note the row so the table re-measures it. Keying off the
+            // ACTUAL row height (not a stored baseline) makes this both cell-
+            // identity-independent (reloadData may hand us a recycled cell) and
+            // timing-independent (fires on whatever layout pass SwiftUI finally
+            // settles on, so it covers a neighbour that's a taller reply row).
+            // It converges: after the re-measure the heights match, so no loop
+            // and no spurious note during scroll reuse (heights already agree).
+            let intrinsic = h.intrinsicContentSize.height
+            let current = table.rect(ofRow: row).height
+            guard intrinsic >= 0, abs(intrinsic - current) > 0.5 else { return }
             table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
         }
     }
