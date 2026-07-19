@@ -250,6 +250,25 @@ struct AppKitMessageListView: NSViewRepresentable {
                 tableView.reloadData(forRowIndexes: changed,
                                      columnIndexes: IndexSet(integer: 0))
                 tableView.noteHeightOfRows(withIndexesChanged: changed)
+                // The reloaded SwiftUI content lays out asynchronously, so the
+                // synchronous noteHeightOfRows above measures the PRE-change
+                // height. A row that just gained a reaction badge would keep
+                // its old (shorter) height and the pill would overflow into the
+                // row below (the reaction-overlaps-next-message bug). The
+                // per-cell intrinsic-size backstop can't cover this either — a
+                // reload resets the cell's height baseline, so its first
+                // post-layout measure is intentionally skipped. Re-measure the
+                // changed rows once SwiftUI has laid the new content out.
+                let changedIds = changed.map { newItems[$0].id }
+                DispatchQueue.main.async { [weak self, weak tableView] in
+                    guard let self, let tableView else { return }
+                    let rows = IndexSet(changedIds.compactMap { id in
+                        self.items.firstIndex(where: { $0.id == id })
+                    })
+                    if !rows.isEmpty {
+                        tableView.noteHeightOfRows(withIndexesChanged: rows)
+                    }
+                }
             }
         }
 
