@@ -504,9 +504,10 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+				};
 			};
 			buildConfigurationList = BD9DC688F0069EE17592B144 /* Build configuration list for PBXProject "freeq-macos" */;
-			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -516,6 +517,7 @@
 			mainGroup = 20C10B5BC807908C13D0B198;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			productRefGroup = B3F2C852EDD7824E6CA1537D /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
