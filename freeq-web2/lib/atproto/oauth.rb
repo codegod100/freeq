@@ -33,21 +33,25 @@ module Atproto
 
     # Complete the OAuth flow after the callback. Returns an OAuthSession.
     def complete(auth_code)
-      access_token, token_did = OAuth.exchange_code(
+      tokens = OAuth.exchange_code(
         @token_endpoint, auth_code, @code_verifier, @redirect_uri,
         @client_id, @dpop_key
       )
+      token_did = tokens[:sub]
       if token_did && token_did != @did
         raise "DID mismatch: resolved #{@did} but token is for #{token_did}"
       end
-      dpop_nonce = OAuth.probe_dpop_nonce(@pds_url, access_token, @dpop_key)
+      dpop_nonce = OAuth.probe_dpop_nonce(@pds_url, tokens[:access_token], @dpop_key)
       OAuthSession.new(
         did: @did,
         handle: @handle,
-        access_token: access_token,
+        access_token: tokens[:access_token],
         pds_url: @pds_url,
         dpop_key: @dpop_key,
-        dpop_nonce: dpop_nonce
+        dpop_nonce: dpop_nonce,
+        refresh_token: tokens[:refresh_token],
+        token_endpoint: @token_endpoint,
+        client_id: @client_id
       )
     end
   end
@@ -164,7 +168,53 @@ module Atproto
       raise "Token exchange failed (#{resp.code}): #{resp.body}" unless resp.is_a?(Net::HTTPSuccess)
 
       token_resp = JSON.parse(resp.body)
-      [token_resp["access_token"], token_resp["sub"]]
+      {
+        access_token: token_resp["access_token"],
+        refresh_token: token_resp["refresh_token"],
+        sub: token_resp["sub"]
+      }
+    end
+
+    # Refresh a DPoP-bound access token. Mutates `session` in place.
+    # Returns true on success, false if refresh is impossible / failed.
+    def refresh!(session)
+      rt = session.refresh_token.to_s
+      te = session.token_endpoint.to_s
+      cid = session.client_id.to_s
+      return false if rt.empty? || te.empty? || cid.empty?
+
+      params = {
+        "grant_type" => "refresh_token",
+        "refresh_token" => rt,
+        "client_id" => cid
+      }
+      dpop_proof = session.dpop_key.proof("POST", te, nonce: session.dpop_nonce)
+      resp = http_post_form(te, params, "DPoP" => dpop_proof)
+
+      if [400, 401].include?(resp.code.to_i) && (nonce = resp["dpop-nonce"])
+        session.dpop_nonce = nonce
+        dpop_proof = session.dpop_key.proof("POST", te, nonce: nonce)
+        resp = http_post_form(te, params, "DPoP" => dpop_proof)
+      end
+
+      unless resp.is_a?(Net::HTTPSuccess)
+        Rails.logger.warn("OAuth refresh failed (#{resp.code}): #{resp.body.to_s[0, 200]}") if defined?(Rails)
+        return false
+      end
+
+      token_resp = JSON.parse(resp.body)
+      session.access_token = token_resp["access_token"] if token_resp["access_token"]
+      session.refresh_token = token_resp["refresh_token"] if token_resp["refresh_token"]
+      # Fresh DPoP nonce for subsequent getSession / SASL.
+      if (n = resp["dpop-nonce"])
+        session.dpop_nonce = n
+      else
+        session.dpop_nonce = probe_dpop_nonce(session.pds_url, session.access_token, session.dpop_key)
+      end
+      true
+    rescue StandardError => e
+      Rails.logger.warn("OAuth refresh error: #{e.class}: #{e.message}") if defined?(Rails)
+      false
     end
 
     def probe_dpop_nonce(pds_url, access_token, dpop_key)

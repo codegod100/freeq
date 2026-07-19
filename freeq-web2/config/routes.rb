@@ -23,6 +23,7 @@ Rails.application.routes.draw do
   # (avoids CORS and keeps getServerOrigin() = window.location.origin correct).
   get "api/v1/keys/*did", to: "api#get_keys", format: false
   post "api/v1/keys", to: "api#upload_keys"
+  get "api/irc_status", to: "api#irc_status"
   # AT Protocol OAuth.
   get "login", to: "sessions#new"
   post "login", to: "sessions#create"

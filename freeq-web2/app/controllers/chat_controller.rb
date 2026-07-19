@@ -82,8 +82,10 @@ class ChatController < ApplicationController
     end
 
     # No REST history for DMs — request via CHATHISTORY over WS.
+    # allow_replay! is done inside request_dm_backlog! so the BATCH is not
+    # suppressed (channel history is suppressed when REST already rendered).
     @history = []
-    @session.request_dm_backlog!(@dm_nick) if @session.ws_state == :ready
+    @session.request_dm_backlog!(@dm_nick)
 
     @parent_lookup = {}
     @own_nick = @session.authenticated? ? @session.auth_nick : @session.current_nick
@@ -91,7 +93,12 @@ class ChatController < ApplicationController
     @members_html = nil
     @is_dm = true
 
-    @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @dm_nick)
+    # as_dm: true — never JOIN the partner nick as a channel.
+    @session.spawn_upstream_if_needed(
+      SessionRegistry.instance.upstream_url,
+      @dm_nick,
+      as_dm: true
+    )
     render :show
   end
 

@@ -40,7 +40,8 @@ One upstream WebSocket connection per browser session. The Rails process:
 
 ```bash
 cd freeq-web2
-git add freeq-web2/   # nix flakes only see git-tracked files; index only, no commit
+# Pure flakes only see the Git tree. With colocated jj, commit freeq-web2
+# paths first (`jj commit`), or last-resort: `git add freeq-web2/` (index only).
 nix develop
 # inside the shell, deps are auto-installed; just run:
 bin/rails server -b 127.0.0.1 -p 3000

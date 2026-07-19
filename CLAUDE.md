@@ -9,6 +9,53 @@
 > already ready — these are the identity/provisioning steps ad-hoc signing
 > can't do. See also `docs/QUEUE-FOR-CHAD.md` for other participation items.
 
+---
+
+## Version control (agents)
+
+This repo is **colocated jj + git**. Agents should use **`jj`** for day-to-day
+VCS — not raw `git` — except where a tool only speaks Git (e.g. pure Nix
+flakes needing a Git tree, or `gh` for GitHub).
+
+### Preferred commands
+
+| Goal | Use |
+|------|-----|
+| Status | `jj status` |
+| Diff | `jj diff` / `jj diff -r @-` |
+| Log | `jj log -n 10` |
+| Describe current change | `jj describe -m "…"` |
+| Finish change + open next | `jj commit -m "…"` (snapshot, then new empty `@`) |
+| Move bookmark | `jj bookmark set main -r @-` (or `jj bookmark move main --to @-`) |
+| Push | `jj git push` (or `jj git push --bookmark main`) |
+| Pull / import remote | `jj git fetch` then rebase/onto as needed |
+| Undo last local op | `jj undo` |
+
+### Commit / ship hygiene
+
+- **Never** update git config (`user.name` / `user.email`); jj uses its own
+  user settings.
+- **Never** force-push or rewrite public history unless the user explicitly
+  asks (`jj git push --force` / abandon of shared revisions).
+- Do **not** commit secrets (`.env`, `.dev-data/`, keys, session stores).
+- Prefer one focused change per `jj commit` with a complete-sentence message
+  (why, not just what).
+- Only push when the user asks to push / ship / publish.
+- For GitHub PRs, still use `gh`; the underlying remote is Git. Point the PR
+  at the bookmark you pushed (`main` or a feature bookmark).
+
+### Colocated Git notes
+
+- Working copy is shared with Git. After `jj commit`, the change is a Git
+  commit once a bookmark (e.g. `main`) points at it.
+- Prefer `jj git push` over `git push`.
+- Avoid `git add` / `git commit` / `git push` unless jj cannot do the job.
+- Pure Nix flakes only see files present in the **Git** tree: finish a jj
+  change that includes those paths (`jj commit`), or stage with `git add`
+  only as a last resort for a local flake eval without finishing the change.
+
+---
+
 **Requirements:**
 - `session_id` must be unique per TCP connection
 - `nonce` must be cryptographically random

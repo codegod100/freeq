@@ -496,34 +496,48 @@ export default class ChatController extends Controller {
   // ── Direct Messages (E2EE) ──────────────────────────────────────────
 
   /**
-   * Generate identity keys and publish the pre-key bundle. Retries while
-   * the Rails BFF is still waiting for SASL / API-BEARER from freeq-server.
+   * Generate identity keys and publish the pre-key bundle.
+   * Server-side upload_keys already waits for API-BEARER (~12s), so we only
+   * retry a few times with long gaps — no tight status polling.
    */
   async ensureE2ee(did) {
+    // Dedupe concurrent calls (Stimulus reconnect / Turbo can re-enter).
+    if (this._e2eePromise) return this._e2eePromise;
+    this._e2eePromise = this._ensureE2eeOnce(did).finally(() => {
+      this._e2eePromise = null;
+    });
+    return this._e2eePromise;
+  }
+
+  async _ensureE2eeOnce(did) {
     const origin = dm.getServerOrigin();
-    for (let attempt = 0; attempt < 8; attempt++) {
-      if (attempt > 0) {
-        await new Promise((r) => setTimeout(r, 1000 + attempt * 500));
+    // 3 attempts: immediate (server waits for SASL), then 4s, then 10s.
+    const delays = [0, 4000, 10000];
+    for (let i = 0; i < delays.length; i++) {
+      if (delays[i] > 0) {
+        await new Promise((r) => setTimeout(r, delays[i]));
       }
       await dm.initE2ee(did, origin);
       try {
         const resp = await fetch(
           `${origin}/api/v1/keys/${encodeURIComponent(did)}`
         );
-        if (resp.ok) return;
+        if (resp.ok) {
+          console.log("[dm] E2EE pre-key published for", did);
+          return;
+        }
       } catch {
-        // network blip — retry
+        // ignore transient network errors
       }
     }
     console.warn(
-      "[dm] E2EE pre-key not published yet; DMs may fail until the page reloads after connect"
+      "[dm] E2EE pre-key not published — IRC SASL may have failed. Sign out and sign in again."
     );
   }
 
   setupDm() {
     // Initialize E2EE when authenticated (DID available on the page).
-    // Pre-key upload needs the BFF to hold an IRC API-BEARER (arrives
-    // after SASL), so retry until our bundle is published upstream.
+    // Pre-key upload needs the BFF to hold an IRC API-BEARER (after SASL).
     const did = this.element.dataset.authDid;
     if (did) {
       this.ensureE2ee(did);
@@ -697,19 +711,23 @@ export default class ChatController extends Controller {
         continue;
       }
 
-      // 2) Own row without cache (reload / other tab): show placeholder.
-      //    Double Ratchet cannot decrypt our own outbound ciphertext.
+      // 2) Own row — DR cannot decrypt our send chain. Prefer echo cache
+      //    (now persisted across refresh). Fall back to a muted placeholder.
       const fromLower = fromNick.toLowerCase();
       const isSelf =
         (ownDid && fromDid && fromDid === ownDid) ||
         (ownNick && fromLower === ownNick.toLowerCase()) ||
         (ownHandle && fromLower === ownHandle.toLowerCase());
       if (isSelf) {
-        this.applyDecryptedRow(row, "[encrypted message]", { placeholder: true });
+        this.applyDecryptedRow(row, "[encrypted message — sent by you]", {
+          placeholder: true,
+        });
         continue;
       }
 
       // 3) Partner message — decrypt with session for their DID.
+      //    Process rows in DOM order so the ratchet advances correctly on
+      //    CHATHISTORY replay after refresh.
       const remoteDid =
         fromDid && fromDid.startsWith("did:")
           ? fromDid
@@ -724,17 +742,23 @@ export default class ChatController extends Controller {
       const plaintext = await dm.decryptDm(remoteDid, wire, dm.getServerOrigin());
       if (plaintext) {
         this.applyDecryptedRow(row, plaintext);
-      } else if (!row.dataset.decryptTried) {
-        row.dataset.decryptTried = "true";
-        // Leave ciphertext visible; a later scheduleDecryptPass may succeed
-        // once the session is established from another message.
+      } else {
+        // Soft placeholder; leave decryptable so a later pass can retry
+        // after E2EE init / session re-establish.
+        this.applyDecryptedRow(
+          row,
+          "[could not decrypt]",
+          { placeholder: true, sticky: false },
+        );
       }
     }
   }
 
-  applyDecryptedRow(row, plaintext, { placeholder = false } = {}) {
-    row.dataset.text = placeholder ? row.dataset.text : plaintext;
-    row.dataset.decrypted = "true";
+  applyDecryptedRow(row, plaintext, { placeholder = false, sticky = true } = {}) {
+    if (!placeholder) {
+      row.dataset.text = plaintext;
+    }
+    if (sticky) row.dataset.decrypted = "true";
     row.setAttribute("data-encrypted", "true");
     const body = row.querySelector(".body");
     if (!body) return;

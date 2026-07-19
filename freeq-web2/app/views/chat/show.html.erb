@@ -57,8 +57,10 @@
         </ul>
       </div>
       <div id="user-info">
+        <%# #user-handle is live-updated when IRC renames us (Guest*) or SASL fails. %>
         <% if @session.authenticated? %>
-          <div class="user-handle">🔒 <%= @session.auth_handle %></div>
+          <div class="user-handle" id="user-handle">🔒 <%= @session.auth_handle %></div>
+          <div id="user-irc-note" class="user-irc-note" style="display:none;color:var(--muted);font-size:.65rem;margin-top:.15rem"></div>
           <div class="user-actions">
             <form method="POST" action="/logout" style="display:inline">
               <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
@@ -66,7 +68,8 @@
             </form>
           </div>
         <% else %>
-          <div class="user-handle guest">👤 <%= @session.current_nick || "guest" %></div>
+          <div class="user-handle guest" id="user-handle">👤 <%= @session.current_nick || "guest" %></div>
+          <div id="user-irc-note" class="user-irc-note" style="display:none;color:var(--muted);font-size:.65rem;margin-top:.15rem"></div>
           <div class="user-actions">
             <a href="/login" class="btn-link">Sign in</a>
           </div>

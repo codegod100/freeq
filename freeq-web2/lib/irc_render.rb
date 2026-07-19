@@ -12,6 +12,43 @@ module IrcRender
     s.start_with?("#") ? s : "##{s}"
   end
 
+  # Parse freeq-server force-rename notices issued at registration:
+  #   "Nick foo is registered — renamed to Guest12345. Authenticate to reclaim."
+  #   "foo is registered to another identity. You are bar (tied to your account)."
+  # Returns the new nick string, or nil.
+  def parse_forced_nick_rename(line)
+    text = line.to_s
+    if (m = text.match(/renamed to (Guest\d+)/i))
+      return m[1]
+    end
+    if (m = text.match(/You are (\S+) \(tied to your account\)/i))
+      return m[1]
+    end
+    nil
+  end
+
+  # Live #user-handle markup for the sidebar widget.
+  # irc_ok: true when SASL succeeded (API-BEARER present).
+  def user_handle_html(nick:, auth_handle: nil, irc_ok: false)
+    nick = nick.to_s
+    if irc_ok && auth_handle.to_s != ""
+      %(<div class="user-handle" id="user-handle">🔒 #{html_escape(auth_handle)}</div>)
+    else
+      label = nick.empty? ? "guest" : nick
+      %(<div class="user-handle guest" id="user-handle">👤 #{html_escape(label)}</div>)
+    end
+  end
+
+  def user_irc_note_text(nick:, irc_ok: false, authenticated: false)
+    return "" if irc_ok
+    if nick.to_s.match?(/\AGuest\d+\z/i)
+      return "IRC as #{nick} — OAuth token expired or SASL failed; sign out & sign in"
+    end
+    return "IRC not authenticated — sign out & sign in (token likely expired)" if authenticated
+
+    ""
+  end
+
   # Parse `@key=value;... :rest` → [tags_hash, rest_without_tags].
   def parse_irc_tags(line)
     line = line.chomp.delete_suffix("\r")

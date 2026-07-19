@@ -113,19 +113,29 @@ class SessionState
   # ── History replay fallback ──────────────────────────────────────────
   #
   # Normally JOIN chathistory replay is suppressed because REST scrollback
-  # already rendered it. When REST fails (e.g. 403 on +i/+k channels),
-  # allow the replay for that channel to render instead.
+  # already rendered it. When REST fails (e.g. 403 on +i/+k channels) or
+  # for DMs (no REST history at all), allow the replay to render instead.
+  #
+  # Keys are lowercased; channel targets keep their leading #/& (never
+  # invent one for nick/DM targets).
 
-  def allow_replay!(channel)
-    synchronize { @replay_channels << IrcRender.canonical_channel(channel) }
+  def allow_replay!(target)
+    synchronize { @replay_channels << history_target_key(target) }
   end
 
-  def replay_allowed?(channel)
-    synchronize { @replay_channels.include?(IrcRender.canonical_channel(channel)) }
+  def replay_allowed?(target)
+    synchronize { @replay_channels.include?(history_target_key(target)) }
   end
 
-  def clear_replay!(channel)
-    synchronize { @replay_channels.delete(IrcRender.canonical_channel(channel)) }
+  def clear_replay!(target)
+    synchronize { @replay_channels.delete(history_target_key(target)) }
+  end
+
+  # Normalize CHATHISTORY / BATCH / row-cache keys to bare lowercase so
+  # channel "#freeq" and Cable room "freeq" hit the same bucket, and DM
+  # nicks never get a spurious leading #.
+  def history_target_key(target)
+    target.to_s.strip.sub(/\A[#&]/, "").downcase
   end
 
   def track_replay_batch(id)
@@ -149,10 +159,25 @@ class SessionState
     enqueue_outbound("CHATHISTORY LATEST #{IrcRender.canonical_channel(channel)} * #{limit}\r\n")
   end
 
-  # Request DM history via CHATHISTORY over WS.
+  # Request DM history via CHATHISTORY over WS. Safe to call before the
+  # upstream is ready — the request is held until registration finishes.
   def request_dm_backlog!(nick, limit = 50)
-    return unless @ws_state == :ready
+    nick = nick.to_s
+    return if nick.empty?
 
+    # Always allow the chathistory BATCH for this nick through the
+    # broadcaster (DMs have no REST scrollback to suppress against).
+    allow_replay!(nick)
+    @pending_dm_backlog = [nick, limit]
+    flush_pending_dm_backlog!
+  end
+
+  def flush_pending_dm_backlog!
+    return unless @ws_state == :ready
+    return unless @pending_dm_backlog
+
+    nick, limit = @pending_dm_backlog
+    @pending_dm_backlog = nil
     enqueue_outbound("CHATHISTORY LATEST #{nick} * #{limit}\r\n")
   end
 
@@ -172,15 +197,17 @@ class SessionState
 
   # ── Recent message rows ──────────────────────────────────────────────
   #
-  # The broadcaster caches the last N rendered message rows per channel.
-  # ChatChannel#subscribed replays them so broadcasts that raced the
-  # subscription (page-load JOIN replay, CHATHISTORY, live messages
-  # during navigation) aren't lost.
+  # The broadcaster caches the last N rendered message rows per target
+  # (channel or DM nick). ChatChannel#subscribed replays them so
+  # broadcasts that raced the subscription aren't lost.
+  #
+  # Keys use history_target_key — channels keep #, DM nicks stay bare
+  # (must match CableReady stream bare + client room param).
 
   RECENT_ROWS_PER_CHANNEL = 50
 
-  def cache_row(channel, html)
-    c = IrcRender.canonical_channel(channel)
+  def cache_row(target, html)
+    c = history_target_key(target)
     synchronize do
       rows = (@recent_rows[c] ||= [])
       rows << html
@@ -188,13 +215,13 @@ class SessionState
     end
   end
 
-  def recent_rows(channel)
-    synchronize { (@recent_rows[IrcRender.canonical_channel(channel)] || []).dup }
+  def recent_rows(target)
+    synchronize { (@recent_rows[history_target_key(target)] || []).dup }
   end
 
-  # Drain the cache for a channel (one-shot subscribe replay).
-  def take_recent_rows(channel)
-    synchronize { @recent_rows.delete(IrcRender.canonical_channel(channel)) || [] }
+  # Drain the cache for a target (one-shot subscribe replay).
+  def take_recent_rows(target)
+    synchronize { @recent_rows.delete(history_target_key(target)) || [] }
   end
 
   # Force the WS task to reconnect so it picks up the new auth state.
@@ -282,7 +309,38 @@ class SessionState
 
   # ── Upstream WS ───────────────────────────────────────────────────────
 
-  def spawn_upstream_if_needed(upstream_url, channel)
+  # Ensure the upstream IRC WS is running.
+  # - Channel targets (#foo / bare channel name): JOIN + client channel list.
+  # - DM nicks: never JOIN; only ensure WS + broadcaster (and flush DM backlog).
+  #
+  # `as_dm:` must be true when the target is a nick (chat#dm). Bare channel
+  # names from chat#show omit # and are still channels.
+  def spawn_upstream_if_needed(upstream_url, channel, as_dm: false)
+    if as_dm
+      ensure_broadcaster!
+      @task_mutex.synchronize do
+        if @task && !@task.alive?
+          @task = nil
+          @ws_state = :disconnected
+          @join_sent.clear
+        end
+        if @task && @task.alive?
+          flush_pending_dm_backlog!
+          return
+        end
+        # Prefer an already-joined channel as registration primary so we
+        # never JOIN a nick. Fall back to #freeq.
+        primary = synchronize { @channels.to_a.first } || "#freeq"
+        primary = IrcRender.canonical_channel(primary)
+        extras = synchronize { @channels.to_a.map { |c| IrcRender.canonical_channel(c) } } - [primary]
+        @join_sent << primary
+        @join_sent.merge(extras)
+        @task = Thread.new { run_upstream(upstream_url.to_s, primary) }
+        extras.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
+      end
+      return
+    end
+
     target = IrcRender.canonical_channel(channel)
     add_channel!(target) # record + persist (client-authoritative)
     ensure_broadcaster!
@@ -301,6 +359,7 @@ class SessionState
           @join_sent << target
           enqueue_outbound("JOIN #{target}\r\n")
         end
+        flush_pending_dm_backlog!
         return
       end
 
@@ -441,11 +500,20 @@ class SessionState
       return
     end
 
-    # 433 nick in use → retry, but still forward so user sees the error.
+    # 433 nick in use → retry with a random guest nick, track it.
     if line.include?(" 433 ")
+      new_nick = guest_nick
+      apply_nick!(new_nick)
       irc_in << line
-      driver.text("NICK #{guest_nick}\r\n")
+      driver.text("NICK #{new_nick}\r\n")
       return
+    end
+
+    # Server force-rename (registered nick / Guest*) arrives as NOTICE after
+    # registration. Update current_nick before the broadcaster paints UI.
+    if (renamed = IrcRender.parse_forced_nick_rename(line))
+      apply_nick!(renamed)
+      # Fall through so the notice still appears in the message pane.
     end
 
     # Registration state machine — each phase may consume the line or
@@ -457,6 +525,9 @@ class SessionState
       if (caps = parse_cap_ack(line))
         Rails.logger.info("CAP ACK: #{caps.inspect}")
         if caps.any? { |c| c.casecmp?("sasl") } && authenticated?
+          # Access tokens expire; refresh when we have a refresh_token so
+          # SASL pds-oauth getSession doesn't fail with a dead token.
+          refresh_oauth_before_sasl!
           # Start SASL ATPROTO-CHALLENGE.
           driver.text("AUTHENTICATE ATPROTO-CHALLENGE\r\n")
           @reg_phase = :sasl_challenge
@@ -496,11 +567,27 @@ class SessionState
       if line.include?(" 903 ")
         Rails.logger.info("SASL authentication successful for #{auth_handle}")
         finish_registration(driver, channel)
+        # Widget already shows 🔒 handle from page render; re-assert after SASL.
+        begin
+          IrcBroadcaster.broadcast_user_identity(self)
+        rescue StandardError
+          nil
+        end
         consumed = true
       elsif line.include?(" 904 ")
-        Rails.logger.warn("SASL authentication failed; proceeding as guest")
+        Rails.logger.warn(
+          "SASL authentication failed for #{auth_handle}; proceeding as guest. " \
+          "line=#{line.to_s[0, 200]}"
+        )
+        @api_bearer = nil
         @reg_phase = :wait_cap_ack
         finish_registration(driver, channel)
+        # Guest rename NOTICE often follows; if not, still flip widget off 🔒.
+        begin
+          IrcBroadcaster.broadcast_user_identity(self)
+        rescue StandardError
+          nil
+        end
         consumed = true
       elsif (nonce = parse_dpop_nonce_notice(line))
         update_dpop_nonce!(nonce)
@@ -529,6 +616,7 @@ class SessionState
     driver.text("JOIN #{channel}\r\n")
     self.ws_state = :ready
     @reg_phase = :ready
+    flush_pending_dm_backlog!
     flush_outbound(driver)
   end
 
@@ -597,5 +685,35 @@ class SessionState
 
   def guest_nick
     "web" + rand(0xffffffff).to_s(16)
+  end
+
+  # Update the live IRC nick (after 433 retry or server force-rename).
+  def apply_nick!(nick)
+    return if nick.nil? || nick.empty?
+    @current_nick = nick
+    @known_nicks ||= Set.new
+    @known_nicks << nick
+  end
+
+  # Best-effort token refresh before SASL. Existing sessions without a
+  # refresh_token (logged in before we stored them) skip this — user must
+  # re-sign-in once to pick up a refresh_token.
+  def refresh_oauth_before_sasl!
+    return unless authenticated?
+    return if @auth.refresh_token.to_s.empty?
+
+    ok = Atproto::OAuth.refresh!(@auth)
+    if ok
+      Rails.logger.info("OAuth access token refreshed for #{auth_handle}")
+      begin
+        SessionRegistry.instance.persist_auth(@session_id, @auth)
+      rescue StandardError => e
+        Rails.logger.warn("persist after refresh failed: #{e.class}: #{e.message}")
+      end
+    else
+      Rails.logger.warn(
+        "OAuth refresh failed for #{auth_handle} — SASL may fail until re-login"
+      )
+    end
   end
 end

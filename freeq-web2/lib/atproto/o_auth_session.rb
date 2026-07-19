@@ -4,15 +4,20 @@ require_relative "dpop_key"
 module Atproto
   # Authenticated AT Protocol session. Carried by SessionState for SASL.
   class OAuthSession
-    attr_accessor :did, :handle, :access_token, :pds_url, :dpop_key, :dpop_nonce
+    attr_accessor :did, :handle, :access_token, :pds_url, :dpop_key, :dpop_nonce,
+                  :refresh_token, :token_endpoint, :client_id
 
-    def initialize(did:, handle:, access_token:, pds_url:, dpop_key:, dpop_nonce: nil)
+    def initialize(did:, handle:, access_token:, pds_url:, dpop_key:, dpop_nonce: nil,
+                   refresh_token: nil, token_endpoint: nil, client_id: nil)
       @did = did
       @handle = handle
       @access_token = access_token
       @pds_url = pds_url
       @dpop_key = dpop_key
       @dpop_nonce = dpop_nonce
+      @refresh_token = refresh_token
+      @token_endpoint = token_endpoint
+      @client_id = client_id
     end
 
     def nick
@@ -26,7 +31,10 @@ module Atproto
         "access_token" => @access_token,
         "pds_url" => @pds_url,
         "dpop_key" => @dpop_key.serialize,
-        "dpop_nonce" => @dpop_nonce
+        "dpop_nonce" => @dpop_nonce,
+        "refresh_token" => @refresh_token,
+        "token_endpoint" => @token_endpoint,
+        "client_id" => @client_id
       }
     end
 
@@ -49,7 +57,10 @@ module Atproto
         access_token: h["access_token"],
         pds_url: h["pds_url"],
         dpop_key: key,
-        dpop_nonce: h["dpop_nonce"]
+        dpop_nonce: h["dpop_nonce"],
+        refresh_token: h["refresh_token"],
+        token_endpoint: h["token_endpoint"],
+        client_id: h["client_id"]
       )
     end
   end

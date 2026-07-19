@@ -18,6 +18,14 @@ module IrcBroadcaster
   # Process a single inbound IRC line for a known viewing context, or
   # fan-out to every joined channel when the line is not channel-scoped.
   def handle(session, line)
+    # Server force-renamed us (Guest* / derived nick). Update sidebar widget.
+    # session_state already applied the nick; this paints the UI.
+    if (renamed = IrcRender.parse_forced_nick_rename(line))
+      session.apply_nick!(renamed)
+      broadcast_user_identity(session)
+      # Fall through so the NOTICE still shows in chat.
+    end
+
     # Forward policy NOTICEs to the capture queue if one is active, and
     # suppress them from the chat output.
     if session.policy_response_queue && policy_notice?(line)
@@ -212,6 +220,50 @@ module IrcBroadcaster
     else
       nil
     end
+  end
+
+  # Push current IRC identity into the sidebar #user-handle widget on every
+  # stream this session is subscribed to (per-room + session stream).
+  def broadcast_user_identity(session)
+    irc_ok = session.api_bearer.to_s != ""
+    handle_html = IrcRender.user_handle_html(
+      nick: session.current_nick,
+      auth_handle: (session.authenticated? ? session.auth_handle : nil),
+      irc_ok: irc_ok && session.authenticated?
+    )
+    note = IrcRender.user_irc_note_text(
+      nick: session.current_nick,
+      irc_ok: irc_ok && session.authenticated?,
+      authenticated: session.authenticated?
+    )
+
+    ops = lambda do |cable|
+      cable.outer_html(selector: "#user-handle", html: handle_html)
+      if note.empty?
+        cable.set_attribute(selector: "#user-irc-note", name: "style", value: "display:none")
+        cable.text_content(selector: "#user-irc-note", text: "")
+      else
+        cable.set_attribute(
+          selector: "#user-irc-note",
+          name: "style",
+          value: "display:block;color:var(--muted);font-size:.65rem;margin-top:.15rem"
+        )
+        cable.text_content(selector: "#user-irc-note", text: note)
+      end
+    end
+
+    # Session-wide stream (ChatChannel always joins freeq:session:<id>).
+    session_cable = CableReady::Channel.new("freeq:session:#{session.session_id}")
+    ops.call(session_cable)
+    session_cable.broadcast
+
+    session.joined.each do |ch|
+      c = cable_for(ch)
+      ops.call(c)
+      c.broadcast
+    end
+  rescue => e
+    Rails.logger.warn("broadcast_user_identity: #{e.class}: #{e.message}") if defined?(Rails)
   end
 
   def broadcast_reaction(channel, msgid, emoji, nick, added)

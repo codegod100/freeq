@@ -13,18 +13,62 @@
 import * as e2ee from "@freeq/sdk/e2ee";
 
 const DM_LIST_KEY = "freeq-dm-list";
+// Survives refresh so our own ENC3 rows stay readable. DR only decrypts the
+// *partner's* send chain; outbound ciphertext is not round-trippable.
+const ECHO_STORAGE_KEY = "freeq-dm-echo-v1";
+const ECHO_MAX = 200;
+const ECHO_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-// Ciphertext → plaintext for our own outbound DMs. The Double Ratchet only
-// lets us decrypt the *partner's* send chain; freeq-app uses the same
-// pattern (cacheEchoPlaintext) so the server echo renders as readable text.
+// Ciphertext → plaintext for our own outbound DMs (in-memory + localStorage).
 const echoPlaintext = new Map();
+
+function loadEchoStore() {
+  try {
+    const raw = localStorage.getItem(ECHO_STORAGE_KEY);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    const now = Date.now();
+    for (const [wire, entry] of Object.entries(obj)) {
+      if (!entry || typeof entry.p !== "string") continue;
+      if (now - (entry.t || 0) > ECHO_TTL_MS) continue;
+      echoPlaintext.set(wire, entry.p);
+    }
+  } catch {
+    // ignore corrupt storage
+  }
+}
+
+function persistEchoStore() {
+  try {
+    const now = Date.now();
+    // Drop expired / over-cap entries (oldest first).
+    const entries = [...echoPlaintext.entries()];
+    while (entries.length > ECHO_MAX) {
+      const [old] = entries.shift();
+      echoPlaintext.delete(old);
+    }
+    const obj = {};
+    for (const [wire, p] of echoPlaintext) {
+      obj[wire] = { p, t: now };
+    }
+    localStorage.setItem(ECHO_STORAGE_KEY, JSON.stringify(obj));
+  } catch {
+    // quota / private mode — in-memory still works for the session
+  }
+}
+
+// Hydrate on module load so refresh can restore own messages immediately.
+loadEchoStore();
 
 /** Remember plaintext for a wire ENC3: body we just encrypted. */
 export function cacheEcho(wire, plaintext) {
-  if (wire && plaintext != null) echoPlaintext.set(wire, plaintext);
+  if (wire && plaintext != null) {
+    echoPlaintext.set(wire, plaintext);
+    persistEchoStore();
+  }
 }
 
-/** Look up (and keep) cached plaintext for an outbound ENC3 body. */
+/** Look up cached plaintext for an outbound ENC3 body. */
 export function getEcho(wire) {
   return echoPlaintext.get(wire) || null;
 }

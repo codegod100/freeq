@@ -115,5 +115,8 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
   not the user's global gem dir).
 - Without the flake, `make` is not on the default PATH; run bundle/native
   builds inside `nix-shell -p gnumake --run '...'`.
-- Nix flakes only see git-tracked files. Run `git add freeq-web2/` (index
-  only, no commit needed) so `nix develop` can read the flake + sources.
+- Pure Nix flakes only see files in the **Git** tree. This monorepo uses
+  colocated **jj**: finish a change that includes freeq-web2
+  (`jj commit -m "…"`) so the flake can read sources, or as a last resort
+  `git add freeq-web2/` (index only) for a local flake eval. Prefer `jj`
+  for all other VCS ops — see root `AGENTS.md` § Version control.

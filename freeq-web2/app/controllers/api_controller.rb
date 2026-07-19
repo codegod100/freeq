@@ -84,18 +84,51 @@ class ApiController < ApplicationController
 
   # POST /api/v1/keys — proxy pre-key bundle upload to upstream freeq-server.
   # freeq-server requires Bearer = IRC session_id (from API-BEARER NOTICE).
+  # Page load races SASL: wait briefly for the NOTICE before giving up.
   def upload_keys
-    bearer = current_session.api_bearer
+    session = current_session
+    # Touch upstream so SASL can complete while we wait for the bearer.
+    session.spawn_upstream_if_needed(
+      SessionRegistry.instance.upstream_url,
+      session.joined.first || session.channels.to_a.first || "#freeq"
+    )
+    bearer = wait_for_api_bearer(session, timeout: 12.0)
     if bearer.nil? || bearer.empty?
       render json: {
-        error: "Not authenticated to IRC yet — wait for connection, then reload."
+        error: "Not authenticated to IRC yet — SASL may still be running or failed. " \
+               "Wait for status=connected, or sign out and sign in again.",
+        ws_state: session.ws_state,
+        has_bearer: false
       }, status: :unauthorized
       return
     end
     proxy_upstream_json(:post, "/api/v1/keys", body: request.raw_post, bearer: bearer)
   end
 
+  # GET /api/irc_status — browser polls this before/while publishing pre-keys.
+  def irc_status
+    s = current_session
+    render json: {
+      ws_state: s.ws_state,
+      authenticated: s.authenticated?,
+      has_bearer: s.api_bearer.to_s != "",
+      nick: s.current_nick,
+      did: (s.authenticated? ? s.auth.did : nil)
+    }
+  end
+
   private
+
+  def wait_for_api_bearer(session, timeout: 10.0)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      b = session.api_bearer
+      return b if b && !b.empty?
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep 0.15
+    end
+    nil
+  end
 
   # Forward a JSON request to FREEQ_UPSTREAM_REST and return the response as-is.
   def proxy_upstream_json(method, path, body: nil, bearer: nil)

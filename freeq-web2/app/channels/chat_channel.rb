@@ -8,13 +8,17 @@ class ChatChannel < ApplicationCable::Channel
     return reject if bare.empty?
 
     stream_for(bare)
+    # Session-wide stream for identity/nick updates (Guest rename, SASL).
+    stream_from "freeq:session:#{session_id}"
 
     # Replay cached member roster + connection status so the panel isn't
     # blank when the subscription arrives after the upstream already sent
     # 353 NAMES (which would have been broadcast before anyone was listening).
     session = SessionRegistry.instance.get(connection.session_id)
-    canonical = IrcRender.canonical_channel(bare)
-    members = session.channel_members[canonical]
+    # Channels use #name for member maps; DM rooms are bare nicks (no #).
+    channel_key = bare.start_with?("#") ? bare : "##{bare}"
+    members = session.channel_members[channel_key] ||
+              session.channel_members[IrcRender.canonical_channel(bare)]
 
     cr = CableReady::Channel.new(broadcasting_for(bare))
     cr.inner_html(selector: "#member-panel", html: IrcRender.render_member_list(members)) if members
@@ -29,7 +33,9 @@ class ChatChannel < ApplicationCable::Channel
     # this subscription confirmed (page-load race, chathistory replay)
     # are otherwise dropped by the pubsub. Client-side filterDupes strips
     # any overlap with REST scrollback by data-msgid.
-    rows = session.take_recent_rows(canonical)
+    # Use the bare room key so DM nicks match cache_row/history_target_key
+    # (do NOT force a leading # — that was dropping all DM cache hits).
+    rows = session.take_recent_rows(bare)
     rows.each do |row|
       cr.append(selector: "#messages", html: row)
     end
