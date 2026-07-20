@@ -34,7 +34,9 @@ struct SplitRootView: View {
         .onChange(of: appState.pendingDMNick) { _, nick in
             guard let nick else { return }
             appState.pendingDMNick = nil
-            selection = nick
+            // Canonicalize (nick → DID key when known) and make sure the
+            // buffer exists so the detail column has something to show.
+            selection = appState.getOrCreateDM(nick).name
         }
         .onAppear { selection = appState.activeChannel }
     }
@@ -52,14 +54,17 @@ private struct SidebarListView: View {
             $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
         }
         let dms = appState.dmBuffers
-            .filter { !appState.isBlocked(nick: $0.name) }
+            .filter { !appState.isBufferBlocked($0.name) }
             .sorted { $0.lastActivity > $1.lastActivity }
         return channels + dms
     }
 
     private var filtered: [ChannelState] {
         guard !searchText.isEmpty else { return allConversations }
-        return allConversations.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        return allConversations.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+                || appState.displayNameForKey($0.name).localizedCaseInsensitiveContains(searchText)
+        }
     }
 
     private func isChannel(_ name: String) -> Bool { name.hasPrefix("#") || name.hasPrefix("&") }

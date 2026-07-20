@@ -31,11 +31,18 @@ struct UserProfileSheet: View {
     private var isDirect: Bool { directActor != nil }
 
     /// The freeq nick we can actually Message, if this identity is on freeq and
-    /// isn't us.
+    /// isn't us. Falls back to the nick this sheet was opened with when the
+    /// directory lookup has nothing — did:key identities (bots) never resolve
+    /// there, but a channel member with a known nick is still messageable
+    /// (startDM canonicalizes to the DID-keyed thread via getOrCreateDM).
     private var messageableNick: String? {
-        guard let n = freeqIdentity?.nick, !n.isEmpty,
-              n.lowercased() != appState.nick.lowercased() else { return nil }
-        return n
+        if let n = freeqIdentity?.nick, !n.isEmpty,
+           n.lowercased() != appState.nick.lowercased() {
+            return n
+        }
+        guard !isDirect, !nick.isEmpty,
+              nick.lowercased() != appState.nick.lowercased() else { return nil }
+        return nick
     }
 
     /// Channels we share with this person (intersection of theirs and ours).

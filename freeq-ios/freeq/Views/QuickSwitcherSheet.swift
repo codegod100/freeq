@@ -22,7 +22,12 @@ struct QuickSwitcherSheet: View {
     private var filtered: [ChannelState] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         guard !q.isEmpty else { return buffers }
-        return buffers.filter { $0.name.lowercased().contains(q) }
+        // Match the rendered name too — a DID-keyed DM should be findable by
+        // the peer's nick, not their raw DID.
+        return buffers.filter {
+            $0.name.lowercased().contains(q)
+                || appState.displayNameForKey($0.name).lowercased().contains(q)
+        }
     }
 
     var body: some View {
@@ -48,7 +53,7 @@ struct QuickSwitcherSheet: View {
                                 Image(systemName: buf.name.hasPrefix("#") ? "number" : "person.fill")
                                     .foregroundStyle(.secondary)
                                     .frame(width: 18)
-                                Text(buf.name).foregroundStyle(.primary)
+                                Text(appState.displayNameForKey(buf.name)).foregroundStyle(.primary)
                                 Spacer()
                                 if let u = appState.unreadCounts[buf.name], u > 0 {
                                     Text("\(u)")

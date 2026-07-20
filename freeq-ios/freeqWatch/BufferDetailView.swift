@@ -14,6 +14,11 @@ struct BufferDetailView: View {
         watch.snapshot?.recent[bufferName] ?? []
     }
 
+    /// Human title from the snapshot — never a raw DID buffer key.
+    private var displayTitle: String {
+        watch.snapshot?.buffers.first(where: { $0.name == bufferName })?.title ?? bufferName
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollViewReader { proxy in
@@ -61,7 +66,7 @@ struct BufferDetailView: View {
             .padding(.horizontal, 6)
             .padding(.bottom, 4)
         }
-        .navigationTitle(bufferName.hasPrefix("#") ? bufferName : "@\(bufferName)")
+        .navigationTitle(bufferName.hasPrefix("#") ? displayTitle : "@\(displayTitle)")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showingReplySheet) {
             VStack(spacing: 8) {

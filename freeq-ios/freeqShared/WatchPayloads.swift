@@ -6,15 +6,22 @@ import Foundation
 
 public struct WatchBufferSummary: Codable, Hashable, Identifiable {
     public var id: String { name }
-    public let name: String          // `#room` or peer nick
+    public let name: String          // buffer key: `#room`, peer nick, or peer DID
+    /// Human name for DID-keyed DM buffers; nil when `name` is already human.
+    public let displayName: String?
     public let unread: Int
     public let lastFrom: String?
     public let lastText: String?
     public let lastAt: Date?
     public let isChannel: Bool
 
-    public init(name: String, unread: Int, lastFrom: String?, lastText: String?, lastAt: Date?, isChannel: Bool) {
+    /// What the watch renders — never a raw DID.
+    public var title: String { displayName ?? name }
+
+    public init(name: String, displayName: String? = nil, unread: Int, lastFrom: String?,
+                lastText: String?, lastAt: Date?, isChannel: Bool) {
         self.name = name
+        self.displayName = displayName
         self.unread = unread
         self.lastFrom = lastFrom
         self.lastText = lastText

@@ -7,6 +7,8 @@ import Foundation
 /// Spotlight can find one and pass it to an action.
 struct ChannelEntity: AppEntity, Identifiable {
     let id: String
+    /// Human name — the peer's nick for DID-keyed DM buffers.
+    var name: String = ""
 
     static var typeDisplayRepresentation: TypeDisplayRepresentation {
         TypeDisplayRepresentation(
@@ -16,7 +18,7 @@ struct ChannelEntity: AppEntity, Identifiable {
     }
 
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: "\(id)")
+        DisplayRepresentation(title: "\(name.isEmpty ? id : name)")
     }
 
     static var defaultQuery = ChannelQuery()
@@ -39,7 +41,7 @@ struct ChannelQuery: EntityQuery {
     private func all() async -> [ChannelEntity] {
         guard let state = AppState.shared else { return [] }
         let names = state.channels.map { $0.name } + state.dmBuffers.map { $0.name }
-        return names.map { ChannelEntity(id: $0) }
+        return names.map { ChannelEntity(id: $0, name: state.displayNameForKey($0)) }
     }
 }
 

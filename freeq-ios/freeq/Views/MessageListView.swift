@@ -88,7 +88,7 @@ struct MessageListView: View {
                     .buttonStyle(.plain)
 
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(channel.messages.enumerated()), id: \.element.id) { idx, msg in
+                        ForEach(Array(channel.messages.enumerated()), id: \.element.renderKey) { idx, msg in
                             let showHeader = shouldShowHeader(at: idx)
                             let showDate = shouldShowDateSeparator(at: idx)
 
@@ -171,7 +171,7 @@ struct MessageListView: View {
                     Button(action: {
                         if let last = channel.messages.last {
                             withAnimation(.easeOut(duration: 0.2)) {
-                                proxy.scrollTo(last.id, anchor: .bottom)
+                                proxy.scrollTo(last.renderKey, anchor: .bottom)
                             }
                         }
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -311,16 +311,16 @@ struct MessageListView: View {
     private func scrollToBottom(proxy: ScrollViewProxy) {
         // Triple-scroll: immediate + short delay + after CHATHISTORY arrives
         if let last = channel.messages.last {
-            proxy.scrollTo(last.id, anchor: .bottom)
+            proxy.scrollTo(last.renderKey, anchor: .bottom)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             if let last = channel.messages.last {
-                proxy.scrollTo(last.id, anchor: .bottom)
+                proxy.scrollTo(last.renderKey, anchor: .bottom)
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             if let last = channel.messages.last {
-                proxy.scrollTo(last.id, anchor: .bottom)
+                proxy.scrollTo(last.renderKey, anchor: .bottom)
             }
         }
     }
@@ -331,7 +331,7 @@ struct MessageListView: View {
         let isOwnMessage = last.from == appState.nick
         if isOwnMessage || isNearBottom {
             withAnimation(.easeOut(duration: 0.15)) {
-                proxy.scrollTo(last.id, anchor: .bottom)
+                proxy.scrollTo(last.renderKey, anchor: .bottom)
             }
             showScrollButton = false
             isNearBottom = true
@@ -410,13 +410,17 @@ struct MessageListView: View {
             Label("Copy Text", systemImage: "doc.on.doc")
         }
 
-        Button(action: {
-            print("[PIN] channel=\(channel.name) msgid=\(msg.id)")
-            appState.sendRaw("PIN \(channel.name) \(msg.id)")
-            ToastManager.shared.show("PIN \(msg.id.prefix(8))...", icon: "pin.fill")
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        }) {
-            Label("Pin Message", systemImage: "pin")
+        // PIN is op-only server-side (ERR_CHANOPRIVSNEEDED otherwise) — don't
+        // offer it to non-ops; the rejection numeric isn't surfaced in UI and
+        // the optimistic toast would claim success on a silent failure.
+        if channel.memberInfo(for: appState.nick)?.isOp ?? false {
+            Button(action: {
+                appState.sendRaw("PIN \(channel.name) \(msg.id)")
+                ToastManager.shared.show("Pinned", icon: "pin.fill")
+                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            }) {
+                Label("Pin Message", systemImage: "pin")
+            }
         }
 
         Button(action: {
@@ -561,7 +565,7 @@ struct MessageListView: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 3)
         .frame(maxWidth: .infinity, alignment: .center)
-        .id(msg.id)
+        .id(msg.renderKey)
     }
 
     private func deletedMessage(_ msg: ChatMessage, showHeader: Bool) -> some View {
@@ -579,7 +583,7 @@ struct MessageListView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 2)
-        .id(msg.id)
+        .id(msg.renderKey)
     }
 
     // MARK: - Message Rows
@@ -743,7 +747,7 @@ struct MessageListView: View {
             insertion: .move(edge: .bottom).combined(with: .opacity),
             removal: .opacity
         ))
-        .id(msg.id)
+        .id(msg.renderKey)
     }
 
     // MARK: - Reply Context

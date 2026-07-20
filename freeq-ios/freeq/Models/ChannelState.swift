@@ -1,0 +1,157 @@
+import Foundation
+import Combine
+
+/// A channel with its messages and members.
+class ChannelState: ObservableObject, Identifiable {
+    let name: String
+    @Published var messages: [ChatMessage] = []
+    @Published var members: [MemberInfo] = []
+    @Published var topic: String = ""
+    @Published var typingUsers: [String: Date] = [:]  // nick -> last typing time
+    @Published var pins: Set<String> = []  // pinned message IDs
+    /// Tracks the most recent activity (message, join, topic change, etc.)
+    var lastActivity: Date = Date()
+
+    var id: String { name }
+
+    var activeTypers: [String] {
+        let cutoff = Date().addingTimeInterval(-5)
+        return typingUsers.filter { $0.value > cutoff }.map { $0.key }.sorted()
+    }
+
+    init(name: String) {
+        self.name = name
+    }
+
+    private var messageIds: Set<String> = []
+    /// id → index into `messages`. Makes findMessage / reactions / edits /
+    /// deletes / reply resolution O(1) instead of a linear scan of the whole
+    /// (unbounded) transcript on every TAGMSG and every reply row. Rebuilt
+    /// when indices shift (out-of-order history insert); updated in place on
+    /// the common in-order live append.
+    private var messageIndex: [String: Int] = [:]
+
+    func findMessage(byId id: String) -> Int? {
+        messageIndex[id]
+    }
+
+    func memberInfo(for nick: String) -> MemberInfo? {
+        members.first(where: { $0.nick.lowercased() == nick.lowercased() })
+    }
+
+    private func rebuildMessageIndex() {
+        messageIndex.removeAll(keepingCapacity: true)
+        for (i, m) in messages.enumerated() { messageIndex[m.id] = i }
+    }
+
+    /// Adopt another buffer's transcript (used when a DM buffer is renamed
+    /// after a peer NICK change). Copies the messages AND rebuilds the dedup
+    /// set + index — previously only `messages` was copied, leaving the dedup
+    /// Set empty so the next live/history message re-appended and duplicated
+    /// the whole transcript.
+    func adoptMessages(from other: ChannelState) {
+        messages = other.messages
+        messageIds = Set(messages.map(\.id))
+        rebuildMessageIndex()
+    }
+
+    /// Append a message only if its ID hasn't been seen before.
+    /// Inserts in timestamp order to handle CHATHISTORY arriving after live messages.
+    func appendIfNew(_ msg: ChatMessage) {
+        guard !messageIds.contains(msg.id) else { return }
+        messageIds.insert(msg.id)
+
+        // If the message is older than the last message, insert in sorted
+        // position (history backfill) — this shifts subsequent indices, so
+        // rebuild the map. The common live case appends at the end (O(1)).
+        if let last = messages.last, msg.timestamp < last.timestamp {
+            let idx = messages.firstIndex(where: { $0.timestamp > msg.timestamp }) ?? messages.endIndex
+            messages.insert(msg, at: idx)
+            rebuildMessageIndex()
+        } else {
+            messages.append(msg)
+            messageIndex[msg.id] = messages.count - 1
+        }
+        // Update last activity for sorting
+        if msg.timestamp > lastActivity {
+            lastActivity = msg.timestamp
+        }
+    }
+
+    func applyEdit(originalId: String, newId: String?, newText: String) {
+        if let idx = findMessage(byId: originalId) {
+            messages[idx].text = newText
+            messages[idx].isEdited = true
+            if let newId = newId {
+                messages[idx].id = newId
+                messageIds.insert(newId)
+                // Re-key the index: the slot is unchanged, only its id moved.
+                messageIndex.removeValue(forKey: originalId)
+                messageIndex[newId] = idx
+            }
+        }
+    }
+
+    /// Tombstone via identity swap — mirrors applyEdit's mechanics exactly,
+    /// which are the only in-place update that reliably renders: rows carry
+    /// an explicit `.id(msg.id)` in the view, so a same-id mutation stays
+    /// pinned to the stale row while an id CHANGE releases it and rebuilds.
+    /// The original id stays in `messageIds` so a replay can't resurrect it.
+    func applyDelete(msgId: String) {
+        if let idx = findMessage(byId: msgId) {
+            var tomb = messages[idx]
+            tomb.id = msgId + ":tombstone"
+            tomb.isDeleted = true
+            tomb.text = ""
+            messages[idx] = tomb
+            messageIds.insert(tomb.id)
+            messageIndex.removeValue(forKey: msgId)
+            messageIndex[tomb.id] = idx
+        }
+    }
+
+    func applyReaction(msgId: String, emoji: String, from: String) {
+        if let idx = findMessage(byId: msgId) {
+            var reactions = messages[idx].reactions
+            var nicks = reactions[emoji] ?? Set<String>()
+            nicks.insert(from)
+            reactions[emoji] = nicks
+            messages[idx].reactions = reactions
+        }
+    }
+
+    func removeReaction(msgId: String, emoji: String, from: String) {
+        guard let idx = findMessage(byId: msgId) else { return }
+        var reactions = messages[idx].reactions
+        guard var nicks = reactions[emoji] else { return }
+        nicks.remove(from)
+        if nicks.isEmpty {
+            reactions.removeValue(forKey: emoji)
+        } else {
+            reactions[emoji] = nicks
+        }
+        messages[idx].reactions = reactions
+    }
+}
+
+/// Member info for the member list.
+struct MemberInfo: Identifiable, Equatable {
+    let nick: String
+    let isOp: Bool
+    let isHalfop: Bool
+    let isVoiced: Bool
+    let awayMsg: String?
+    let did: String?
+
+    var id: String { nick.lowercased() }
+
+    var prefix: String {
+        if isOp { return "@" }
+        if isHalfop { return "%" }
+        if isVoiced { return "+" }
+        return ""
+    }
+
+    var isAway: Bool { awayMsg != nil }
+    var isVerified: Bool { did != nil }
+}

@@ -60,7 +60,7 @@ private struct BufferRow: View {
                     .foregroundStyle(buffer.isChannel ? .blue : .green)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(buffer.isChannel ? buffer.name : "@\(buffer.name)")
+                Text(buffer.isChannel ? buffer.title : "@\(buffer.title)")
                     .font(.system(size: 13, weight: buffer.unread > 0 ? .semibold : .regular))
                     .lineLimit(1)
                 if let from = buffer.lastFrom, let text = buffer.lastText {

@@ -133,3 +133,25 @@ targets:
         IPHONEOS_DEPLOYMENT_TARGET: "18.0"
     dependencies:
       - target: freeq
+
+# Declared schemes survive xcodegen regens (hand-made Xcode schemes don't —
+# a regen deletes them). freeq-zerosum bakes in the zerosum deployment via
+# the env vars ServerConfig reads; note env vars only apply to Xcode-launched
+# runs — a home-screen launch (notification tap, Spotlight) falls back to
+# freeq.at, so use the ServerConfig sed for untethered device testing.
+schemes:
+  freeq:
+    build:
+      targets:
+        freeq: all
+    run:
+      config: Debug
+  freeq-zerosum:
+    build:
+      targets:
+        freeq: all
+    run:
+      config: Debug
+      environmentVariables:
+        IRC_SERVER: "irc.zerosum.org:6667"
+        AUTH_BROKER_BASE: "https://irc.zerosum.org"

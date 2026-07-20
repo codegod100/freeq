@@ -100,7 +100,7 @@ struct SearchSheet: View {
     private func searchResultRow(_ result: SearchResult) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 8) {
-                Text(result.channel)
+                Text(appState.displayNameForKey(result.channel))
                     .font(.fqCaption.weight(.medium))
                     .foregroundColor(Theme.accent)
 

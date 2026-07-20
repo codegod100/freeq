@@ -25,6 +25,8 @@ let package = Package(
             path: "freeq/Models",
             sources: [
                 "ChatMessage.swift",
+                "ChannelState.swift",
+                "DidDisplay.swift",
                 "MessageActions.swift",
                 "ServerConfig.swift",
                 "FreeqDirectory.swift",

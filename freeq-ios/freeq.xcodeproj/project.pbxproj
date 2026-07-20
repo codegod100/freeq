@@ -35,6 +35,7 @@
 		3752BB3B1DC74EFFB3D5FB13 /* BufferRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E69472A0DAAB1972CC0FB351 /* BufferRoutingTests.swift */; };
 		398FB4288B111CB2E4FBD016 /* SplitRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E30BF0C98AC2E9B7A006E95 /* SplitRootView.swift */; };
 		3DE43AC9D91A05A551A0C97F /* ChatMessage.swift in Sources */ = {isa = PBXBuildFile; fileRef = F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */; };
+		4047D67A42E04325ACEFECDA /* DidDisplay.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA678EF1B2762175E6668C55 /* DidDisplay.swift */; };
 		45EE47A41295B02CF2A3A689 /* AudioTestView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09AFFD5DE516371B6CC31172 /* AudioTestView.swift */; };
 		466133069EF5AF5E57B45ABF /* ShortcutsHelpSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 750B92E90FF075DF9E61E91F /* ShortcutsHelpSheet.swift */; };
 		4BC265FF53A0BB0A3BFECD1A /* FreeqCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 883DBC919B347571BC792852 /* FreeqCommands.swift */; };
@@ -75,6 +76,7 @@
 		AA5C84EC4D1A8D5C37828312 /* CallControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EA2E012985430B01C97EBC /* CallControlIntents.swift */; };
 		B198511552ED975806FF24E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CC6F468E7EEBA9A6B686019 /* ContentView.swift */; };
 		B2DF4E800D832B107555FD28 /* CallActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7278D584F74B58B9922F23BC /* CallActivityAttributes.swift */; };
+		B62B3DA9AC4576EACB59616B /* ChannelState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA24DC11B2BF464C7175F93 /* ChannelState.swift */; };
 		B757EEF191C41D1327706DB2 /* FreeqSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71E14BE7827AB5FE22AC3FF6 /* FreeqSDK.xcframework */; };
 		B792746D241CB91D4B15E377 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40F27BC70CA9C7E4307D2A3 /* SearchSheet.swift */; };
 		B851BB1F9C23ED67884D5621 /* CallMicCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = 17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */; };
@@ -178,6 +180,7 @@
 		58407D4C1041AA5F085B8CDC /* BlueskyEmbed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BlueskyEmbed.swift; sourceTree = "<group>"; };
 		59139B7746A5521BDD375C83 /* freeqWatchApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = freeqWatchApp.swift; sourceTree = "<group>"; };
 		5B107817CBF9268860E40AC0 /* SettingsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsTab.swift; sourceTree = "<group>"; };
+		5CA24DC11B2BF464C7175F93 /* ChannelState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChannelState.swift; sourceTree = "<group>"; };
 		5DDE25216F85C26CCEE21C66 /* NetworkMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkMonitor.swift; sourceTree = "<group>"; };
 		5E30BF0C98AC2E9B7A006E95 /* SplitRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitRootView.swift; sourceTree = "<group>"; };
 		607BA33EFE4FD90620B86761 /* PresenceDot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PresenceDot.swift; sourceTree = "<group>"; };
@@ -237,6 +240,7 @@
 		D2EE05180089D95AD96D9B76 /* AuthSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthSession.swift; sourceTree = "<group>"; };
 		D528FB66B3A58A4A06E4379C /* Notifications.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Notifications.swift; sourceTree = "<group>"; };
 		D567BC948344D3BCA2F31223 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = System/Library/Frameworks/SwiftUI.framework; sourceTree = SDKROOT; };
+		DA678EF1B2762175E6668C55 /* DidDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DidDisplay.swift; sourceTree = "<group>"; };
 		DB66829DE40DA60667ECBB43 /* AppState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppState.swift; sourceTree = "<group>"; };
 		E434E1E24A88662FBDFFCA35 /* ToastView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastView.swift; sourceTree = "<group>"; };
 		E4A25735A9E045465A3F1BAD /* ChatsTab.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatsTab.swift; sourceTree = "<group>"; };
@@ -405,7 +409,9 @@
 				78CD9FF3B40DF51F4177AA84 /* CallCameraCapture.swift */,
 				81C362339EDE04DE16E1064E /* CallKitManager.swift */,
 				17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */,
+				5CA24DC11B2BF464C7175F93 /* ChannelState.swift */,
 				F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */,
+				DA678EF1B2762175E6668C55 /* DidDisplay.swift */,
 				87BB1081CEB9C7213E2A317E /* FreeqDirectory.swift */,
 				25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */,
 				B28D17294C06F964661A5E97 /* KeychainHelper.swift */,
@@ -595,6 +601,7 @@
 				};
 			};
 			buildConfigurationList = CF425087341A09E5CC8DE165 /* Build configuration list for PBXProject "freeq" */;
+			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -604,7 +611,6 @@
 			mainGroup = 01499C2CDD8D0D2662C1FB6B;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
-			productRefGroup = F62CC89110A6FF28365B0816 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
@@ -697,12 +703,14 @@
 				0D90DB6A860ED297CC10A2CF /* CallView.swift in Sources */,
 				160583C1C4A46B49DB909D79 /* CatchUpDigestSheet.swift in Sources */,
 				8051F4C388919E36E3F7D21B /* ChannelSettingsSheet.swift in Sources */,
+				B62B3DA9AC4576EACB59616B /* ChannelState.swift in Sources */,
 				9ADC4B8DCD3BCB087C8FF8C2 /* ChatDetailView.swift in Sources */,
 				3DE43AC9D91A05A551A0C97F /* ChatMessage.swift in Sources */,
 				F984D50CE55E26A76B8B7B8D /* ChatsTab.swift in Sources */,
 				D96D2C4DCB89EED18C1AED57 /* ComposeView.swift in Sources */,
 				D0209F9328C9586D5B2849DE /* ConnectView.swift in Sources */,
 				B198511552ED975806FF24E9 /* ContentView.swift in Sources */,
+				4047D67A42E04325ACEFECDA /* DidDisplay.swift in Sources */,
 				F5578CDEA68BCCE1C35408EF /* DiscoverTab.swift in Sources */,
 				BDE5C52E5FD4C024CDA4D798 /* EmptyStateView.swift in Sources */,
 				4BC265FF53A0BB0A3BFECD1A /* FreeqCommands.swift in Sources */,

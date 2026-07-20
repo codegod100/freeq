@@ -21,7 +21,20 @@ struct ChatMessage: Identifiable, Equatable {
     var origin: String? = nil
     var reactions: [String: Set<String>] = [:]  // emoji -> set of nicks
 
-    static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
-        lhs.id == rhs.id
+    // Equality is memberwise (synthesized). An id-only == here made SwiftUI
+    // treat same-id content changes (delete tombstone, reactions) as "equal"
+    // and skip the row re-render — the row then stayed stale until the whole
+    // list was rebuilt. Dedup by id belongs to ChannelState.messageIds, not
+    // to Equatable.
+
+    /// Row identity for the transcript ForEach. Folds the renderable content
+    /// into the identity so any in-place change (delete tombstone, edit,
+    /// reaction) is a structural remove+insert — an in-place update of a
+    /// same-identity row has been observed to not reach the screen.
+    /// Only stable within a run (hashValue is seeded per-launch); never
+    /// persist it.
+    var renderKey: String {
+        let reactionsPart = reactions.map { "\($0.key)\($0.value.count)" }.sorted().joined()
+        return "\(id)|\(isDeleted ? 1 : 0)|\(isEdited ? 1 : 0)|\(text.hashValue)|\(reactionsPart)"
     }
 }

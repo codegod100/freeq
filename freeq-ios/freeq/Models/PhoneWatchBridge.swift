@@ -55,6 +55,7 @@ final class PhoneWatchBridge: NSObject {
             let last = ch.messages.last(where: { !$0.from.isEmpty && !$0.isDeleted })
             return WatchBufferSummary(
                 name: ch.name,
+                displayName: state.displayNameForKey(ch.name),
                 unread: state.unreadCounts[ch.name] ?? 0,
                 lastFrom: last?.from,
                 lastText: last?.text,

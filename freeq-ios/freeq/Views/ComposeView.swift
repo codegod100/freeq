@@ -572,7 +572,7 @@ struct ComposeView: View {
     private var placeholder: String {
         if appState.replyingTo != nil { return "Reply..." }
         if appState.editingMessage != nil { return "Edit message..." }
-        return "Message \(appState.activeChannel ?? "")"
+        return "Message \(appState.activeChannel.map { appState.displayNameForKey($0) } ?? "")"
     }
 
     private func contextBar(icon: String, label: String, preview: String, color: Color, onDismiss: @escaping () -> Void) -> some View {

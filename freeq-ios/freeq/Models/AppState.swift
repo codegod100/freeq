@@ -133,19 +133,10 @@ extension ISO8601DateFormatter {
     }()
 }
 
-/// A channel with its messages and members.
-class ChannelState: ObservableObject, Identifiable {
-    let name: String
-    @Published var messages: [ChatMessage] = []
-    @Published var members: [MemberInfo] = []
-    @Published var topic: String = ""
-    @Published var typingUsers: [String: Date] = [:]  // nick -> last typing time
-    @Published var pins: Set<String> = []  // pinned message IDs
-    /// Tracks the most recent activity (message, join, topic change, etc.)
-    var lastActivity: Date = Date()
-
-    var id: String { name }
-
+// ChannelState + MemberInfo live in Models/ChannelState.swift (SwiftPM
+// FreeqIosCore member, so the DM identity/merge logic is unit-testable).
+// The AvatarCache-dependent member collapsing stays here, app-side:
+extension ChannelState {
     /// Members collapsed to one row per account (same DID). Multi-session or
     /// nick-collision twins (e.g. chadfowler.com / chadfowlercom, or a bot that
     /// reconnected N times) count once. DID resolves from the roster or the
@@ -173,137 +164,8 @@ class ChannelState: ObservableObject, Identifiable {
 
     @MainActor
     var uniqueMemberCount: Int { uniqueMembers.count }
-
-    var activeTypers: [String] {
-        let cutoff = Date().addingTimeInterval(-5)
-        return typingUsers.filter { $0.value > cutoff }.map { $0.key }.sorted()
-    }
-
-    init(name: String) {
-        self.name = name
-    }
-
-    private var messageIds: Set<String> = []
-    /// id → index into `messages`. Makes findMessage / reactions / edits /
-    /// deletes / reply resolution O(1) instead of a linear scan of the whole
-    /// (unbounded) transcript on every TAGMSG and every reply row. Rebuilt
-    /// when indices shift (out-of-order history insert); updated in place on
-    /// the common in-order live append.
-    private var messageIndex: [String: Int] = [:]
-
-    func findMessage(byId id: String) -> Int? {
-        messageIndex[id]
-    }
-
-    func memberInfo(for nick: String) -> MemberInfo? {
-        members.first(where: { $0.nick.lowercased() == nick.lowercased() })
-    }
-
-    private func rebuildMessageIndex() {
-        messageIndex.removeAll(keepingCapacity: true)
-        for (i, m) in messages.enumerated() { messageIndex[m.id] = i }
-    }
-
-    /// Adopt another buffer's transcript (used when a DM buffer is renamed
-    /// after a peer NICK change). Copies the messages AND rebuilds the dedup
-    /// set + index — previously only `messages` was copied, leaving the dedup
-    /// Set empty so the next live/history message re-appended and duplicated
-    /// the whole transcript.
-    func adoptMessages(from other: ChannelState) {
-        messages = other.messages
-        messageIds = Set(messages.map(\.id))
-        rebuildMessageIndex()
-    }
-
-    /// Append a message only if its ID hasn't been seen before.
-    /// Inserts in timestamp order to handle CHATHISTORY arriving after live messages.
-    func appendIfNew(_ msg: ChatMessage) {
-        guard !messageIds.contains(msg.id) else { return }
-        messageIds.insert(msg.id)
-
-        // If the message is older than the last message, insert in sorted
-        // position (history backfill) — this shifts subsequent indices, so
-        // rebuild the map. The common live case appends at the end (O(1)).
-        if let last = messages.last, msg.timestamp < last.timestamp {
-            let idx = messages.firstIndex(where: { $0.timestamp > msg.timestamp }) ?? messages.endIndex
-            messages.insert(msg, at: idx)
-            rebuildMessageIndex()
-        } else {
-            messages.append(msg)
-            messageIndex[msg.id] = messages.count - 1
-        }
-        // Update last activity for sorting
-        if msg.timestamp > lastActivity {
-            lastActivity = msg.timestamp
-        }
-    }
-
-    func applyEdit(originalId: String, newId: String?, newText: String) {
-        if let idx = findMessage(byId: originalId) {
-            messages[idx].text = newText
-            messages[idx].isEdited = true
-            if let newId = newId {
-                messages[idx].id = newId
-                messageIds.insert(newId)
-                // Re-key the index: the slot is unchanged, only its id moved.
-                messageIndex.removeValue(forKey: originalId)
-                messageIndex[newId] = idx
-            }
-        }
-    }
-
-    func applyDelete(msgId: String) {
-        if let idx = findMessage(byId: msgId) {
-            messages[idx].isDeleted = true
-            messages[idx].text = ""
-        }
-    }
-
-    func applyReaction(msgId: String, emoji: String, from: String) {
-        if let idx = findMessage(byId: msgId) {
-            var reactions = messages[idx].reactions
-            var nicks = reactions[emoji] ?? Set<String>()
-            nicks.insert(from)
-            reactions[emoji] = nicks
-            messages[idx].reactions = reactions
-        }
-    }
-
-    func removeReaction(msgId: String, emoji: String, from: String) {
-        guard let idx = findMessage(byId: msgId) else { return }
-        var reactions = messages[idx].reactions
-        guard var nicks = reactions[emoji] else { return }
-        nicks.remove(from)
-        if nicks.isEmpty {
-            reactions.removeValue(forKey: emoji)
-        } else {
-            reactions[emoji] = nicks
-        }
-        messages[idx].reactions = reactions
-    }
 }
 
-/// Member info for the member list.
-struct MemberInfo: Identifiable, Equatable {
-    let nick: String
-    let isOp: Bool
-    let isHalfop: Bool
-    let isVoiced: Bool
-    let awayMsg: String?
-    let did: String?
-
-    var id: String { nick.lowercased() }
-
-    var prefix: String {
-        if isOp { return "@" }
-        if isHalfop { return "%" }
-        if isVoiced { return "+" }
-        return ""
-    }
-
-    var isAway: Bool { awayMsg != nil }
-    var isVerified: Bool { did != nil }
-}
 
 /// Connection state.
 enum ConnectionState: Equatable {
@@ -411,6 +273,88 @@ class AppState: ObservableObject {
     /// A close is automatically *undone* when the peer sends a new PRIVMSG
     /// (incoming activity is the universal signal that we want the DM
     /// back), or when the user manually opens a new DM with that nick.
+    // MARK: - DID-keyed DM identity
+    /// DID → display nick, learned from account tags, MemberDid events, and
+    /// the conversation list's partner-did. Display-grade: survives the peer
+    /// going offline, so a DID-keyed thread keeps rendering as a name.
+    @Published var didDisplayNames: [String: String] = [:]
+    /// Lowercased nick → DID (account tags / MemberDid / partner-did).
+    /// Includes did:key identities, which AvatarCache deliberately refuses.
+    var knownDids: [String: String] = [:]
+
+    /// Human label for a thread key that may be a raw DID (see DidDisplay).
+    func displayNameForKey(_ key: String) -> String {
+        DidDisplay.displayName(
+            key: key,
+            bindings: didDisplayNames,
+            reverseNick: { [weak self] did in
+                self?.knownDids.first(where: { $0.value == did })?.key
+            }
+        )
+    }
+
+    /// The DID bound to a nick, when known. Used to open/key DM threads
+    /// under their canonical (DID) key.
+    func didForNick(_ nick: String) -> String? {
+        knownDids[nick.lowercased()]
+    }
+
+    /// Canonical buffer key for opening a conversation: channels and DIDs pass
+    /// through; a nick follows its DID binding when known, so every open path
+    /// (compose sheet, deep link, intent, profile tap) lands in the one thread.
+    func canonicalDmKey(_ target: String) -> String {
+        if target.hasPrefix("#") || target.hasPrefix("&") || DidDisplay.isDid(target) {
+            return target
+        }
+        return didForNick(target) ?? target
+    }
+
+    /// Blocked check for a DM buffer key, which may be a DID rather than the
+    /// nick the block was recorded under.
+    func isBufferBlocked(_ key: String) -> Bool {
+        if DidDisplay.isDid(key) {
+            if blockedDIDs.contains(key) { return true }
+            return isBlocked(nick: displayNameForKey(key))
+        }
+        return isBlocked(nick: key, did: didForNick(key))
+    }
+
+    /// Record a learned nick↔DID binding everywhere identity is consumed:
+    /// the identity maps (thread keying + labels) and channel member entries
+    /// (DID-gated UI).
+    func recordUserDid(nick: String, did: String) {
+        knownDids[nick.lowercased()] = did
+        didDisplayNames[did] = nick
+        for ch in channels {
+            if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == nick.lowercased() }),
+               ch.members[idx].did == nil {
+                let m = ch.members[idx]
+                ch.members[idx] = MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop,
+                                             isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: did)
+            }
+        }
+    }
+
+    /// Record a binding and fold any nick-keyed DM thread into the DID-keyed
+    /// one, repointing the active thread and carrying closed state. Shared by
+    /// MemberDid (live learning) and the conversation list's partner-did —
+    /// an OFFLINE peer never produces a live MemberDid, so without the
+    /// TARGETS path a stale nick thread and the DID thread coexist as
+    /// duplicate rows.
+    func adoptDmBinding(nick: String, did: String) {
+        recordUserDid(nick: nick, did: did)
+        if DidDisplay.mergeDmBuffers(
+            dmBuffers: &dmBuffers, unreadCounts: &unreadCounts, nick: nick, did: did
+        ) {
+            if activeChannel?.lowercased() == nick.lowercased() {
+                activeChannel = did
+            }
+            if closedDMs.contains(nick.lowercased()) {
+                closedDMs.insert(did.lowercased())
+            }
+        }
+    }
+
     @Published var closedDMs: Set<String> = [] {
         didSet { UserDefaults.standard.set(Array(closedDMs), forKey: "freeq.closedDMs") }
     }
@@ -1703,8 +1647,17 @@ class AppState: ObservableObject {
     }
 
     func deleteMessage(target: String, msgId: String) {
-        bufferForSend(target).applyDelete(msgId: msgId)
         sendRaw("@+draft/delete=\(msgId) TAGMSG \(target)")
+        // Apply the local row removal only after the context menu's dismissal
+        // fully settles. The visual change from an edit works because its
+        // echo lands seconds after the menu is gone; a mutation during the
+        // dismissal window hits the row while UIKit still holds its preview
+        // snapshot and the on-screen pixels never update (verified: data,
+        // body re-eval, and even the replacement row all correct — display
+        // stayed frozen).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.bufferForSend(target).applyDelete(msgId: msgId)
+        }
     }
 
     func sendTyping(target: String) {
@@ -1715,6 +1668,11 @@ class AppState: ObservableObject {
     }
 
     func requestHistory(channel: String, before: Date? = nil) {
+        // Guests skip DM history: guest DMs are never persisted server-side,
+        // so the request can only fail (ACCOUNT_REQUIRED).
+        if !channel.hasPrefix("#"), !channel.hasPrefix("&"), authenticatedDID == nil {
+            return
+        }
         if let before = before {
             let iso = ISO8601DateFormatter().string(from: before)
             sendRaw("CHATHISTORY BEFORE \(channel) timestamp=\(iso) 50")
@@ -2048,12 +2006,15 @@ class AppState: ObservableObject {
             // Caller handed us a channel name; route to the channel store instead.
             return getOrCreateChannel(trimmed)
         }
-        if let existing = dmBuffers.first(where: { $0.name.lowercased() == trimmed.lowercased() }) {
+        // Follow a known nick→DID binding so a nick-addressed open (compose
+        // sheet, optimistic send, deep link) lands in the DID-keyed thread.
+        let key = canonicalDmKey(trimmed)
+        if let existing = dmBuffers.first(where: { $0.name.lowercased() == key.lowercased() }) {
             return existing
         }
-        let dm = ChannelState(name: trimmed)
+        let dm = ChannelState(name: key)
         dmBuffers.append(dm)
-        requestHistory(channel: trimmed)
+        requestHistory(channel: key)
         SpotlightIndexer.reindex(self)
         attemptRestoreLastChannel()
         return dm
@@ -2155,6 +2116,11 @@ class AppState: ObservableObject {
     }
 
     fileprivate func renameUser(oldNick: String, newNick: String) {
+        // Keep DID-keyed thread identity current across the rename.
+        if let did = knownDids.removeValue(forKey: oldNick.lowercased()) {
+            knownDids[newNick.lowercased()] = did
+            didDisplayNames[did] = newNick
+        }
         for ch in channels {
             if let idx = ch.members.firstIndex(where: { $0.nick.lowercased() == oldNick.lowercased() }) {
                 let m = ch.members[idx]
@@ -2345,19 +2311,29 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             // suppress notifications too (by nick AND DID).
             let senderBlocked = !isSelf && state.isBlocked(nick: from, did: ircMsg.account)
 
-            // Prefetch avatar using DID if available (from account-tag)
+            // Prefetch avatar using DID if available (from account-tag),
+            // and record the binding for DID-keyed thread identity.
             if let did = ircMsg.account {
+                state.recordUserDid(nick: from, did: did)
                 Task { @MainActor in
                     AvatarCache.shared.prefetch(from, did: did)
                 }
             }
 
+            // One conversation, one buffer: DMs key by the SDK's canonical
+            // dm_key (peer DID when known, else nick); fallback preserves
+            // behavior against an older SDK build.
+            let dmBufName = ircMsg.dmKey ?? (isSelf ? target : from)
+
             // SDK normalizes both wire forms (draft/multiline BATCH and
             // legacy +freeq.at/multiline) into real `\n` before this
             // point; no decode here. SwiftUI Text renders `\n` natively.
+            // Own messages attribute to our current nick, whichever client
+            // alias sent them — one DID, one visible identity; edit/delete
+            // "my last message" selection follows.
             let msg = ChatMessage(
                 id: ircMsg.msgid ?? UUID().uuidString,
-                from: from,
+                from: isSelf ? state.nick : from,
                 text: ircMsg.text,
                 isAction: ircMsg.isAction,
                 timestamp: Date(timeIntervalSince1970: Double(ircMsg.timestampMs) / 1000.0),
@@ -2384,8 +2360,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     let ch = state.getOrCreateChannel(target)
                     ch.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
                 } else {
-                    let bufferName = isSelf ? target : from
-                    let dm = state.getOrCreateDM(bufferName)
+                    let dm = state.getOrCreateDM(dmBufName)
                     dm.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
                 }
                 return
@@ -2430,7 +2405,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
                 }
             } else {
-                let bufferName = isSelf ? target : from
+                let bufferName = dmBufName
                 // New activity in a previously-closed DM un-closes it. If
                 // the peer messages me, or I message them, I want the DM
                 // back in the list.
@@ -2520,12 +2495,14 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 for msg in sorted { dm.appendIfNew(msg) }
             }
 
-        case .memberDid:
-            // Emitted by the updated SDK when a nick<->DID binding is
-            // learned. Adopted in the iOS DID-DM pass; ignored until then.
-            break
+        case .memberDid(let bindNick, let bindDid):
+            // A nick↔DID binding was learned (join/whois/account tag): record
+            // it and fold any nick-keyed DM thread into the DID-keyed one —
+            // a cold first DM keys by nick until the peer's reply teaches
+            // the binding.
+            state.adoptDmBinding(nick: bindNick, did: bindDid)
 
-        case .chatHistoryTarget(let nick, let timestamp, _):
+        case .chatHistoryTarget(let nick, let timestamp, let partnerDid):
             // Server tells us "you have history with this peer"; create the
             // DM buffer and seed lastActivity from the server-provided
             // timestamp (`time` tag, ISO8601). Without this, every DM
@@ -2535,8 +2512,20 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             //
             // Respect user-closed DMs: server-side history is what made
             // closed DMs reappear on reload before we tracked them locally.
-            if state.closedDMs.contains(nick.lowercased()) { return }
-            let dm = state.getOrCreateDM(nick)
+            // Key the conversation by its stable identity when the server
+            // names it (freeq.at/partner-did); the nick renders via
+            // displayNameForKey. Closed state is honored under BOTH keys —
+            // a DM closed before this pass is nick-keyed.
+            let key = partnerDid ?? nick
+            if state.closedDMs.contains(key.lowercased())
+                || state.closedDMs.contains(nick.lowercased()) { return }
+            if let did = partnerDid {
+                // Record + merge exactly like MemberDid — an OFFLINE peer
+                // never emits one, so a leftover nick-keyed thread would
+                // otherwise duplicate the DID-keyed row.
+                state.adoptDmBinding(nick: nick, did: did)
+            }
+            let dm = state.getOrCreateDM(key)
             if let ts = timestamp,
                let parsed = ISO8601DateFormatter.freeqTargets.date(from: ts) {
                 // If the buffer has no real messages yet, the current
@@ -2558,7 +2547,9 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             let isSelf = state.isSelfSender(nick: from, account: tags["account"] ?? tags["+freeq.at/account"])
             // For DMs, an echoed TAGMSG from ourselves carries target=peer, from=self —
             // route to the peer's DM buffer, not a DM keyed by our own nick.
-            let dmBuffer = isSelf ? target : from
+            // Same conversation keying as .message: the SDK's dm_key (peer
+            // DID when known), with the legacy nick fallback.
+            let dmBuffer = tagMsg.dmKey ?? (isSelf ? target : from)
             let bufferName = target.hasPrefix("#") ? target : dmBuffer
 
             // Typing indicators
@@ -2576,6 +2567,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             // Message deletion
             if let deleteId = tags["+draft/delete"] {
                 let ch = bufferName.hasPrefix("#") ? state.getOrCreateChannel(bufferName) : state.getOrCreateDM(bufferName)
+                print("[tagmsg-delete] from=\(from) buffer=\(ch.name) msgId=\(deleteId) localHit=\(ch.findMessage(byId: deleteId) != nil)")
                 ch.applyDelete(msgId: deleteId)
             }
 
