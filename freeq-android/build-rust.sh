@@ -25,16 +25,40 @@ if rustc --print sysroot 2>/dev/null | grep -q Cellar; then
     done
 fi
 
-# Auto-detect NDK if not set
+# Auto-detect NDK if not set (macOS SDK Manager, Linux ~/Android, or Nix androidenv)
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
-    NDK_DIR="$HOME/Library/Android/sdk/ndk"
-    if [ -d "$NDK_DIR" ]; then
-        ANDROID_NDK_HOME="$(ls -d "$NDK_DIR"/*/ 2>/dev/null | sort -V | tail -1)"
-        ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
+    for NDK_DIR in \
+        "$HOME/Library/Android/sdk/ndk" \
+        "$HOME/Android/Sdk/ndk" \
+        "${ANDROID_HOME:-}/ndk" \
+        "${ANDROID_SDK_ROOT:-}/ndk"
+    do
+        if [ -n "$NDK_DIR" ] && [ -d "$NDK_DIR" ]; then
+            ANDROID_NDK_HOME="$(ls -d "$NDK_DIR"/*/ 2>/dev/null | sort -V | tail -1)"
+            ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
+            break
+        fi
+    done
+    # local.properties sdk.dir → ndk/* (NixOS freeq-android builds)
+    if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -f freeq-android/local.properties ]; then
+        SDK_DIR="$(sed -n 's/^sdk\.dir=//p' freeq-android/local.properties | head -1)"
+        if [ -n "$SDK_DIR" ] && [ -d "$SDK_DIR/ndk" ]; then
+            ANDROID_NDK_HOME="$(ls -d "$SDK_DIR"/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+            ANDROID_NDK_HOME="${ANDROID_NDK_HOME%/}"
+        fi
+        # Nix android-sdk-ndk package keeps NDK outside the composite androidsdk root
+        if [ -z "${ANDROID_NDK_HOME:-}" ]; then
+            CAND="$(ls -d /nix/store/*-android-sdk-ndk-*/libexec/android-sdk/ndk/*/ 2>/dev/null | sort -V | tail -1)"
+            if [ -n "$CAND" ]; then
+                ANDROID_NDK_HOME="${CAND%/}"
+            fi
+        fi
+    fi
+    if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "$ANDROID_NDK_HOME" ]; then
         export ANDROID_NDK_HOME
         echo "==> Auto-detected NDK: $ANDROID_NDK_HOME"
     else
-        echo "ERROR: Android NDK not found. Install via Android Studio SDK Manager."
+        echo "ERROR: Android NDK not found. Set ANDROID_NDK_HOME or install via SDK Manager / nix androidenv."
         exit 1
     fi
 fi

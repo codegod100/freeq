@@ -17,6 +17,8 @@ members = [
     "freeq-agent-kit",
     "freeq-eliza",
     "freeq-agent-kit/examples/claude-mcp",
+    # Standalone WS-controlled AV media plane used by eve
+    "eve-av-bridge",
 ]
 exclude = [
     "freeq-app/src-tauri",

@@ -1968,6 +1968,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "eve-av-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "clap",
+ "freeq-agent-kit",
+ "freeq-av",
+ "freeq-sdk",
+ "futures-util",
+ "iroh-live",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "exr"
 version = "1.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
