@@ -15,6 +15,7 @@ export default class ChatController extends Controller {
     this.setupTabComplete();
     this.setupDm();
     this.hydrateReplyBadges();
+    this.localizeTimes();
     this.scrollToBottom();
 
     // Focus the composer — safer than the autofocus attribute, which the
@@ -50,6 +51,7 @@ export default class ChatController extends Controller {
             this.hydrateReplyBadges();
             // Live PRIVMSG rows arrive as ENC3: ciphertext — decrypt in place.
             this.decryptDmRows();
+            this.localizeTimes();
             this.scrollToBottom();
           }
         },
@@ -82,6 +84,80 @@ export default class ChatController extends Controller {
   scrollToBottom() {
     const el = document.getElementById("messages");
     if (el) el.scrollTop = el.scrollHeight;
+  }
+
+  /**
+   * Rewrite .ts[data-ts] and .date-sep[data-ts] into the browser's local
+   * timezone. Server still emits UTC as a no-JS fallback.
+   */
+  localizeTimes() {
+    const root = document.getElementById("messages") || this.element;
+    if (!root) return;
+
+    root.querySelectorAll(".ts[data-ts]").forEach((el) => {
+      const sec = parseInt(el.dataset.ts, 10);
+      if (!Number.isFinite(sec)) return;
+      const d = new Date(sec * 1000);
+      el.textContent = d.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      });
+    });
+
+    // Rebuild date separators from message timestamps in *local* calendar days.
+    this.rebuildDateSeparators(root);
+  }
+
+  localDayKey(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+
+  formatLocalDateLabel(d) {
+    const now = new Date();
+    const today = this.localDayKey(now);
+    const key = this.localDayKey(d);
+    if (key === today) return "Today";
+    const yest = new Date(now);
+    yest.setDate(yest.getDate() - 1);
+    if (key === this.localDayKey(yest)) return "Yesterday";
+    return d.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+  }
+
+  rebuildDateSeparators(root) {
+    // Drop server-rendered seps; re-insert based on local day boundaries.
+    root.querySelectorAll(".date-sep").forEach((el) => el.remove());
+
+    let lastDay = null;
+    const children = Array.from(root.children);
+    for (const node of children) {
+      const tsEl = node.querySelector?.(".ts[data-ts]");
+      if (!tsEl) continue;
+      const sec = parseInt(tsEl.dataset.ts, 10);
+      if (!Number.isFinite(sec)) continue;
+      const d = new Date(sec * 1000);
+      const day = this.localDayKey(d);
+      if (day === lastDay) continue;
+      lastDay = day;
+      const sep = document.createElement("div");
+      sep.className = "date-sep";
+      sep.dataset.ts = String(sec);
+      sep.dataset.day = day;
+      sep.setAttribute("role", "separator");
+      const span = document.createElement("span");
+      span.textContent = this.formatLocalDateLabel(d);
+      sep.appendChild(span);
+      node.parentNode.insertBefore(sep, node);
+    }
   }
 
   // Strip CableReady append ops whose HTML carries a data-msgid already
@@ -257,13 +333,12 @@ export default class ChatController extends Controller {
       );
       const mine = el?.classList.contains("mine");
       const path = mine ? "unreact" : "react";
-      // No optimistic update — wait for the server echo via freeq:reaction
-      // event so the nick matches exactly and we don't double-count.
+      const me = self.myReactionNick();
       const payload = new FormData();
       payload.append("msgid", msgid);
       payload.append("emoji", emoji);
       try {
-        await fetch(`/chat/${encodeURIComponent(channel)}/${path}`, {
+        const res = await fetch(`/chat/${encodeURIComponent(channel)}/${path}`, {
           method: "POST",
           headers: {
             "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')
@@ -272,10 +347,33 @@ export default class ChatController extends Controller {
           body: payload,
           credentials: "same-origin",
         });
+        if (!res.ok) {
+          console.error("toggleReaction HTTP", res.status);
+          return;
+        }
+        // Apply immediately — freeq:reaction may never arrive if ActionCable
+        // is down or session-mismatched. Server echo re-applies idempotently.
+        let nick = me;
+        try {
+          const data = await res.json();
+          if (data && data.nick) nick = data.nick;
+        } catch (_) {
+          /* non-JSON ok */
+        }
+        if (nick) self.applyReaction(msgid, emoji, nick, !mine);
       } catch (e) {
         console.error("toggleReaction", e);
       }
     };
+  }
+
+  myReactionNick() {
+    return (
+      this.element.dataset.authNick ||
+      this.element.dataset.authHandle ||
+      document.body.getAttribute("data-auth-handle") ||
+      ""
+    );
   }
 
   applyReaction(msgid, emoji, nick, added) {
@@ -296,10 +394,7 @@ export default class ChatController extends Controller {
     let chip = container.querySelector(
       `.reaction-chip[data-emoji="${CSS.escape(emoji)}"]`
     );
-    const me =
-      document.body.getAttribute("data-auth-handle") ||
-      this.element.dataset.authHandle ||
-      "";
+    const me = this.myReactionNick();
     if (!chip && added) {
       chip = document.createElement("button");
       chip.type = "button";
@@ -310,10 +405,17 @@ export default class ChatController extends Controller {
       container.insertBefore(chip, container.querySelector(".react-btn"));
     }
     if (!chip) return;
+    // Treat handle / preferred nick / current nick as the same person so
+    // optimistic + server echo don't double-count.
+    const aliases = new Set(
+      [nick, me, this.element.dataset.authHandle, this.element.dataset.authNick]
+        .filter(Boolean)
+        .map((s) => s.toLowerCase())
+    );
     let nicks = (chip.getAttribute("title") || "")
       .split(", ")
       .filter(Boolean)
-      .filter((n) => n !== nick);
+      .filter((n) => !aliases.has(n.toLowerCase()));
     if (added) nicks.push(nick);
     if (nicks.length === 0) {
       chip.remove();
@@ -321,16 +423,52 @@ export default class ChatController extends Controller {
     }
     chip.setAttribute("title", nicks.join(", "));
     chip.textContent = nicks.length <= 1 ? emoji : emoji + " " + nicks.length;
-    if (me) chip.classList.toggle("mine", nicks.includes(me));
+    if (me) {
+      const mine = nicks.some((n) => aliases.has(n.toLowerCase()));
+      chip.classList.toggle("mine", mine);
+    }
   }
 
   setupSidebar() {
+    const sidebar = () => document.getElementById("sidebar");
+    const members = () => document.getElementById("member-panel");
+    const scrim = () => document.getElementById("drawer-scrim");
+
+    const syncScrim = () => {
+      const open =
+        sidebar()?.classList.contains("open") ||
+        members()?.classList.contains("open");
+      scrim()?.classList.toggle("open", !!open);
+      document.body.style.overflow = open ? "hidden" : "";
+    };
+
+    window.closeDrawers = () => {
+      sidebar()?.classList.remove("open");
+      members()?.classList.remove("open");
+      syncScrim();
+    };
+
     window.toggleSidebar = () => {
-      document.getElementById("sidebar")?.classList.toggle("open");
+      const s = sidebar();
+      const m = members();
+      if (!s) return;
+      const willOpen = !s.classList.contains("open");
+      m?.classList.remove("open");
+      s.classList.toggle("open", willOpen);
+      syncScrim();
     };
+
     window.toggleMembers = () => {
-      document.getElementById("member-panel")?.classList.toggle("open");
+      const s = sidebar();
+      const m = members();
+      if (!m) return;
+      const willOpen = !m.classList.contains("open");
+      s?.classList.remove("open");
+      m.classList.toggle("open", willOpen);
+      syncScrim();
     };
+
+    // Section collapse (MY CHANNELS / ALL / DMs).
     document.querySelectorAll(".sidebar-toggle").forEach((el) => {
       el.addEventListener("click", () => {
         const id = el.dataset.target;
@@ -341,6 +479,19 @@ export default class ChatController extends Controller {
         el.classList.toggle("collapsed", !hidden);
       });
     });
+
+    // Tapping a channel / DM navigates — close the sheet first so the
+    // transition feels intentional rather than a full-page jump under a drawer.
+    sidebar()?.addEventListener("click", (ev) => {
+      const a = ev.target.closest("a.sidebar-channel-link");
+      if (a) window.closeDrawers();
+    });
+
+    document.addEventListener("keydown", (ev) => {
+      if (ev.key === "Escape") window.closeDrawers();
+    });
+
+    // Swipe-from-edge would be nice later; backdrop tap is enough for v1.
   }
 
   // ── Topic editing ─────────────────────────────────────────────────

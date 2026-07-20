@@ -98,7 +98,7 @@ module IrcBroadcaster
       members = IrcRender.parse_353_members(line)
       map = session.channel_members[ch] ||= {}
       members.each { |e| map[e[:nick]] = e }
-      cable_for(ch).inner_html(selector: "#member-panel", html: IrcRender.render_member_list(map)).broadcast
+      cable_for(ch).inner_html(selector: "#member-list", html: IrcRender.render_member_list(map)).broadcast
       return
     end
 
@@ -113,7 +113,7 @@ module IrcBroadcaster
         end
       targets.each do |target|
         html = apply_member_change(session, target, change)
-        cable_for(target).inner_html(selector: "#member-panel", html: html).broadcast if html
+        cable_for(target).inner_html(selector: "#member-list", html: html).broadcast if html
       end
       return
     end
@@ -128,11 +128,11 @@ module IrcBroadcaster
           entry[:account] = acct
         end
       end
-      # Re-render any member panel that has this nick.
+      # Re-render any member list that has this nick.
       prefix_nick = line[1..]&.split("!")&.first
       session.channel_members.each do |ch, map|
         next unless prefix_nick && map.key?(prefix_nick)
-        cable_for(ch).inner_html(selector: "#member-panel", html: IrcRender.render_member_list(map)).broadcast
+        cable_for(ch).inner_html(selector: "#member-list", html: IrcRender.render_member_list(map)).broadcast
       end
       return
     end
@@ -145,6 +145,8 @@ module IrcBroadcaster
     if (dm_target = dm_target_for(session, line))
       html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup, own_nick: session.current_nick, known_nicks: session.known_nicks)
       unless html.empty?
+        tags, = IrcRender.parse_irc_tags(line)
+        html = session.with_date_separator(dm_target, html, IrcRender.time_from_tags(tags))
         session.cache_row(dm_target, html)
         cable_for(dm_target).append(selector: "#messages", html: html).broadcast
       end
@@ -158,8 +160,9 @@ module IrcBroadcaster
       end
 
       if (err = IrcRender.parse_channel_error(line, ch))
-        ts = Time.now.utc.strftime("%H:%M:%S")
-        html = %(<div class="notice"><span class="ts">#{ts}</span><span class="body">#{IrcRender.html_escape(err)}</span></div>)
+        clock = IrcRender.timestamp_span(Time.now.utc)
+        html = %(<div class="notice">#{clock}<span class="body">#{IrcRender.html_escape(err)}</span></div>)
+        html = session.with_date_separator(ch, html, Time.now.utc)
         session.cache_row(ch, html)
         cable_for(ch).append(selector: "#messages", html: html).broadcast
       end
@@ -181,7 +184,10 @@ module IrcBroadcaster
       # is handled by batch suppression, and DOM-level dups by the client's
       # filterDupes. Requested history (CHATHISTORY) must re-render on
       html = IrcRender.render_irc_line(line, parent_lookup: session.parent_lookup, own_nick: session.current_nick, known_nicks: session.known_nicks)
+      next if html.empty?
 
+      tags, = IrcRender.parse_irc_tags(line)
+      html = session.with_date_separator(ch, html, IrcRender.time_from_tags(tags))
       session.cache_row(ch, html)
       cable_for(ch).append(selector: "#messages", html: html).broadcast
     end
@@ -264,16 +270,18 @@ module IrcBroadcaster
   # Push current IRC identity into the sidebar #user-handle widget on every
   # stream this session is subscribed to (per-room + session stream).
   def broadcast_user_identity(session)
-    irc_ok = session.api_bearer.to_s != ""
+    irc_ok = session.authenticated?
     handle_html = IrcRender.user_handle_html(
       nick: session.current_nick,
-      auth_handle: (session.authenticated? ? session.auth_handle : nil),
-      irc_ok: irc_ok && session.authenticated?
+      auth_handle: session.auth_handle,
+      irc_ok: irc_ok,
+      signing_in: session.signing_in?
     )
     note = IrcRender.user_irc_note_text(
       nick: session.current_nick,
-      irc_ok: irc_ok && session.authenticated?,
-      authenticated: session.authenticated?
+      irc_ok: irc_ok,
+      authenticated: irc_ok,
+      signing_in: session.signing_in?
     )
 
     ops = lambda do |cable|

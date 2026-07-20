@@ -16,8 +16,9 @@
       </div>
     <% end %>
 
-    <form method="POST" action="/login" data-turbo="false" style="margin-top:24px;display:flex;flex-direction:column;gap:12px">
-      <%= hidden_field_tag :authenticity_token, form_authenticity_token %>
+    <%# GET — OAuth start is protected by the OAuth state param on callback,
+        not by Rails CSRF. POST /login still works for non-browser clients. %>
+    <form method="GET" action="/login/start" data-turbo="false" style="margin-top:24px;display:flex;flex-direction:column;gap:12px">
       <label style="font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Handle</label>
       <input
         style="border-radius:8px;border:1px solid var(--border);background:var(--bg);padding:8px 12px;font-size:.875rem;outline:none;color:var(--fg)"

@@ -4,3 +4,4 @@ import "@hotwired/turbo-rails";
 import "./config";
 import "./controllers";
 import "./channels";
+import "./pwa";

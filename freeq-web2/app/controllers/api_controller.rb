@@ -87,7 +87,7 @@ class ApiController < ApplicationController
   # Page load races SASL: wait (throttled re-spawn) before giving up.
   def upload_keys
     session = current_session
-    unless session.authenticated?
+    unless session.has_credentials?
       render json: {
         error: "Not signed in — pre-key upload requires AT Protocol login.",
         ws_state: session.ws_state,
@@ -105,7 +105,9 @@ class ApiController < ApplicationController
                "Wait for status=connected, or sign out and sign in again.",
         ws_state: session.ws_state,
         has_bearer: false,
-        authenticated: true,
+        authenticated: false,
+        has_credentials: true,
+        sasl_status: session.sasl_status,
         last_error: session.last_upstream_error
       }, status: :unauthorized
       return
@@ -119,9 +121,11 @@ class ApiController < ApplicationController
     render json: {
       ws_state: s.ws_state,
       authenticated: s.authenticated?,
+      has_credentials: s.has_credentials?,
+      sasl_status: s.sasl_status,
       has_bearer: s.api_bearer.to_s != "",
       nick: s.current_nick,
-      did: (s.authenticated? ? s.auth.did : nil),
+      did: s.auth_did,
       last_error: s.last_upstream_error
     }
   end

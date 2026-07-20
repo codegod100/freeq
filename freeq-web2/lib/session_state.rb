@@ -14,16 +14,30 @@ require_relative "atproto/sasl"
 require_relative "atproto/o_auth"
 
 # In-memory per-session state. One upstream WebSocket per browser session.
-# When authenticated (OAuth), the WS task performs SASL ATPROTO-CHALLENGE;
-# otherwise it registers as a guest.
+#
+# Identity model (single source of truth for "signed in"):
+#
+#   credentials  — Atproto::OAuthSession or :guest
+#                  OAuth tokens used *only* to complete SASL. Not app login.
+#   SASL / IRC   — API-BEARER present means freeq-server bound a DID on this
+#                  connection. That is app authentication.
+#
+#   authenticated?     → SASL succeeded (DID on the wire)
+#   has_credentials?   → we hold OAuth material to run (or re-run) SASL
+#   signing_in?        → credentials present, SASL not done yet
+#
+# UI and policy joins must key off authenticated?, never credentials alone.
 class SessionState
   include MonitorMixin
 
   attr_reader :session_id, :joined, :channels, :channel_members, :irc_out, :irc_in,
               :parent_lookup, :suppress_history_batches, :reaction_cache,
               :policy_response_queue, :current_nick, :known_nicks, :nick_to_did,
-              :whois_response_queue, :api_bearer, :last_upstream_error
-  attr_accessor :auth   # :guest or Atproto::OAuthSession
+              :whois_response_queue, :api_bearer, :last_upstream_error,
+              :last_msg_day, :sasl_status
+  # OAuth credential bag (or :guest). Prefer has_credentials? / credentials.
+  # Writer is custom — see auth= below.
+  attr_reader :auth
   attr_accessor :ws_state # :disconnected, :connecting, :registering, :ready
   attr_accessor :whois_response_queue  # set to a Queue when capturing WHOIS replies
 
@@ -49,7 +63,10 @@ class SessionState
     @policy_response_queue = nil  # Set to a Queue when capturing policy NOTICEs
     @recent_rows = {}             # channel => [html rows] for subscribe replay
     @api_bearer = nil             # freeq-server IRC session_id (from API-BEARER NOTICE)
+    # :none | :pending | :ok | :failed — app identity tracks this, not OAuth alone
+    @sasl_status = :none
     @last_upstream_error = nil    # last connect/run failure (for diagnostics)
+    @last_msg_day = {}            # channel/DM key => "YYYY-MM-DD" for date separators
     @task = nil
     @broadcaster = nil
     @reg_phase = :wait_cap_ack  # :wait_cap_ack, :sasl_challenge, :sasl_result
@@ -58,17 +75,48 @@ class SessionState
 
   # ── Auth helpers ──────────────────────────────────────────────────────
 
-  def authenticated?
+  # OAuth token bag for SASL (not "logged in" by itself).
+  def credentials
+    has_credentials? ? @auth : nil
+  end
+
+  def has_credentials?
     @auth.is_a?(Atproto::OAuthSession)
   end
 
+  # App signed-in = DID bound on the IRC connection (SASL 903 + API-BEARER).
+  def authenticated?
+    has_credentials? && @api_bearer.to_s != "" && @sasl_status == :ok
+  end
+
+  def signing_in?
+    has_credentials? && !authenticated?
+  end
+
   def auth_nick
-    authenticated? ? @auth.nick : nil
+    has_credentials? ? @auth.nick : nil
   end
 
   def auth_handle
-    authenticated? ? @auth.handle : nil
+    has_credentials? ? @auth.handle : nil
   end
+
+  def auth_did
+    has_credentials? ? @auth.did : nil
+  end
+
+  # Install OAuth credentials. Does NOT mark the user authenticated until SASL.
+  def auth=(value)
+    if value.is_a?(Atproto::OAuthSession)
+      @auth = value
+      @sasl_status = @api_bearer.to_s.empty? ? :pending : :ok
+    else
+      @auth = :guest
+      @api_bearer = nil
+      @sasl_status = :none
+    end
+  end
+  alias credentials= auth=
 
   # ── Client-authoritative channel list ──────────────────────────────
   #
@@ -220,6 +268,30 @@ class SessionState
     end
   end
 
+  # Day key of the last message rendered for a channel/DM (for live date seps).
+  def last_msg_day_for(target)
+    synchronize { @last_msg_day[history_target_key(target)] }
+  end
+
+  def set_last_msg_day(target, day_key)
+    return if day_key.to_s.empty?
+
+    synchronize { @last_msg_day[history_target_key(target)] = day_key.to_s }
+  end
+
+  # Prepend a date separator if this message is on a new day for the target.
+  # Returns html (possibly with separator prefix) and updates last_msg_day.
+  def with_date_separator(target, html, time)
+    day = IrcRender.day_key(time)
+    return html if day.nil?
+
+    prev = last_msg_day_for(target)
+    set_last_msg_day(target, day)
+    return html if prev == day
+
+    IrcRender.date_separator_html(time) + html
+  end
+
   def recent_rows(target)
     synchronize { (@recent_rows[history_target_key(target)] || []).dup }
   end
@@ -233,18 +305,21 @@ class SessionState
   # Re-asserts the full client-owned channel list upstream.
   def request_reconnect(upstream_url = nil)
     channels_to_rejoin = synchronize { @channels.to_a }
-    @task_mutex.synchronize do
-      if @task && @task.alive?
-        @task.kill
-        @task.join(2) # give it a moment to die
-        @task = nil
+
+    # Drop other freeq-web2 sessions for this DID/nick (same process only).
+    if has_credentials?
+      begin
+        SessionRegistry.instance.ghost_siblings!(
+          except_sid: @session_id,
+          did: @auth.did,
+          nick: auth_nick
+        )
+      rescue StandardError => e
+        Rails.logger.warn("ghost_siblings: #{e.class}: #{e.message}") if defined?(Rails)
       end
-      @ws_state = :disconnected
-      @reg_phase = :wait_cap_ack
-      # Old freeq-server session_id is dead with the socket — do not reuse it
-      # for REST (pre-key upload would 401 against a closed IRC session).
-      @api_bearer = nil
     end
+
+    disconnect_upstream!(reason: "reconnect")
 
     return unless upstream_url
 
@@ -257,6 +332,35 @@ class SessionState
     rest = channels_to_rejoin[1..] || []
     @join_sent.merge(rest)
     rest.each { |ch| enqueue_outbound("JOIN #{ch}\r\n") }
+  end
+
+  # Drop the upstream IRC connection. Prefer QUIT so the nick is released
+  # promptly instead of a half-open TCP hold.
+  def disconnect_upstream!(reason: "disconnect")
+    @task_mutex.synchronize do
+      if @task && @task.alive?
+        begin
+          enqueue_outbound("QUIT :#{reason}\r\n") if @ws_state == :ready
+          sleep 0.15
+        rescue StandardError
+          nil
+        end
+        @task.kill
+        @task.join(2)
+        @task = nil
+      end
+      @ws_state = :disconnected
+      @reg_phase = :wait_cap_ack
+      @api_bearer = nil
+      # Credentials survive reconnect; SASL must run again on the new socket.
+      @sasl_status = has_credentials? ? :pending : :none
+      @join_sent.clear
+      begin
+        @socket&.close
+      rescue StandardError
+        nil
+      end
+    end
   end
 
   # ── Reaction cache ────────────────────────────────────────────────────
@@ -383,6 +487,53 @@ class SessionState
     Rails.logger.info("force_join #{ch} (bearer=#{@api_bearer.to_s != ''})") if defined?(Rails)
   end
 
+  # Drive SASL until app identity is real (API-BEARER). OAuth alone is not enough.
+  # Call before JOINing policy-gated channels or treating the user as signed in.
+  def ensure_authenticated!(upstream_url = nil, timeout: 12.0)
+    return false unless has_credentials?
+    return true if authenticated?
+
+    upstream = upstream_url || SessionRegistry.instance.upstream_url
+    @sasl_status = :pending
+    if @task&.alive? && @ws_state == :ready && @api_bearer.to_s.empty?
+      log_irc(
+        "ensure_authenticated!: credentials for #{auth_handle} but no SASL — reconnecting"
+      )
+      request_reconnect(upstream)
+    elsif !@task&.alive? || @ws_state == :disconnected
+      # Fresh connect — open the pipe; registration primary is #freeq so we
+      # don't JOIN a policy channel as guest mid-handshake.
+      ensure_broadcaster!
+      @task_mutex.synchronize do
+        if !@task || !@task.alive?
+          @task = nil
+          @join_sent.clear
+          @task = Thread.new { run_upstream(upstream.to_s, "#freeq") }
+        end
+      end
+    elsif @task&.alive? && @ws_state != :ready
+      log_irc("ensure_authenticated!: waiting for in-flight SASL (#{@reg_phase}/#{@ws_state})")
+    end
+
+    bearer = wait_for_api_bearer(timeout: timeout, primary: "#freeq")
+    ok = bearer.to_s != "" && has_credentials?
+    @sasl_status = ok ? :ok : (has_credentials? ? :failed : :none)
+    log_irc(
+      "ensure_authenticated!: sasl=#{@sasl_status} bearer=#{ok ? 'yes' : 'NO'} " \
+      "ws=#{@ws_state} phase=#{@reg_phase} handle=#{auth_handle}"
+    )
+    ok
+  end
+  alias ensure_irc_authenticated! ensure_authenticated!
+
+  def log_irc(msg)
+    Rails.logger.info(msg) if defined?(Rails)
+    path = (defined?(Rails) ? Rails.root : Pathname.new(".")).join("log/oauth.log")
+    File.open(path, "a") { |f| f.puts("#{Time.now.utc.iso8601} #{msg}") }
+  rescue StandardError
+    nil
+  end
+
   # After SASL 903 the connection has a DID — re-assert every channel so a
   # prior guest-time JOIN 477 cannot leave us stuck out of +policy channels.
   def rejoin_all_after_sasl!(driver)
@@ -419,6 +570,15 @@ class SessionState
   # `as_dm:` must be true when the target is a nick (chat#dm). Bare channel
   # names from chat#show omit # and are still channels.
   def spawn_upstream_if_needed(upstream_url, channel, as_dm: false)
+    # Credentials without SASL → re-handshake before JOIN/DM (policy channels).
+    if has_credentials? && @api_bearer.to_s.empty? && @task&.alive? && @ws_state == :ready
+      log_irc(
+        "spawn: credentials #{auth_handle} on guest IRC — reconnecting SASL before #{channel}"
+      )
+      request_reconnect(upstream_url)
+      wait_for_api_bearer(timeout: 8.0, primary: as_dm ? "#freeq" : channel)
+    end
+
     if as_dm
       ensure_broadcaster!
       @task_mutex.synchronize do
@@ -458,9 +618,15 @@ class SessionState
 
       if @task && @task.alive?
         # Already connected — JOIN unless one's already in flight.
+        # If still mid-SASL (authed, no bearer yet), only mark the channel;
+        # rejoin_all_after_sasl! will JOIN after 903.
         unless @join_sent.include?(target)
           @join_sent << target
-          enqueue_outbound("JOIN #{target}\r\n")
+          if has_credentials? && @api_bearer.to_s.empty? && @ws_state != :ready
+            # Mid-SASL — rejoin_all_after_sasl! JOINs after 903 (avoid guest 477).
+          else
+            enqueue_outbound("JOIN #{target}\r\n")
+          end
         end
         flush_pending_dm_backlog!
         return
@@ -556,16 +722,19 @@ class SessionState
       if chunk
         driver.parse(chunk)
       else
-        # Always try to drain the outbound queue, regardless of ws_state.
-        # Messages enqueued before :ready (e.g. JOINs) will be sent once
-        # the registration handshake completes via flush_outbound.
-        begin
-          line = irc_out.pop(true)
-          driver.text(line) if ws_state == :ready
-        rescue ThreadError
-          sleep 0.01
+        # Drain outbound only when ready. Never pop-and-drop during
+        # registration — that used to silently discard TAGMSG (reacts) and
+        # PRIVMSG enqueued while SASL was still in flight.
+        if ws_state == :ready
+          begin
+            line = irc_out.pop(true)
+            driver.text(line)
+          rescue ThreadError
+            sleep 0.01
+          end
+        else
+          sleep 0.005
         end
-        sleep 0.005 if ws_state != :ready
       end
     end
   rescue => e
@@ -588,10 +757,19 @@ class SessionState
 
   def send_registration(driver, channel)
     driver.text("CAP LS 302\r\n")
-    nick = authenticated? ? auth_nick : guest_nick
+    # Prefer account nick whenever we have OAuth credentials (SASL will follow).
+    nick = has_credentials? ? auth_nick : guest_nick
+    @desired_nick = auth_nick if has_credentials?
+    @nick_collision_tries = 0
+    @nick_reclaim_attempts = 0
     @current_nick = nick
     @known_nicks ||= Set.new
     @known_nicks << nick
+    @sasl_status = :pending if has_credentials?
+    log_irc(
+      "send_registration sid=#{@session_id.to_s[0, 8]}… nick=#{nick} " \
+      "credentials=#{has_credentials?} handle=#{auth_handle || '-'} primary=#{channel}"
+    )
     driver.text("NICK #{nick}\r\n")
     driver.text("USER web2 0 * :freeq-web2\r\n")
     driver.text("CAP REQ :sasl account-notify extended-join account-tag message-tags batch server-time echo-message draft/chathistory\r\n")
@@ -609,23 +787,62 @@ class SessionState
     # NOTICE * :API-BEARER <session_id> arrives after successful SASL.
     if (bearer = parse_api_bearer_notice(line))
       @api_bearer = bearer
-      Rails.logger.info("Captured API-BEARER for session=#{@session_id[0, 8]}…")
+      @sasl_status = :ok if has_credentials?
+      log_irc(
+        "Captured API-BEARER for session=#{@session_id[0, 8]}… " \
+        "sasl=#{@sasl_status} handle=#{auth_handle || '-'}"
+      )
+      # App identity flips to signed-in only once bearer lands.
+      begin
+        IrcBroadcaster.broadcast_user_identity(self)
+      rescue StandardError
+        nil
+      end
       return
     end
 
-    # 433 nick in use → retry with a random guest nick, track it.
+    # 433 nick in use. Authenticated: temporary preferred_ then retry preferred
+    # after SASL. Never web* for authed users. Guests: random web*.
     if line.include?(" 433 ")
-      new_nick = guest_nick
+      if has_credentials? && auth_nick.to_s != ""
+        @desired_nick = auth_nick
+        # Post-SASL: keep hammering preferred (our old connection may free it).
+        if @ws_state == :ready || @reg_phase == :ready || @reg_phase == :sasl_result
+          Rails.logger.info("433 post-auth for #{auth_nick} — reschedule reclaim") if defined?(Rails)
+          schedule_nick_reclaim!(driver, force: true)
+          irc_in << line
+          return
+        end
+        new_nick = nick_fallback_for_collision(auth_nick)
+      else
+        new_nick = guest_nick
+      end
       apply_nick!(new_nick)
       irc_in << line
       driver.text("NICK #{new_nick}\r\n")
+      Rails.logger.info("433 nick in use — retrying as #{new_nick}") if defined?(Rails)
       return
+    end
+
+    # Our NICK change confirmed by server (:old!u@h NICK :new).
+    if (new_from_nick = parse_self_nick_change(line))
+      apply_nick!(new_from_nick)
+      begin
+        IrcBroadcaster.broadcast_user_identity(self)
+      rescue StandardError
+        nil
+      end
     end
 
     # Server force-rename (registered nick / Guest*) arrives as NOTICE after
     # registration. Update current_nick before the broadcaster paints UI.
     if (renamed = IrcRender.parse_forced_nick_rename(line))
       apply_nick!(renamed)
+      # After SASL, reclaim preferred nick if server parked us on Guest*/tmp.
+      if has_credentials? && auth_nick.to_s != "" && !renamed.to_s.casecmp?(auth_nick)
+        @desired_nick = auth_nick
+        schedule_nick_reclaim!(driver) if @ws_state == :ready || @reg_phase == :sasl_result
+      end
       # Fall through so the notice still appears in the message pane.
     end
 
@@ -652,6 +869,19 @@ class SessionState
             Rails.logger.warn("policy re-JOIN failed: #{e.class}: #{e.message}") if defined?(Rails)
           end
         end
+      elsif has_credentials? && trailing.include?("requires authentication")
+        # JOIN as guest while we still hold OAuth — finish SASL, then re-JOIN.
+        log_irc("JOIN #{failed_ch} needs SASL — ensuring auth for #{auth_handle}")
+        Thread.new do
+          begin
+            if ensure_authenticated!(SessionRegistry.instance.upstream_url)
+              sleep 0.3
+              force_join!(failed_ch)
+            end
+          rescue StandardError => e
+            log_irc("auth re-JOIN failed: #{e.class}: #{e.message}")
+          end
+        end
       end
       # Fall through so the user sees the notice in chat.
     end
@@ -663,22 +893,32 @@ class SessionState
     case @reg_phase
     when :wait_cap_ack
       if (caps = parse_cap_ack(line))
-        Rails.logger.info("CAP ACK: #{caps.inspect}")
-        if caps.any? { |c| c.casecmp?("sasl") } && authenticated?
+        log_irc(
+          "CAP ACK: #{caps.inspect} credentials=#{has_credentials?} " \
+          "handle=#{auth_handle || '-'}"
+        )
+        if caps.any? { |c| c.casecmp?("sasl") } && has_credentials?
           # Access tokens expire; refresh when we have a refresh_token so
           # SASL pds-oauth getSession doesn't fail with a dead token.
+          @sasl_status = :pending
           refresh_oauth_before_sasl!
-          # Start SASL ATPROTO-CHALLENGE.
           driver.text("AUTHENTICATE ATPROTO-CHALLENGE\r\n")
           @reg_phase = :sasl_challenge
-          Rails.logger.info("Starting SASL ATPROTO-CHALLENGE for #{auth_handle}")
+          log_irc("Starting SASL ATPROTO-CHALLENGE for #{auth_handle}")
         else
-          # No SASL or not authenticated — guest mode.
+          # No SASL cap or no OAuth credentials — guest IRC.
+          log_irc(
+            "CAP ACK → guest finish (sasl_cap=#{caps.any? { |c| c.casecmp?('sasl') }} " \
+            "credentials=#{has_credentials?})"
+          )
+          @sasl_status = has_credentials? ? :failed : :none
           finish_registration(driver, channel, after_sasl: false)
         end
         consumed = true
       elsif line =~ / 00[1-4] /
         # Server sent numeric registration without CAP → proceed as guest.
+        log_irc("numeric welcome without CAP ACK — guest finish: #{line.to_s[0, 120]}")
+        @sasl_status = has_credentials? ? :failed : :none
         finish_registration(driver, channel, after_sasl: false)
         # Don't consume — let user see the welcome numeric.
       end
@@ -686,7 +926,7 @@ class SessionState
     when :sasl_challenge
       # Check for DPOP_NONCE notice and update the OAuth session.
       if (nonce = parse_dpop_nonce_notice(line))
-        Rails.logger.debug("DPoP nonce rotated during SASL: #{nonce}")
+        log_irc("DPoP nonce rotated during SASL")
         update_dpop_nonce!(nonce)
         consumed = true
       elsif (challenge_b64 = parse_authenticate_challenge(line))
@@ -695,19 +935,32 @@ class SessionState
           response = Atproto::Sasl.build_response(challenge[:nonce], @auth)
           driver.text("AUTHENTICATE #{response}\r\n")
           @reg_phase = :sasl_result
-          Rails.logger.info("SASL challenge response sent for #{auth_handle}")
+          log_irc("SASL challenge response sent for #{auth_handle}")
         rescue => e
-          Rails.logger.warn("SASL challenge response failed: #{e.class}: #{e.message}")
+          log_irc("SASL challenge response failed: #{e.class}: #{e.message}")
+          @sasl_status = :failed
           finish_registration(driver, channel, after_sasl: false)
         end
+        consumed = true
+      elsif line.include?(" 904 ")
+        log_irc("SASL 904 during challenge phase: #{line.to_s[0, 200]}")
+        @api_bearer = nil
+        @sasl_status = :failed
+        finish_registration(driver, channel, after_sasl: false)
         consumed = true
       end
 
     when :sasl_result
       if line.include?(" 903 ")
-        Rails.logger.info("SASL authentication successful for #{auth_handle}")
+        log_irc("SASL 903 success for #{auth_handle}")
+        @sasl_status = :ok
+        # Always NICK preferred after SASL — do NOT apply_nick! first or
+        # reclaim_preferred_nick! will no-op and the IRC nick stays on preferred_/Guest*.
+        @desired_nick = auth_nick if auth_nick.to_s != ""
+        @nick_reclaim_attempts = 0
+        reclaim_preferred_nick!(driver, force: true)
+        schedule_nick_reclaim!(driver, force: true)
         finish_registration(driver, channel, after_sasl: true)
-        # Widget already shows 🔒 handle from page render; re-assert after SASL.
         begin
           IrcBroadcaster.broadcast_user_identity(self)
         rescue StandardError
@@ -715,14 +968,14 @@ class SessionState
         end
         consumed = true
       elsif line.include?(" 904 ")
-        Rails.logger.warn(
-          "SASL authentication failed for #{auth_handle}; proceeding as guest. " \
+        log_irc(
+          "SASL 904 failed for #{auth_handle}; credentials kept, IRC is guest. " \
           "line=#{line.to_s[0, 200]}"
         )
         @api_bearer = nil
+        @sasl_status = :failed
         @reg_phase = :wait_cap_ack
         finish_registration(driver, channel, after_sasl: false)
-        # Guest rename NOTICE often follows; if not, still flip widget off 🔒.
         begin
           IrcBroadcaster.broadcast_user_identity(self)
         rescue StandardError
@@ -739,7 +992,8 @@ class SessionState
           response = Atproto::Sasl.build_response(challenge[:nonce], @auth)
           driver.text("AUTHENTICATE #{response}\r\n")
         rescue => e
-          Rails.logger.warn("SASL retry failed: #{e.class}: #{e.message}")
+          log_irc("SASL retry failed: #{e.class}: #{e.message}")
+          @sasl_status = :failed
           finish_registration(driver, channel, after_sasl: false)
         end
         consumed = true
@@ -807,19 +1061,34 @@ class SessionState
     nil
   end
 
-  # Parse `:server CAP * ACK :sasl account-notify` into the list of caps.
+  # Strip IRCv3 tags + optional :prefix so CAP/AUTHENTICATE parse is reliable.
+  # e.g. "@time=… :irc.freeq.at CAP * ACK :sasl …" → "CAP * ACK :sasl …"
+  def irc_command_payload(line)
+    line = line.to_s.chomp.delete_suffix("\r")
+    line = line.sub(/\A@\S+\s+/, "")
+    line = line.sub(/\A:[^\s]+\s+/, "")
+    line
+  end
+
+  # Parse `CAP * ACK :sasl account-notify` (with or without server prefix/tags).
   def parse_cap_ack(line)
-    parts = line.split
-    return nil unless parts.length >= 4
-    return nil unless parts[1]&.casecmp?("CAP") && parts[3]&.casecmp?("ACK")
-    caps = parts[4..]
+    payload = irc_command_payload(line)
+    parts = payload.split
+    return nil if parts.length < 3
+    return nil unless parts[0]&.casecmp?("CAP")
+    # CAP <target> ACK :caps…
+    ack_i = parts.index { |p| p.casecmp?("ACK") }
+    return nil unless ack_i
+    caps = parts[(ack_i + 1)..]
     return nil if caps.nil? || caps.empty?
+
     caps.map { |c| c.delete_prefix(":") }
   end
 
   def parse_authenticate_challenge(line)
-    return nil unless line.start_with?("AUTHENTICATE ")
-    challenge = line.sub("AUTHENTICATE ", "").strip
+    payload = irc_command_payload(line)
+    return nil unless payload.start_with?("AUTHENTICATE ")
+    challenge = payload.sub(/\AAUTHENTICATE\s+/, "").strip
     challenge unless challenge.empty? || challenge == "+"
   end
 
@@ -842,7 +1111,7 @@ class SessionState
   # Keep the rotated DPoP nonce on disk so a restart doesn't re-auth
   # with a stale nonce (matches freeq-webui apply_dpop_nonce intent).
   def update_dpop_nonce!(nonce)
-    return unless authenticated?
+    return unless has_credentials?
 
     @auth.dpop_nonce = nonce
     begin
@@ -856,6 +1125,99 @@ class SessionState
     "web" + rand(0xffffffff).to_s(16)
   end
 
+  # Server convention: trailing `_` marks a temporary nick to reclaim after SASL.
+  # Use preferred_, preferred__, … so we never fall back to a random web* guest.
+  def nick_fallback_for_collision(preferred)
+    base = preferred.to_s
+    base = "user" if base.empty?
+    @nick_collision_tries = (@nick_collision_tries || 0) + 1
+    "#{base}#{'_' * [@nick_collision_tries, 3].min}"
+  end
+
+  # After SASL 903 (or on 433 post-auth), send NICK preferred.
+  # force: true always emits NICK even if local @current_nick already matches
+  # (local state is often optimistic and wrong vs the server).
+  def reclaim_preferred_nick!(driver, force: false)
+    desired = (@desired_nick.presence || auth_nick).to_s
+    return if desired.empty?
+    return if !force && @current_nick.to_s.casecmp?(desired) && !temporary_nick?(@current_nick)
+
+    Rails.logger.info(
+      "Reclaiming nick #{desired} (local=#{@current_nick} force=#{force})"
+    ) if defined?(Rails)
+    begin
+      driver.text("NICK #{desired}\r\n")
+    rescue StandardError => e
+      Rails.logger.warn("reclaim NICK send failed: #{e.class}: #{e.message}") if defined?(Rails)
+      return
+    end
+    # Only optimistic-apply when we were clearly on a temp nick; confirmed via
+    # server NICK line / 433 otherwise.
+    apply_nick!(desired) if temporary_nick?(@current_nick) || @current_nick.to_s.empty?
+  end
+
+  def temporary_nick?(nick)
+    n = nick.to_s
+    n.empty? || n.end_with?("_") || n.match?(/\AGuest\d+\z/i) || n.match?(/\Aweb[0-9a-f]+\z/i)
+  end
+
+  # Retry preferred NICK a few times (sibling QUIT may free the nick).
+  def schedule_nick_reclaim!(driver, force: false)
+    desired = (@desired_nick.presence || auth_nick).to_s
+    return if desired.empty?
+
+    @nick_reclaim_attempts = 0 if force
+    max = 8
+    Thread.new do
+      max.times do |i|
+        sleep(0.5 + i * 0.4)
+        break unless has_credentials?
+        break if !temporary_nick?(@current_nick) && @current_nick.to_s.casecmp?(desired)
+        break unless @ws_state == :ready || @reg_phase == :ready || @reg_phase == :sasl_result
+
+        @nick_reclaim_attempts = i + 1
+        Rails.logger.info(
+          "nick reclaim attempt #{@nick_reclaim_attempts}: NICK #{desired} (local=#{@current_nick})"
+        ) if defined?(Rails)
+        begin
+          driver.text("NICK #{desired}\r\n")
+        rescue StandardError => e
+          Rails.logger.warn("nick reclaim send failed: #{e.class}: #{e.message}") if defined?(Rails)
+          break
+        end
+      end
+    end
+  end
+
+  # :oldnick!user@host NICK :newnick  (only if oldnick is us)
+  def parse_self_nick_change(line)
+    line = line.to_s.chomp.delete_suffix("\r")
+    line = line.sub(/\A@\S+\s+/, "")
+    return nil unless line.start_with?(":")
+    rest = line[1..]
+    sp = rest.index(" ") or return nil
+    prefix = rest[0...sp]
+    after = rest[(sp + 1)..]
+    return nil unless after.start_with?("NICK ")
+    old = prefix.split("!").first.to_s
+    return nil if old.empty?
+    return nil unless our_nicks_include?(old)
+
+    new =
+      if after.start_with?("NICK :")
+        after.sub(/\ANICK :/, "").split(/\s/, 2).first
+      else
+        after.split(/\s+/, 3)[1]
+      end
+    new.to_s.empty? ? nil : new
+  end
+
+  def our_nicks_include?(nick)
+    candidates = [@current_nick, auth_nick, @desired_nick]
+    candidates.concat(@known_nicks.to_a) if @known_nicks
+    candidates.compact.any? { |n| n.to_s.casecmp?(nick) }
+  end
+
   # Best-effort token refresh before SASL. Existing sessions without a
   # refresh_token (logged in before we stored them) skip this — user must
   # re-sign-in once to pick up a refresh_token.
@@ -863,7 +1225,7 @@ class SessionState
   # Refresh tokens are single-use (ATProto rotates them). Serialize so two
   # concurrent WS reconnects cannot burn the same RT ("Refresh token replayed").
   def refresh_oauth_before_sasl!
-    return unless authenticated?
+    return unless has_credentials?
 
     @refresh_mutex ||= Mutex.new
     @refresh_mutex.synchronize { refresh_oauth_before_sasl_locked! }

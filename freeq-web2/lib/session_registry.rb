@@ -37,29 +37,61 @@ class SessionRegistry
   end
 
   # Return the live SessionState for `session_id`, creating it on first
-  # touch. On create, try restoring an authenticated OAuth session from
-  # the encrypted disk store so the user stays signed in across restarts.
+  # touch. On create, restore OAuth *credentials* from the encrypted disk
+  # store — app identity still requires SASL after the IRC connect.
+  #
+  # If an in-memory state has no credentials, re-check disk (OAuth callback
+  # may have persisted under this id after an earlier guest touch).
   def get(session_id)
-    synchronize do
+    need_sasl_reconnect = false
+    state = synchronize do
       existing = @states[session_id]
-      return existing if existing
-
-      state = SessionState.new(session_id)
-      if (oauth = @session_store&.load(session_id))
-        state.auth = oauth
-        Rails.logger.info(
-          "restored authenticated session from disk " \
-          "session=#{session_id[0, 8]}… did=#{oauth.did}"
-        ) if defined?(Rails)
+      if existing
+        if !existing.has_credentials? && restore_auth_from_disk!(existing)
+          need_sasl_reconnect = existing.ws_state == :ready && existing.api_bearer.to_s.empty?
+        end
+        existing
+      else
+        s = SessionState.new(session_id)
+        restore_auth_from_disk!(s)
+        # Client-authoritative channel list — restored from disk and
+        # re-asserted to the upstream on the next WS connect.
+        if @session_store
+          s.restore_channels!(@session_store.load_channels(session_id))
+        end
+        @states[session_id] = s
+        s
       end
-      # Client-authoritative channel list — restored from disk and
-      # re-asserted to the upstream on the next WS connect.
-      if @session_store
-        state.restore_channels!(@session_store.load_channels(session_id))
-      end
-      @states[session_id] = state
-      state
     end
+    # Outside the lock — reconnect can take time / re-enter the registry.
+    if need_sasl_reconnect
+      Rails.logger.warn(
+        "disk credentials restored onto guest IRC — reconnecting for SASL " \
+        "session=#{session_id.to_s[0, 8]}…"
+      ) if defined?(Rails)
+      state.request_reconnect(upstream_url)
+    end
+    state
+  end
+
+  # Returns true if OAuth credentials were applied from disk.
+  def restore_auth_from_disk!(state)
+    return false if state.nil? || state.has_credentials?
+
+    oauth = @session_store&.load(state.session_id)
+    return false unless oauth
+
+    state.auth = oauth # credentials; sasl_status becomes :pending
+    if defined?(Rails)
+      Rails.logger.info(
+        "restored OAuth credentials from disk " \
+        "session=#{state.session_id.to_s[0, 8]}… did=#{oauth.did}"
+      )
+    end
+    true
+  rescue StandardError => e
+    Rails.logger.warn("restore_auth_from_disk! failed: #{e.class}: #{e.message}") if defined?(Rails)
+    false
   end
 
   # Persist the user's channel list (client-authoritative).
@@ -95,6 +127,34 @@ class SessionRegistry
     @session_store&.remove(session_id)
   rescue StandardError => e
     Rails.logger.warn("clear_auth failed: #{e.class}: #{e.message}") if defined?(Rails)
+  end
+
+  # Disconnect every other in-process freeq-web2 upstream for the same DID
+  # (or preferred nick). Only our own sockets — we do not control the IRC
+  # server and cannot force off other users' connections.
+  def ghost_siblings!(except_sid:, did: nil, nick: nil)
+    except_sid = except_sid.to_s
+    did = did.to_s
+    nick = nick.to_s
+    victims = []
+    synchronize do
+      @states.each do |sid, state|
+        next if sid.to_s == except_sid
+        match =
+          (did != "" && state.has_credentials? && state.auth.did.to_s == did) ||
+          (nick != "" && state.current_nick.to_s.casecmp?(nick)) ||
+          (nick != "" && state.has_credentials? && state.auth_nick.to_s.casecmp?(nick))
+        victims << state if match
+      end
+    end
+    victims.each do |state|
+      Rails.logger.info(
+        "ghost_siblings: disconnecting sid=#{state.session_id.to_s[0, 8]}… " \
+        "nick=#{state.current_nick} for reclaim"
+      ) if defined?(Rails)
+      state.disconnect_upstream!(reason: "replaced by same-identity login")
+    end
+    victims.size
   end
 
   # Fetch channels from the upstream REST API.

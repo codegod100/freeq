@@ -28,24 +28,36 @@ module IrcRender
   end
 
   # Live #user-handle markup for the sidebar widget.
-  # irc_ok: true when SASL succeeded (API-BEARER present).
-  def user_handle_html(nick:, auth_handle: nil, irc_ok: false)
+  #
+  # App identity = SASL (irc_ok). OAuth credentials alone are "signing in",
+  # not a locked handle — that was the dual-state lie that let policy 477
+  # surprise users who thought they were already signed in.
+  #
+  #   irc_ok:          SASL succeeded (API-BEARER present)
+  #   auth_handle:     handle from OAuth credentials (if any)
+  #   signing_in:      credentials present, SASL not finished
+  def user_handle_html(nick:, auth_handle: nil, irc_ok: false, signing_in: false)
     nick = nick.to_s
     if irc_ok && auth_handle.to_s != ""
       %(<div class="user-handle" id="user-handle">🔒 #{html_escape(auth_handle)}</div>)
+    elsif signing_in && auth_handle.to_s != ""
+      %(<div class="user-handle signing-in" id="user-handle">⏳ #{html_escape(auth_handle)}</div>)
     else
       label = nick.empty? ? "guest" : nick
       %(<div class="user-handle guest" id="user-handle">👤 #{html_escape(label)}</div>)
     end
   end
 
-  def user_irc_note_text(nick:, irc_ok: false, authenticated: false)
+  def user_irc_note_text(nick:, irc_ok: false, authenticated: false, signing_in: false)
     return "" if irc_ok
+    return "Signing in to IRC (SASL)…" if signing_in
     if nick.to_s.match?(/\AGuest\d+\z/i)
-      return "IRC as #{nick} — OAuth token expired or SASL failed; sign out & sign in"
+      return "IRC as #{nick} — reclaiming nick…" if authenticated
+      return "IRC as #{nick} — sign in to join policy channels"
     end
-    return "IRC not authenticated — sign out & sign in (token likely expired)" if authenticated
-
+    if authenticated && nick.to_s.match?(/_+\z/)
+      return "IRC as #{nick} — reclaiming preferred nick…"
+    end
     ""
   end
 
@@ -116,16 +128,93 @@ module IrcRender
     end
   end
 
+  # Image URL patterns (aligned with freeq-app MessageList).
+  IMAGE_EXT_RE = /\.(?:jpg|jpeg|png|gif|webp)(?:\?|$)/i
+  FREEQ_MEDIA_RE = %r{/api/v1/media/}i
+  BSKY_CDN_RE = %r{cdn\.bsky\.app/img/}i
+
+  def image_url?(url)
+    u = url.to_s
+    return true if u.match?(IMAGE_EXT_RE)
+    return true if u.match?(FREEQ_MEDIA_RE) && u.match?(/image|png|jpe?g|gif|webp/i)
+    return true if u.match?(BSKY_CDN_RE)
+    false
+  end
+
+  # Fallback labels (UTC). Browser localizes via data-ts + chat_controller.js.
+  def format_date_separator(time)
+    t = coerce_utc_time(time)
+    now = Time.now.utc
+    return "Today" if same_utc_day?(t, now)
+    return "Yesterday" if same_utc_day?(t, now - 86_400)
+
+    t.strftime("%A, %B ") + t.day.to_s + t.strftime(", %Y")
+  end
+
+  def date_separator_html(time)
+    t = coerce_utc_time(time)
+    label = format_date_separator(t)
+    day = day_key(t).to_s
+    epoch = t.to_i
+    %(<div class="date-sep" data-ts="#{epoch}" data-day="#{html_escape(day)}" role="separator"><span>#{html_escape(label)}</span></div>)
+  end
+
+  def day_key(time)
+    coerce_utc_time(time).strftime("%Y-%m-%d")
+  rescue StandardError
+    nil
+  end
+
+  def coerce_utc_time(time)
+    return time.getutc if time.is_a?(Time)
+
+    Time.at(time.to_i).utc
+  end
+
+  def same_utc_day?(a, b)
+    a.year == b.year && a.month == b.month && a.day == b.day
+  end
+
+  # Unix epoch + UTC clock as SSR fallback; client rewrites to local time.
+  def timestamp_span(time)
+    t = coerce_utc_time(time)
+    %(<span class="ts" data-ts="#{t.to_i}">#{t.strftime("%H:%M:%S")}</span>)
+  end
+
+  # IRCv3 server-time tag → Time, else now.
+  def time_from_tags(tags)
+    raw = (tags || {})["time"] || (tags || {})["+time"]
+    return Time.now.utc if raw.to_s.empty?
+
+    Time.parse(raw.to_s).utc
+  rescue StandardError
+    Time.now.utc
+  end
+
   def linkify_urls(escaped)
     out = +""
     rest = escaped.to_s
-    while (pos = rest.index("https://"))
+    # Match http(s) so local media and production both work.
+    while (m = rest.match(%r{https?://}))
+      pos = m.begin(0)
       out << rest[0...pos]
-      match = rest[pos..].match(/[\s<]/)
-      url_end = match ? match.begin(0) : (rest.size - pos)
-      url = rest[pos...(pos + url_end)]
-      out << %(<a href="#{url}" target="_blank" rel="noopener">#{url}</a>)
-      rest = rest[(pos + url_end)..]
+      after = rest[pos..]
+      match = after.match(/[\s<]/)
+      url_end = match ? match.begin(0) : after.size
+      url = after[0...url_end]
+      # Trim trailing punctuation commonly glued onto URLs.
+      while url.end_with?(".", ",", ")", "]", "!", "?", ";", "'", '"')
+        url = url[0...-1]
+        url_end -= 1
+      end
+      if image_url?(url)
+        out << %(<a href="#{url}" target="_blank" rel="noopener noreferrer" class="msg-img-url">#{url}</a>)
+        out << %(<a href="#{url}" target="_blank" rel="noopener noreferrer" class="msg-img-link">) \
+             + %(<img src="#{url}" alt="" class="msg-img" loading="lazy" referrerpolicy="no-referrer"></a>)
+      else
+        out << %(<a href="#{url}" target="_blank" rel="noopener noreferrer">#{url}</a>)
+      end
+      rest = after[url_end..]
     end
     out << rest
     out
@@ -281,7 +370,8 @@ module IrcRender
         else ""
         end
       did_attr = m[:account] ? %( data-did="#{html_escape(m[:account])}" data-account="#{html_escape(m[:account])}") : ""
-      %(<div class="member" data-nick="#{safe_nick}"#{did_attr}>#{pfx}<span class="nick #{color}" onclick="window.openDm('#{safe_nick}')" style="cursor:pointer" title="Click to message">#{safe_nick}</span></div>)
+      pfx_html = pfx.empty? ? %(<span class="pfx" aria-hidden="true"></span>) : pfx
+      %(<div class="member" data-nick="#{safe_nick}"#{did_attr}>#{pfx_html}<span class="nick #{color}" onclick="window.openDm('#{safe_nick}')" title="Message #{safe_nick}">#{safe_nick}</span></div>)
     end.join
   end
 
@@ -329,13 +419,13 @@ module IrcRender
   # an edit button is appended to the row.
   def render_irc_line(line, parent_lookup: nil, own_nick: nil, known_nicks: nil)
     line = line.chomp.delete_suffix("\r")
-    ts = Time.now.utc.strftime("%H:%M:%S")
-    ts_html = %(<span class="ts">#{ts}</span>)
-
     tags, rest_with_prefix = parse_irc_tags(line)
-    rest = rest_with_prefix[1..] or return notice_row(line, ts_html)
+    msg_time = time_from_tags(tags)
+    clock = timestamp_span(msg_time)
 
-    sp = rest.index(" ") or return notice_row(line, ts_html)
+    rest = rest_with_prefix[1..] or return notice_row(line, clock)
+
+    sp = rest.index(" ") or return notice_row(line, clock)
     prefix = rest[0...sp]
     cmd_and_args = rest[(sp + 1)..]
     nick = prefix.split("!").first
@@ -369,28 +459,28 @@ module IrcRender
       reaction_html = render_reaction_chips(dom_msgid, reactions || {})
       reply_btn = render_reply_btn(dom_msgid)
       edit_btn = (own_nick && nick&.casecmp?(own_nick)) || (known_nicks && known_nicks.any? { |n| n&.casecmp?(nick) }) ? render_edit_btn(dom_msgid) : ""
-      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{account_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
+      return %(<div class="#{cls}"#{msgid_attr}#{nick_attr}#{account_attr}#{text_attr}>#{clock}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
     end
 
 
     if %w[JOIN PART QUIT].include?(cmd)
       cls = cmd == "JOIN" ? "join" : "part"
-      return %(<div class="#{cls}">#{ts_html}<span class="body">— #{html_escape(nick)} #{cmd.downcase}</span></div>)
+      return %(<div class="#{cls}">#{clock}<span class="body">— #{html_escape(nick)} #{cmd.downcase}</span></div>)
     end
 
-    notice_row(line, ts_html)
+    notice_row(line, clock)
   end
 
   # parent_lookup: { msgid => { nick:, text: } } built from the history set.
   def render_history_row(msg, parent_lookup: nil, own_nick: nil, known_nicks: nil)
     nick = msg[:sender].to_s.split("!").first
     color = nick_color_class(nick)
-    ts = begin
-      Time.at(msg[:timestamp].to_i).utc.strftime("%H:%M:%S")
+    msg_time = begin
+      Time.at(msg[:timestamp].to_i).utc
     rescue StandardError
-      "--:--:--"
+      Time.now.utc
     end
-    ts_html = %(<span class="ts">#{ts}</span>)
+    clock = timestamp_span(msg_time)
     text = msg[:text].to_s
     safe_text = linkify_urls(html_escape(text))
     msgid = msg[:msgid]
@@ -410,7 +500,28 @@ module IrcRender
     reaction_html = render_reaction_chips(msgid, reactions)
     reply_btn = render_reply_btn(msgid)
     edit_btn = (own_nick && nick&.casecmp?(own_nick)) || (known_nicks && known_nicks.any? { |n| n&.casecmp?(nick) }) ? render_edit_btn(msgid) : ""
-    %(<div class="msg"#{msgid_attr}#{nick_attr}#{account_attr}#{text_attr}>#{ts_html}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
+    %(<div class="msg" data-day="#{day_key(msg_time)}"#{msgid_attr}#{nick_attr}#{account_attr}#{text_attr}>#{clock}<span class="body">#{reply_html}<span class="nick #{color}">#{html_escape(nick)}</span> #{safe_text}#{reaction_html}#{reply_btn}#{edit_btn}</span></div>)
+  end
+
+  # SSR history list with date separators between day boundaries.
+  # Returns [html, last_day_key].
+  def render_history_with_separators(history, parent_lookup: nil, own_nick: nil, known_nicks: nil)
+    out = +""
+    last_day = nil
+    Array(history).each do |msg|
+      t = begin
+        Time.at(msg[:timestamp].to_i).utc
+      rescue StandardError
+        Time.now.utc
+      end
+      day = day_key(t)
+      if day && day != last_day
+        out << date_separator_html(t)
+        last_day = day
+      end
+      out << render_history_row(msg, parent_lookup: parent_lookup, own_nick: own_nick, known_nicks: known_nicks)
+    end
+    [out, last_day]
   end
 
   def parse_reactions_tag(value)

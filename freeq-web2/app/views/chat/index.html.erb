@@ -5,9 +5,13 @@
     <div class="nav-right">
       <% if @session.authenticated? %>
         <span class="auth-badge">🔒 <%= @session.auth_handle %></span>
-        <form method="POST" action="/logout" style="display:inline">
-          <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+        <form method="POST" action="/logout" data-turbo="false" style="display:inline">
           <button type="submit" class="btn-link">Sign out</button>
+        </form>
+      <% elsif @session.signing_in? %>
+        <span class="auth-badge signing-in">⏳ <%= @session.auth_handle %></span>
+        <form method="POST" action="/logout" data-turbo="false" style="display:inline">
+          <button type="submit" class="btn-link">Cancel</button>
         </form>
       <% else %>
         <a href="/login" class="btn-link">Sign in</a>

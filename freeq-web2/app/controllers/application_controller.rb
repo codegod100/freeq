@@ -1,86 +1,140 @@
 # frozen_string_literal: true
 
+require_relative "../../lib/freeq_sid"
+
 class ApplicationController < ActionController::Base
   allow_browser versions: :modern
 
   before_action :ensure_session_cookie
 
+  # Plain HMAC cookie. Keep this tiny — fat OAuth cookies + Cookie-header
+  # corruption on the boxd edge were dropping the session id.
+  # MUST match ActionCable::Connection (see FreeqSid / freeq_sid.rb).
+  SID_COOKIE = FreeqSid::COOKIE
+
   private
 
   def ensure_session_cookie
-    cookies.signed[:freeq_session] ||= {
-      value: SecureRandom.hex(16),
+    session_id
+  end
+
+  def oauth_file_log(msg)
+    path = Rails.root.join("log/oauth.log")
+    File.open(path, "a") { |f| f.puts("#{Time.now.utc.iso8601} #{msg}") }
+  rescue StandardError
+    nil
+  end
+
+  def session_id
+    return @freeq_session_id if defined?(@freeq_session_id) && @freeq_session_id.present?
+
+    sid = read_sid_cookie
+    sid = session[:freeq_sid].to_s if sid.blank?
+    sid = SecureRandom.hex(16) if sid.blank?
+
+    bind_freeq_session!(sid)
+    sid
+  end
+
+  def bind_freeq_session!(sid)
+    sid = sid.to_s
+    raise ArgumentError, "empty freeq session id" if sid.empty?
+
+    @freeq_session_id = sid
+    session[:freeq_sid] = sid
+    write_sid_cookie!(sid)
+    sid
+  end
+
+  def read_sid_cookie
+    header = request.headers["Cookie"].to_s
+    sid = FreeqSid.from_cookies(request.cookies, cookie_header: header)
+    return sid if sid.present?
+
+    legacy = cookies.signed[FreeqSid::LEGACY_COOKIE].to_s rescue ""
+    return legacy if legacy.present?
+
+    raw = extract_cookie_value(SID_COOKIE).to_s
+    if raw.present? && FreeqSid.parse(raw).nil?
+      oauth_file_log("sid cookie bad/malformed len=#{raw.bytesize} prefix=#{raw[0, 48].inspect}")
+    end
+    nil
+  end
+
+  # Prefer the raw Cookie header so a corrupted jar entry cannot swallow the sid.
+  def extract_cookie_value(name)
+    header = request.headers["Cookie"].to_s
+    if header.present?
+      header.split(/;\s*|,\s*(?=[A-Za-z_][A-Za-z0-9_]*=)/).each do |part|
+        k, v = part.split("=", 2)
+        next if k.nil? || v.nil?
+        return v if k.strip == name
+      end
+    end
+    request.cookies[name]
+  end
+
+  def sid_hmac(sid)
+    FreeqSid.hmac(sid)
+  end
+
+  def write_sid_cookie!(sid)
+    %w[freeq_session oauth_session pending_oauth].each { |n| expire_cookie!(n) }
+
+    cookies[SID_COOKIE] = {
+      value: FreeqSid.cookie_value(sid),
       httponly: true,
       same_site: :lax,
-      expires: 30.days.from_now
+      secure: !Rails.env.development?,
+      expires: 30.days.from_now,
+      path: "/"
     }
   end
 
   def current_session
-    state = SessionRegistry.instance.get(session_id)
-    # Registry restores from the encrypted disk store on first touch.
-    # Cookie is a secondary path — also used to backfill refresh fields
-    # that older disk payloads omitted (refresh_token / token_endpoint /
-    # client_id), without which SASL 904s after the access token expires.
-    if cookies.encrypted[:oauth_session].present?
-      begin
-        data = JSON.parse(cookies.encrypted[:oauth_session])
-        cookie_oauth = Atproto::OAuthSession.from_h(data)
-        if state.auth == :guest
-          state.auth = cookie_oauth
-          SessionRegistry.instance.persist_auth(session_id, cookie_oauth)
-          # Disk was empty — reconnect so SASL runs with the restored OAuth.
-          if state.ws_state == :ready && state.api_bearer.to_s.empty?
-            state.request_reconnect(SessionRegistry.instance.upstream_url)
-          end
-        elsif state.authenticated? && needs_refresh_backfill?(state.auth, cookie_oauth)
-          # Only backfill when disk has NO refresh_token. Never overwrite a
-          # disk RT with a cookie RT (cookie can hold an already-rotated RT).
-          backfill_refresh_fields!(state.auth, cookie_oauth)
-          SessionRegistry.instance.persist_auth(session_id, state.auth)
-          Rails.logger.info(
-            "Backfilled OAuth refresh fields for #{state.auth_handle} from cookie"
-          )
-          if state.api_bearer.to_s.empty?
-            state.request_reconnect(SessionRegistry.instance.upstream_url)
-          end
-        end
-      rescue StandardError => e
-        Rails.logger.warn("Failed to restore OAuth session: #{e.class}: #{e.message}")
-        cookies.delete(:oauth_session) if state.auth == :guest
-      end
-    end
+    sid = session_id
+    state = SessionRegistry.instance.get(sid)
 
-    # After a background token refresh, rewrite the cookie so the next
-    # process restart does not re-use a burned (single-use) refresh token.
-    if state.authenticated? && SessionRegistry.instance.take_cookie_sync!(session_id)
-      write_oauth_cookie!(state.auth)
-    end
+    # Stick the sid cookie while we hold OAuth credentials (SASL may still
+    # be in flight). App "signed in" is state.authenticated? (SASL).
+    write_sid_cookie!(sid) if state.has_credentials?
+
+    oauth_file_log(
+      "current_session sid=#{sid[0, 8]} " \
+      "sasl=#{state.authenticated?} credentials=#{state.has_credentials?} " \
+      "status=#{state.sasl_status} handle=#{state.auth_handle || '-'} " \
+      "req_cookies=#{request.cookies.keys.sort.join(',')} " \
+      "hdr_bytes=#{request.headers['Cookie'].to_s.bytesize}"
+    )
 
     state
   end
 
-  def needs_refresh_backfill?(disk, cookie)
-    disk.refresh_token.to_s.empty? && cookie.refresh_token.to_s != ""
-  end
+  def expire_cookie!(name)
+    name = name.to_s
+    return unless request.cookies[name].present? || cookies[name].present?
 
-  def backfill_refresh_fields!(disk, cookie)
-    disk.refresh_token = cookie.refresh_token if disk.refresh_token.to_s.empty?
-    disk.token_endpoint = cookie.token_endpoint if disk.token_endpoint.to_s.empty?
-    disk.client_id = cookie.client_id if disk.client_id.to_s.empty?
-  end
-
-  def write_oauth_cookie!(oauth)
-    cookies.encrypted[:oauth_session] = {
-      value: JSON.generate(oauth.to_h),
-      httponly: true,
+    cookies.delete(name, path: "/")
+    cookies[name] = {
+      value: "deleted",
+      path: "/",
+      expires: 1.year.ago,
+      secure: !Rails.env.development?,
       same_site: :lax,
-      expires: 30.days.from_now
+      httponly: true
     }
+  rescue StandardError
+    nil
   end
 
-  def session_id
-    ensure_session_cookie
-    cookies.signed[:freeq_session]
+  def write_oauth_cookie!(_oauth)
+    expire_cookie!("oauth_session")
+  end
+
+  def clear_oauth_browser_state!
+    session.delete(:oauth)
+    session.delete(:freeq_sid)
+    %w[oauth_session pending_oauth freeq_session].each { |n| expire_cookie!(n) }
+    expire_cookie!(SID_COOKIE)
   end
 end

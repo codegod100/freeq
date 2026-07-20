@@ -54,6 +54,20 @@ class ChatReflex < ApplicationReflex
 
   def join
     channel = canonical_channel(params[:channel].presence || element.dataset[:channel])
+    # App auth = SASL. If we have OAuth credentials, finish SASL before JOIN
+    # so policy-gated channels never see a guest connection.
+    if session.has_credentials?
+      unless session.ensure_authenticated!(SessionRegistry.instance.upstream_url)
+        morph :nothing
+        cable_ready
+          .inner_html(
+            selector: "#messages",
+            html: %(<div class="notice">Still signing in to IRC (SASL)… wait a moment and try joining again. If this persists, sign out and sign back in.</div>)
+          )
+          .broadcast
+        return
+      end
+    end
     # spawn_upstream_if_needed owns the JOIN (deduped via @join_sent) —
     # don't enqueue a second one here.
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
@@ -115,6 +129,9 @@ class ChatReflex < ApplicationReflex
   private
 
   def session
+    # connection.session_id is freeq_sid (ApplicationCable::Connection) —
+    # same id as ApplicationController#session_id. Never invent a parallel
+    # guest SessionState here.
     @session ||= SessionRegistry.instance.get(connection.session_id)
   end
 

@@ -21,7 +21,7 @@ class ChatChannel < ApplicationCable::Channel
               session.channel_members[IrcRender.canonical_channel(bare)]
 
     cr = CableReady::Channel.new(broadcasting_for(bare))
-    cr.inner_html(selector: "#member-panel", html: IrcRender.render_member_list(members)) if members
+    cr.inner_html(selector: "#member-list", html: IrcRender.render_member_list(members)) if members
     # Snapshot IRC status (not ActionCable). finish_registration broadcasts
     # again when the upstream becomes ready so we don't stay on connecting….
     status_text, status_ok =

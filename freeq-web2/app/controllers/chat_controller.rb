@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 class ChatController < ApplicationController
+  # React POSTs from fetch() hit the same boxd Cookie/CSRF edge cases that
+  # forced us to skip CSRF on login/logout. Worst case is a forged reaction
+  # on the attacker's own IRC session.
+  skip_before_action :verify_authenticity_token, only: %i[react unreact]
+
   # GET /chat — channel list (the "channels" page).
   def index
     @channels = SessionRegistry.instance.fetch_channels
@@ -13,7 +18,11 @@ class ChatController < ApplicationController
     @bare = @channel.delete("#")
     @session = current_session
 
-    # Kick IRC early so SASL can finish before we request restricted history.
+    # Credentials without SASL → finish SASL first so we never JOIN a
+    # policy channel as a guest on page load.
+    if @session.has_credentials? && !@session.authenticated?
+      @session.ensure_authenticated!(SessionRegistry.instance.upstream_url, timeout: 12.0)
+    end
     @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)
 
     channels = SessionRegistry.instance.fetch_channels
@@ -35,7 +44,7 @@ class ChatController < ApplicationController
     # AND the DID must be a current channel member on freeq-server. Wait for
     # bearer → :ready → 353 NAMES (JOIN landed), then fetch with retries.
     bearer =
-      if @session.authenticated?
+      if @session.has_credentials?
         @session.wait_for_api_bearer(timeout: 8.0, primary: @channel)
       else
         @session.api_bearer # guests never get one; public channels still work
@@ -79,7 +88,7 @@ class ChatController < ApplicationController
     @parent_lookup = IrcRender.parent_lookup_from_history(@history)
     # Keep a per-session lookup so live-rendered replies can show parent context.
     @session.parent_lookup.merge!(@parent_lookup)
-    @own_nick = @session.authenticated? ? @session.auth_nick : @session.current_nick
+    @own_nick = @session.has_credentials? ? @session.auth_nick : @session.current_nick
     @known_nicks = @session.known_nicks
 
     # Cached member roster (may be empty on first visit; populated by 353 NAMES).
@@ -119,7 +128,7 @@ class ChatController < ApplicationController
     @session.request_dm_backlog!(@dm_nick)
 
     @parent_lookup = {}
-    @own_nick = @session.authenticated? ? @session.auth_nick : @session.current_nick
+    @own_nick = @session.has_credentials? ? @session.auth_nick : @session.current_nick
     @known_nicks = @session.known_nicks
     @members_html = nil
     @is_dm = true
@@ -158,6 +167,15 @@ class ChatController < ApplicationController
     tag = added ? "+react" : "+freeq.at/unreact"
     line = "@#{tag}=#{IrcRender.escape_tag_value(emoji)};+reply=#{IrcRender.escape_tag_value(msgid)} TAGMSG #{channel}\r\n"
     session.enqueue_outbound(line)
-    render json: { ok: true }
+    nick = session.current_nick.presence || session.auth_nick.presence || "me"
+    # Local cache + optional CableReady fan-out so the clicker sees the chip
+    # even if ActionCable is flaky.
+    begin
+      session.apply_reaction(msgid, emoji, nick, added)
+      IrcBroadcaster.broadcast_reaction(channel, msgid, emoji, nick, added)
+    rescue StandardError => e
+      Rails.logger.warn("react local apply: #{e.class}: #{e.message}") if defined?(Rails)
+    end
+    render json: { ok: true, nick: nick, added: added, msgid: msgid, emoji: emoji }
   end
 end

@@ -3,12 +3,20 @@
 <div id="freeq-chat"
      data-controller="chat"
      data-channel="<%= @bare %>"
-     data-auth-handle="<%= @session.authenticated? ? @session.auth_handle : "" %>"
-     data-auth-nick="<%= @session.authenticated? ? @session.auth_nick : (@session.current_nick || "") %>"
-     data-auth-did="<%= @session.authenticated? ? @session.auth.did : "" %>">
+     data-auth-handle="<%= @session.has_credentials? ? @session.auth_handle : "" %>"
+     data-auth-nick="<%= @session.has_credentials? ? @session.auth_nick : (@session.current_nick || "") %>"
+     data-auth-did="<%= @session.has_credentials? ? @session.auth_did : "" %>"
+     data-irc-authenticated="<%= @session.authenticated? %>">
   <nav>
+    <%# Channels drawer — visible only ≤1024px; keeps mobile chrome minimal. %>
+    <button type="button" class="mobile-btn" id="btn-channels"
+            onclick="window.toggleSidebar()" aria-label="Channels" title="Channels">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h16M4 12h16M4 17h16"/>
+      </svg>
+    </button>
     <span class="brand">freeq</span>
-    <span style="font-size:.875rem;color:#7ab7ff"><%= @channel %></span>
+    <span class="nav-channel"><%= @channel %></span>
     <span id="channel-topic" title="Click to edit topic"
           style="margin-left:.5rem;font-size:.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%;min-width:4rem;cursor:pointer"><%= @topic.presence || "add topic" %></span>
     <form id="topic-form"
@@ -23,12 +31,24 @@
     </form>
     <div class="nav-right">
       <span id="status"><span class="dot"></span> <span>connecting…</span></span>
+      <button type="button" class="mobile-btn" id="btn-members"
+              onclick="window.toggleMembers()" aria-label="People" title="People in channel">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1"/>
+          <circle cx="9.5" cy="8" r="3.5"/>
+          <path d="M20 19v-1a3.5 3.5 0 0 0-2.5-3.35"/>
+          <path d="M16.5 4.6a3.5 3.5 0 0 1 0 6.8"/>
+        </svg>
+      </button>
     </div>
   </nav>
 
+  <div id="drawer-scrim" onclick="window.closeDrawers()" aria-hidden="true"></div>
+
   <div class="chat-body">
-    <%# Sidebar %>
+    <%# Sidebar — desktop column; mobile left sheet via .open %>
     <aside id="sidebar" data-reflex-permanent>
+      <p class="drawer-heading">Channels</p>
       <div class="sidebar-scroll">
         <form id="join-form"
               data-reflex="submit->ChatReflex#join"
@@ -57,14 +77,21 @@
         </ul>
       </div>
       <div id="user-info">
-        <%# #user-handle is live-updated when IRC renames us (Guest*) or SASL fails. %>
+        <%# App identity = SASL. OAuth credentials alone show "signing in". %>
         <% if @session.authenticated? %>
           <div class="user-handle" id="user-handle">🔒 <%= @session.auth_handle %></div>
           <div id="user-irc-note" class="user-irc-note" style="display:none;color:var(--muted);font-size:.65rem;margin-top:.15rem"></div>
           <div class="user-actions">
-            <form method="POST" action="/logout" style="display:inline">
-              <input type="hidden" name="authenticity_token" value="<%= form_authenticity_token %>">
+            <form method="POST" action="/logout" data-turbo="false" style="display:inline">
               <button type="submit" class="btn-link">Sign out</button>
+            </form>
+          </div>
+        <% elsif @session.signing_in? %>
+          <div class="user-handle signing-in" id="user-handle">⏳ <%= @session.auth_handle %></div>
+          <div id="user-irc-note" class="user-irc-note" style="display:block;color:var(--muted);font-size:.65rem;margin-top:.15rem">Signing in to IRC (SASL)…</div>
+          <div class="user-actions">
+            <form method="POST" action="/logout" data-turbo="false" style="display:inline">
+              <button type="submit" class="btn-link">Cancel</button>
             </form>
           </div>
         <% else %>
@@ -80,9 +107,16 @@
     <%# Messages + compose — min-height:0 so #messages scrolls instead of growing. %>
     <section class="chat-main">
       <div id="messages" data-reflex-permanent>
-        <% @history.each do |msg| %>
-          <%= raw(IrcRender.render_history_row(msg, parent_lookup: @parent_lookup, own_nick: @own_nick, known_nicks: @known_nicks)) %>
-        <% end %>
+        <%
+          history_html, last_day = IrcRender.render_history_with_separators(
+            @history,
+            parent_lookup: @parent_lookup,
+            own_nick: @own_nick,
+            known_nicks: @known_nicks
+          )
+          @session.set_last_msg_day(@channel, last_day) if last_day
+        %>
+        <%= raw(history_html) %>
       </div>
       <div id="reply-banner" class="reply-banner" data-reflex-permanent></div>
       <div id="send-bar">
@@ -105,13 +139,17 @@
       </div>
     </section>
 
-    <%# Members %>
+    <%# Members — desktop column; mobile right sheet via .open.
+        Live updates target #member-list only so the heading survives. %>
     <aside id="member-panel" data-reflex-permanent>
-      <% if @members_html %>
-        <%= raw(@members_html) %>
-      <% else %>
-        <div style="color:var(--muted)">—</div>
-      <% end %>
+      <p class="drawer-heading">People</p>
+      <div id="member-list">
+        <% if @members_html %>
+          <%= raw(@members_html) %>
+        <% else %>
+          <div class="member empty">—</div>
+        <% end %>
+      </div>
     </aside>
   </div>
 

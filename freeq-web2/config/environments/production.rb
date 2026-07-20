@@ -8,6 +8,7 @@ Rails.application.configure do
 
   # Eager load code on boot for better performance and memory savings (ignored by Rake tasks).
   config.eager_load = true
+  config.active_job.queue_adapter = :async
 
   # Full error reports are disabled.
   config.consider_all_requests_local = false
@@ -21,14 +22,22 @@ Rails.application.configure do
   # Enable serving of images, stylesheets, and JavaScripts from an asset server.
   # config.asset_host = "http://assets.example.com"
 
-  # Assume all access to the app is happening through a SSL-terminating reverse proxy.
-  # config.assume_ssl = true
+  # boxd (and most reverse proxies) terminate TLS in front of Puma.
+  config.assume_ssl = true
 
   # Force all access to the app over SSL, use Strict-Transport-Security, and use secure cookies.
-  # config.force_ssl = true
+  config.force_ssl = true
 
   # Skip http-to-https redirect for the default health check endpoint.
-  # config.ssl_options = { redirect: { exclude: ->(request) { request.path == "/up" } } }
+  # Service worker + health must stay reachable on the plain local port too.
+  config.ssl_options = {
+    redirect: {
+      exclude: ->(request) {
+        path = request.path.to_s
+        path == "/up" || path == "/service-worker" || path == "/manifest"
+      }
+    }
+  }
 
   # Log to STDOUT with the current request id as a default log tag.
   config.log_tags = [ :request_id ]
@@ -50,12 +59,27 @@ Rails.application.configure do
   # the I18n.default_locale when a translation cannot be found).
   config.i18n.fallbacks = true
 
-  # Enable DNS rebinding protection and other `Host` header attacks.
-  # config.hosts = [
-  #   "example.com",     # Allow requests from example.com
-  #   /.*\.example\.com/ # Allow requests from subdomains like `www.example.com`
-  # ]
-  #
+  # DNS rebinding protection — allow boxd + any FREEQ_PUBLIC_URL host.
+  config.hosts.clear
+  config.hosts << "freeq.boxd.sh"
+  config.hosts << /.*\.boxd\.sh/
+  if (pub = ENV["FREEQ_PUBLIC_URL"].to_s).present?
+    begin
+      config.hosts << URI(pub).host
+    rescue StandardError
+      nil
+    end
+  end
   # Skip DNS rebinding protection for the default health check endpoint.
-  # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+  config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+
+  # ActionCable from the public origin.
+  config.action_cable.url = ENV.fetch("ACTION_CABLE_URL", "wss://freeq.boxd.sh/cable")
+  config.action_cable.allowed_request_origins = [
+    "https://freeq.boxd.sh",
+    %r{\Ahttps://.*\.boxd\.sh\z}
+  ]
+  if (pub = ENV["FREEQ_PUBLIC_URL"].to_s).present?
+    config.action_cable.allowed_request_origins << pub
+  end
 end
