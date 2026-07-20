@@ -414,24 +414,31 @@ class AppState(application: Application) : AndroidViewModel(application) {
             prefs.edit().putString("server", serverAddress.value).apply()
         }
 
-        try {
-            val handler = AndroidEventHandler(this)
-            client = FreeqClient(serverAddress.value, nickName, handler)
-            client?.setPlatform("freeq android")
-            // Prefer WebSocket on 443/wss like the iOS client; pass an empty
-            // string to disable WS and use the TCP `serverAddress` directly
-            // (the fallback path triggered by attemptTransportFallback below).
-            client?.setWebsocketUrl(if (useWebSocket) ServerConfig.wssServer else "")
-
-            pendingWebToken?.let { token ->
-                client?.setWebToken(token)
-                pendingWebToken = null
+        // FreeqClient construction loads libfreeq_sdk_ffi via JNA (~25MB + iroh
+        // deps). On a software-rendered emulator that faults the .so on the main
+        // thread and causes ANR. Build/connect on IO; only touch UI state on Main.
+        val server = serverAddress.value
+        val token = pendingWebToken
+        pendingWebToken = null
+        scope.launch {
+            try {
+                val newClient = withContext(Dispatchers.IO) {
+                    val handler = AndroidEventHandler(this@AppState)
+                    FreeqClient(server, nickName, handler).also { c ->
+                        c.setPlatform("freeq android")
+                        // Prefer WebSocket on 443/wss like the iOS client; pass an
+                        // empty string to disable WS and use the TCP `server` addr
+                        // (fallback path from attemptTransportFallback).
+                        c.setWebsocketUrl(if (useWebSocket) ServerConfig.wssServer else "")
+                        token?.let { c.setWebToken(it) }
+                        c.connect()
+                    }
+                }
+                client = newClient
+            } catch (e: Exception) {
+                connectionState.value = ConnectionState.Disconnected
+                errorMessage.value = "Connection failed: ${e.message}"
             }
-
-            client?.connect()
-        } catch (e: Exception) {
-            connectionState.value = ConnectionState.Disconnected
-            errorMessage.value = "Connection failed: ${e.message}"
         }
     }
 
