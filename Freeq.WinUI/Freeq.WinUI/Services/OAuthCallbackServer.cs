@@ -53,7 +53,6 @@ public class OAuthResult
 
 /// <summary>
 /// Handles AT Protocol OAuth flow via the freeq auth broker.
-/// Based on the working implementation in freeq-windows-app/Auth/BrokerAuth.cs.
 /// </summary>
 public class OAuthCallbackServer : IDisposable
 {
