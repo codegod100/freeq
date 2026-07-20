@@ -91,6 +91,13 @@ module IrcBroadcaster
       return
     end
 
+    # Soft-delete: +draft/delete=<msgid> TAGMSG.
+    if (del = IrcRender.parse_tagmsg_delete(line))
+      msgid, ch = del
+      broadcast_message_deleted(ch, msgid)
+      return
+    end
+
     # NAMES (353) — extract channel from the line if possible.
     if IrcRender.is_353?(line)
       ch = channel_from_353(line) || session.joined.first
@@ -314,12 +321,6 @@ module IrcBroadcaster
   end
 
   def broadcast_reaction(channel, msgid, emoji, nick, added)
-    payload = {
-      msgid: msgid,
-      emoji: emoji,
-      nick: nick,
-      added: added
-    }.to_json
     # Custom event so the chat controller can update chips without a full morph.
     cable_for(channel).dispatch_event(
       selector: "#freeq-chat",
@@ -329,6 +330,20 @@ module IrcBroadcaster
   rescue => e
     # Fallback: just log; chips will catch up on next history load.
     Rails.logger.warn("broadcast_reaction failed: #{e.class}: #{e.message}")
+  end
+
+  # Remove a message row after +draft/delete (or optimistic local delete).
+  def broadcast_message_deleted(channel, msgid)
+    mid = msgid.to_s
+    return if mid.empty?
+
+    ch = channel.to_s
+    # Prefer channel stream; for DMs channel is a nick — same stream_name path.
+    cable_for(ch)
+      .remove(selector: %(.msg[data-msgid="#{mid.gsub('"', '')}"]))
+      .broadcast
+  rescue => e
+    Rails.logger.warn("broadcast_message_deleted failed: #{e.class}: #{e.message}")
   end
 
   # When a policy capture is active, capture ALL nick-directed NOTICEs.

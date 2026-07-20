@@ -119,7 +119,19 @@
         <%= raw(history_html) %>
       </div>
       <div id="reply-banner" class="reply-banner" data-reflex-permanent></div>
+      <div id="upload-preview" class="upload-preview" hidden>
+        <img id="upload-preview-img" alt="preview" />
+        <div class="upload-preview-meta">
+          <span id="upload-preview-name"></span>
+          <span id="upload-preview-status"></span>
+        </div>
+        <button type="button" id="upload-preview-cancel" class="btn-link" title="Cancel">×</button>
+      </div>
       <div id="send-bar">
+        <input type="file" id="file-input" accept="image/*,image/png,image/jpeg,image/gif,image/webp"
+               hidden>
+        <button type="button" id="attach-btn" class="attach-btn" title="Upload screenshot or image"
+                aria-label="Upload image">+</button>
         <form id="send-form"
               data-reflex-permanent
               data-reflex="submit->ChatReflex#send_message"
@@ -132,7 +144,7 @@
             id="message-input"
             type="text"
             name="msg"
-            placeholder="Send to <%= @channel %>…"
+            placeholder="Send to <%= @channel %>… (paste images)"
             autocomplete="off">
           <button type="submit">Send</button>
         </form>

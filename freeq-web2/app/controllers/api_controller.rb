@@ -6,7 +6,8 @@ require "net/http"
 class ApiController < ApplicationController
   # E2EE SDK posts pre-key bundles without a CSRF header; these endpoints
   # are same-origin proxies to freeq-server's public keys API.
-  skip_before_action :verify_authenticity_token, only: %i[upload_keys get_keys]
+  # Upload uses FormData from fetch; same boxd CSRF edge as react/logout.
+  skip_before_action :verify_authenticity_token, only: %i[upload_keys get_keys upload]
 
   # GET /api/policy/:channel — fetch channel policy via POLICY RULES + INFO.
   def policy
@@ -130,7 +131,100 @@ class ApiController < ApplicationController
     }
   end
 
+  # POST /upload — multipart proxy for screenshots/images.
+  # Fields: file (required), channel (optional), alt (optional).
+  # freeq-server stores private media and returns { url, content_type, size }.
+  def upload
+    session = current_session
+    unless session.has_credentials? && session.auth_did.to_s.start_with?("did:")
+      return render json: { error: "Sign in to upload images" }, status: :unauthorized
+    end
+
+    # Ensure our IRC connection holds the DID so freeq-server accepts the upload.
+    if !session.authenticated?
+      session.ensure_authenticated!(SessionRegistry.instance.upstream_url, timeout: 12.0)
+    end
+    unless session.authenticated?
+      return render json: {
+        error: "Still signing in to IRC — try again in a moment"
+      }, status: :unauthorized
+    end
+
+    uploaded = params[:file]
+    unless uploaded.respond_to?(:tempfile) || uploaded.respond_to?(:read)
+      return render json: { error: "No file provided" }, status: :unprocessable_entity
+    end
+
+    io = uploaded.respond_to?(:tempfile) ? uploaded.tempfile : uploaded
+    io.rewind if io.respond_to?(:rewind)
+    bytes = io.read
+    if bytes.nil? || bytes.empty?
+      return render json: { error: "Empty file" }, status: :unprocessable_entity
+    end
+    if bytes.bytesize > 10 * 1024 * 1024
+      return render json: { error: "File too large (max 10MB)" }, status: :payload_too_large
+    end
+
+    content_type = uploaded.content_type.presence || "application/octet-stream"
+    filename = uploaded.original_filename.presence || "screenshot.png"
+    channel = params[:channel].to_s
+    alt = params[:alt].to_s
+
+    result = proxy_upstream_multipart(
+      "/api/v1/upload",
+      file_bytes: bytes,
+      filename: filename,
+      content_type: content_type,
+      fields: {
+        "did" => session.auth_did,
+        "channel" => channel,
+        "alt" => alt
+      }.reject { |_k, v| v.to_s.empty? }
+    )
+    render json: result[:json], status: result[:status]
+  rescue StandardError => e
+    Rails.logger.warn("upload failed: #{e.class}: #{e.message}") if defined?(Rails)
+    render json: { error: "Upload failed: #{e.message}" }, status: :bad_gateway
+  end
+
   private
+
+  # Multipart POST to FREEQ_UPSTREAM_REST (no extra gems).
+  def proxy_upstream_multipart(path, file_bytes:, filename:, content_type:, fields: {})
+    base = SessionRegistry.instance.rest_base
+    uri = URI("#{base}#{path}")
+    boundary = "----FreeqWeb2#{SecureRandom.hex(16)}"
+    body = +""
+    fields.each do |name, value|
+      body << "--#{boundary}\r\n"
+      body << "Content-Disposition: form-data; name=\"#{name}\"\r\n\r\n"
+      body << value.to_s
+      body << "\r\n"
+    end
+    body << "--#{boundary}\r\n"
+    body << "Content-Disposition: form-data; name=\"file\"; filename=\"#{filename.to_s.gsub('"', '')}\"\r\n"
+    body << "Content-Type: #{content_type}\r\n\r\n"
+    body = body.b
+    body << file_bytes.b
+    body << "\r\n--#{boundary}--\r\n".b
+
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == "https")
+    http.read_timeout = 60
+    http.open_timeout = 10
+    req = Net::HTTP::Post.new(uri.request_uri)
+    req["Content-Type"] = "multipart/form-data; boundary=#{boundary}"
+    req["Content-Length"] = body.bytesize.to_s
+    req.body = body
+    resp = http.request(req)
+    json =
+      begin
+        JSON.parse(resp.body)
+      rescue JSON::ParserError
+        { "error" => resp.body.to_s.presence || "invalid upstream response", "status" => resp.code.to_i }
+      end
+    { status: resp.code.to_i, json: json }
+  end
 
   # Forward a JSON request to FREEQ_UPSTREAM_REST and return the response as-is.
   def proxy_upstream_json(method, path, body: nil, bearer: nil)

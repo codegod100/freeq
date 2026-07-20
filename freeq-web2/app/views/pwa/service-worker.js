@@ -1,12 +1,12 @@
 /* freeq-web2 service worker — served at /service-worker (no long-cache).
  * Bump CACHE_VERSION when the offline shell changes. */
-const CACHE_VERSION = "freeq-web2-v1";
+const CACHE_VERSION = "freeq-web2-v2";
 const SHELL = ["/", "/chat", "/offline.html", "/manifest",
   "/icon-192.png", "/icon-512.png", "/icon-512-maskable.png",
   "/apple-touch-icon.png", "/favicon.png"];
 
 const NO_CACHE_PREFIXES = [
-  "/api/", "/auth", "/login", "/logout", "/cable", "/debug/", "/up",
+  "/api/", "/auth", "/login", "/logout", "/cable", "/debug/", "/up", "/upload",
 ];
 
 function shouldBypass(url) {

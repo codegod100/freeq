@@ -14,6 +14,7 @@ export default class ChatController extends Controller {
     this.setupTopicEdit();
     this.setupTabComplete();
     this.setupDm();
+    this.setupUpload();
     this.hydrateReplyBadges();
     this.localizeTimes();
     this.scrollToBottom();
@@ -72,6 +73,228 @@ export default class ChatController extends Controller {
     if (this._onReaction) {
       this.element.removeEventListener("freeq:reaction", this._onReaction);
     }
+    this.teardownUpload?.();
+  }
+
+  // ── Image upload (+ button, paste, optional drop) ───────────────────
+
+  setupUpload() {
+    const MAX_BYTES = 10 * 1024 * 1024;
+    const attachBtn = document.getElementById("attach-btn");
+    const fileInput = document.getElementById("file-input");
+    const input = document.getElementById("message-input");
+    const preview = document.getElementById("upload-preview");
+    const previewImg = document.getElementById("upload-preview-img");
+    const previewName = document.getElementById("upload-preview-name");
+    const previewStatus = document.getElementById("upload-preview-status");
+    const previewCancel = document.getElementById("upload-preview-cancel");
+    if (!attachBtn || !fileInput || !input) return;
+
+    let objectUrl = null;
+    let uploading = false;
+
+    const clearPreview = () => {
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrl = null;
+      }
+      if (preview) preview.hidden = true;
+      if (previewImg) previewImg.removeAttribute("src");
+      if (previewName) previewName.textContent = "";
+      if (previewStatus) {
+        previewStatus.textContent = "";
+        previewStatus.classList.remove("error");
+      }
+      fileInput.value = "";
+      uploading = false;
+      attachBtn.disabled = false;
+    };
+
+    const showPreview = (file, statusText) => {
+      if (!preview) return;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = file.type.startsWith("image/")
+        ? URL.createObjectURL(file)
+        : null;
+      if (previewImg) {
+        if (objectUrl) {
+          previewImg.src = objectUrl;
+          previewImg.hidden = false;
+        } else {
+          previewImg.hidden = true;
+        }
+      }
+      if (previewName) previewName.textContent = file.name || "image";
+      if (previewStatus) {
+        previewStatus.textContent = statusText || "";
+        previewStatus.classList.remove("error");
+      }
+      preview.hidden = false;
+    };
+
+    const setStatus = (text, isError = false) => {
+      if (!previewStatus) return;
+      previewStatus.textContent = text;
+      previewStatus.classList.toggle("error", !!isError);
+    };
+
+    const authDid = () =>
+      this.element.dataset.authDid ||
+      document.body.getAttribute("data-auth-did") ||
+      "";
+
+    const channelName = () => {
+      const isDm = document
+        .getElementById("send-form")
+        ?.dataset?.isDm === "true";
+      if (isDm) return "";
+      const bare =
+        this.bare ||
+        this.element.dataset.channel ||
+        this.channel?.replace(/^#/, "") ||
+        "";
+      return bare ? `#${bare.replace(/^#/, "")}` : "";
+    };
+
+    const sendUrlMessage = (url) => {
+      const caption = (input.value || "").trim();
+      input.value = caption ? `${caption} ${url}` : url;
+      const form = document.getElementById("send-form");
+      if (form) {
+        // StimulusReflex listens for submit — requestSubmit triggers it.
+        if (typeof form.requestSubmit === "function") form.requestSubmit();
+        else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    };
+
+    const uploadFile = async (file) => {
+      if (!file) return;
+      if (uploading) return;
+
+      if (!authDid().startsWith("did:")) {
+        setStatus("Sign in to upload images", true);
+        showPreview(file, "Sign in to upload images");
+        previewStatus?.classList.add("error");
+        return;
+      }
+      if (file.size > MAX_BYTES) {
+        showPreview(file, "File too large (max 10MB)");
+        setStatus("File too large (max 10MB)", true);
+        return;
+      }
+      // Screenshots / photos — accept any image/* (incl. empty type from some OS).
+      if (file.type && !file.type.startsWith("image/")) {
+        showPreview(file, `Unsupported type: ${file.type}`);
+        setStatus(`Unsupported type: ${file.type}`, true);
+        return;
+      }
+
+      uploading = true;
+      attachBtn.disabled = true;
+      showPreview(file, "Uploading…");
+
+      try {
+        const fd = new FormData();
+        fd.append("file", file, file.name || "screenshot.png");
+        const ch = channelName();
+        if (ch) fd.append("channel", ch);
+        const caption = (input.value || "").trim();
+        if (caption) fd.append("alt", caption);
+
+        const res = await fetch("/upload", {
+          method: "POST",
+          body: fd,
+          credentials: "same-origin",
+        });
+        let data = {};
+        try {
+          data = await res.json();
+        } catch (_) {
+          data = { error: await res.text() };
+        }
+        if (!res.ok) {
+          throw new Error(data.error || data.message || `Upload failed (${res.status})`);
+        }
+        if (!data.url) throw new Error("Upload succeeded but no URL returned");
+
+        setStatus("Sending…");
+        sendUrlMessage(data.url);
+        clearPreview();
+      } catch (e) {
+        console.error("upload", e);
+        setStatus(e.message || "Upload failed", true);
+        uploading = false;
+        attachBtn.disabled = false;
+      }
+    };
+
+    const onAttachClick = () => {
+      if (!authDid().startsWith("did:")) {
+        showPreview(
+          new File([], "image"),
+          "Sign in to upload images"
+        );
+        // Fake empty file looks odd — just status toast via preview strip.
+        if (previewImg) previewImg.hidden = true;
+        if (previewName) previewName.textContent = "Upload";
+        setStatus("Sign in to upload images", true);
+        if (preview) preview.hidden = false;
+        return;
+      }
+      fileInput.click();
+    };
+
+    const onFileChange = () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (file) uploadFile(file);
+    };
+
+    const onPaste = (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (const item of items) {
+        if (item.kind === "file" && (!item.type || item.type.startsWith("image/"))) {
+          const file = item.getAsFile();
+          if (file) {
+            e.preventDefault();
+            uploadFile(file);
+            return;
+          }
+        }
+      }
+    };
+
+    // Drag-drop onto the composer / message pane (lightweight).
+    const onDragOver = (e) => {
+      if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) {
+        e.preventDefault();
+      }
+    };
+    const onDrop = (e) => {
+      if (!e.dataTransfer?.files?.length) return;
+      e.preventDefault();
+      const file = e.dataTransfer.files[0];
+      if (file) uploadFile(file);
+    };
+
+    attachBtn.addEventListener("click", onAttachClick);
+    fileInput.addEventListener("change", onFileChange);
+    input.addEventListener("paste", onPaste);
+    this.element.addEventListener("paste", onPaste);
+    this.element.addEventListener("dragover", onDragOver);
+    this.element.addEventListener("drop", onDrop);
+    previewCancel?.addEventListener("click", clearPreview);
+
+    this.teardownUpload = () => {
+      attachBtn.removeEventListener("click", onAttachClick);
+      fileInput.removeEventListener("change", onFileChange);
+      input.removeEventListener("paste", onPaste);
+      this.element.removeEventListener("paste", onPaste);
+      this.element.removeEventListener("dragover", onDragOver);
+      this.element.removeEventListener("drop", onDrop);
+      previewCancel?.removeEventListener("click", clearPreview);
+      clearPreview();
+    };
   }
 
   setStatus(text, connected) {
@@ -266,6 +489,9 @@ export default class ChatController extends Controller {
       if (banner) {
         banner.innerHTML =
           '<span class="reply-banner-label">Editing message</span>' +
+          '<span class="reply-banner-spacer"></span>' +
+          '<button type="button" class="reply-banner-delete" title="Delete message" ' +
+          'onclick="window.deleteEditingMessage()">Delete</button>' +
           '<button type="button" class="reply-banner-cancel" title="Cancel" onclick="window.cancelEdit()">×</button>';
       }
     };
@@ -277,6 +503,47 @@ export default class ChatController extends Controller {
       if (editInput) editInput.value = "";
       const banner = document.getElementById("reply-banner");
       if (banner) banner.innerHTML = "";
+    };
+
+    window.deleteEditingMessage = async () => {
+      const editInput = document.getElementById("edit-to-input");
+      const msgid = (editInput && editInput.value) || "";
+      if (!msgid) return;
+      if (!window.confirm("Delete this message?")) return;
+
+      const bare =
+        self.bare ||
+        self.element?.dataset?.channel ||
+        (self.channel || "").replace(/^#/, "");
+      // Channel path segment is bare name; DMs use the nick as data-channel.
+      const target = bare;
+      if (!target) return;
+
+      try {
+        const payload = new FormData();
+        payload.append("msgid", msgid);
+        const res = await fetch(
+          `/chat/${encodeURIComponent(target)}/delete`,
+          {
+            method: "POST",
+            body: payload,
+            credentials: "same-origin",
+          }
+        );
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          console.error("delete failed", res.status, err);
+          return;
+        }
+        // Optimistic remove — server echo also removes via CableReady.
+        const row = document.querySelector(
+          `.msg[data-msgid="${CSS.escape(msgid)}"]`
+        );
+        row?.remove();
+        window.cancelEdit();
+      } catch (e) {
+        console.error("deleteEditingMessage", e);
+      }
     };
   }
 

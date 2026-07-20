@@ -136,7 +136,8 @@ module IrcRender
   def image_url?(url)
     u = url.to_s
     return true if u.match?(IMAGE_EXT_RE)
-    return true if u.match?(FREEQ_MEDIA_RE) && u.match?(/image|png|jpe?g|gif|webp/i)
+    # freeq private media capability URLs: /api/v1/media/{id}/{sig}/{filename}
+    return true if u.match?(FREEQ_MEDIA_RE)
     return true if u.match?(BSKY_CDN_RE)
     false
   end
@@ -261,6 +262,22 @@ module IrcRender
   def edit_target(line)
     tags, _ = parse_irc_tags(line)
     tags["+draft/edit"]
+  end
+
+  # Returns [msgid, channel] for a +draft/delete TAGMSG, or nil.
+  def parse_tagmsg_delete(line)
+    tags, after = parse_irc_tags(line)
+    msgid = tags["+draft/delete"]
+    return nil if msgid.to_s.empty?
+
+    rest = after[1..] or return nil # strip ':'
+    parts = rest.split
+    return nil unless parts[1].to_s.casecmp?("TAGMSG")
+
+    channel = parts[2].to_s.delete_prefix(":")
+    return nil if channel.empty?
+
+    [msgid, channel]
   end
 
   def should_emit?(line, current_channel)

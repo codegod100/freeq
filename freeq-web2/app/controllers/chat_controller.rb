@@ -1,10 +1,10 @@
 # frozen_string_literal: true
 
 class ChatController < ApplicationController
-  # React POSTs from fetch() hit the same boxd Cookie/CSRF edge cases that
-  # forced us to skip CSRF on login/logout. Worst case is a forged reaction
-  # on the attacker's own IRC session.
-  skip_before_action :verify_authenticity_token, only: %i[react unreact]
+  # React/delete POSTs from fetch() hit the same boxd Cookie/CSRF edge cases
+  # that forced us to skip CSRF on login/logout. Worst case is a forged
+  # reaction/delete on the attacker's own IRC session.
+  skip_before_action :verify_authenticity_token, only: %i[react unreact destroy_message]
 
   # GET /chat — channel list (the "channels" page).
   def index
@@ -150,6 +150,42 @@ class ChatController < ApplicationController
   # POST /chat/:channel/unreact  { msgid, emoji }
   def unreact
     enqueue_reaction(added: false)
+  end
+
+  # POST /chat/:channel/delete  { msgid }
+  # Soft-delete via IRCv3 +draft/delete on TAGMSG (author or ops).
+  def destroy_message
+    raw = params[:channel].to_s
+    # DM rooms use a bare nick; channels get #.
+    target =
+      if raw.start_with?("#", "&")
+        IrcRender.canonical_channel(raw)
+      elsif request.path.to_s.include?("/dm/") || params[:is_dm].to_s == "true"
+        raw
+      else
+        IrcRender.canonical_channel(raw)
+      end
+    msgid = params[:msgid].to_s
+    if msgid.empty?
+      return render json: { ok: false, error: "msgid required" }, status: :unprocessable_entity
+    end
+
+    session = current_session
+    spawn_target = target.start_with?("#", "&") ? target : (session.joined.first || "#freeq")
+    session.spawn_upstream_if_needed(
+      SessionRegistry.instance.upstream_url,
+      spawn_target,
+      as_dm: !target.start_with?("#", "&")
+    )
+    line = "@+draft/delete=#{IrcRender.escape_tag_value(msgid)} TAGMSG #{target}\r\n"
+    session.enqueue_outbound(line)
+    # Optimistic remove for the actor (inbound TAGMSG also fans out).
+    begin
+      IrcBroadcaster.broadcast_message_deleted(target, msgid)
+    rescue StandardError => e
+      Rails.logger.warn("delete local apply: #{e.class}: #{e.message}") if defined?(Rails)
+    end
+    render json: { ok: true, msgid: msgid }
   end
 
   private

@@ -19,6 +19,7 @@ Rails.application.routes.draw do
   # Mutations used by the JS reaction picker (and available as plain POST APIs).
   post "chat/:channel/react", to: "chat#react"
   post "chat/:channel/unreact", to: "chat#unreact"
+  post "chat/:channel/delete", to: "chat#destroy_message"
 
   # Channel policy info + other same-origin API.
   get "api/policy/:channel", to: "api#policy", constraints: { channel: /[^\/]+/ }, format: false
@@ -28,6 +29,8 @@ Rails.application.routes.draw do
   # (avoids CORS and keeps getServerOrigin() = window.location.origin correct).
   get "api/v1/keys/*did", to: "api#get_keys", format: false
   post "api/v1/keys", to: "api#upload_keys"
+  # Screenshot / image upload — proxies multipart to freeq-server /api/v1/upload.
+  post "upload", to: "api#upload"
   get "api/irc_status", to: "api#irc_status"
   # Temporary OAuth diagnostics (remove when login stickiness is solid).
   get "debug/auth", to: "debug_auth#show"
