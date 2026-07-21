@@ -721,6 +721,27 @@ class AppState {
         }
     }
 
+    /// Leave several channels at once (sidebar multi-select). Sends a PART for
+    /// each, then removes them in one pass so the auto-join list is persisted
+    /// once and the active channel is re-pointed a single time (not per-part).
+    func partChannels(_ names: [String]) {
+        let targets = Set(names.map { $0.lowercased() })
+        guard !targets.isEmpty else { return }
+        for name in names {
+            do {
+                try client?.part(channel: name)
+            } catch {
+                errorMessage = "Part failed for \(name): \(error.localizedDescription)"
+            }
+        }
+        channels.removeAll { targets.contains($0.name.lowercased()) }
+        autoJoinChannels.removeAll { targets.contains($0.lowercased()) }
+        UserDefaults.standard.set(autoJoinChannels, forKey: "freeq.channels")
+        if let active = activeChannel?.lowercased(), targets.contains(active) {
+            activeChannel = channels.first?.name
+        }
+    }
+
     func sendRaw(_ line: String) {
         try? client?.sendRaw(line: line)
     }

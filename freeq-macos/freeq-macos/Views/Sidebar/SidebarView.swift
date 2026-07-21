@@ -3,60 +3,97 @@ import SwiftUI
 struct SidebarView: View {
     @Environment(AppState.self) private var appState
     @State private var showStatusEditor = false
+    // Multi-select mode for bulk actions (e.g. leave several channels at once).
+    @State private var isSelecting = false
+    @State private var selected: Set<String> = []
+    @State private var confirmLeave = false
 
-    var body: some View {
-        @Bindable var state = appState
-        List(selection: $state.activeChannel) {
-            // Favorites
-            let favChannels = appState.channels.filter { appState.favorites.contains($0.name.lowercased()) }
-            if !favChannels.isEmpty {
-                Section("Favorites") {
-                    ForEach(favChannels) { channel in
-                        ChannelRow(channel: channel)
-                            .tag(channel.name)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                    }
-                }
-            }
+    private func exitSelectMode() {
+        isSelecting = false
+        selected = []
+    }
 
-            // Channels (non-favorites)
-            Section("Channels") {
-                ForEach(appState.channels.filter { !appState.favorites.contains($0.name.lowercased()) }) { channel in
-                    ChannelRow(channel: channel)
+    /// The channel entries in the shared list content (order/grouping matching
+    /// the visible list) — used by "Select All".
+    private var selectableChannelNames: [String] {
+        appState.channels.map(\.name)
+    }
+
+    /// The currently-selected entries that are channels (DMs/P2P are ignored by
+    /// the bulk "Leave" action).
+    private var selectedChannels: [String] {
+        selected.filter { $0.hasPrefix("#") || $0.hasPrefix("&") }.sorted()
+    }
+
+    @ViewBuilder
+    private var listSections: some View {
+        // Favorites
+        let favChannels = appState.channels.filter { appState.favorites.contains($0.name.lowercased()) }
+        if !favChannels.isEmpty {
+            Section("Favorites") {
+                ForEach(favChannels) { channel in
+                    ChannelRow(channel: channel,
+                               isSelecting: isSelecting,
+                               isSelected: selected.contains(channel.name))
                         .tag(channel.name)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
                 }
             }
+        }
 
-            // DMs (blocked people's DMs are suppressed)
-            let visibleDMs = appState.dmBuffers.filter { !appState.isBlocked(nick: $0.name) }
-            if !visibleDMs.isEmpty {
-                Section("Direct Messages") {
-                    ForEach(visibleDMs.sorted(by: { $0.lastActivity > $1.lastActivity })) { dm in
-                        DMRow(dm: dm)
-                            .tag(dm.name)
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                    }
+        // Channels (non-favorites)
+        Section("Channels") {
+            ForEach(appState.channels.filter { !appState.favorites.contains($0.name.lowercased()) }) { channel in
+                ChannelRow(channel: channel,
+                           isSelecting: isSelecting,
+                           isSelected: selected.contains(channel.name))
+                    .tag(channel.name)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+            }
+        }
+
+        // DMs (blocked people's DMs are suppressed)
+        let visibleDMs = appState.dmBuffers.filter { !appState.isBlocked(nick: $0.name) }
+        if !visibleDMs.isEmpty {
+            Section("Direct Messages") {
+                ForEach(visibleDMs.sorted(by: { $0.lastActivity > $1.lastActivity })) { dm in
+                    DMRow(dm: dm)
+                        .tag(dm.name)
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
                 }
             }
+        }
 
-            // P2P connections
-            if !appState.p2pConnectedPeers.isEmpty {
-                Section("P2P Direct") {
-                    ForEach(Array(appState.p2pConnectedPeers), id: \.self) { peerId in
-                        Label {
-                            Text(String(peerId.prefix(12)) + "…")
-                                .font(.system(.body, design: .monospaced))
-                        } icon: {
-                            Image(systemName: "point.3.connected.trianglepath.dotted")
-                                .foregroundStyle(Theme.success)
-                        }
-                        .tag("p2p:\(String(peerId.prefix(8)))")
+        // P2P connections
+        if !appState.p2pConnectedPeers.isEmpty {
+            Section("P2P Direct") {
+                ForEach(Array(appState.p2pConnectedPeers), id: \.self) { peerId in
+                    Label {
+                        Text(String(peerId.prefix(12)) + "…")
+                            .font(.system(.body, design: .monospaced))
+                    } icon: {
+                        Image(systemName: "point.3.connected.trianglepath.dotted")
+                            .foregroundStyle(Theme.success)
                     }
+                    .tag("p2p:\(String(peerId.prefix(8)))")
                 }
+            }
+        }
+    }
+
+    var body: some View {
+        @Bindable var state = appState
+        // In select mode the list drives a multi-selection Set (native ⌘/⇧-click
+        // + highlight); otherwise it drives single-selection navigation. Same
+        // section content feeds both so there's one source of truth.
+        Group {
+            if isSelecting {
+                List(selection: $selected) { listSections }
+            } else {
+                List(selection: $state.activeChannel) { listSections }
             }
         }
         .listStyle(.sidebar)
@@ -64,6 +101,7 @@ struct SidebarView: View {
         .background(Theme.sidebarBackground)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 0) {
+                if isSelecting { selectionBar }
                 Divider().overlay(Theme.borderSoft)
                 bottomBar
             }
@@ -85,6 +123,58 @@ struct SidebarView: View {
                     }
                 }
             }
+        }
+    }
+
+    // Bulk-action bar shown above the bottom bar while in select mode.
+    @ViewBuilder
+    private var selectionBar: some View {
+        let allNames = selectableChannelNames
+        let allSelected = !allNames.isEmpty && selectedChannels.count == allNames.count
+        HStack(spacing: 10) {
+            Button(allSelected ? "None" : "All") {
+                selected = allSelected ? [] : Set(allNames)
+            }
+            .buttonStyle(.plain)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(Theme.accent)
+
+            Spacer()
+
+            Text("\(selectedChannels.count) selected")
+                .font(.caption)
+                .foregroundStyle(Theme.textTertiary)
+
+            Button(role: .destructive) {
+                confirmLeave = true
+            } label: {
+                Label("Leave", systemImage: "rectangle.portrait.and.arrow.right")
+                    .font(.caption.weight(.medium))
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(selectedChannels.isEmpty ? Theme.textTertiary : Theme.danger)
+            .disabled(selectedChannels.isEmpty)
+
+            Button("Done") { exitSelectMode() }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.textSecondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Theme.surfaceElevated)
+        .confirmationDialog(
+            "Leave \(selectedChannels.count) channel\(selectedChannels.count == 1 ? "" : "s")?",
+            isPresented: $confirmLeave,
+            titleVisibility: .visible
+        ) {
+            Button("Leave \(selectedChannels.count)", role: .destructive) {
+                appState.partChannels(selectedChannels)
+                exitSelectMode()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(selectedChannels.joined(separator: ", "))
         }
     }
 
@@ -146,6 +236,18 @@ struct SidebarView: View {
                     .help("iroh P2P: \(appState.p2pConnectedPeers.count) peers")
             }
 
+            // Multi-select toggle (bulk-leave several channels at once)
+            if !appState.channels.isEmpty {
+                Button {
+                    if isSelecting { exitSelectMode() } else { isSelecting = true }
+                } label: {
+                    Image(systemName: isSelecting ? "checkmark.circle.fill" : "checklist")
+                        .foregroundStyle(isSelecting ? Theme.accent : Theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .help(isSelecting ? "Cancel selection" : "Select channels…")
+            }
+
             // Join channel
             Button {
                 appState.showJoinSheet = true
@@ -196,6 +298,10 @@ struct SidebarView: View {
 struct ChannelRow: View {
     @Environment(AppState.self) private var appState
     let channel: ChannelState
+    /// When the sidebar is in multi-select mode, show a checkbox and drive the
+    /// row highlight off `isSelected` instead of the active-channel state.
+    var isSelecting: Bool = false
+    var isSelected: Bool = false
 
     private var unread: Int {
         appState.unreadCounts[channel.name.lowercased()] ?? 0
@@ -214,6 +320,13 @@ struct ChannelRow: View {
     }
 
     var body: some View {
+        let highlighted = isSelecting ? isSelected : isActive
+        HStack(spacing: 8) {
+            if isSelecting {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 15))
+                    .foregroundStyle(isSelected ? Theme.accent : Theme.textTertiary)
+            }
         Label {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
@@ -248,15 +361,16 @@ struct ChannelRow: View {
                 .foregroundStyle(channel.isEncrypted ? Theme.success : (isActive ? Theme.accent : Theme.textTertiary))
                 .help(channel.isEncrypted ? "End-to-end encrypted channel" : "")
         }
+        }  // end HStack (checkbox + row)
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .background(
             RoundedRectangle(cornerRadius: 10)
-                .fill(isActive ? Theme.surfaceElevated : Color.clear)
+                .fill(highlighted ? Theme.surfaceElevated : Color.clear)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(isActive ? Theme.borderSoft : Color.clear, lineWidth: 1)
+                .strokeBorder(highlighted ? Theme.borderSoft : Color.clear, lineWidth: 1)
         )
         .contextMenu {
             Button(appState.favorites.contains(channel.name.lowercased()) ? "Unfavorite" : "Favorite") {
