@@ -1379,9 +1379,17 @@ mod av_impl {
                     format: video_format.clone(),
                     enabled: camera_enabled_flag.clone(),
                 };
+                // iOS encodes with SOFTWARE openh264 (the media stack's
+                // VideoToolbox H.264 *encoder* is compiled macOS-only), so
+                // 720p@30 overloads the phone and the outgoing video lags for
+                // receivers. Cap the camera to 360p on iOS; desktop keeps 720p.
+                #[cfg(target_os = "ios")]
+                let camera_preset = VideoPreset::P360;
+                #[cfg(not(target_os = "ios"))]
+                let camera_preset = VideoPreset::P720;
                 broadcast
                     .video()
-                    .set_source(push_source, VideoCodec::H264, [VideoPreset::P720])
+                    .set_source(push_source, VideoCodec::H264, [camera_preset])
                     .map_err(|e| {
                         tracing::warn!("AV: initial video set_source failed: {e}");
                         FreeqError::ConnectionFailed
