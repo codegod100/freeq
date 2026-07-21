@@ -55,6 +55,10 @@ pub async fn serve(
         .route("/v1/session/disconnect", post(http_disconnect))
         .route("/v1/radio/play", post(http_radio_play))
         .route("/v1/radio/stop", post(http_radio_stop))
+        .route("/v1/watch/play", post(http_watch_play))
+        .route("/v1/watch/stop", post(http_watch_stop))
+        .route("/v1/call-egress/start", post(http_call_egress_start))
+        .route("/v1/call-egress/stop", post(http_call_egress_stop))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -72,6 +76,8 @@ async fn http_status(State(state): State<AppState>) -> impl IntoResponse {
         "ok": true,
         "session": snap.session,
         "radio": snap.radio,
+        "watch": snap.watch,
+        "call_egress": snap.call_egress,
         "clients": state.clients.load(Ordering::Relaxed),
     }))
 }
@@ -159,6 +165,70 @@ async fn http_radio_stop(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+async fn http_watch_play(
+    State(state): State<AppState>,
+    Json(body): Json<PlayBody>,
+) -> impl IntoResponse {
+    match state.sessions.play_watch(body.url).await {
+        Ok(watch) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "watch": watch }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+async fn http_watch_stop(State(state): State<AppState>) -> impl IntoResponse {
+    match state.sessions.stop_watch().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct CallEgressBody {
+    /// Full RTMP(S) URL including stream key, e.g. rtmps://stream.place:1935/live/<key>
+    rtmp_url: String,
+}
+
+async fn http_call_egress_start(
+    State(state): State<AppState>,
+    Json(body): Json<CallEgressBody>,
+) -> impl IntoResponse {
+    match state.sessions.start_call_egress(body.rtmp_url).await {
+        Ok(egress) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "call_egress": egress })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+async fn http_call_egress_stop(State(state): State<AppState>) -> impl IntoResponse {
+    match state.sessions.stop_call_egress().await {
+        Ok(egress) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "call_egress": egress })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 // ── WebSocket ───────────────────────────────────────────────────────
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -178,6 +248,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         "vad_utterances".into(),
         "speak_pcm".into(),
         "radio".into(),
+        "call_egress".into(),
         "http_v1".into(),
     ];
     if cfg!(feature = "irc-signaling") {
@@ -289,6 +360,21 @@ async fn handle_text(state: &AppState, text: &str) -> anyhow::Result<()> {
         }
         ClientMsg::StopRadio => {
             state.sessions.send(SessionCmd::StopRadio { reply: None });
+        }
+        ClientMsg::PlayWatch { url } => {
+            state.sessions.send(SessionCmd::PlayWatch { url, reply: None });
+        }
+        ClientMsg::StopWatch => {
+            state.sessions.send(SessionCmd::StopWatch { reply: None });
+        }
+        ClientMsg::StartCallEgress { rtmp_url } => {
+            state.sessions.send(SessionCmd::StartCallEgress {
+                rtmp_url,
+                reply: None,
+            });
+        }
+        ClientMsg::StopCallEgress => {
+            state.sessions.send(SessionCmd::StopCallEgress { reply: None });
         }
         ClientMsg::Status => {
             state.sessions.send(SessionCmd::Status { reply: None });

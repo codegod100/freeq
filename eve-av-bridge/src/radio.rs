@@ -28,6 +28,8 @@ const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
 pub struct RadioHandle {
     stop: Arc<AtomicBool>,
     viz: Option<RadioViz>,
+    /// Latest ICY StreamTitle (shared with the icy task).
+    last_title: Arc<std::sync::Mutex<Option<String>>>,
     _task: tokio::task::JoinHandle<()>,
     _icy: tokio::task::JoinHandle<()>,
 }
@@ -38,17 +40,25 @@ impl RadioHandle {
     }
 
     pub fn title(&self) -> Option<String> {
-        self.viz.as_ref().map(|v| v.title()).filter(|t| !t.is_empty())
+        self.last_title
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .filter(|t| !t.is_empty())
+            .or_else(|| self.viz.as_ref().map(|v| v.title()).filter(|t| !t.is_empty()))
     }
 }
 
 /// Spawn a background task that pulls `url` through ffmpeg and enqueues PCM.
-/// When `viz` is set, also feeds DSP samples and an ICY metadata reader.
+/// Always runs an ICY metadata reader for StreamTitle; when `viz` is set, also
+/// feeds DSP samples and paints the title on the video tile.
+/// `title_tx` receives each new non-empty StreamTitle (song changes).
 pub fn start_radio(
     url: String,
     speaker: Speaker,
     mut session_alive: watch::Receiver<bool>,
     viz: Option<RadioViz>,
+    title_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 ) -> Result<RadioHandle> {
     if url.trim().is_empty() {
         bail!("empty radio url");
@@ -75,6 +85,8 @@ pub fn start_radio(
     let viz_icy = viz.clone();
     let url_icy = url.clone();
     let mut alive_icy = session_alive.clone();
+    let last_title = Arc::new(std::sync::Mutex::new(None));
+    let last_title_icy = last_title.clone();
 
     let task = tokio::spawn(async move {
         info!(%url, ?ffmpeg, "starting radio decode");
@@ -89,12 +101,18 @@ pub fn start_radio(
     });
 
     let icy = tokio::spawn(async move {
-        if viz_icy.is_none() {
-            return;
-        }
         // Brief delay so ffmpeg claims the stream first; icy is a second GET.
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        if let Err(e) = run_icy_meta(&url_icy, viz_icy.unwrap(), stop_icy, &mut alive_icy).await {
+        if let Err(e) = run_icy_meta(
+            &url_icy,
+            viz_icy,
+            last_title_icy,
+            title_tx,
+            stop_icy,
+            &mut alive_icy,
+        )
+        .await
+        {
             warn!(error = %e, "icy metadata reader ended");
         }
     });
@@ -102,6 +120,7 @@ pub fn start_radio(
     Ok(RadioHandle {
         stop,
         viz,
+        last_title,
         _task: task,
         _icy: icy,
     })
@@ -286,7 +305,9 @@ async fn run_ffmpeg_pipe(
 /// Parallel ICY metadata reader — second HTTP GET with `Icy-MetaData: 1`.
 async fn run_icy_meta(
     url: &str,
-    viz: RadioViz,
+    viz: Option<RadioViz>,
+    last_title: Arc<std::sync::Mutex<Option<String>>>,
+    title_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     stop: Arc<AtomicBool>,
     session_alive: &mut watch::Receiver<bool>,
 ) -> Result<()> {
@@ -299,7 +320,17 @@ async fn run_icy_meta(
 
     // Reconnect loop — some stations drop the meta connection periodically.
     while !stop.load(Ordering::Relaxed) && *session_alive.borrow() {
-        match icy_session(&client, url, &viz, &stop, session_alive).await {
+        match icy_session(
+            &client,
+            url,
+            viz.as_ref(),
+            &last_title,
+            title_tx.as_ref(),
+            &stop,
+            session_alive,
+        )
+        .await
+        {
             Ok(()) => {
                 if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
                     break;
@@ -321,7 +352,9 @@ async fn run_icy_meta(
 async fn icy_session(
     client: &reqwest::Client,
     url: &str,
-    viz: &RadioViz,
+    viz: Option<&RadioViz>,
+    last_title_shared: &std::sync::Mutex<Option<String>>,
+    title_tx: Option<&tokio::sync::mpsc::UnboundedSender<String>>,
     stop: &AtomicBool,
     session_alive: &mut watch::Receiver<bool>,
 ) -> Result<()> {
@@ -342,7 +375,9 @@ async fn icy_session(
             if let Ok(s) = v.to_str() {
                 let s = s.trim();
                 if !s.is_empty() {
-                    viz.set_station(s);
+                    if let Some(v) = viz {
+                        v.set_station(s);
+                    }
                     info!(station = %s, "icy station name");
                     break;
                 }
@@ -439,7 +474,15 @@ async fn icy_session(
             if let Some(title) = parse_stream_title(&meta) {
                 if title != last_title {
                     info!(%title, "icy StreamTitle");
-                    viz.set_title(&title);
+                    if let Some(v) = viz {
+                        v.set_title(&title);
+                    }
+                    if let Ok(mut g) = last_title_shared.lock() {
+                        *g = Some(title.clone());
+                    }
+                    if let Some(tx) = title_tx {
+                        let _ = tx.send(title.clone());
+                    }
                     last_title = title;
                 }
             }

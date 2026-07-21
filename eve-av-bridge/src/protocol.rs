@@ -32,11 +32,21 @@ pub enum ClientMsg {
         sample_rate: u32,
     },
     SpeakClear,
-    /// Stream an internet radio URL into the active MoQ session.
+    /// Stream an internet radio URL into the active MoQ session (audio + optional viz tile).
     PlayRadio {
         url: String,
     },
     StopRadio,
+    /// HLS / stream.place watch (real video + audio) — not radio.
+    PlayWatch {
+        url: String,
+    },
+    StopWatch,
+    /// Mix the freeq call (all remote participants) and RTMP to stream.place / custom URL.
+    StartCallEgress {
+        rtmp_url: String,
+    },
+    StopCallEgress,
     Status,
 }
 
@@ -58,6 +68,10 @@ pub enum ServerMsg {
         clients: usize,
         #[serde(skip_serializing_if = "Option::is_none")]
         radio: Option<RadioStatus>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        watch: Option<crate::session::WatchStatus>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        call_egress: Option<crate::egress::EgressStatus>,
     },
     SessionState {
         state: SessionState,
@@ -89,6 +103,15 @@ pub enum ServerMsg {
         url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+    CallEgress {
+        running: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rtmp: Option<String>,
+        participants: usize,
+        frames: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        last_error: Option<String>,
     },
     Error {
         message: String,

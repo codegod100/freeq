@@ -7,8 +7,10 @@
 //!
 //! See README.md for the control protocol.
 
+mod egress;
 mod protocol;
 mod radio;
+mod watch;
 mod session;
 mod viz;
 mod ws;
