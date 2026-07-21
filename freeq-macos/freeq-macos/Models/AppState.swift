@@ -1504,6 +1504,15 @@ extension AppState {
                 (displayText, wasEncrypted) = channelE2ee.incoming(text: msg.text, channel: msg.target)
             }
 
+            // Server-persisted reactions replayed by CHATHISTORY ride the
+            // `+freeq.at/reactions` tag (parsed into msg.reactions). Carry them
+            // onto the message so reactions survive logout/login, not just the
+            // live `+react` TAGMSGs since this session started.
+            var initialReactions: [String: Set<String>] = [:]
+            for tally in msg.reactions where !tally.nicks.isEmpty {
+                initialReactions[tally.emoji] = Set(tally.nicks)
+            }
+
             // Attribute our own messages to our current nick, whichever
             // client alias sent them (a web session under the handle nick, a
             // TUI under -n <nick> — same DID, one visible identity). Also
@@ -1519,7 +1528,8 @@ extension AppState {
                 isSigned: msg.isSigned,
                 isEncrypted: wasEncrypted,
                 origin: msg.origin,
-                editOf: msg.editOf
+                editOf: msg.editOf,
+                reactions: initialReactions
             )
 
             // Handle edits

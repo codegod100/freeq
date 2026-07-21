@@ -24,6 +24,21 @@ final class CoreModelTests: XCTestCase {
         XCTAssertEqual(ch.messages[0].text, "hi")
     }
 
+    func testAppendIfNewFoldsReactionsIntoCachedCopy() {
+        // Local cache loads a message WITHOUT reactions; a CHATHISTORY replay
+        // then delivers the same message WITH server-persisted reactions.
+        // Dedup must fold the reactions in (not drop them) so they survive
+        // logout/login.
+        let ch = ChannelState(name: "#t")
+        ch.appendIfNew(msg("m1"))                        // cached, no reactions
+        var replay = msg("m1")
+        replay.reactions = ["🎉": ["alice", "bob"], "🔥": ["carol"]]
+        ch.appendIfNew(replay)                            // CHATHISTORY copy
+        XCTAssertEqual(ch.messages.count, 1)              // still one message
+        XCTAssertEqual(ch.messages[0].reactions["🎉"], ["alice", "bob"])
+        XCTAssertEqual(ch.messages[0].reactions["🔥"], ["carol"])
+    }
+
     func testAppendOutOfOrderInsertsByTimestamp() {
         let ch = ChannelState(name: "#t")
         ch.appendIfNew(msg("m1", at: 100))

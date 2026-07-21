@@ -77,7 +77,18 @@ class ChannelState: Identifiable {
     /// under a fresh msgid. Dedup on both the current id and the original
     /// (`editOf`) so those two copies collapse instead of rendering twice.
     func appendIfNew(_ msg: ChatMessage) {
-        guard !messageIds.contains(msg.id) else { return }
+        if messageIds.contains(msg.id) {
+            // Already have this message (e.g. the local cache copy loaded
+            // first). A CHATHISTORY replay may still carry authoritative
+            // server-persisted reactions the cached copy lacked — fold them in
+            // so reactions survive logout/login, not just live ones.
+            if !msg.reactions.isEmpty, let idx = findMessage(byId: msg.id) {
+                for (emoji, nicks) in msg.reactions where !nicks.isEmpty {
+                    messages[idx].reactions[emoji] = nicks
+                }
+            }
+            return
+        }
         if let editOf = msg.editOf, messageIds.contains(editOf) { return }
         messageIds.insert(msg.id)
         if let editOf = msg.editOf { messageIds.insert(editOf) }
