@@ -291,6 +291,9 @@ describe('messaging methods', () => {
     // target, fetch history by it (the reply batch then arrives DID-keyed),
     // and learn the display binding so the DID renders as a name at once.
     const { client, ws } = await makeRegistered();
+    // TARGETS only ever arrive on an authenticated session; the client now
+    // skips DM-history fetches as a guest, so simulate the authed state.
+    (client as any)._authDid = 'did:plc:alice';
     const targets: string[] = [];
     client.on('historyTarget', (t) => targets.push(t));
     ws.recv(
@@ -388,6 +391,8 @@ describe('messaging methods', () => {
 
   it('TARGETS without the tag (old server) keeps nick behavior unchanged', async () => {
     const { client, ws } = await makeRegistered();
+    // TARGETS only ever arrive on an authenticated session (see above).
+    (client as any)._authDid = 'did:plc:alice';
     const targets: string[] = [];
     client.on('historyTarget', (t) => targets.push(t));
     ws.recv(':srv CHATHISTORY TARGETS bob');
