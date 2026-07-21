@@ -629,17 +629,24 @@ function wireEvents(c: FreeqClient) {
     }
   });
 
-  c.on('messageEdited', (channel, originalMsgId, newText, newMsgId, isStreaming) => {
+  c.on('messageEdited', (channel, originalMsgId, newText, newMsgId, isStreaming, editorNick, editorAccount) => {
     // Ensure DM buffer exists
     const isChannel = channel.startsWith('#') || channel.startsWith('&');
     if (!isChannel && !useStore.getState().channels.has(channel.toLowerCase())) {
       s().addChannel(channel);
     }
-    s().editMessage(channel, originalMsgId, newText, newMsgId, isStreaming);
+    s().editMessage(channel, originalMsgId, newText, newMsgId, isStreaming, editorNick, editorAccount);
   });
 
-  c.on('messageDeleted', (channel, msgId) => {
-    s().deleteMessage(channel, msgId);
+  c.on('messageDeleted', (channel, msgId, deleterNick, deleterAccount) => {
+    s().deleteMessage(channel, msgId, deleterNick, deleterAccount);
+  });
+
+  c.on('serverFail', (text) => {
+    // Server rejected an action (FAIL <cmd> <code> <desc>). Show it where
+    // the user is looking — silent rejections are undebuggable.
+    const active = useStore.getState().activeChannel || 'server';
+    s().addSystemMessage(active, `Server error: ${text}`);
   });
 
   c.on('reactionAdded', (channel, msgId, emoji, fromNick) => {

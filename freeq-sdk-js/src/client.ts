@@ -1202,6 +1202,8 @@ export class FreeqClient extends EventEmitter {
         displayText,
         openerTags['msgid'],
         isStreaming,
+        from,
+        openerTags['account'],
       );
       return;
     }
@@ -1694,7 +1696,7 @@ export class FreeqClient extends EventEmitter {
             break;
           }
           const isStreaming = msg.tags['+freeq.at/streaming'] === '1';
-          this.emit('messageEdited', bufName, editOf, displayText, msg.tags['msgid'], isStreaming);
+          this.emit('messageEdited', bufName, editOf, displayText, msg.tags['msgid'], isStreaming, from, msg.tags['account']);
           break;
         }
 
@@ -1751,6 +1753,14 @@ export class FreeqClient extends EventEmitter {
           // Emitted so the app can show notifications / increment badges
           this.emit('systemMessage', '__mention__', JSON.stringify({ channel: bufName, from, text, isDM, isMention }));
         }
+        break;
+      }
+
+      case 'FAIL': {
+        // IRCv3 FAIL — surface to the app. A silent server rejection is
+        // indistinguishable from a client bug at the UI (and has cost
+        // real debugging time); the app renders these as system messages.
+        this.emit('serverFail', msg.params.join(' '));
         break;
       }
 
@@ -1815,7 +1825,7 @@ export class FreeqClient extends EventEmitter {
         const bufName = isChannel ? target : this.dmKey(isSelf ? target : from);
 
         const deleteOf = msg.tags['+draft/delete'];
-        if (deleteOf) { this.emit('messageDeleted', bufName, deleteOf); break; }
+        if (deleteOf) { this.emit('messageDeleted', bufName, deleteOf, from, msg.tags['account']); break; }
 
         const reaction = msg.tags['+react'];
         if (reaction) {

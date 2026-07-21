@@ -750,3 +750,39 @@ describe('mergeHistory edit reconciliation', () => {
     expect(msgs[0].text).toBe('edited orphan');
   });
 });
+
+// ── Edit/delete authorship gate (forged events ignored) ──
+describe('edit/delete authorship gate', () => {
+  const s = () => useStore.getState();
+  const ch = 'did:key:z6mkgatepeer';
+  const at = (id: string, from: string, text: string) => ({
+    id, from, text, timestamp: new Date('2026-07-21T00:00:00Z'), tags: {},
+  });
+
+  beforeEach(() => {
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+  });
+
+  it('ignores an edit whose actor is not the original sender', () => {
+    s().addMessage(ch, at('m1', 'alice', 'mine'));
+    (s() as any).editMessage(ch, 'm1', 'forged', 'e1', false, 'mallory', undefined);
+    const m = s().channels.get(ch)!.messages[0];
+    expect(m.text).toBe('mine');
+    expect(m.id).toBe('m1');
+  });
+
+  it('ignores a delete whose actor is not the original sender', () => {
+    s().addMessage(ch, at('m2', 'alice', 'keep me'));
+    (s() as any).deleteMessage(ch, 'm2', 'mallory', undefined);
+    expect(s().channels.get(ch)!.messages[0].deleted).toBeUndefined();
+  });
+
+  it('applies edit and delete from the matching author', () => {
+    s().addMessage(ch, at('m3', 'alice', 'v1'));
+    (s() as any).editMessage(ch, 'm3', 'v2', 'e3', false, 'alice', undefined);
+    expect(s().channels.get(ch)!.messages[0].text).toBe('v2');
+    (s() as any).deleteMessage(ch, 'e3', 'ALICE', undefined);
+    expect(s().channels.get(ch)!.messages[0].deleted).toBe(true);
+  });
+});

@@ -35,10 +35,16 @@ export interface FreeqEvents {
   message: (channel: string, message: Message) => void;
 
   /** Fired when a message is edited. */
-  messageEdited: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean) => void;
+  messageEdited: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean, editorNick?: string, editorAccount?: string) => void;
 
-  /** Fired when a message is deleted. */
-  messageDeleted: (channel: string, msgId: string) => void;
+  /** Fired when a message is deleted. Deleter identity lets receivers
+   *  enforce authorship in unpersisted (guest) threads, where the server
+   *  relays without a row to check. */
+  messageDeleted: (channel: string, msgId: string, deleterNick?: string, deleterAccount?: string) => void;
+
+  /** IRCv3 FAIL from the server ("COMMAND ERROR_CODE description") — render
+   *  it; silent rejections are indistinguishable from client bugs. */
+  serverFail: (text: string) => void;
 
   /** Fired when a reaction is added. */
   reactionAdded: (channel: string, msgId: string, emoji: string, fromNick: string) => void;

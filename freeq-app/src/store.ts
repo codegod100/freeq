@@ -228,8 +228,8 @@ export interface Store {
   addMessage: (channel: string, msg: Message) => void;
   mergeHistory: (channel: string, messages: Message[]) => void;
   addSystemMessage: (channel: string, text: string) => void;
-  editMessage: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean) => void;
-  deleteMessage: (channel: string, msgId: string) => void;
+  editMessage: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean, editorNick?: string, editorAccount?: string) => void;
+  deleteMessage: (channel: string, msgId: string, deleterNick?: string, deleterAccount?: string) => void;
   addReaction: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
   removeReaction: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
   incrementMentions: (channel: string) => void;
@@ -807,7 +807,19 @@ export const useStore = create<Store>((set, get) => ({
     get().addMessage(channel, msg);
   },
 
-  editMessage: (channel, originalMsgId, newText, newMsgId, isStreaming) => set((s) => {
+  editMessage: (channel, originalMsgId, newText, newMsgId, isStreaming, editorNick, editorAccount) => set((s) => {
+    // Authorship gate: only the original sender may edit. The server
+    // enforces this when the thread is persisted; for unpersisted (guest)
+    // threads it relays without a check, so the client is the authority.
+    // Account (DID) comparison first, nick fallback; no editor identity
+    // provided (own optimistic path) passes.
+    const authorOk = (m: Message): boolean => {
+      if (!editorNick && !editorAccount) return true;
+      const mAccount = m.tags?.['account'];
+      if (editorAccount && mAccount) return editorAccount === mAccount;
+      if (editorNick) return editorNick.toLowerCase() === m.from.toLowerCase();
+      return true;
+    };
     // Treat empty edit as a "cleared" message to prevent invisible messages
     const displayText = newText || (isStreaming ? '' : '[message cleared]');
     const channels = new Map(s.channels);
@@ -816,7 +828,7 @@ export const useStore = create<Store>((set, get) => ({
       // Match on id OR editOf — handles chained edits (e.g., streaming)
       // where the first edit changes id but subsequent edits still reference the original
       ch.messages = ch.messages.map((m) =>
-        (m.id === originalMsgId || m.editOf === originalMsgId)
+        (m.id === originalMsgId || m.editOf === originalMsgId) && authorOk(m)
           // editOf keeps the ROOT of the edit chain so chained edits and
           // replayed collapsed rows keep matching each other.
           ? { ...m, text: displayText, id: newMsgId || m.id, editOf: m.editOf ?? originalMsgId, isStreaming: !!isStreaming }
@@ -830,7 +842,7 @@ export const useStore = create<Store>((set, get) => ({
     for (const [id, batch] of batches) {
       if (batch.target.toLowerCase() !== channel.toLowerCase()) continue;
       batch.messages = batch.messages.map((m) =>
-        (m.id === originalMsgId || m.editOf === originalMsgId)
+        (m.id === originalMsgId || m.editOf === originalMsgId) && authorOk(m)
           ? { ...m, text: displayText, id: newMsgId || m.id, editOf: m.editOf ?? originalMsgId, isStreaming: !!isStreaming }
           : m
       );
@@ -840,12 +852,20 @@ export const useStore = create<Store>((set, get) => ({
     return { channels, batches };
   }),
 
-  deleteMessage: (channel, msgId) => set((s) => {
+  deleteMessage: (channel, msgId, deleterNick, deleterAccount) => set((s) => {
     const channels = new Map(s.channels);
     const ch = channels.get(channel.toLowerCase());
     if (!ch) return { channels };
+    // Authorship gate — mirror of editMessage's (see there).
+    const authorOk = (m: Message): boolean => {
+      if (!deleterNick && !deleterAccount) return true;
+      const mAccount = m.tags?.['account'];
+      if (deleterAccount && mAccount) return deleterAccount === mAccount;
+      if (deleterNick) return deleterNick.toLowerCase() === m.from.toLowerCase();
+      return true;
+    };
     ch.messages = ch.messages.map((m) =>
-      m.id === msgId ? { ...m, deleted: true, text: '' } : m
+      m.id === msgId && authorOk(m) ? { ...m, deleted: true, text: '' } : m
     );
     channels.set(channel.toLowerCase(), { ...ch });
     return { channels };
