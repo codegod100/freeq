@@ -1,4 +1,4 @@
-//! Active freeq-av media session + per-participant VAD + radio.
+//! Active freeq-av media session + per-participant VAD + radio + viz.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::protocol::{ParticipantEvent, ServerMsg, SessionInfo, SessionState};
 use crate::radio::{RadioHandle, start_radio};
+use crate::viz::RadioViz;
 
 /// Commands the WS/HTTP layer sends into the session manager.
 pub enum SessionCmd {
@@ -52,6 +53,8 @@ pub enum SessionCmd {
 pub struct RadioStatus {
     pub playing: bool,
     pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -126,6 +129,7 @@ impl SessionManager {
             radio: RadioStatus {
                 playing: false,
                 url: None,
+                title: None,
             },
         })
     }
@@ -139,6 +143,8 @@ struct Live {
     alive: watch::Sender<bool>,
     radio: Option<RadioHandle>,
     radio_url: Option<String>,
+    /// Shared video tile for radio DSP + ICY title (when !audio_only).
+    viz: Option<RadioViz>,
 }
 
 async fn run_manager(
@@ -208,14 +214,30 @@ async fn run_manager(
                     audio_only,
                 };
 
+                // Video tile for radio visualizer when not audio-only.
+                let viz = if audio_only {
+                    None
+                } else {
+                    let v = RadioViz::new("eve radio");
+                    v.ensure_renderer();
+                    Some(v)
+                };
+
                 let (alive_tx, alive_rx) = watch::channel(true);
                 let event_tx2 = event_tx.clone();
                 let info2 = info.clone();
+                let viz_for_session = viz.clone();
 
                 let session_task = tokio::spawn(async move {
-                    if let Err(e) =
-                        run_av_session(av_config, push_source, audio_only, event_tx2.clone(), alive_rx)
-                            .await
+                    if let Err(e) = run_av_session(
+                        av_config,
+                        push_source,
+                        audio_only,
+                        viz_for_session,
+                        event_tx2.clone(),
+                        alive_rx,
+                    )
+                    .await
                     {
                         warn!(error = %e, "av session error");
                         emit(
@@ -243,6 +265,7 @@ async fn run_manager(
                     alive: alive_tx,
                     radio: None,
                     radio_url: None,
+                    viz,
                 });
 
                 emit(
@@ -319,19 +342,27 @@ async fn run_manager(
                 }
                 l.speaker.clear();
                 let alive_rx = l.alive.subscribe();
-                match start_radio(url.clone(), l.speaker.clone(), alive_rx) {
+                let viz = l.viz.clone();
+                if l.info.audio_only {
+                    warn!(
+                        "radio playing on audio_only session — no video tile; reconnect with audio_only=false for viz"
+                    );
+                }
+                match start_radio(url.clone(), l.speaker.clone(), alive_rx, viz) {
                     Ok(handle) => {
                         l.radio = Some(handle);
                         l.radio_url = Some(url.clone());
                         let st = RadioStatus {
                             playing: true,
                             url: Some(url),
+                            title: None,
                         };
                         emit(
                             &event_tx,
                             ServerMsg::Radio {
                                 playing: true,
                                 url: st.url.clone(),
+                                title: None,
                             },
                         );
                         if let Some(r) = reply {
@@ -368,6 +399,7 @@ async fn run_manager(
                     ServerMsg::Radio {
                         playing: false,
                         url: None,
+                        title: None,
                     },
                 );
                 if let Some(r) = reply {
@@ -377,18 +409,27 @@ async fn run_manager(
             SessionCmd::Status { reply } => {
                 let g = live.lock().await;
                 let snap = match g.as_ref() {
-                    Some(l) => StatusSnapshot {
-                        session: Some(l.info.clone()),
-                        radio: RadioStatus {
-                            playing: l.radio.is_some(),
-                            url: l.radio_url.clone(),
-                        },
-                    },
+                    Some(l) => {
+                        let title = l
+                            .radio
+                            .as_ref()
+                            .and_then(|h| h.title())
+                            .or_else(|| l.viz.as_ref().map(|v| v.title()).filter(|t| !t.is_empty()));
+                        StatusSnapshot {
+                            session: Some(l.info.clone()),
+                            radio: RadioStatus {
+                                playing: l.radio.is_some(),
+                                url: l.radio_url.clone(),
+                                title,
+                            },
+                        }
+                    }
                     None => StatusSnapshot {
                         session: None,
                         radio: RadioStatus {
                             playing: false,
                             url: None,
+                            title: None,
                         },
                     },
                 };
@@ -418,6 +459,9 @@ async fn stop_live(
         if let Some(h) = prev.radio {
             h.stop();
         }
+        if let Some(v) = prev.viz {
+            v.stop();
+        }
         let _ = prev.alive.send(false);
         emit(
             event_tx,
@@ -443,6 +487,7 @@ async fn run_av_session(
     config: AvConfig,
     push_source: freeq_av::PushAudioSource,
     audio_only: bool,
+    viz: Option<RadioViz>,
     event_tx: mpsc::UnboundedSender<ServerMsg>,
     mut alive: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -450,13 +495,21 @@ async fn run_av_session(
         session = %config.session_id,
         nick = %config.my_nick,
         audio_only,
+        has_viz = viz.is_some(),
         "opening AvSession"
     );
 
-    let mut session = if audio_only {
-        AvSession::connect(config, push_source, || TestPatternSource::new(320, 180))
-    } else {
-        AvSession::connect(config, push_source, || TestPatternSource::new(640, 360))
+    let mut session = match (audio_only, viz) {
+        (false, Some(v)) => {
+            let v2 = v.clone();
+            AvSession::connect(config, push_source, move || v2.video_source())
+        }
+        (false, None) => {
+            AvSession::connect(config, push_source, || TestPatternSource::new(640, 360))
+        }
+        (true, _) => {
+            AvSession::connect(config, push_source, || TestPatternSource::new(320, 180))
+        }
     };
 
     let mut taps = tokio::task::JoinSet::new();

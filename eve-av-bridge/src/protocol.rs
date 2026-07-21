@@ -87,6 +87,8 @@ pub enum ServerMsg {
         playing: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
     },
     Error {
         message: String,

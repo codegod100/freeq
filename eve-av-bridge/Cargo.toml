@@ -31,6 +31,9 @@ url = "2"
 iroh-live = { git = "https://github.com/n0-computer/iroh-live", rev = "edd9bcc530a615f3ab3a6919e96790a077905376", default-features = false, features = ["opus", "h264"] }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
 uuid = { version = "1", features = ["v4"] }
+bytes = "1"
+libc = "0.2"
+reqwest = { workspace = true, default-features = false, features = ["rustls-tls", "stream"] }
 
 [features]
 default = []

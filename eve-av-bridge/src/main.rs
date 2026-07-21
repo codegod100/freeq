@@ -10,6 +10,7 @@
 mod protocol;
 mod radio;
 mod session;
+mod viz;
 mod ws;
 
 use std::net::SocketAddr;
