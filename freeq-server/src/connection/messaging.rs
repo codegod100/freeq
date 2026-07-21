@@ -525,6 +525,13 @@ pub(super) fn handle_tagmsg(
         // by event_id; a peer with no local session for the target just no-ops)
         // is the same shape the PRIVMSG DM path already uses.
         let mut sessions = super::routing::local_sessions_for_target(state, target);
+        // The sender's other devices get the event too — reactions/typing in
+        // a DM otherwise leave the sender's own other clients stale.
+        for sib in sender_sibling_sessions(state, conn) {
+            if !sessions.contains(&sib) {
+                sessions.push(sib);
+            }
+        }
         // Echo to the sender, same as the channel branch: a client holding
         // echo-message renders its own reaction from the echo, not
         // optimistically.
@@ -2037,18 +2044,27 @@ fn handle_edit(
             }
         }
         _ => {
-            // Message not found (no DB, pruned, or wrong msgid) — reject
-            let reply = Message::from_server(
-                &state.server_name,
-                "FAIL",
-                vec!["EDIT", "MESSAGE_NOT_FOUND", "Original message not found"],
-            );
-            if let Some(tx) = state.connections.lock().get(&conn.id) {
-                let _ = tx.try_send(format!("{reply}\r\n"));
+            // No row. In a channel that means a genuinely unknown msgid —
+            // reject. In a DM the thread itself may be unpersisted (guest
+            // DMs never write rows): relay the edit live like any other
+            // message instead of failing — the DB is a bystander for these
+            // threads, exactly as it is for their PRIVMSGs and reactions.
+            // (No row also means no server-side authorship check; receiving
+            // clients enforce editor == original sender.)
+            if is_channel {
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "FAIL",
+                    vec!["EDIT", "MESSAGE_NOT_FOUND", "Original message not found"],
+                );
+                if let Some(tx) = state.connections.lock().get(&conn.id) {
+                    let _ = tx.try_send(format!("{reply}\r\n"));
+                }
+                return;
             }
-            return;
         }
     }
+    let persisted = matches!(original, Some(Some(_)));
 
     // Generate new msgid for the edit
     let edit_msgid = crate::msgid::generate();
@@ -2149,19 +2165,23 @@ fn handle_edit(
     // For DMs, store under the canonical dm_key (not the nick) so
     // edits appear in CHATHISTORY alongside the original message.
     // store_channel was captured from the original row above.
+    // Unpersisted threads (no original row) get no edit row either —
+    // the edit is as ephemeral as the message it replaces.
     let editor_did = conn.authenticated_did.as_deref();
-    state.with_db(|db| {
-        db.insert_edit(
-            &store_channel,
-            &hostmask,
-            new_text,
-            timestamp,
-            &store_tags,
-            &edit_msgid,
-            original_msgid,
-            editor_did,
-        )
-    });
+    if persisted {
+        state.with_db(|db| {
+            db.insert_edit(
+                &store_channel,
+                &hostmask,
+                new_text,
+                timestamp,
+                &store_tags,
+                &edit_msgid,
+                original_msgid,
+                editor_did,
+            )
+        });
+    }
 
     // Update in-memory history (channels only)
     // Note: we keep the original msgid stable so that subsequent edits
@@ -2353,11 +2373,21 @@ fn handle_edit(
                     }
                 };
 
+                // The sender's other devices need the edit too, or they show
+                // stale text until their next history refetch.
+                let siblings = sender_sibling_sessions(state, conn);
                 let conns = state.connections.lock();
                 // Deliver to all target sessions
                 for target_session in &target_sessions {
                     if let Some(tx) = conns.get(target_session) {
                         deliver_to_session(tx, target_session);
+                    }
+                }
+                for sib in &siblings {
+                    if !target_sessions.contains(sib)
+                        && let Some(tx) = conns.get(sib)
+                    {
+                        deliver_to_session(tx, sib);
                     }
                 }
 
@@ -2369,10 +2399,17 @@ fn handle_edit(
                 }
             }
             RouteResult::Relayed => {
-                // Target is on a federated peer — edit was relayed
-                // Echo to sender
+                // Target is on a federated peer — edit was relayed.
+                // Deliver to the sender's other local devices + echo.
+                let siblings = sender_sibling_sessions(state, conn);
+                let conns = state.connections.lock();
+                for sib in &siblings {
+                    if let Some(tx) = conns.get(sib) {
+                        deliver_to_session(tx, sib);
+                    }
+                }
                 if state.cap_echo_message.lock().contains(&conn.id)
-                    && let Some(tx) = state.connections.lock().get(&conn.id)
+                    && let Some(tx) = conns.get(&conn.id)
                 {
                     deliver_to_session(tx, &conn.id);
                 }
@@ -2456,21 +2493,28 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
             }
         }
         _ => {
-            // Message not found (no DB, pruned, or wrong msgid) — reject
-            let reply = Message::from_server(
-                &state.server_name,
-                "FAIL",
-                vec!["DELETE", "MESSAGE_NOT_FOUND", "Original message not found"],
-            );
-            if let Some(tx) = state.connections.lock().get(&conn.id) {
-                let _ = tx.try_send(format!("{reply}\r\n"));
+            // No row: unknown msgid in a channel → reject; unpersisted DM
+            // (guest threads) → relay the delete live like any other DM
+            // event. Receiving clients enforce deleter == original sender.
+            if is_channel {
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "FAIL",
+                    vec!["DELETE", "MESSAGE_NOT_FOUND", "Original message not found"],
+                );
+                if let Some(tx) = state.connections.lock().get(&conn.id) {
+                    let _ = tx.try_send(format!("{reply}\r\n"));
+                }
+                return;
             }
-            return;
         }
     }
+    let persisted = matches!(original, Some(Some(_)));
 
-    // Soft-delete in DB
-    state.with_db(|db| db.soft_delete_message(&storage_key, original_msgid));
+    // Soft-delete in DB (no-op for unpersisted threads — nothing to mark)
+    if persisted {
+        state.with_db(|db| db.soft_delete_message(&storage_key, original_msgid));
+    }
 
     // Remove from in-memory history and pins (channels only)
     if is_channel {
@@ -2519,9 +2563,16 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
         }
     } else {
         // DM: deliver the delete to every local session bound to the target
-        // (a nick or a `did:`), fanning out across the DID's devices.
+        // (a nick or a `did:`), fanning out across the DID's devices — and
+        // to the sender's own other devices, which otherwise keep showing
+        // the deleted message until their next refetch.
         // TAGMSG-specific, so we don't reuse relay_to_nick (it sends PRIVMSG).
-        let target_sessions = super::routing::local_sessions_for_target(state, target);
+        let mut target_sessions = super::routing::local_sessions_for_target(state, target);
+        for sib in sender_sibling_sessions(state, conn) {
+            if !target_sessions.contains(&sib) {
+                target_sessions.push(sib);
+            }
+        }
         let tag_caps = state.cap_message_tags.lock();
         let conns = state.connections.lock();
         for target_session in &target_sessions {
@@ -2533,6 +2584,24 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
         }
         // Note: For federated DM deletes, we'd need S2S support — not implemented yet
     }
+}
+
+/// Sessions of the sender's own DID other than the sending one. A DM event
+/// (edit/delete/reaction) must reach the sender's other devices too — the
+/// peer's sessions and the sending session alone leave the sender's other
+/// clients showing stale state until their next history refetch. Guests
+/// have no DID, hence no linkable siblings.
+fn sender_sibling_sessions(state: &Arc<SharedState>, conn: &Connection) -> Vec<String> {
+    let did = state.session_dids.lock().get(&conn.id).cloned();
+    let Some(did) = did else {
+        return Vec::new();
+    };
+    state
+        .did_sessions
+        .lock()
+        .get(&did)
+        .map(|s| s.iter().filter(|id| **id != conn.id).cloned().collect())
+        .unwrap_or_default()
 }
 
 // ── AV session control ─────────────────────────────────────────────
