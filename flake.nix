@@ -19,7 +19,10 @@
       rust-overlay,
       crane,
     }:
-    flake-utils.lib.eachDefaultSystem (
+    # Linux only: packages pull alsa-lib + glibc.static (no Darwin).
+    # eachDefaultSystem would also invent aarch64-darwin / x86_64-darwin and
+    # Determinate CI inventory fails evaluating alsa on those hosts.
+    flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
       system:
       let
         overlays = [ (import rust-overlay) ];
@@ -178,7 +181,7 @@
           '';
         };
 
-        formatter = pkgs.nixfmt-rfc-style;
+        formatter = pkgs.nixfmt;
       }
     );
 }
