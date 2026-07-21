@@ -1055,8 +1055,28 @@ class AppState {
         channelE2ee.importKey(channel: channel, base64: b64)
     }
 
+    /// A DM thread keyed by a bare DID with no learned nick (typical for an
+    /// OFFLINE peer whose conversation was created on another client) renders
+    /// the raw DID and can't fold its nick-keyed twin. Resolve the DID → handle
+    /// via the profile API, then bind: names the thread and merges the twin.
+    /// Also tries the handle's local part, since freeq nicks are often the
+    /// handle without its domain (e.g. "kellyjeanne" from "kellyjeanne.bsky.social").
+    func resolveDmDidIfNeeded(_ key: String) {
+        guard DidDisplay.isDid(key),
+              didDisplayNames[key] == nil,
+              ProfileCache.shared.nick(for: key) == nil else { return }
+        ProfileCache.shared.resolveByDid(key) { [weak self] handle in
+            guard let self, let handle else { return }
+            self.adoptDmBinding(nick: handle, did: key)
+            if let dot = handle.firstIndex(of: "."), String(handle[..<dot]).lowercased() != handle.lowercased() {
+                self.adoptDmBinding(nick: String(handle[..<dot]), did: key)
+            }
+        }
+    }
+
     func getOrCreateDM(_ nick: String) -> ChannelState {
         let lower = nick.lowercased()
+        resolveDmDidIfNeeded(nick)
         if let dm = dmBuffers.first(where: { $0.name.lowercased() == lower }) {
             return dm
         }
@@ -1462,7 +1482,12 @@ extension AppState {
             // iOS already takes — macOS was just ignoring `msg.account`
             // and so no Bluesky avatars ever resolved.
             if let did = msg.account, did.hasPrefix("did:") {
-                recordUserDid(nick: msg.fromNick, did: did)
+                // adoptDmBinding (not bare recordUserDid): learning a peer's DID
+                // must ALSO fold a nick-keyed DM thread into its DID-keyed one.
+                // Without the merge, a conversation opened by nick and one the
+                // server keys by DID (e.g. messages sent from the web client)
+                // show up as two separate threads for the same person.
+                adoptDmBinding(nick: msg.fromNick, did: did)
             }
 
             // One person, one thread: DMs key by the SDK's canonical
@@ -1797,7 +1822,10 @@ extension AppState {
             if info.contains("authenticated as ") || info.contains("logged in as ") {
                 let parts = info.split(separator: " ")
                 if let did = parts.last, did.hasPrefix("did:") {
-                    recordUserDid(nick: whoisNick, did: String(did))
+                    // Merge (not just record): a WHOIS is often how a
+                    // nick-keyed DM thread finally learns the peer's DID, so it
+                    // must fold into the DID-keyed thread the server already has.
+                    adoptDmBinding(nick: whoisNick, did: String(did))
                 }
             }
             // Background WHOIS is for identity hydration only. Only explicit
