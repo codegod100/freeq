@@ -1006,6 +1006,7 @@ async fn auth_callback(
 
 const ALLOWED_ORIGINS: &[&str] = &[
     "https://irc.freeq.at",
+    "https://freeqworld.boxd.sh",
     "https://revenant-watch.boxd.sh",
     "http://localhost:5173",
     "http://localhost:8000",
@@ -1509,7 +1510,7 @@ pub fn is_valid_return_to(url: &str) -> bool {
         return false;
     };
     match (parsed.scheme(), parsed.host_str()) {
-        ("https", Some("irc.freeq.at" | "staging.freeq.at" | "revenant-watch.boxd.sh")) => true,
+        ("https", Some("irc.freeq.at" | "staging.freeq.at" | "freeqworld.boxd.sh" | "revenant-watch.boxd.sh")) => true,
         // Loopback dev origins, any port.
         ("http", Some("localhost" | "127.0.0.1")) => true,
         _ => false,
