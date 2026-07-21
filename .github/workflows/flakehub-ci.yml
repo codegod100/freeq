@@ -1,11 +1,8 @@
-# Build flake outputs on GitHub Actions and push store paths to FlakeHub Cache
-# (OIDC — no static cache secrets). Docs:
-#   https://docs.determinate.systems/guides/determinate-ci/
-#   https://docs.determinate.systems/flakehub/cache/
+# Build crane packages and push store paths to FlakeHub Cache (OIDC).
+# Docs: https://docs.determinate.systems/guides/github-actions/
+#       https://docs.determinate.systems/flakehub/cache/
 #
-# Requires a FlakeHub paid plan for successful cache pushes; without it builds
-# may still pass while cache upload returns HTTP 401.
-# Fork PRs cannot authenticate to FlakeHub Cache.
+# Requires a FlakeHub paid plan for successful cache pushes.
 # Linux only — FlakeHub Cache has no Darwin support.
 
 name: FlakeHub CI
@@ -17,16 +14,47 @@ on:
     branches:
       - main
       - master
-    tags:
-      - "v?[0-9]+.[0-9]+.[0-9]+*"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  DeterminateCI:
-    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@main
+  crane:
+    name: crane (${{ matrix.attr }})
+    runs-on: ${{ matrix.runner }}
     permissions:
       id-token: write
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Dynamic first — faster feedback; static is the deploy artifact.
+          - system: x86_64-linux
+            runner: ubuntu-latest
+            attr: eve-av-bridge
+          - system: x86_64-linux
+            runner: ubuntu-latest
+            attr: eve-av-bridge-static
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            attr: eve-av-bridge
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: DeterminateSystems/determinate-nix-action@v3
+
+      - uses: DeterminateSystems/flakehub-cache-action@v3
+
+      - name: nix build .#${{ matrix.attr }}
+        run: |
+          set -euo pipefail
+          nix build ".#packages.${{ matrix.system }}.${{ matrix.attr }}" -L --print-build-logs
+          out="$(readlink -f result)"
+          echo "store_path=$out"
+          file "$out/bin/eve-av-bridge" || true
+          if [[ "${{ matrix.attr }}" == *static* ]]; then
+            ldd "$out/bin/eve-av-bridge" 2>&1 | head -5 || true
+          fi
+          "$out/bin/eve-av-bridge" --help | head -12

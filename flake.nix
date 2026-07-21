@@ -1,5 +1,5 @@
 {
-  description = "freeq workspace + glibc-static eve-av-bridge for bare Linux (Ubuntu boxd, etc.)";
+  description = "freeq workspace + crane-built eve-av-bridge (dynamic + glibc crt-static)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -20,8 +20,6 @@
       crane,
     }:
     # Linux only: packages pull alsa-lib + glibc.static (no Darwin).
-    # eachDefaultSystem would also invent aarch64-darwin / x86_64-darwin and
-    # Determinate CI inventory fails evaluating alsa on those hosts.
     flake-utils.lib.eachSystem [ "x86_64-linux" "aarch64-linux" ] (
       system:
       let
@@ -29,8 +27,8 @@
         pkgs = import nixpkgs {
           inherit system overlays;
         };
+        inherit (pkgs) lib;
 
-        # Host gnu target only — static via crt-static + glibc.static (no musl).
         rustToolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [
             "rust-src"
@@ -41,22 +39,44 @@
 
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
 
-        src = pkgs.lib.cleanSourceWith {
-          src = ./.;
-          filter =
-            path: type:
-            let
-              base = baseNameOf path;
-            in
-            !(
-              pkgs.lib.hasInfix "/target" path
-              || pkgs.lib.hasInfix "/.git" path
-              || pkgs.lib.hasInfix "/node_modules" path
-              || pkgs.lib.hasInfix "/freeq-app" path
-              || pkgs.lib.hasInfix "/freeq-ios" path
-              || pkgs.lib.hasInfix "/freeq-android" path
+        # Crane cargo sources + freeq path deps for eve-av-bridge only.
+        # Keep the workspace Cargo.toml/Cargo.lock but drop huge app trees.
+        cargoFilter =
+          path: type:
+          let
+            base = baseNameOf path;
+            isDenied =
+              lib.hasInfix "/target" path
+              || lib.hasInfix "/.git" path
+              || lib.hasInfix "/.cargo-nix" path
+              || lib.hasInfix "/node_modules" path
+              || lib.hasInfix "/freeq-app" path
+              || lib.hasInfix "/freeq-ios" path
+              || lib.hasInfix "/freeq-android" path
+              || lib.hasInfix "/freeq-macos" path
+              || lib.hasInfix "/freeq-webui" path
+              || lib.hasInfix "/freeq-web2" path
+              || lib.hasInfix "/freeq-site" path
+              || lib.hasInfix "/docs/" path
+              || lib.hasInfix "/deploy/" path
+              || lib.hasInfix "/Freeq.WinUI" path
               || base == "target"
-            );
+              || base == ".cargo-nix";
+          in
+          (!isDenied)
+          && (
+            (craneLib.filterCargoSources path type)
+            # Keep workspace metadata and non-rs assets crane still needs occasionally.
+            || base == "Cargo.toml"
+            || base == "Cargo.lock"
+            || base == "rust-toolchain.toml"
+            || lib.hasSuffix ".md" base
+          );
+
+        src = lib.cleanSourceWith {
+          src = ./.;
+          filter = cargoFilter;
+          name = "freeq-eve-av-bridge-src";
         };
 
         commonArgs = {
@@ -64,7 +84,9 @@
           pname = "eve-av-bridge";
           version = "0.1.0";
           strictDeps = true;
-          cargoExtraArgs = "-p eve-av-bridge";
+
+          # Workspace package — only build the bridge crate + its path deps.
+          cargoExtraArgs = "-p eve-av-bridge --bins";
 
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -79,10 +101,18 @@
             openssl
           ];
 
+          # No unit tests in the package build (they need network/SFU).
           doCheck = false;
         };
 
-        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        # Shared dep graph — rebuilt only when Cargo.lock / toolchain change.
+        cargoArtifacts = craneLib.buildDepsOnly (
+          commonArgs
+          // {
+            # Deps-only still needs the same -p flag so it doesn't try every workspace member.
+            pname = "eve-av-bridge-deps";
+          }
+        );
 
         # Dynamic (Nix store) — fine on NixOS / nix-ld hosts.
         eve-av-bridge = craneLib.buildPackage (
@@ -90,8 +120,9 @@
           // {
             inherit cargoArtifacts;
             meta = {
-              description = "eve freeq AV media plane (WebSocket + radio)";
+              description = "eve freeq AV media plane (WebSocket + radio + viz)";
               mainProgram = "eve-av-bridge";
+              platforms = lib.platforms.linux;
             };
           }
         );
@@ -105,9 +136,8 @@
           ];
         });
 
-        # glibc crt-static on the final binary only (not proc-macros).
-        # cargo rustc -C flags apply only to the leaf crate — setting
-        # RUSTFLAGS globally breaks async-trait / host proc-macros.
+        # glibc crt-static on the *leaf* binary only. Global RUSTFLAGS break
+        # host proc-macros; crane's cargo build runs normally, then we re-link.
         eve-av-bridge-static = craneLib.buildPackage (
           commonArgs
           // {
@@ -122,28 +152,32 @@
               pkgs.openssl
             ];
 
+            # Prefer static alsa/openssl search paths for the final link.
             NIX_LDFLAGS = "-L${pkgs.glibc.static}/lib -L${alsaLibStatic}/lib";
 
-            # Build deps normally, then re-link the bin with crt-static.
-            buildPhase = ''
-              runHook preBuild
-              cargoBuildLog=$(mktemp cargoBuildLogXXXX.json)
-              cargo build --release --message-format json-render-diagnostics \
-                -p eve-av-bridge \
-                --bin eve-av-bridge \
-                | tee "$cargoBuildLog"
-              # Re-compile/link only the final binary with static glibc CRT.
-              cargo rustc --release -p eve-av-bridge --bin eve-av-bridge -- \
+            # After crane's normal cargo build, re-link only the bin with crt-static.
+            postBuild = ''
+              cargo rustc --release -p eve-av-bridge --bin eve-av-bridge --offline -- \
                 -C target-feature=+crt-static \
                 -C link-arg=-L${alsaLibStatic}/lib \
+                -C link-arg=-L${pkgs.glibc.static}/lib \
                 -C link-arg=-lasound
-              runHook postBuild
             '';
 
             meta = {
-              description = "eve-av-bridge with glibc crt-static for bare Linux";
+              description = "eve-av-bridge with glibc crt-static for bare Linux (Ubuntu boxd)";
               mainProgram = "eve-av-bridge";
+              platforms = lib.platforms.linux;
             };
+          }
+        );
+
+        # Optional clippy as a check (same artifacts).
+        eve-av-bridge-clippy = craneLib.cargoClippy (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- -D warnings";
           }
         );
       in
@@ -158,26 +192,60 @@
           drv = eve-av-bridge;
         };
 
-        devShells.default = pkgs.mkShell {
-          packages = [
+        checks = {
+          inherit eve-av-bridge eve-av-bridge-static;
+          clippy = eve-av-bridge-clippy;
+        };
+
+        # Match package build inputs so local cargo can link the same libs.
+        # Prefer: `nix develop` then `cargo build -p eve-av-bridge --release`
+        # Or: `nix build .#eve-av-bridge` / `.#eve-av-bridge-static` (crane).
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system} or { };
+
+          packages = with pkgs; [
+            just
+            pkg-config
+            openssl
+            alsa-lib
+            glibc.static
+            cmake
+            protobuf
+            ffmpeg
+            watchexec
             rustToolchain
-            pkgs.just
-            pkgs.pkg-config
-            pkgs.openssl
-            pkgs.alsa-lib
-            pkgs.glibc.static
-            pkgs.cmake
-            pkgs.protobuf
-            pkgs.ffmpeg
-            pkgs.watchexec
           ];
 
           shellHook = ''
-            echo "freeq dev shell"
+            # Prefer rustup cargo when present (faster incremental local builds).
+            if [ -d "$HOME/.rustup/toolchains" ]; then
+              for t in stable-x86_64-unknown-linux-gnu nightly-x86_64-unknown-linux-gnu; do
+                if [ -x "$HOME/.rustup/toolchains/$t/bin/cargo" ]; then
+                  export PATH="$HOME/.rustup/toolchains/$t/bin:$PATH"
+                  break
+                fi
+              done
+            fi
+            if [ -d "$HOME/.cargo/bin" ]; then
+              export PATH="$HOME/.cargo/bin:$PATH"
+            fi
+
+            # Avoid nix gcc-wrapper poisoning host build-scripts (SIGSEGV).
+            unset NIX_CC NIX_CC_FOR_BUILD NIX_BINTOOLS NIX_BINTOOLS_FOR_BUILD
+            unset NIX_CFLAGS_COMPILE NIX_CFLAGS_COMPILE_FOR_BUILD
+            if [ -n "''${NIX_LDFLAGS-}" ]; then
+              export NIX_LDFLAGS="$(printf '%s\n' "$NIX_LDFLAGS" | sed -E 's/ *-rpath [^ ]+//g')"
+            fi
+            if [ -n "''${NIX_LDFLAGS_FOR_BUILD-}" ]; then
+              export NIX_LDFLAGS_FOR_BUILD="$(printf '%s\n' "$NIX_LDFLAGS_FOR_BUILD" | sed -E 's/ *-rpath [^ ]+//g')"
+            fi
+            export NIX_HARDENING_ENABLE=""
+
+            echo "freeq crane shell (rustc=$(rustc --version 2>/dev/null | head -1))"
             echo "  cargo build -p eve-av-bridge --release"
-            echo "  RUSTFLAGS='-C target-feature=+crt-static' cargo build -p eve-av-bridge --release"
-            echo "  nix build .#eve-av-bridge-static   # glibc crt-static for Ubuntu/boxd"
-            echo "  nix build .#eve-av-bridge          # normal dynamic (NixOS)"
+            echo "  nix build .#eve-av-bridge            # crane dynamic"
+            echo "  nix build .#eve-av-bridge-static     # crane + glibc crt-static"
+            echo "  nix build .#checks.x86_64-linux.clippy"
           '';
         };
 

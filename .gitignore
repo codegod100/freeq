@@ -1,4 +1,6 @@
 /target
+/target-nix
+.cargo-nix/
 Cargo.lock
 irc.db*
 iroh-key.secret
