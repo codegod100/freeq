@@ -774,68 +774,16 @@ final class AvSessionTests: XCTestCase {
 /// on `CallCameraCapture.applyOrientation` for the derivation.
 final class CallCameraCaptureOrientationTests: XCTestCase {
 
-    func testPortraitOrientationKeepsUserUpright() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.portrait)
-
-        XCTAssertEqual(cap.previewRotationAngleForTest, 90,
-                       "portrait → preview rotates 90° CW so the user's head appears at the top of the portrait rect")
-    }
-
-    func testLandscapeLeftOrientationKeepsUserUprightInPortraitLockedRect() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.landscapeLeft)
-
-        // User-reported bug: Apple's standard mapping (0°) leaves the
-        // preview upside-down in landscape because our UI is
-        // portrait-locked, not rotating. The correct angle is 270° CW.
-        XCTAssertEqual(cap.previewRotationAngleForTest, 270,
-                       "landscapeLeft + portrait-locked UI → 270° CW keeps the user's head at vision-up")
-    }
-
-    func testLandscapeRightOrientationKeepsUserUprightInPortraitLockedRect() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.landscapeRight)
-
-        XCTAssertEqual(cap.previewRotationAngleForTest, 270,
-                       "landscapeRight + portrait-locked UI → 270° CW keeps the user's head at vision-up")
-    }
-
-    func testPortraitUpsideDownKeepsUserUpright() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.portraitUpsideDown)
-
-        // The rect rotates with the device (it's drawn in device-portrait
-        // coords), so what's at rect-top in pixels is at vision-bottom for
-        // an upside-down device — and the buffer's head-position also
-        // flipped to compensate. Net rotation: 90° CW, same as portrait.
-        XCTAssertEqual(cap.previewRotationAngleForTest, 90,
-                       "portraitUpsideDown + portrait-locked UI → 90° CW (same as portrait); rect & buffer rotations cancel")
-    }
-
-    func testFaceUpFaceDownAndUnknownLeavePreviewAlone() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-        cap.applyOrientationForTest(.portrait)
-        let before = cap.previewRotationAngleForTest
-
-        cap.applyOrientationForTest(.faceUp)
-        XCTAssertEqual(cap.previewRotationAngleForTest, before,
-                       "face-up is not a meaningful UI rotation; keep the prior preview angle")
-        cap.applyOrientationForTest(.faceDown)
-        XCTAssertEqual(cap.previewRotationAngleForTest, before,
-                       "face-down is not a meaningful UI rotation; keep the prior preview angle")
-        cap.applyOrientationForTest(.unknown)
-        XCTAssertEqual(cap.previewRotationAngleForTest, before)
-    }
+    // NOTE: the local PREVIEW rotation is now driven by
+    // AVCaptureDevice.RotationCoordinator (front-camera- and
+    // orientation-correct, computed by the OS from the live physical
+    // orientation), not by a hand-derived angle table. The old unit tests
+    // here asserted that table — which was exactly the bug (portrait 90° off,
+    // landscape upside-down, landscapeLeft indistinguishable from Right).
+    // The coordinator needs a real device/preview connection, so it isn't
+    // unit-testable; it's verified on-device. The OUTGOING software rotation
+    // (`rotatedFrame`, unchanged) is still covered below, as is the
+    // `lastValidOrientation` tracking it depends on.
 
     /// `lastValidOrientation` must remember the most recent UI-meaningful
     /// orientation so the resume-from-faceUp path (e.g., user sets phone on
