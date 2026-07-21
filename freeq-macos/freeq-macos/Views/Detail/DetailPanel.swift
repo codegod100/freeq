@@ -204,9 +204,9 @@ struct MemberRow: View {
         .contentShape(Rectangle())
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.clear))
         .onTapGesture {
-            if member.nick.lowercased() != appState.nick.lowercased() {
-                showProfile = true
-            }
+            // Clicking yourself opens your own card too (see your status,
+            // handle, proof) — the same card everyone else sees of you.
+            showProfile = true
         }
         .sheet(isPresented: $showProfile) {
             UserProfileSheet(nick: member.nick)
