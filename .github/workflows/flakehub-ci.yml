@@ -1,0 +1,32 @@
+# Build flake outputs on GitHub Actions and push store paths to FlakeHub Cache
+# (OIDC — no static cache secrets). Docs:
+#   https://docs.determinate.systems/guides/determinate-ci/
+#   https://docs.determinate.systems/flakehub/cache/
+#
+# Requires a FlakeHub paid plan for successful cache pushes; without it builds
+# may still pass while cache upload returns HTTP 401.
+# Fork PRs cannot authenticate to FlakeHub Cache.
+# Linux only — FlakeHub Cache has no Darwin support.
+
+name: FlakeHub CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v?[0-9]+.[0-9]+.[0-9]+*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  DeterminateCI:
+    uses: DeterminateSystems/ci/.github/workflows/workflow.yml@main
+    permissions:
+      id-token: write
+      contents: read
