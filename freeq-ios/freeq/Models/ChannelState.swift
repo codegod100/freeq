@@ -58,7 +58,18 @@ class ChannelState: ObservableObject, Identifiable {
     /// Append a message only if its ID hasn't been seen before.
     /// Inserts in timestamp order to handle CHATHISTORY arriving after live messages.
     func appendIfNew(_ msg: ChatMessage) {
-        guard !messageIds.contains(msg.id) else { return }
+        if messageIds.contains(msg.id) {
+            // Already have this message (e.g. the local cache copy loaded
+            // first). A CHATHISTORY replay may still carry authoritative
+            // server-persisted reactions the cached copy lacked — fold them in
+            // so reactions survive logout/login (parity with macOS).
+            if !msg.reactions.isEmpty, let idx = findMessage(byId: msg.id) {
+                for (emoji, nicks) in msg.reactions where !nicks.isEmpty {
+                    messages[idx].reactions[emoji] = nicks
+                }
+            }
+            return
+        }
         messageIds.insert(msg.id)
 
         // If the message is older than the last message, insert in sorted

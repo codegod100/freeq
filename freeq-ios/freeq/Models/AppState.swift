@@ -1996,6 +1996,45 @@ class AppState: ObservableObject {
     /// DMs are keyed by peer nick. Refuse anything that looks like a channel —
     /// a `#`/`&` name in `dmBuffers` would render with the DM avatar/style and
     /// silently shadow the real channel.
+    private var resolvingDids: Set<String> = []
+
+    /// A DM thread keyed by a bare DID with no learned nick (an OFFLINE peer,
+    /// or a conversation created on another client) renders the raw DID and
+    /// can't fold its nick twin. Resolve the DID → handle via the Bluesky
+    /// profile API (it accepts a DID), then adopt: names the thread and merges
+    /// the twin. Also tries the handle's local part, since freeq nicks are
+    /// often the handle without its domain (e.g. "kellyjeanne" from
+    /// "kellyjeanne.bsky.social"). Deduped; parity with macOS.
+    func resolveDmDidIfNeeded(_ key: String) {
+        guard DidDisplay.isDid(key),
+              didDisplayNames[key] == nil,
+              !knownDids.values.contains(key),
+              !resolvingDids.contains(key) else { return }
+        resolvingDids.insert(key)
+        Task { @MainActor in
+            defer { self.resolvingDids.remove(key) }
+            guard let handle = await AppState.resolveHandle(forDid: key) else { return }
+            self.adoptDmBinding(nick: handle, did: key)
+            if let dot = handle.firstIndex(of: "."),
+               String(handle[..<dot]).lowercased() != handle.lowercased() {
+                self.adoptDmBinding(nick: String(handle[..<dot]), did: key)
+            }
+        }
+    }
+
+    private static func resolveHandle(forDid did: String) async -> String? {
+        let encoded = did.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? did
+        guard let url = URL(string: "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=\(encoded)")
+        else { return nil }
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let handle = json["handle"] as? String else { return nil }
+            return handle
+        } catch { return nil }
+    }
+
     func getOrCreateDM(_ nick: String) -> ChannelState {
         let trimmed = nick.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else {
@@ -2009,6 +2048,7 @@ class AppState: ObservableObject {
         // Follow a known nick→DID binding so a nick-addressed open (compose
         // sheet, optimistic send, deep link) lands in the DID-keyed thread.
         let key = canonicalDmKey(trimmed)
+        resolveDmDidIfNeeded(key)
         if let existing = dmBuffers.first(where: { $0.name.lowercased() == key.lowercased() }) {
             return existing
         }
@@ -2311,13 +2351,24 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             // suppress notifications too (by nick AND DID).
             let senderBlocked = !isSelf && state.isBlocked(nick: from, did: ircMsg.account)
 
-            // Prefetch avatar using DID if available (from account-tag),
-            // and record the binding for DID-keyed thread identity.
+            // Prefetch avatar using DID if available (from account-tag), and
+            // adopt the binding (record AND fold a nick-keyed DM thread into
+            // its DID-keyed one) — a conversation opened by nick and the same
+            // one the server keys by DID (e.g. sent from web, or an offline
+            // peer) must not show up as two threads.
             if let did = ircMsg.account {
-                state.recordUserDid(nick: from, did: did)
+                state.adoptDmBinding(nick: from, did: did)
                 Task { @MainActor in
                     AvatarCache.shared.prefetch(from, did: did)
                 }
+            }
+
+            // Server-persisted reactions replayed by CHATHISTORY ride the
+            // `+freeq.at/reactions` tag → carry them onto the message so
+            // reactions survive logout/login, not just live +react TAGMSGs.
+            var initialReactions: [String: Set<String>] = [:]
+            for tally in ircMsg.reactions where !tally.nicks.isEmpty {
+                initialReactions[tally.emoji] = Set(tally.nicks)
             }
 
             // One conversation, one buffer: DMs key by the SDK's canonical
@@ -2339,7 +2390,8 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 timestamp: Date(timeIntervalSince1970: Double(ircMsg.timestampMs) / 1000.0),
                 replyTo: ircMsg.replyTo,
                 isSigned: ircMsg.isSigned,
-                origin: ircMsg.origin
+                origin: ircMsg.origin,
+                reactions: initialReactions
             )
 
             // Handle edits
