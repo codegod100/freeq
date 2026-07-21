@@ -742,6 +742,7 @@ struct MessageRow: View {
                                 emoji: emoji,
                                 count: nicks.count,
                                 isSelfReacted: nicks.contains(appState.nick),
+                                reactors: Array(nicks),
                                 action: {
                                     if let target = appState.activeChannel {
                                         appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
@@ -1118,7 +1119,20 @@ struct ReactionBadge: View {
     let emoji: String
     let count: Int
     let isSelfReacted: Bool
+    /// Nicks who reacted with this emoji — surfaced as a hover tooltip
+    /// (the macOS equivalent of a long-press "who reacted" sheet).
+    var reactors: [String] = []
     let action: () -> Void
+
+    /// "🎉 alice, bob and you" — capped so a popular reaction stays readable.
+    private var reactorTooltip: String {
+        guard !reactors.isEmpty else { return "" }
+        let sorted = reactors.sorted { $0.lowercased() < $1.lowercased() }
+        let shown = sorted.prefix(12)
+        var list = shown.joined(separator: ", ")
+        if sorted.count > shown.count { list += " +\(sorted.count - shown.count) more" }
+        return "reacted with \(emoji): \(list)"
+    }
 
     var body: some View {
         Button(action: action) {
@@ -1143,6 +1157,7 @@ struct ReactionBadge: View {
             )
         }
         .buttonStyle(.plain)
+        .help(reactorTooltip)
     }
 }
 

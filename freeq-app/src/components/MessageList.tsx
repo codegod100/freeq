@@ -1042,7 +1042,7 @@ function Reactions({ msg, channel }: { msg: Message; channel: string }) {
                 ? 'bg-accent/10 border-accent/30 text-accent'
                 : 'bg-surface border-transparent hover:border-border-bright text-fg-muted'
             }`}
-            title={[...nicks].join(', ')}
+            title={`reacted with ${emoji}: ${[...nicks].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())).slice(0, 12).join(', ')}${nicks.size > 12 ? ` +${nicks.size - 12} more` : ''}`}
           >
             <span>{emoji}</span>
             <span>{nicks.size}</span>

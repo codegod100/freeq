@@ -817,7 +817,18 @@ struct MessageListView: View {
                 .buttonStyle(.plain)
                 .sensoryFeedback(.impact(weight: .light), trigger: isMine)
                 .accessibilityLabel("\(emoji) reaction, \(nicks.count)")
+                .accessibilityValue(nicks.sorted { $0.lowercased() < $1.lowercased() }.joined(separator: ", "))
                 .accessibilityHint(isMine ? "Double-tap to remove your reaction" : "Double-tap to react")
+                // Long-press to see who reacted (the touch equivalent of a
+                // hover tooltip).
+                .contextMenu {
+                    Section("Reacted with \(emoji)") {
+                        ForEach(nicks.sorted { $0.lowercased() < $1.lowercased() }, id: \.self) { nick in
+                            Label(nick.lowercased() == appState.nick.lowercased() ? "\(nick) (you)" : nick,
+                                  systemImage: "person.crop.circle")
+                        }
+                    }
+                }
             }
         }
     }
