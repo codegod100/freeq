@@ -93,30 +93,49 @@
           }
         );
 
-        # glibc static: same x86_64-unknown-linux-gnu target, link libc.a.
-        # Uses -C target-feature=+crt-static (not musl).
+        # Static libasound.a (default alsa-lib is shared-only).
+        alsaLibStatic = pkgs.alsa-lib.overrideAttrs (old: {
+          dontDisableStatic = true;
+          configureFlags = (old.configureFlags or [ ]) ++ [
+            "--enable-static"
+            "--disable-shared"
+          ];
+        });
+
+        # glibc crt-static on the final binary only (not proc-macros).
+        # cargo rustc -C flags apply only to the leaf crate — setting
+        # RUSTFLAGS globally breaks async-trait / host proc-macros.
         eve-av-bridge-static = craneLib.buildPackage (
           commonArgs
           // {
             inherit cargoArtifacts;
             pname = "eve-av-bridge-static";
 
-            # Prefer static .a from pkg-config where available.
             PKG_CONFIG_ALL_STATIC = "1";
 
-            # Host gnu target + static CRT (glibc).
-            RUSTFLAGS = "-C target-feature=+crt-static";
-            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
-
-            # Static glibc + static-friendly C deps for the linker.
-            buildInputs = with pkgs; [
-              glibc.static
-              alsa-lib
-              openssl
+            buildInputs = [
+              pkgs.glibc.static
+              alsaLibStatic
+              pkgs.openssl
             ];
 
-            # Ensure the C linker can see libc.a / libpthread.a etc.
-            NIX_LDFLAGS = "-L${pkgs.glibc.static}/lib";
+            NIX_LDFLAGS = "-L${pkgs.glibc.static}/lib -L${alsaLibStatic}/lib";
+
+            # Build deps normally, then re-link the bin with crt-static.
+            buildPhase = ''
+              runHook preBuild
+              cargoBuildLog=$(mktemp cargoBuildLogXXXX.json)
+              cargo build --release --message-format json-render-diagnostics \
+                -p eve-av-bridge \
+                --bin eve-av-bridge \
+                | tee "$cargoBuildLog"
+              # Re-compile/link only the final binary with static glibc CRT.
+              cargo rustc --release -p eve-av-bridge --bin eve-av-bridge -- \
+                -C target-feature=+crt-static \
+                -C link-arg=-L${alsaLibStatic}/lib \
+                -C link-arg=-lasound
+              runHook postBuild
+            '';
 
             meta = {
               description = "eve-av-bridge with glibc crt-static for bare Linux";
