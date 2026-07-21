@@ -752,9 +752,36 @@ export const useStore = create<Store>((set, get) => ({
     const ch = getOrCreateChannel(channels, channel);
 
     // Dedup by msgid — existing (live) copy wins over a history copy.
+    // Edit-aware: a replayed row and a live row can be the SAME message
+    // under different msgids (edits re-key), so also reconcile via the
+    // edit anchor (editOf, root of the chain) instead of blindly
+    // appending — that append rendered as a stacked duplicate.
     const existingIds = new Set(ch.messages.map((m) => m.id).filter(Boolean));
-    const novel = incoming.filter((m) => !m.id || !existingIds.has(m.id));
-    if (novel.length === 0) return {};
+    const novel: Message[] = [];
+    let reconciled = false;
+    for (const m of incoming) {
+      if (m.id && existingIds.has(m.id)) continue;
+      const anchor = m.editOf;
+      if (anchor) {
+        // Incoming collapsed edit of a message we already hold → update
+        // the held row in place (id, text) rather than append.
+        const idx = ch.messages.findIndex(
+          (e) => e.id === anchor || e.editOf === anchor,
+        );
+        if (idx >= 0) {
+          ch.messages = ch.messages.map((e, i) =>
+            i === idx ? { ...e, text: m.text, id: m.id, editOf: e.editOf ?? anchor } : e,
+          );
+          reconciled = true;
+          continue;
+        }
+      }
+      // Incoming stale base row for which we already hold a collapsed
+      // edit → skip it.
+      if (m.id && ch.messages.some((e) => e.editOf === m.id)) continue;
+      novel.push(m);
+    }
+    if (novel.length === 0 && !reconciled) return {};
 
     const merged = [...ch.messages, ...novel];
     merged.sort((a, b) => {
@@ -790,7 +817,9 @@ export const useStore = create<Store>((set, get) => ({
       // where the first edit changes id but subsequent edits still reference the original
       ch.messages = ch.messages.map((m) =>
         (m.id === originalMsgId || m.editOf === originalMsgId)
-          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
+          // editOf keeps the ROOT of the edit chain so chained edits and
+          // replayed collapsed rows keep matching each other.
+          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: m.editOf ?? originalMsgId, isStreaming: !!isStreaming }
           : m
       );
       channels.set(channel.toLowerCase(), { ...ch });
@@ -802,7 +831,7 @@ export const useStore = create<Store>((set, get) => ({
       if (batch.target.toLowerCase() !== channel.toLowerCase()) continue;
       batch.messages = batch.messages.map((m) =>
         (m.id === originalMsgId || m.editOf === originalMsgId)
-          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
+          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: m.editOf ?? originalMsgId, isStreaming: !!isStreaming }
           : m
       );
       batches.set(id, batch);

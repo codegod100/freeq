@@ -1657,6 +1657,42 @@ export class FreeqClient extends EventEmitter {
         // saw `ENC1:…` in place of the edited body.)
         const editOf = msg.tags['+draft/edit'];
         if (editOf) {
+          // A replayed edit inside a CHATHISTORY batch collapses into the
+          // batch itself, so `historyBatch` hands the app a final
+          // transcript. Emitting mid-batch raced the batch delivery: the
+          // app's store had nothing to apply the edit to yet (fresh
+          // session) and dropped it — or, in older builds, rendered the
+          // edit as a stacked duplicate row. `editOf` is anchored to the
+          // ROOT of an edit chain so chained edits keep matching.
+          const editBatchId = msg.tags['batch'];
+          const editBatch = editBatchId ? this.batches.get(editBatchId) : undefined;
+          if (editBatch && editBatch.type !== 'draft/multiline') {
+            const idx = editBatch.messages.findIndex(
+              (m) => m.id === editOf || m.editOf === editOf,
+            );
+            if (idx >= 0) {
+              const prev = editBatch.messages[idx];
+              editBatch.messages[idx] = {
+                ...prev,
+                text: displayText,
+                id: msg.tags['msgid'] || prev.id,
+                editOf: prev.editOf ?? editOf,
+              };
+              break;
+            }
+            // Original row absent from this batch window — deliver the
+            // edit as its own row rather than losing the content.
+            editBatch.messages.push({
+              id: msg.tags['msgid'] || crypto.randomUUID(),
+              from,
+              text: displayText,
+              timestamp: msg.tags['time'] ? new Date(msg.tags['time']) : new Date(),
+              tags: msg.tags,
+              isSelf,
+              editOf,
+            });
+            break;
+          }
           const isStreaming = msg.tags['+freeq.at/streaming'] === '1';
           this.emit('messageEdited', bufName, editOf, displayText, msg.tags['msgid'], isStreaming);
           break;

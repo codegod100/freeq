@@ -682,3 +682,71 @@ describe('whoisCache vs nick reassignment (stale identity bug)', () => {
     ).toBe(false);
   });
 });
+
+// ── DM edit stacking (replayed edits vs live/collapsed rows) ──
+//
+// A replayed history row and a live row can be the SAME message under
+// different msgids (edits re-key). Blind append rendered the original
+// plus stacked "- edited" copies. mergeHistory reconciles via the edit
+// anchor (editOf, root of the chain).
+describe('mergeHistory edit reconciliation', () => {
+  const s = () => useStore.getState();
+  const ch = 'did:key:z6mktestpeer';
+  const at = (iso: string, id: string, text: string, editOf?: string) => ({
+    id, from: 'zapnap', text, timestamp: new Date(iso), tags: {},
+    ...(editOf ? { editOf } : {}),
+  });
+
+  beforeEach(() => {
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+  });
+
+  it('replayed collapsed edit updates the held original in place', () => {
+    s().addMessage(ch, at('2026-07-20T14:35:00Z', 'm0', 'original'));
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:36:00Z', 'e1', 'original - edited', 'm0'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('e1');
+    expect(msgs[0].text).toBe('original - edited');
+    expect(msgs[0].editOf).toBe('m0');
+  });
+
+  it('replayed stale base row is skipped when a collapsed edit is held', () => {
+    s().addMessage(ch, at('2026-07-20T14:35:00Z', 'm0', 'original'));
+    (s() as any).editMessage(ch, 'm0', 'original - edited', 'e1');
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:35:00Z', 'm0', 'original'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('e1');
+    expect(msgs[0].text).toBe('original - edited');
+  });
+
+  it('chained live edits still match a root-anchored replayed row', () => {
+    s().addMessage(ch, at('2026-07-20T14:35:00Z', 'm0', 'original'));
+    // Two live edits, chained references (iOS behavior): e2 edits e1.
+    (s() as any).editMessage(ch, 'm0', 'edited once', 'e1');
+    (s() as any).editMessage(ch, 'e1', 'edited twice', 'e2');
+    // Replay delivers the final collapsed row root-anchored to m0.
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:37:00Z', 'e2', 'edited twice', 'm0'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('e2');
+    expect(msgs[0].text).toBe('edited twice');
+  });
+
+  it('edit row with no held original still lands as a single row', () => {
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:36:00Z', 'e1', 'edited orphan', 'm0'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].text).toBe('edited orphan');
+  });
+});
