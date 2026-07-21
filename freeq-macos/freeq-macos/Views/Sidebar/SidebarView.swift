@@ -34,7 +34,8 @@ struct SidebarView: View {
                 ForEach(favChannels) { channel in
                     ChannelRow(channel: channel,
                                isSelecting: isSelecting,
-                               isSelected: selected.contains(channel.name))
+                               isSelected: selected.contains(channel.name),
+                               onBeginSelect: { name in isSelecting = true; selected = [name] })
                         .tag(channel.name)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
@@ -47,7 +48,8 @@ struct SidebarView: View {
             ForEach(appState.channels.filter { !appState.favorites.contains($0.name.lowercased()) }) { channel in
                 ChannelRow(channel: channel,
                            isSelecting: isSelecting,
-                           isSelected: selected.contains(channel.name))
+                           isSelected: selected.contains(channel.name),
+                           onBeginSelect: { name in isSelecting = true; selected = [name] })
                     .tag(channel.name)
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
@@ -302,6 +304,9 @@ struct ChannelRow: View {
     /// row highlight off `isSelected` instead of the active-channel state.
     var isSelecting: Bool = false
     var isSelected: Bool = false
+    /// Enter multi-select mode from the row's context menu, pre-selecting this
+    /// channel (the discoverable entry point alongside "Leave Channel").
+    var onBeginSelect: ((String) -> Void)? = nil
 
     private var unread: Int {
         appState.unreadCounts[channel.name.lowercased()] ?? 0
@@ -395,6 +400,9 @@ struct ChannelRow: View {
                 }
             }
             Divider()
+            if let onBeginSelect {
+                Button("Select Channels…") { onBeginSelect(channel.name) }
+            }
             Button("Leave Channel") {
                 appState.partChannel(channel.name)
             }
