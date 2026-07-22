@@ -394,16 +394,15 @@ struct AppKitMessageListView: NSViewRepresentable {
                 let action = onLoadOlder
                 return AnyView(LoadMoreRowContent(action: action).frame(width: width))
             case .entry(let row):
-                // Fix the width to the column AND force the content to claim its
-                // full natural height (`fixedSize` vertical). Width-only left the
-                // hosting view free to under-report height — a wrapped/multi-line
-                // message would measure ~1 line while rendering 2+, so the
-                // reaction badge below it sat at the short mark and painted over
-                // the wrapped text (and the row-below). Fixing height at the
-                // hosting boundary makes the self-sized row always tall enough.
+                // Pin ONLY the width to the column. Height stays intrinsic —
+                // each text element claims its full wrapped height via its own
+                // `.fixedSize(horizontal:false, vertical:true)` (message text
+                // AND block renderer). A row-level fixedSize was tried here but
+                // measured the wrapped text at an UNBOUNDED width (→ one line →
+                // the line collapsed to ~0 height and overlapped its neighbours),
+                // so it's the per-element claim that's correct.
                 let view = MessageTimelineRowContent(row: row)
                     .frame(width: width, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
                 if let appState {
                     return AnyView(view.environment(appState))
                 }
@@ -517,7 +516,11 @@ private final class HostingCellView: NSTableCellView {
             // and no spurious note during scroll reuse (heights already agree).
             let intrinsic = h.intrinsicContentSize.height
             let current = table.rect(ofRow: row).height
-            guard intrinsic >= 0, abs(intrinsic - current) > 0.5 else { return }
+            // Only re-measure on a real, sane change. Guard against latching a
+            // transient/degenerate height (0 or noIntrinsicMetric) that a
+            // mid-layout invalidation can briefly report — that would collapse
+            // the row and overlap its neighbours.
+            guard intrinsic > 1, abs(intrinsic - current) > 0.5 else { return }
             table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
         }
     }

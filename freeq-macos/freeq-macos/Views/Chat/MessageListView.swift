@@ -684,6 +684,10 @@ struct MessageRow: View {
                     // Same inline renderer feeds both, so styling is identical.
                     if MessageBlockParser.containsBlockSyntax(cleanText) {
                         MessageBlocksView(text: cleanText, inlineRenderer: parseMessageText)
+                            // Claim full height like the plain-text path, so a
+                            // multi-line block message doesn't under-measure and
+                            // let a reaction badge overlap it.
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(parseMessageText(cleanText))
                             .textSelection(.enabled)
