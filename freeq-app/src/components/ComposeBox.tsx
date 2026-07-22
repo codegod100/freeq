@@ -76,11 +76,6 @@ export function ComposeBox() {
     }
   }, [replyTo]);
 
-  // Typing members
-  const typingMembers = ch
-    ? [...ch.members.values()].filter((m) => m.typing).map((m) => m.nick)
-    : [];
-
   // Members for autocomplete - use size as dependency since Map reference doesn't change
   const memberNicks = useMemo(() => {
     if (!ch) return [];
@@ -544,20 +539,6 @@ export function ComposeBox() {
           <div className="bg-bg-secondary border-2 border-dashed border-accent rounded-xl px-6 py-4 text-accent font-medium">
             Drop file to upload
           </div>
-        </div>
-      )}
-
-      {/* Typing indicator */}
-      {typingMembers.length > 0 && (
-        <div className="px-4 py-1 text-xs text-fg-dim animate-fadeIn">
-          <span className="inline-flex gap-0.5 mr-1">
-            <span className="w-1 h-1 bg-fg-dim rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="w-1 h-1 bg-fg-dim rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="w-1 h-1 bg-fg-dim rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-          </span>
-          {typingMembers.length === 1
-            ? `${typingMembers[0]} is typing`
-            : `${typingMembers.slice(0, 3).join(', ')} are typing`}
         </div>
       )}
 
