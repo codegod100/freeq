@@ -1385,3 +1385,26 @@ describe('onNickCollision policy', () => {
     expect(retryLines[0]).toMatch(/^NICK alice-\d{4}$/);
   });
 });
+
+  it('a replayed edit row carries its reactions into the collapsed message', async () => {
+    // Reactions attach to the msgid the user reacted to — the latest edit
+    // id — so they arrive on the EDIT row in replay. The collapse must
+    // carry them onto the collapsed message; dropping them made reactions
+    // on edited messages vanish on every reload.
+    const { client, ws } = await makeRegistered();
+    const batches: Array<[string, any[]]> = [];
+    client.on('historyBatch', (buf, msgs) => batches.push([buf, msgs]));
+    ws.recv(':srv BATCH +h1 chathistory did:plc:peer');
+    ws.recv('@batch=h1;msgid=M0;time=2026-07-21T00:00:00.000Z :zapnap!u@h PRIVMSG did:plc:peer :original');
+    ws.recv('@batch=h1;msgid=E1;+draft/edit=M0;+freeq.at/reactions=🔥:alice,bob;time=2026-07-21T00:01:00.000Z :zapnap!u@h PRIVMSG did:plc:peer :original - edited');
+    ws.recv(':srv BATCH -h1');
+    // Batched messages suspend across more microtasks than plain PRIVMSGs.
+    for (let i = 0; i < 4; i++) await flushAsync();
+    expect(batches).toHaveLength(1);
+    const msgs = batches[0][1];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('E1');
+    expect(msgs[0].text).toBe('original - edited');
+    const nicks = msgs[0].reactions?.get('🔥');
+    expect(nicks && [...nicks].sort()).toEqual(['alice', 'bob']);
+  });

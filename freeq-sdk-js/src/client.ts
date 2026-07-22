@@ -1681,16 +1681,37 @@ export class FreeqClient extends EventEmitter {
           const editBatchId = msg.tags['batch'];
           const editBatch = editBatchId ? this.batches.get(editBatchId) : undefined;
           if (editBatch && editBatch.type !== 'draft/multiline') {
+            // Reactions attach to the msgid the user reacted to — usually
+            // the latest edit id — so replay delivers them ON the edit row.
+            // The collapse must carry them, or reactions on edited messages
+            // vanish every reload.
+            let editReactions: Map<string, Set<string>> | undefined;
+            const reactionsTag = msg.tags['+freeq.at/reactions'];
+            if (reactionsTag) {
+              editReactions = new Map();
+              for (const part of reactionsTag.split(';')) {
+                const [emoji, nicks] = part.split(':');
+                if (emoji && nicks) {
+                  const set = editReactions.get(emoji) ?? new Set<string>();
+                  for (const n of nicks.split(',')) if (n) set.add(n);
+                  editReactions.set(emoji, set);
+                }
+              }
+            }
             const idx = editBatch.messages.findIndex(
               (m) => m.id === editOf || m.editOf === editOf,
             );
             if (idx >= 0) {
               const prev = editBatch.messages[idx];
+              const mergedReactions = editReactions
+                ? new Map([...(prev.reactions ?? new Map()), ...editReactions])
+                : prev.reactions;
               editBatch.messages[idx] = {
                 ...prev,
                 text: displayText,
                 id: msg.tags['msgid'] || prev.id,
                 editOf: prev.editOf ?? editOf,
+                ...(mergedReactions ? { reactions: mergedReactions } : {}),
               };
               break;
             }
@@ -1704,6 +1725,7 @@ export class FreeqClient extends EventEmitter {
               tags: msg.tags,
               isSelf,
               editOf,
+              ...(editReactions ? { reactions: editReactions } : {}),
             });
             break;
           }
