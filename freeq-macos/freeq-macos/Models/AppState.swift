@@ -1618,6 +1618,13 @@ extension AppState {
                     }
                 }
             } else {
+                // Our OWN echoed DM carries the recipient's nick as `target`
+                // and their canonical DID as `dmKey`. Adopt that binding FIRST
+                // so a thread opened by nick folds into the DID-keyed thread the
+                // echo routes to — otherwise the sender never sees their own DM.
+                if let bind = DmEcho.recipientBinding(isSelf: isSelf, target: target, dmKey: msg.dmKey) {
+                    adoptDmBinding(nick: bind.nick, did: bind.did)
+                }
                 let bufName = dmBufName
                 closedDMs.remove(bufName.lowercased())
                 let dm = getOrCreateDM(bufName)

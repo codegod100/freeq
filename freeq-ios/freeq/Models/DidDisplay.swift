@@ -8,6 +8,23 @@ import Foundation
 /// `did:plc:…` / `did:key:…` key from ever being *rendered* (resolve to a
 /// human name where possible, compact the DID as a last resort) and fold a
 /// nick-keyed thread into its DID-keyed one once the binding is learned.
+/// Binding logic for our OWN echoed DMs. The server echoes a sent DM back with
+/// the wire `target` = the recipient's nick and `dm_key` = their canonical DID
+/// (when resolved). Without adopting that binding, a thread the sender opened
+/// by nick and the DID-keyed thread the echo lands in stay split — so the
+/// sender never sees their own message. Pure + unit-tested. Mirrors macOS.
+enum DmEcho {
+    static func recipientBinding(isSelf: Bool, target: String, dmKey: String?) -> (nick: String, did: String)? {
+        guard isSelf,
+              let did = dmKey, DidDisplay.isDid(did),
+              !target.hasPrefix("#"), !target.hasPrefix("&"),
+              !DidDisplay.isDid(target),
+              target.caseInsensitiveCompare(did) != .orderedSame
+        else { return nil }
+        return (target, did)
+    }
+}
+
 enum DidDisplay {
 
     /// A syntactic DID: `did:<method>:<id>` with a non-empty alphanumeric

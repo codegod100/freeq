@@ -193,4 +193,58 @@ final class ChatHistoryNoticeRoutingTests: XCTestCase {
         let text = "some ordinary server notice"
         XCTAssertEqual(ServerNoticeRouter.route(text), .display(text))
     }
+
+    // MARK: - DmEcho: the sender must see their OWN DM (nick↔DID thread merge)
+    //
+    // Regression guard for "I DM'd him, it reached him and shows on web, but
+    // the macOS/iOS sender never saw it." Root cause: the sender opens the DM
+    // by nick, but the server echoes it back keyed by the recipient's DID, so
+    // the echo lands in a *separate* DID thread. The self-echo carries BOTH the
+    // recipient nick (`target`) and their DID (`dmKey`) — adopt that binding to
+    // fold the two threads into one.
+
+    func testSelfEchoWithDidKeyYieldsRecipientBinding() {
+        let did = "did:plc:76szbe2ywgwb7vzuingj4fhq"
+        let b = DmEcho.recipientBinding(isSelf: true, target: "eve", dmKey: did)
+        XCTAssertEqual(b?.nick, "eve")
+        XCTAssertEqual(b?.did, did)
+    }
+
+    func testNoRecipientBindingForIncomingChannelOrMissingDid() {
+        // Incoming (not our echo) → the sender-binding rule doesn't apply.
+        XCTAssertNil(DmEcho.recipientBinding(isSelf: false, target: "eve", dmKey: "did:plc:abc123def456"))
+        // Channel target → not a DM.
+        XCTAssertNil(DmEcho.recipientBinding(isSelf: true, target: "#freeq", dmKey: "did:plc:abc123def456"))
+        // No dmKey (older SDK) → the echo already keys by nick, nothing to fold.
+        XCTAssertNil(DmEcho.recipientBinding(isSelf: true, target: "eve", dmKey: nil))
+        // dmKey isn't a DID (unresolved peer) → nick already matches.
+        XCTAssertNil(DmEcho.recipientBinding(isSelf: true, target: "eve", dmKey: "eve"))
+        // target already the DID → nothing to fold.
+        XCTAssertNil(DmEcho.recipientBinding(isSelf: true, target: "did:plc:abc123def456", dmKey: "did:plc:abc123def456"))
+    }
+
+    func testSelfEchoFoldsNickThreadIntoDidThreadSoSenderSeesTheirDM() {
+        // A DM opened by nick, with the sent message in it.
+        let nickBuf = ChannelState(name: "eve")
+        nickBuf.appendIfNew(ChatMessage(id: "m1", from: "me", text: "hi",
+                                        isAction: false, timestamp: Date(), replyTo: nil))
+        var dms: [ChannelState] = [nickBuf]
+        var unread: [String: Int] = [:]
+        var mentions: [String: Int] = [:]
+        let did = "did:plc:76szbe2ywgwb7vzuingj4fhq"
+
+        // The self-echo names the recipient nick + their DID → adopt + merge.
+        let bind = DmEcho.recipientBinding(isSelf: true, target: "eve", dmKey: did)
+        XCTAssertNotNil(bind)
+        _ = DidDisplay.mergeDmBuffers(dmBuffers: &dms, unreadCounts: &unread,
+                                      mentionCounts: &mentions,
+                                      nick: bind!.nick, did: bind!.did)
+
+        // One thread, keyed by the DID, still carrying the sent message —
+        // so the sender sees their own DM instead of it vanishing into a
+        // separate DID buffer.
+        XCTAssertEqual(dms.count, 1)
+        XCTAssertEqual(dms[0].name, did)
+        XCTAssertTrue(dms[0].messages.contains { $0.id == "m1" })
+    }
 }

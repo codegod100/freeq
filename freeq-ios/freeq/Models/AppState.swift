@@ -2457,6 +2457,13 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     UINotificationFeedbackGenerator().notificationOccurred(.warning)
                 }
             } else {
+                // Our OWN echoed DM carries the recipient's nick as `target`
+                // and their canonical DID as `dmKey`. Adopt that binding FIRST
+                // so a thread opened by nick folds into the DID-keyed thread the
+                // echo routes to — otherwise the sender never sees their own DM.
+                if let bind = DmEcho.recipientBinding(isSelf: isSelf, target: target, dmKey: ircMsg.dmKey) {
+                    state.adoptDmBinding(nick: bind.nick, did: bind.did)
+                }
                 let bufferName = dmBufName
                 // New activity in a previously-closed DM un-closes it. If
                 // the peer messages me, or I message them, I want the DM
