@@ -1311,6 +1311,39 @@ describe('inbound: spawned agents', () => {
   });
 });
 
+describe('inbound: AV error signal', () => {
+  // `+freeq.at/av-error` is the server's machine-readable AV failure. Before
+  // it existed a rejected av-join was only a human NOTICE — client call state
+  // was set up optimistically and never torn down, leaving a ghost publisher
+  // in a session the server never admitted us to (in-call UI, silent to all).
+  it('emits avError with code, session id, and reason', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('avError', (code, sessionId, reason) => seen.push({ code, sessionId, reason }));
+    ws.recv('@+freeq.at/av-error=join-failed;+freeq.at/av-id=S1;+freeq.at/av-reason=Session\\shas\\sended :srv TAGMSG alice');
+    await flushAsync();
+    expect(seen).toContainEqual({ code: 'join-failed', sessionId: 'S1', reason: 'Session has ended' });
+  });
+
+  it('emits avError for a start-collision naming the winning session', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('avError', (code, sessionId) => seen.push({ code, sessionId }));
+    ws.recv('@+freeq.at/av-error=start-collision;+freeq.at/av-id=WINNER;+freeq.at/av-reason=busy :srv TAGMSG alice');
+    await flushAsync();
+    expect(seen).toContainEqual({ code: 'start-collision', sessionId: 'WINNER' });
+  });
+
+  it('emits avError with empty session id when the tag is absent', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('avError', (code, sessionId) => seen.push({ code, sessionId }));
+    ws.recv('@+freeq.at/av-error=join-failed :srv TAGMSG alice');
+    await flushAsync();
+    expect(seen).toContainEqual({ code: 'join-failed', sessionId: '' });
+  });
+});
+
 describe('inbound: connection lifecycle', () => {
   it("emits 'connected' on transport open", async () => {
     const { FreeqClient } = await import('./client.js');

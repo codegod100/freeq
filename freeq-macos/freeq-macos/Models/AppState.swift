@@ -1696,6 +1696,16 @@ extension AppState {
                               channel: target)
             }
 
+            // Machine-readable AV failure (`+freeq.at/av-error`, directed at
+            // us). Closes the ghost-caller hole: we dial media + flip in-call
+            // UI before av-join round-trips, so a rejected join must tear that
+            // down (we're not in the roster — nobody will ever hear us).
+            if let avError = tags["+freeq.at/av-error"] {
+                handleAvError(code: avError,
+                              sessionId: tags["+freeq.at/av-id"] ?? "",
+                              reason: tags["+freeq.at/av-reason"] ?? "")
+            }
+
         case .names(let channel, let memberList):
             let key = channel.lowercased()
             var existing = pendingNames[key] ?? []

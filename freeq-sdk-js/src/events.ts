@@ -146,6 +146,12 @@ export interface FreeqEvents {
    *  (`+freeq.at/av-token`). Append to the SFU dial URL as `?jwt=…`. */
   avToken: (sessionId: string, token: string) => void;
 
+  /** Fired when the server rejects an AV request (`+freeq.at/av-error`).
+   *  `code` is machine-readable: `join-failed` (tear down local call state —
+   *  we were NOT admitted), `start-collision` (our av-start lost a race;
+   *  `sessionId` names the winning session to join instead). */
+  avError: (code: string, sessionId: string, reason: string) => void;
+
   /** Fired when the join gate (policy acceptance) is required. */
   joinGateRequired: (channel: string) => void;
 

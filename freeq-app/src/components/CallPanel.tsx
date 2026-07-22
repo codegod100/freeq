@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '../store';
-import { getAvInstanceId, getClient, leaveAvSession } from '../irc/client';
+import { getAvInstanceId, getClient, joinAvSession, leaveAvSession } from '../irc/client';
 import { loadMoqComponents } from '../lib/moq-loader';
 import { broadcastName, computeParticipantSlots } from '../lib/av-mesh';
 import { getCachedProfile } from '../lib/profiles';
@@ -407,6 +407,13 @@ export function CallPanel() {
     if (pub.getAttribute('name') === expected) return;
     stopPublishEl();
     buildPublishEl(useStore.getState().avCameraOn);
+    // The publish path changed — the ROSTER must follow, or every
+    // roster-driven subscriber keeps watching the old path and loses our
+    // media (the "renamed mid-call goes silent for web peers" split).
+    // Re-sending av-join with the SAME instance rejoins our slot in place
+    // and updates its nick, so the roster's computed path matches the new
+    // broadcast within one poll.
+    if (channel) joinAvSession(channel, sessionId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myNick, pubEl, sessionId]);
 

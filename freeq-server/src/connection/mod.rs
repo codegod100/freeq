@@ -3253,10 +3253,24 @@ where
                 did = %did_for_av, instances = instances.len(),
                 "AV: deferring teardown ({}s grace for blip/reconnect)", AV_GRACE_SECS
             );
+            // Mark these instances as grace-pending so the join-time orphan
+            // reaper leaves their roster slots alone until the grace decides.
+            {
+                let mut pending = state.av_grace_pending.lock();
+                for inst in &instances {
+                    pending.insert(inst.clone());
+                }
+            }
             let state2 = state.clone();
             let did2 = did_for_av.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(AV_GRACE_SECS)).await;
+                {
+                    let mut pending = state2.av_grace_pending.lock();
+                    for inst in &instances {
+                        pending.remove(inst);
+                    }
+                }
                 for inst in &instances {
                     // If the instance reappeared on any live connection, the
                     // user reconnected and rejoined — keep the slot untouched.

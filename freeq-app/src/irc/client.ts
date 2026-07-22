@@ -735,6 +735,34 @@ function wireEvents(c: FreeqClient) {
     }
   });
 
+  // Machine-readable AV failure from the server. `join-failed`: we were NOT
+  // admitted to the session our UI optimistically joined — tear the call
+  // state down instead of ghost-publishing into it (peers would never be
+  // told to subscribe to us: we're not in the roster). `start-collision`:
+  // our av-start lost a race; the tag names the winning session — converge
+  // onto it immediately instead of sitting in a dead solo call.
+  c.on('avError', (code, sessionId, reason) => {
+    const active = s().activeAvSession;
+    if (code === 'start-collision' && sessionId) {
+      const winner = s().avSessions.get(sessionId);
+      const channel = winner?.channel || pendingAvStart?.channel;
+      pendingAvStart = null;
+      if (channel) {
+        joinAvSession(channel, sessionId);
+        return;
+      }
+    }
+    if (code === 'join-failed' && (active === sessionId || !sessionId)) {
+      s().setAvAudioActive(false);
+      s().setAvCameraOn(false);
+      s().setActiveAvSession(null);
+      currentAvInstance = null;
+      if (pendingCallRejoin?.sessionId === sessionId) pendingCallRejoin = null;
+      const ch = s().activeChannel;
+      s().addSystemMessage(ch || 'server', `Couldn't join the call: ${reason || code}`);
+    }
+  });
+
   c.on('avSessionRemoved', (id) => {
     // If the SDK reaped a session we were still in (e.g. ended before we
     // saw the `state: 'ended'` update), close the panel as a safety net.

@@ -89,6 +89,40 @@ extension AppState {
         }
     }
 
+    /// Handle a `+freeq.at/av-error` TAGMSG (machine-readable AV failure).
+    /// Decision logic is the pure, unit-tested `resolveAvError`.
+    func handleAvError(code: String, sessionId: String, reason: String) {
+        let channel = currentCallChannel ?? pendingAvStartChannel()
+        switch resolveAvError(
+            code: code,
+            errorSessionId: sessionId,
+            currentCallSessionId: currentCallSessionId,
+            pendingStart: !pendingAvStart.isEmpty
+        ) {
+        case .teardownAndRediscover:
+            Log.irc.warning("AV: join rejected (\(reason, privacy: .public)) — tearing down ghost call state")
+            tearDownCallLocallyOnDisconnect()
+            if let channel {
+                Task { await self.discoverAndJoinOrStart(channel: channel) }
+            }
+        case .joinSession(let winner):
+            Log.irc.info("AV: start lost a race — converging on winning session \(winner, privacy: .public)")
+            if let channel {
+                pendingAvStart.remove(channel.lowercased())
+                startCall(channel: channel, sessionId: winner)
+            }
+        case .ignore:
+            break
+        }
+    }
+
+    /// The channel of a pending av-start, if exactly one is pending.
+    private func pendingAvStartChannel() -> String? {
+        guard pendingAvStart.count == 1 else { return nil }
+        // pendingAvStart stores lowercased channel names — usable directly.
+        return pendingAvStart.first
+    }
+
     /// Mint a per-device instance id, mark the channel pending, and put
     /// `av-start` on the wire. We join once the server echoes `started`.
     func startFreshAvSession(channel: String) {

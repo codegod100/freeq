@@ -146,6 +146,10 @@ schemes:
         freeq: all
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - freeqTests
   freeq-zerosum:
     build:
       targets:

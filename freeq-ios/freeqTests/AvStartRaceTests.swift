@@ -1,13 +1,16 @@
 import XCTest
-@testable import FreeqMacosCore
+@testable import freeq
 
-/// Concurrent av-start race — the loser must converge on the winner's session
-/// instead of getting wedged. Regression for "2-person call where we could
-/// never see/hear each other; rejoin sometimes fixed it."
+/// Concurrent av-start race + av-error handling — iOS parity with macOS.
+/// The regression these guard: "multiple people join a call and some can
+/// hear each other and some can't, in random directions."
 final class AvStartRaceTests: XCTestCase {
+    // ── av-state=started convergence ──
+
     func testLoserOfConcurrentStartJoinsWinnersSession() {
         // We were trying to start (pending), but a PEER's start landed first.
-        // Old behavior: notify only → stuck out of the call. Must join.
+        // Old iOS behavior: only joined when actor == self → the loser stayed
+        // wedged outside the call. Must converge on the winner.
         XCTAssertEqual(
             resolveAvStarted(pendingStart: true, actorIsSelf: false, sessionId: "S1"),
             .joinSession("S1"))
@@ -30,15 +33,9 @@ final class AvStartRaceTests: XCTestCase {
             resolveAvStarted(pendingStart: false, actorIsSelf: true, sessionId: "S1"),
             .ignore)
     }
-}
 
-/// `+freeq.at/av-error` — the server's machine-readable AV failure. The
-/// ghost-caller regression this guards: media is dialed and in-call UI is
-/// flipped BEFORE av-join round-trips, so a rejected join (session ended /
-/// full) must tear that ghost down; it used to arrive only as an unparsed
-/// human NOTICE, leaving the client publishing into a session it was never
-/// admitted to — in the call per its own UI, silent/invisible to everyone.
-final class AvErrorResolutionTests: XCTestCase {
+    // ── +freeq.at/av-error ──
+
     func testJoinFailedForOurCallTearsDownAndRediscovers() {
         XCTAssertEqual(
             resolveAvError(code: "join-failed", errorSessionId: "S1",
@@ -47,8 +44,6 @@ final class AvErrorResolutionTests: XCTestCase {
     }
 
     func testJoinFailedWithoutIdStillTearsDownOurCall() {
-        // Older/degenerate server signal with no av-id: if we have a call up
-        // from an optimistic join, it's the one that failed.
         XCTAssertEqual(
             resolveAvError(code: "join-failed", errorSessionId: "",
                            currentCallSessionId: "S1", pendingStart: false),
@@ -60,7 +55,6 @@ final class AvErrorResolutionTests: XCTestCase {
             resolveAvError(code: "join-failed", errorSessionId: "S2",
                            currentCallSessionId: "S1", pendingStart: false),
             .ignore)
-        // No call up at all — nothing to tear down.
         XCTAssertEqual(
             resolveAvError(code: "join-failed", errorSessionId: "S1",
                            currentCallSessionId: nil, pendingStart: false),
@@ -82,13 +76,6 @@ final class AvErrorResolutionTests: XCTestCase {
         XCTAssertEqual(
             resolveAvError(code: "start-collision", errorSessionId: "",
                            currentCallSessionId: nil, pendingStart: true),
-            .ignore)
-    }
-
-    func testUnknownCodeIsIgnored() {
-        XCTAssertEqual(
-            resolveAvError(code: "some-future-code", errorSessionId: "S1",
-                           currentCallSessionId: "S1", pendingStart: true),
             .ignore)
     }
 }

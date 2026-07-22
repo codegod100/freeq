@@ -1921,6 +1921,16 @@ export class FreeqClient extends EventEmitter {
           this._avTokens.set(avId, avToken);
           this.emit('avToken', avId, avToken);
         }
+
+        // Machine-readable AV failure (join rejected / start lost a race).
+        // Without this, a failed av-join was only a human NOTICE — client
+        // call state got set up optimistically and never torn down, leaving
+        // a ghost publisher in a session the server never admitted us to.
+        const avError = msg.tags['+freeq.at/av-error'];
+        if (avError) {
+          this.emit('avError', avError, avId || '',
+            msg.tags['+freeq.at/av-reason'] || '');
+        }
         break;
       }
 

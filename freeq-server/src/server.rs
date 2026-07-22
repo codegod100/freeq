@@ -694,6 +694,11 @@ pub struct SharedState {
     /// Used on disconnect to clean only this connection's slots (per-instance)
     /// and on av-join to reap orphan slots whose IRC connection is gone.
     pub av_instances_per_conn: Mutex<HashMap<String, HashSet<String>>>,
+    /// AV instances whose owning connection dropped and whose teardown is
+    /// deferred behind the disconnect grace window. While an instance is in
+    /// here its roster slot must NOT be reaped as an orphan — the owner's
+    /// media is typically still flowing and they'll rejoin in place.
+    pub av_grace_pending: Mutex<HashSet<String>>,
     /// Pending OAuth sessions: state → OAuthPending.
     pub oauth_pending: Mutex<HashMap<String, OAuthPending>>,
     /// Completed OAuth sessions: state → OAuthResult.
@@ -1573,6 +1578,7 @@ impl Server {
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
             av_instances_per_conn: Mutex::new(HashMap::new()),
+            av_grace_pending: Mutex::new(HashSet::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),
@@ -2216,23 +2222,36 @@ impl Server {
                     // Prune ended AV sessions from memory (keep for 1 hour)
                     // and auto-end sessions idle for >2 hours with no active participants
                     {
+                        // Live-instance set: which AV instances are claimed by a
+                        // connection that's alive right now. Used so the age-based
+                        // arm of the policy only ever reaps resurrected ghosts —
+                        // NEVER a long-running call with live people on it.
+                        let live_instances: std::collections::HashSet<String> = cleanup_state
+                            .av_instances_per_conn
+                            .lock()
+                            .values()
+                            .flat_map(|set| set.iter().cloned())
+                            .collect();
                         let mut mgr = cleanup_state.av_sessions.lock();
-                        // Auto-end sessions where all participants have left but session wasn't formally ended
+                        // Auto-end policy lives in av::should_auto_end (unit-tested).
                         let stale_ids: Vec<String> = mgr
                             .active_sessions()
                             .iter()
                             .filter(|s| {
-                                let active_count = s
+                                let active: Vec<_> = s
                                     .participants
                                     .values()
                                     .filter(|p| p.left_at.is_none())
-                                    .count();
-                                if active_count == 0 {
-                                    return true; // No active participants — end it
-                                }
-                                // Also end sessions older than 2 hours (safety net)
+                                    .collect();
+                                // Instance-less legacy slots can't be liveness-checked;
+                                // treat them as claimed (never end a call we can't verify).
+                                let any_claimed = active.iter().any(|p| {
+                                    p.instance_id
+                                        .as_ref()
+                                        .is_none_or(|inst| live_instances.contains(inst))
+                                });
                                 let age = chrono::Utc::now().timestamp() - s.created_at;
-                                age > 7200
+                                crate::av::should_auto_end(active.len(), age, any_claimed)
                             })
                             .map(|s| s.id.clone())
                             .collect();
@@ -4977,6 +4996,7 @@ mod s2s_adversarial_tests {
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
             av_instances_per_conn: Mutex::new(HashMap::new()),
+            av_grace_pending: Mutex::new(HashSet::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),

@@ -1,6 +1,7 @@
 import Foundation
 
 /// What to do when an `av-state=started` broadcast arrives.
+/// iOS port of the macOS helper — same semantics, unit-tested.
 enum AvStartedResolution: Equatable {
     /// (Re)join this session id — we were trying to start, so converge on
     /// whatever session actually won the race.
@@ -16,14 +17,13 @@ enum AvStartedResolution: Equatable {
 /// The subtle case is a **concurrent av-start race**: two people hit "join" at
 /// the same instant, both see no existing session, and both send `av-start`.
 /// The server allows one session per channel — one wins, the loser gets only a
-/// `NOTICE`. The old logic joined only when `actor == self`, so the loser (who
-/// is still `pendingStart` but sees the *winner's* nick as actor) fell through
-/// to a notification and stayed wedged, never in the call — "we could never
-/// see/hear each other; rejoining sometimes fixed it."
+/// `NOTICE`. Joining only when `actor == self` leaves the loser (still
+/// `pendingStart`, but seeing the *winner's* nick as actor) wedged outside the
+/// call — "we could never see/hear each other; rejoining sometimes fixed it."
 ///
 /// Fix: if we were trying to start this channel's call at all, converge on the
-/// winning session regardless of who created it. We (re)join it; join is
-/// idempotent for the actual creator.
+/// winning session regardless of who created it. Join is idempotent for the
+/// actual creator.
 func resolveAvStarted(pendingStart: Bool, actorIsSelf: Bool, sessionId: String) -> AvStartedResolution {
     if pendingStart { return .joinSession(sessionId) }
     if !actorIsSelf { return .notifyPeerStarted }
@@ -59,16 +59,12 @@ func resolveAvError(
 ) -> AvErrorResolution {
     switch code {
     case "join-failed":
-        // Matches the call we think we're in (or the error has no id and we
-        // have a call up from an optimistic join) → tear down the ghost.
         if let current = currentCallSessionId,
            errorSessionId.isEmpty || errorSessionId == current {
             return .teardownAndRediscover
         }
         return .ignore
     case "start-collision":
-        // Only meaningful while we were trying to start; the tag names the
-        // session that won.
         if pendingStart && !errorSessionId.isEmpty {
             return .joinSession(errorSessionId)
         }

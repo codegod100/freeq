@@ -984,6 +984,33 @@ class AppState: ObservableObject {
         }
     }
 
+    /// Handle a `+freeq.at/av-error` TAGMSG (machine-readable AV failure).
+    /// Decision logic is the pure, unit-tested `resolveAvError`.
+    func handleAvError(code: String, sessionId: String, reason: String) {
+        let channel = currentCallChannel ?? (pendingAvStart.count == 1 ? pendingAvStart.first : nil)
+        switch resolveAvError(
+            code: code,
+            errorSessionId: sessionId,
+            currentCallSessionId: currentCallSessionId,
+            pendingStart: !pendingAvStart.isEmpty
+        ) {
+        case .teardownAndRediscover:
+            print("[av] join rejected (\(reason)) — tearing down ghost call state")
+            tearDownCallLocallyOnDisconnect()
+            if let channel {
+                Task { await self.discoverAndJoinOrStart(channel: channel) }
+            }
+        case .joinSession(let winner):
+            print("[av] start lost a race — converging on winning session \(winner)")
+            if let channel {
+                pendingAvStart.remove(channel.lowercased())
+                startCall(channel: channel, sessionId: winner)
+            }
+        case .ignore:
+            break
+        }
+    }
+
     /// Mint a per-device instance id, mark this channel as pending, and put
     /// `av-start` on the wire. Factored out so the testable probe-injected
     /// path can share the same body as the production REST path.
@@ -2653,11 +2680,21 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 switch avState {
                 case "started":
                     state.activeAvSessions[chanKey] = avId
-                    // If we triggered the start, auto-join now that we have an id.
-                    if state.pendingAvStart.contains(chanKey)
-                       && avActor.lowercased() == state.nick.lowercased() {
+                    // Converge via the unit-tested race resolver: if we were
+                    // trying to start this channel's call AT ALL, join the
+                    // session that actually won — even when the actor is the
+                    // OTHER starter. Keying on actor==self left the loser of a
+                    // concurrent start wedged outside the call (macOS had the
+                    // same bug; this is the parity fix).
+                    if case .joinSession(let sid) = resolveAvStarted(
+                        pendingStart: state.pendingAvStart.contains(chanKey),
+                        actorIsSelf: avActor.lowercased() == state.nick.lowercased(),
+                        sessionId: avId
+                    ) {
                         state.pendingAvStart.remove(chanKey)
-                        state.startCall(channel: target, sessionId: avId)
+                        if !state.isInCall {
+                            state.startCall(channel: target, sessionId: sid)
+                        }
                     }
                 case "ended":
                     state.activeAvSessions.removeValue(forKey: chanKey)
@@ -2709,6 +2746,15 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 default:
                     break
                 }
+            }
+
+            // Machine-readable AV failure (`+freeq.at/av-error`, directed at
+            // us). A rejected av-join must tear down the optimistic call
+            // state — we're not in the roster, so nobody will ever hear us.
+            if let avError = tags["+freeq.at/av-error"] {
+                state.handleAvError(code: avError,
+                                    sessionId: tags["+freeq.at/av-id"] ?? "",
+                                    reason: tags["+freeq.at/av-reason"] ?? "")
             }
 
         case .nickChanged(let oldNick, let newNick):

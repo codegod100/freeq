@@ -225,6 +225,8 @@ When modifying a high-gamma file, write tests FIRST.
 
 ### P1 — High priority
 
+- [ ] **AV: web call grid auto-layout** — web CallPanel must auto-adjust tile layout for participant counts from 1 to ~30 (macOS already does this via `CallGridLayout.tileSize`; port the same policy to web).
+- [ ] **AV: click-to-focus a call tile (ALL clients)** — clicking a participant chip/card focuses it (large tile, others shrink to strip). Web + macOS + iOS.
 - [x] **Message editing** — ✅ DONE. `+draft/edit=<msgid>` on PRIVMSG. Server verifies authorship, stores with `replaces_msgid`, updates in-memory history, broadcasts to channel.
 - [x] **Message deletion** — ✅ DONE. `+draft/delete=<msgid>` on TAGMSG. Soft delete (deleted_at). Author or ops can delete. Excluded from CHATHISTORY/history.
 - [x] **`away-notify` cap** — ✅ DONE. Broadcast AWAY changes to shared channel members. Server, SDK, TUI, and web client all support it.

@@ -278,7 +278,7 @@ final class DMSelfEchoRoutingTests: XCTestCase {
             tags: [
                 TagEntry(key: "+react", value: emoji),
                 TagEntry(key: "+reply", value: msgId),
-            ]))
+            ], dmKey: nil))
     }
 
     private func unreactTagMsg(from: String, target: String, emoji: String, replyTo msgId: String) -> FreeqEvent {
@@ -287,19 +287,19 @@ final class DMSelfEchoRoutingTests: XCTestCase {
             tags: [
                 TagEntry(key: "+freeq.at/unreact", value: emoji),
                 TagEntry(key: "+reply", value: msgId),
-            ]))
+            ], dmKey: nil))
     }
 
     private func deleteTagMsg(from: String, target: String, msgId: String) -> FreeqEvent {
         .tagMsg(msg: TagMessage(
             from: from, target: target,
-            tags: [TagEntry(key: "+draft/delete", value: msgId)]))
+            tags: [TagEntry(key: "+draft/delete", value: msgId)], dmKey: nil))
     }
 
     private func typingTagMsg(from: String, target: String, state: String) -> FreeqEvent {
         .tagMsg(msg: TagMessage(
             from: from, target: target,
-            tags: [TagEntry(key: "+typing", value: state)]))
+            tags: [TagEntry(key: "+typing", value: state)], dmKey: nil))
     }
 
     // MARK: - Pattern A: self-echo TAGMSG in DM routes to peer's buffer
@@ -476,7 +476,7 @@ final class DMSelfEchoRoutingTests: XCTestCase {
             fromNick: me, target: peer, text: "hi bob", msgid: "m1",
             replyTo: nil, replacesMsgid: nil, editOf: nil, batchId: nil,
             pinMsgid: nil, unpinMsgid: nil, isAction: false, isSigned: false,
-            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [])
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [], dmKey: nil)
         handler(s).handleEvent(.message(msg: irc))
 
         let dm = s.dmBuffers.first(where: { $0.name == peer })
@@ -495,7 +495,7 @@ final class DMSelfEchoRoutingTests: XCTestCase {
             fromNick: me, target: peer, text: "fixed", msgid: "m1-v2",
             replyTo: nil, replacesMsgid: "m1", editOf: "m1", batchId: nil,
             pinMsgid: nil, unpinMsgid: nil, isAction: false, isSigned: false,
-            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [])
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [], dmKey: nil)
         handler(s).handleEvent(.message(msg: editIrc))
 
         XCTAssertEqual(dm.messages.first?.text, "fixed")
@@ -564,14 +564,14 @@ final class DMSelfEchoRoutingTests: XCTestCase {
             fromNick: me, target: peer, text: "one", msgid: "m1",
             replyTo: nil, replacesMsgid: nil, editOf: nil, batchId: nil,
             pinMsgid: nil, unpinMsgid: nil, isAction: false, isSigned: false,
-            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [])
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [], dmKey: nil)
         h.handleEvent(.message(msg: send))
 
         let edit = IrcMessage(
             fromNick: me, target: peer, text: "two", msgid: "m1-v2",
             replyTo: nil, replacesMsgid: "m1", editOf: "m1", batchId: nil,
             pinMsgid: nil, unpinMsgid: nil, isAction: false, isSigned: false,
-            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [])
+            timestampMs: Int64(Date().timeIntervalSince1970 * 1000), account: nil, origin: nil, reactions: [], dmKey: nil)
         h.handleEvent(.message(msg: edit))
 
         XCTAssertNil(s.dmBuffers.first(where: { $0.name.lowercased() == me }))
@@ -650,6 +650,13 @@ final class DMSelfEchoRoutingTests: XCTestCase {
         let dm = seedDMMessage(in: s, peer: peer, id: "m1", from: me, text: "regret")
 
         s.deleteMessage(target: peer, msgId: "m1")
+
+        // The local apply is deliberately deferred (~0.6s) so the mutation
+        // doesn't land while UIKit's context-menu dismissal still holds a
+        // row snapshot (which froze the on-screen pixels). Wait for it.
+        let deleted = expectation(description: "local delete applied after menu-dismissal delay")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { deleted.fulfill() }
+        wait(for: [deleted], timeout: 3)
 
         XCTAssertEqual(dm.messages.first?.isDeleted, true)
         XCTAssertEqual(dm.messages.first?.text, "")

@@ -2785,6 +2785,14 @@ fn handle_av_tagmsg(
                         vec![&nick, &format!("Cannot start session: {e}")],
                     );
                     send_to(state, &conn.id, format!("{reply}\r\n"));
+                    // Concurrent-start loser: tell the client WHICH session won
+                    // so it can converge onto it immediately instead of waiting
+                    // on a timeout heuristic (or silently showing a dead call).
+                    let existing = mgr
+                        .active_session_for_channel(target)
+                        .map(|s| s.id.clone())
+                        .unwrap_or_default();
+                    send_av_error(state, &conn.id, &nick, &existing, "start-collision", &e);
                 }
             }
         }
@@ -2868,8 +2876,9 @@ fn handle_av_tagmsg(
                     .collect()
             };
 
+            let grace_pending = state.av_grace_pending.lock().clone();
             let mut mgr = state.av_sessions.lock();
-            mgr.reap_orphan_slots(&session_id, &live);
+            mgr.reap_orphan_slots(&session_id, &live, &grace_pending);
             match mgr.join_session(&session_id, &did, &nick, instance_id) {
                 Ok(session) => {
                     let participant_count = mgr.active_participant_count(&session_id);
@@ -2967,6 +2976,12 @@ fn handle_av_tagmsg(
                         vec![&nick, &format!("Cannot join session: {e}")],
                     );
                     send_to(state, &conn.id, format!("{reply}\r\n"));
+                    // Machine-readable failure so clients can tear down the
+                    // ghost call state (a NOTICE alone is invisible to code:
+                    // macOS/web set up media & UI BEFORE the join round-trips,
+                    // so an unsignalled failure leaves them publishing into a
+                    // session they were never admitted to).
+                    send_av_error(state, &conn.id, &nick, &session_id, "join-failed", &e);
                 }
             }
         }
@@ -3215,6 +3230,35 @@ fn send_av_token(state: &Arc<SharedState>, conn_id: &str, nick: &str, session_id
 
 #[cfg(not(feature = "av-native"))]
 fn send_av_token(_state: &Arc<SharedState>, _conn_id: &str, _nick: &str, _session_id: &str) {}
+
+/// Machine-readable AV failure signal: `@+freeq.at/av-error=<code>;
+/// +freeq.at/av-id=<sid>;+freeq.at/av-reason=<human> TAGMSG <nick>`.
+/// Codes: `join-failed` (av-join rejected — tear down local call state and
+/// re-discover), `start-collision` (av-start lost a race — av-id names the
+/// winning session to join). The NOTICE next to it is for humans; this tag
+/// is for code. Sent to the requesting connection only.
+fn send_av_error(
+    state: &Arc<SharedState>,
+    conn_id: &str,
+    nick: &str,
+    session_id: &str,
+    code: &str,
+    reason: &str,
+) {
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("+freeq.at/av-error".to_string(), code.to_string());
+    if !session_id.is_empty() {
+        tags.insert("+freeq.at/av-id".to_string(), session_id.to_string());
+    }
+    tags.insert("+freeq.at/av-reason".to_string(), reason.to_string());
+    let tag_msg = super::super::irc::Message {
+        tags,
+        prefix: Some(state.server_name.clone()),
+        command: "TAGMSG".to_string(),
+        params: vec![nick.to_string()],
+    };
+    send_to(state, conn_id, format!("{tag_msg}\r\n"));
+}
 
 /// Build the message tags for an AV state TAGMSG (everything but the
 /// nondeterministic `time` tag). Pure + unit-testable.
