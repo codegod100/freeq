@@ -70,6 +70,8 @@ enum ComposeAutocomplete {
         ("zap", "⚡"), ("skull", "💀"), ("sob", "😭"), ("rolling_eyes", "🙄"),
         ("shrug", "🤷"), ("sunglasses", "😎"), ("nerd", "🤓"), ("salute", "🫡"),
         ("brain", "🧠"), ("gem", "💎"), ("trophy", "🏆"), ("party", "🥳"),
+        // freeq music/dance brand.
+        ("dancer", "💃"), ("man_dancing", "🕺"), ("notes", "🎶"), ("saxophone", "🎷"),
     ]
 
     /// Build mention candidates from channel members, folding in each member's

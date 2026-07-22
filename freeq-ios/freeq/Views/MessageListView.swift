@@ -35,7 +35,7 @@ struct MessageListView: View {
     }
 
     /// Emoji that get a floating particle burst when you react with them.
-    private static let celebratoryReactions: Set<String> = ["❤️", "🎉", "🔥", "😂", "👍"]
+    private static let celebratoryReactions: Set<String> = ["❤️", "🎉", "🔥", "😂", "👍", "🕺", "💃", "🎶", "🎷"]
 
     /// Fire a particle burst if `emoji` is celebratory (called from every
     /// reaction-add path). Reduce Motion suppresses the visual in the view.
@@ -366,7 +366,7 @@ struct MessageListView: View {
         }
 
         // Quick reactions
-        ForEach(["👍", "❤️", "😂", "🎉"], id: \.self) { emoji in
+        ForEach(["👍", "❤️", "😂", "🎉", "🕺", "💃", "🎶", "🎷"], id: \.self) { emoji in
             Button(action: {
                 celebrate(emoji)
                 appState.sendReaction(target: channel.name, msgId: msg.id, emoji: emoji)
@@ -1226,6 +1226,7 @@ struct EmojiPickerSheet: View {
     let channel: String
 
     let commonEmoji = ["👍", "👎", "❤️", "😂", "😮", "😢", "🎉", "🔥",
+                       "🕺", "💃", "🎶", "🎷",  // freeq music/dance brand
                        "👀", "💯", "✅", "❌", "🙏", "💪", "🤔", "😍",
                        "🚀", "⭐", "🌈", "🎵", "☕", "🍕", "🐛", "💡"]
 

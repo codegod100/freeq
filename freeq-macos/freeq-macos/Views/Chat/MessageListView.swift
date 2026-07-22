@@ -863,7 +863,7 @@ struct MessageRow: View {
         // React
         if !isSystem {
             Menu("React") {
-                ForEach(["👍", "❤️", "😂", "🎉", "👀", "🔥"], id: \.self) { emoji in
+                ForEach(["👍", "❤️", "😂", "🎉", "👀", "🔥", "🕺", "💃", "🎶", "🎷"], id: \.self) { emoji in
                     Button(emoji) {
                         if let target = appState.activeChannel {
                             appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
@@ -1053,7 +1053,9 @@ struct HoverActionBar: View {
     let message: ChatMessage
     @State private var showEmojiPicker = false
 
-    private let quickEmoji = ["👍", "❤️", "😂", "🎉", "👀", "🔥"]
+    // The trailing four (dancers, notes, sax) are freeq's music/dance brand —
+    // present by default everywhere alongside the usual reactions.
+    private let quickEmoji = ["👍", "❤️", "😂", "🎉", "👀", "🔥", "🕺", "💃", "🎶", "🎷"]
 
     var body: some View {
         HStack(spacing: 2) {
