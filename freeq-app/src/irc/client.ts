@@ -644,7 +644,11 @@ function wireEvents(c: FreeqClient) {
 
   c.on('serverFail', (text) => {
     // Server rejected an action (FAIL <cmd> <code> <desc>). Show it where
-    // the user is looking — silent rejections are undebuggable.
+    // the user is looking — silent rejections are undebuggable. Exception:
+    // background history probes (speculative CHATHISTORY on opening a
+    // thread) fail routinely for guest peers; rendering those spams a red
+    // line per open while telling the user nothing actionable.
+    if (/^CHATHISTORY (INVALID_TARGET|ACCOUNT_REQUIRED)/.test(text)) return;
     const active = useStore.getState().activeChannel || 'server';
     s().addSystemMessage(active, `Server error: ${text}`);
   });
