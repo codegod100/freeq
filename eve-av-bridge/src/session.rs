@@ -17,6 +17,7 @@ use tracing::{info, warn};
 use crate::egress::{CallEgress, EgressStatus};
 use crate::protocol::{ParticipantEvent, ServerMsg, SessionInfo, SessionState};
 use crate::radio::{RadioHandle, start_radio};
+use crate::on_air::OnAirSource;
 use crate::watch::{WatchHandle, WatchTile, start_watch};
 
 /// Process role: radio | watch | broadcast | all (default for dev).
@@ -848,8 +849,8 @@ async fn run_av_session(
             AvSession::connect(config, push_source, move || v2.video_source())
         }
         (false, None, None) => {
-            // broadcast plane: placeholder until call-egress mix is outbound-only
-            AvSession::connect(config, push_source, || TestPatternSource::new(640, 360))
+            // broadcast plane: "ON THE AIR" slate (call-egress is RTMP out)
+            AvSession::connect(config, push_source, OnAirSource::new)
         }
         (true, _, _) => {
             AvSession::connect(config, push_source, || TestPatternSource::new(320, 180))

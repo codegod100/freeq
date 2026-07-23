@@ -11,6 +11,7 @@ mod egress;
 mod protocol;
 mod radio;
 mod watch;
+mod on_air;
 mod session;
 mod viz;
 mod ws;

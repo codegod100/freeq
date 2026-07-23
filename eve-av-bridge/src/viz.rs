@@ -324,7 +324,7 @@ impl VideoSource for VizVideoSource {
     }
 }
 
-fn blend(dst: u8, src: u8, a: f32) -> u8 {
+pub(crate) fn blend(dst: u8, src: u8, a: f32) -> u8 {
     ((dst as f32) * (1.0 - a) + (src as f32) * a).round() as u8
 }
 
@@ -350,7 +350,7 @@ fn spectrum_color(hue: f32, v: f32) -> (u8, u8, u8) {
     )
 }
 
-fn fill_rect(
+pub(crate) fn fill_rect(
     rgba: &mut [u8],
     w: usize,
     h: usize,
@@ -377,7 +377,7 @@ fn fill_rect(
 }
 
 // Minimal 5×7 font for A–Z a–z 0–9 and punctuation (bitmap rows, 5 bits used).
-fn glyph(c: char) -> [u8; 7] {
+pub(crate) fn glyph(c: char) -> [u8; 7] {
     match c {
         'A' | 'a' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
         'B' | 'b' => [0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E],
@@ -432,7 +432,7 @@ fn glyph(c: char) -> [u8; 7] {
     }
 }
 
-fn draw_text(
+pub(crate) fn draw_text(
     rgba: &mut [u8],
     w: usize,
     h: usize,
