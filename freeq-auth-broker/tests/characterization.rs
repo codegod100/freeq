@@ -496,7 +496,7 @@ async fn client_metadata_document() {
     // The advertised scope union (incl. transition:generic grace period).
     assert_eq!(
         json["scope"],
-        "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic"
+        "atproto blob:image/* repo:app.bsky.actor.profile repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic"
     );
     assert_eq!(json["grant_types"], serde_json::json!(["authorization_code", "refresh_token"]));
     assert_eq!(json["token_endpoint_auth_method"], "none");
