@@ -309,6 +309,20 @@ class AppState: ObservableObject {
         return didForNick(target) ?? target
     }
 
+    /// Only the original sender may edit/delete a message: DID comparison
+    /// when both sides are known, else nick. Unpersisted guest threads rely
+    /// on this — the server relays their edits/deletes without a DB row to
+    /// verify against. A missing original passes (apply will no-op anyway).
+    func authorMatches(in buffer: ChannelState, originalId: String,
+                       actorNick: String, actorAccount: String?) -> Bool {
+        guard let idx = buffer.findMessage(byId: originalId) else { return true }
+        let original = buffer.messages[idx]
+        if let acct = actorAccount, let origDid = didForNick(original.from) {
+            return acct == origDid
+        }
+        return actorNick.lowercased() == original.from.lowercased()
+    }
+
     /// Blocked check for a DM buffer key, which may be a DID rather than the
     /// nick the block was recorded under.
     func isBufferBlocked(_ key: String) -> Bool {
@@ -1771,10 +1785,13 @@ class AppState: ObservableObject {
     }
 
     func requestHistory(channel: String, before: Date? = nil) {
-        // Guests skip DM history: guest DMs are never persisted server-side,
-        // so the request can only fail (ACCOUNT_REQUIRED).
-        if !channel.hasPrefix("#"), !channel.hasPrefix("&"), authenticatedDID == nil {
-            return
+        // DM history exists only for did<->did threads. Skip requests that
+        // can only fail: as a guest ourselves (ACCOUNT_REQUIRED), or for a
+        // guest peer — a nick-keyed thread with no DID binding
+        // (INVALID_TARGET on every thread open otherwise).
+        if !channel.hasPrefix("#"), !channel.hasPrefix("&") {
+            if authenticatedDID == nil { return }
+            if !DidDisplay.isDid(channel), didForNick(channel) == nil { return }
         }
         if let before = before {
             let iso = ISO8601DateFormatter().string(from: before)
@@ -2504,6 +2521,13 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                         batch.messages[idx].text = ircMsg.text
                         batch.messages[idx].isEdited = true
                         if let newId = ircMsg.msgid { batch.messages[idx].id = newId }
+                        // Reactions attach to the msgid the user reacted to —
+                        // usually the latest edit id — so replay delivers
+                        // them ON the edit row. Merge them or reactions on
+                        // edited messages vanish every relaunch.
+                        for (emoji, nicks) in msg.reactions where !nicks.isEmpty {
+                            batch.messages[idx].reactions[emoji] = nicks
+                        }
                     } else {
                         batch.messages.append(msg)
                     }
@@ -2511,12 +2535,16 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     return
                 }
 
-                if target.hasPrefix("#") {
-                    let ch = state.getOrCreateChannel(target)
-                    ch.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
-                } else {
-                    let dm = state.getOrCreateDM(dmBufName)
-                    dm.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
+                let editBuf = target.hasPrefix("#")
+                    ? state.getOrCreateChannel(target)
+                    : state.getOrCreateDM(dmBufName)
+                // Only the original sender may edit. The server enforces this
+                // for persisted threads; for unpersisted (guest) DMs it
+                // relays without a row to check, so the client is the
+                // authority.
+                if state.authorMatches(in: editBuf, originalId: editOf,
+                                       actorNick: from, actorAccount: ircMsg.account) {
+                    editBuf.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
                 }
                 return
             }
@@ -2729,8 +2757,12 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             // Message deletion
             if let deleteId = tags["+draft/delete"] {
                 let ch = bufferName.hasPrefix("#") ? state.getOrCreateChannel(bufferName) : state.getOrCreateDM(bufferName)
-                print("[tagmsg-delete] from=\(from) buffer=\(ch.name) msgId=\(deleteId) localHit=\(ch.findMessage(byId: deleteId) != nil)")
-                ch.applyDelete(msgId: deleteId)
+                // Same authorship rule as edits (see the message arm).
+                let account = tags["account"] ?? tags["+freeq.at/account"]
+                if state.authorMatches(in: ch, originalId: deleteId,
+                                       actorNick: from, actorAccount: account) {
+                    ch.applyDelete(msgId: deleteId)
+                }
             }
 
             // Reactions
@@ -2874,6 +2906,20 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     state.motdLines.append(String(text.dropFirst(5)))
                 }
             } else if !text.isEmpty {
+                // IRCv3 FAIL lines arrive as ServerNotice text shaped
+                // "COMMAND ERROR_CODE description". Surface them — a silent
+                // server rejection is indistinguishable from a client bug
+                // (a guest-DM edit failing invisibly cost an evening).
+                // Background history probes (speculative CHATHISTORY on
+                // opening a thread) fail routinely for guest peers —
+                // toasting those spams with nothing actionable (mirror of
+                // the web client's filter).
+                if text.range(of: #"^[A-Z]+ [A-Z_]+ "#, options: .regularExpression) != nil,
+                   !text.hasPrefix("CHATHISTORY ") {
+                    Task { @MainActor in
+                        ToastManager.shared.show("Server: \(text)", icon: "exclamationmark.triangle")
+                    }
+                }
                 print("Notice: \(text)")
             }
 
