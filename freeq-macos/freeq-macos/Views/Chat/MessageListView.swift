@@ -61,14 +61,66 @@ struct MessageListView: View {
             if shouldShowWelcome {
                 ChannelWelcomeView()
             }
+
+            if appState.hasMessageSelection {
+                SelectionHintBar()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
         .background(Theme.chatBackground)
+        .animation(.easeInOut(duration: 0.15), value: appState.hasMessageSelection)
     }
 
     private func loadOlderHistory() {
         guard let target = appState.activeChannel,
               let oldest = messages.first else { return }
         appState.requestHistory(channel: target, before: oldest.timestamp)
+    }
+}
+
+// MARK: - Selection hint bar
+
+/// Floating pill shown while a block of messages is selected. Gives the copy
+/// action a visible target (not just ⌘C) plus Select-all / Clear, and quietly
+/// teaches the shortcuts. Selection lives in `AppState`; the AppKit list drives
+/// it from shift/cmd-clicks.
+private struct SelectionHintBar: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        let count = appState.selectedMessageIds.count
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Theme.accent)
+            Text("\(count) selected")
+                .font(.system(.callout, weight: .medium))
+                .monospacedDigit()
+
+            Divider().frame(height: 14)
+
+            Button {
+                let n = appState.copySelectedMessages()
+                if n > 0 { appState.clearMessageSelection() }
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .help("Copy the selected messages as clean text (⌘C)")
+
+            Button("Select all") { appState.selectAllMessages() }
+                .help("Select every message in this conversation")
+
+            Button("Clear") { appState.clearMessageSelection() }
+                .help("Clear the selection (Esc)")
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
     }
 }
 

@@ -90,7 +90,23 @@ struct AppKitMessageListView: NSViewRepresentable {
 
         private let cellIdentifier = NSUserInterfaceItemIdentifier("freeq.msgcell")
 
-        deinit { NotificationCenter.default.removeObserver(self) }
+        // ── Block selection (multi-message copy) ──
+        // Shift/cmd-click selects a range/toggles a row; ⌘C copies the clean
+        // transcript; Esc clears. Handled via local event monitors because the
+        // rows are SwiftUI NSHostingViews that consume plain clicks (so the
+        // table itself never sees a mouseDown to drive selection from) — we only
+        // intercept MODIFIER clicks, leaving plain clicks (links, buttons,
+        // in-message text selection, context menus) completely untouched.
+        private var mouseMonitor: Any?
+        private var keyMonitor: Any?
+        /// Row index that anchors a shift-click range.
+        private var selectionAnchorRow: Int?
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+            if let m = mouseMonitor { NSEvent.removeMonitor(m) }
+            if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        }
 
         func makeScrollView() -> NSScrollView {
             let table = ChatTableView()
@@ -144,7 +160,111 @@ struct AppKitMessageListView: NSViewRepresentable {
 
             self.scrollView = scroll
             self.tableView = table
+            installSelectionMonitors()
             return scroll
+        }
+
+        // MARK: Block selection
+
+        private func installSelectionMonitors() {
+            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
+                [weak self] event in
+                self?.handleMouseDown(event) ?? event
+            }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+                [weak self] event in
+                self?.handleKeyDown(event) ?? event
+            }
+        }
+
+        /// Only MODIFIER clicks inside this list's viewport are intercepted; a
+        /// plain click is returned untouched (and clears any block selection).
+        private func handleMouseDown(_ event: NSEvent) -> NSEvent? {
+            guard let scroll = scrollView, let table = tableView,
+                  let win = scroll.window, event.window === win else { return event }
+            let p = table.convert(event.locationInWindow, from: nil)
+            guard table.visibleRect.contains(p) else { return event }
+
+            let mods = event.modifierFlags.intersection([.shift, .command])
+            if mods.isEmpty {
+                // Click-away inside the list clears a block selection so the next
+                // plain interaction feels normal. Event still flows to SwiftUI.
+                if appState?.hasMessageSelection == true {
+                    appState?.clearMessageSelection()
+                    refreshSelectionTint()
+                }
+                return event
+            }
+
+            let row = table.row(at: p)
+            guard row >= 0, row < items.count, case .entry = items[row] else { return event }
+            if mods.contains(.shift) {
+                extendSelection(to: row)
+            } else if mods.contains(.command) {
+                toggleSelection(at: row)
+            }
+            return nil  // swallow — don't also hand a modifier-click to SwiftUI
+        }
+
+        /// ⌘C copies the selection, Esc clears it — but only when the user isn't
+        /// editing text (so the composer's own copy/cancel keep working) and a
+        /// selection actually exists (so normal ⌘C is never hijacked).
+        private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
+            guard let scroll = scrollView, scroll.window?.isKeyWindow == true,
+                  appState?.hasMessageSelection == true else { return event }
+            if scroll.window?.firstResponder is NSTextView { return event }
+
+            // ⌘C
+            if event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers?.lowercased() == "c" {
+                appState?.copySelectedMessages()
+                return nil
+            }
+            // Esc
+            if event.keyCode == 53 {
+                appState?.clearMessageSelection()
+                refreshSelectionTint()
+                return nil
+            }
+            return event
+        }
+
+        private func extendSelection(to row: Int) {
+            let anchor = selectionAnchorRow ?? row
+            selectionAnchorRow = anchor
+            let lo = min(anchor, row), hi = max(anchor, row)
+            var ids = Set<String>()
+            for i in lo...hi where i >= 0 && i < items.count {
+                if case let .entry(r) = items[i] { ids.insert(r.id) }
+            }
+            appState?.selectedMessageIds = ids
+            refreshSelectionTint()
+        }
+
+        private func toggleSelection(at row: Int) {
+            guard case let .entry(r) = items[row] else { return }
+            if appState?.selectedMessageIds.contains(r.id) == true {
+                appState?.selectedMessageIds.remove(r.id)
+            } else {
+                appState?.selectedMessageIds.insert(r.id)
+                selectionAnchorRow = row
+            }
+            refreshSelectionTint()
+        }
+
+        /// Repaint the tint of every visible row to match the current selection.
+        /// Off-screen rows pick it up from `viewFor` when they scroll in.
+        private func refreshSelectionTint() {
+            guard let table = tableView else { return }
+            let sel = appState?.selectedMessageIds ?? []
+            let range = table.rows(in: table.visibleRect)
+            guard range.length > 0 else { return }
+            for r in range.location..<(range.location + range.length) {
+                guard r >= 0, r < items.count,
+                      let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false)
+                        as? HostingCellView else { continue }
+                cell.setSelected(sel.contains(items[r].id))
+            }
         }
 
         // MARK: Apply an update from SwiftUI
@@ -167,6 +287,13 @@ struct AppKitMessageListView: NSViewRepresentable {
                 // New channel (or first/last paint): reload wholesale and snap
                 // to the bottom with no animation — never a visible top→bottom
                 // sweep, never a diff against an unrelated channel's messages.
+                // A block selection is per-buffer, so a channel switch drops it.
+                if channelChanged {
+                    selectionAnchorRow = nil
+                    DispatchQueue.main.async { [weak self] in
+                        self?.appState?.clearMessageSelection()
+                    }
+                }
                 items = newItems
                 tableView.reloadData()
                 tableView.layoutSubtreeIfNeeded()
@@ -197,6 +324,9 @@ struct AppKitMessageListView: NSViewRepresentable {
                 restore(anchor)
             }
             handleScrollTarget(parent)
+            // External selection changes (hint-bar buttons, Select All) re-run
+            // the SwiftUI body → updateNSView → here; keep row tints in sync.
+            refreshSelectionTint()
         }
 
         /// Diff `items → newItems` by id and mutate the table minimally.
@@ -352,6 +482,7 @@ struct AppKitMessageListView: NSViewRepresentable {
             }()
             cell.host(content(for: items[row]))
             cell.clamp.overscroll = overscroll(forRow: row)
+            cell.setSelected(appState?.selectedMessageIds.contains(items[row].id) == true)
             return cell
         }
 
@@ -443,6 +574,19 @@ private final class HostingCellView: NSTableCellView {
     let clamp = RowClamp()
     private var hosting: ReportingHostingView?
     private var heightSyncScheduled = false
+    private var isSelectedRow = false
+
+    /// Tint the row when it's part of a block selection. The hosted SwiftUI
+    /// content draws on a clear background, so a subtle accent fill on the
+    /// cell's own layer shows through behind it.
+    func setSelected(_ selected: Bool) {
+        guard selected != isSelectedRow else { return }
+        isSelectedRow = selected
+        wantsLayer = true
+        layer?.backgroundColor = selected
+            ? NSColor.controlAccentColor.withAlphaComponent(0.20).cgColor
+            : NSColor.clear.cgColor
+    }
 
     func host(_ view: AnyView) {
         let rooted = AnyView(view.environment(clamp))

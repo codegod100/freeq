@@ -62,6 +62,7 @@ let package = Package(
                 "UploadResponse.swift",
                 "ReconnectPolicy.swift",
                 "ConnectGate.swift",
+                "MessageTranscript.swift",
                 "MenuBarModel.swift",
                 "MessageActions.swift",
                 "Safety.swift",

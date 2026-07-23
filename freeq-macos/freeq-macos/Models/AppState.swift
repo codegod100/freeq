@@ -333,6 +333,46 @@ class AppState {
             ?? dmBuffers.first { $0.name.lowercased() == name.lowercased() }
     }
 
+    // MARK: - Message block selection (multi-message copy)
+
+    /// Ids of messages the user has selected for a block copy (shift/cmd-click
+    /// in the message list). Empty = no selection. Observed by the list (to
+    /// tint selected rows) and by the selection hint bar.
+    var selectedMessageIds: Set<String> = []
+
+    var hasMessageSelection: Bool { !selectedMessageIds.isEmpty }
+
+    func clearMessageSelection() {
+        if !selectedMessageIds.isEmpty { selectedMessageIds.removeAll() }
+    }
+
+    /// Select every real (non-system, non-deleted) message in the active buffer.
+    func selectAllMessages() {
+        guard let ch = activeChannelState else { return }
+        selectedMessageIds = Set(
+            ch.messages
+                .filter { !$0.from.isEmpty && !$0.isDeleted }
+                .map(\.id)
+        )
+    }
+
+    /// Copy the selected messages as a clean `Name: message` transcript (plain
+    /// text only, so nothing pastes as Slack-style rich junk). Ordered
+    /// chronologically regardless of the order rows were clicked.
+    @discardableResult
+    func copySelectedMessages() -> Int {
+        guard let ch = activeChannelState else { return 0 }
+        let ordered = ch.messages.filter { selectedMessageIds.contains($0.id) }
+        let text = MessageTranscript.plainText(ordered) { [weak self] nick in
+            let name = self?.profileCache.profile(for: nick)?.displayName
+            return (name?.isEmpty == false) ? name! : nick
+        }
+        guard !text.isEmpty else { return 0 }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        return ordered.count
+    }
+
     var allBuffers: [ChannelState] {
         channels + dmBuffers
     }
