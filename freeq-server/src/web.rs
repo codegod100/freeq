@@ -3552,12 +3552,17 @@ async fn av_moq_ws_root(
     State(state): State<Arc<crate::server::SharedState>>,
 ) -> impl IntoResponse {
     let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
+    // Self-declared AV instance id — keys server-side media revocation on
+    // roster teardown (audit F6).
+    let inst = query.get("inst").filter(|v| !v.is_empty()).cloned();
     let sfu = state.sfu_state.lock().clone();
     match sfu {
         // qmux requires "webtransport" subprotocol for MoQ framing over WebSocket
         Some(sfu) => ws
             .protocols(["webtransport"])
-            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, String::new(), jwt, socket))
+            .on_upgrade(move |socket| {
+                crate::av_sfu::handle_ws_moq(sfu, String::new(), jwt, inst, socket)
+            })
             .into_response(),
         None => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -3587,11 +3592,12 @@ async fn av_moq_ws(
     tracing::info!(path = %path, "MoQ WebSocket upgrade with path");
 
     let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
+    let inst = query.get("inst").filter(|v| !v.is_empty()).cloned();
     let sfu = state.sfu_state.lock().clone();
     match sfu {
         Some(sfu) => ws
             .protocols(["webtransport"])
-            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, jwt, socket))
+            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, jwt, inst, socket))
             .into_response(),
         None => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,

@@ -183,6 +183,11 @@ class AppState {
     /// same session+instance within the server's AV grace window. Set only on
     /// disconnect-driven teardown; cleared on explicit leave or after rejoin.
     @ObservationIgnored var pendingCallRejoin: PendingCallRejoin? = nil
+    /// Media dial held between av-join and the server's av-token TAGMSG
+    /// (tokenless fallback after a short wait). See `mediaDialUrl`.
+    @ObservationIgnored var pendingMediaDial: PendingMediaDial? = nil
+    /// Periodic roster reconciliation while in a call (audit F9).
+    @ObservationIgnored var rosterReconcileTimer: Timer? = nil
     @ObservationIgnored var cameraCapture: CallCameraCapture? = nil
     @ObservationIgnored var screenCapture: CallScreenCapture? = nil
     @ObservationIgnored var micCapture: CallMicCapture? = nil
@@ -1697,13 +1702,21 @@ extension AppState {
             }
 
             // Machine-readable AV failure (`+freeq.at/av-error`, directed at
-            // us). Closes the ghost-caller hole: we dial media + flip in-call
-            // UI before av-join round-trips, so a rejected join must tear that
-            // down (we're not in the roster — nobody will ever hear us).
+            // us). Closes the ghost-caller hole: a rejected join must tear
+            // down the optimistic call state (we're not in the roster —
+            // nobody will ever hear us).
             if let avError = tags["+freeq.at/av-error"] {
                 handleAvError(code: avError,
                               sessionId: tags["+freeq.at/av-id"] ?? "",
                               reason: tags["+freeq.at/av-reason"] ?? "")
+            }
+
+            // Per-session media token (`+freeq.at/av-token`, directed at us
+            // right after our av-join) — triggers the held media dial
+            // (join → token → dial; audit F7).
+            if let avToken = tags["+freeq.at/av-token"],
+               let avId = tags["+freeq.at/av-id"] {
+                handleAvToken(sessionId: avId, token: avToken)
             }
 
         case .names(let channel, let memberList):

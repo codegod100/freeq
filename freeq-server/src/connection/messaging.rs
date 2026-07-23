@@ -2877,8 +2877,23 @@ fn handle_av_tagmsg(
             };
 
             let grace_pending = state.av_grace_pending.lock().clone();
+            // SFU handle taken BEFORE the av_sessions lock (single lock-order:
+            // never acquire sfu_state while holding av_sessions).
+            #[cfg(feature = "av-native")]
+            let sfu_for_revoke = state.sfu_state.lock().clone();
             let mut mgr = state.av_sessions.lock();
-            mgr.reap_orphan_slots(&session_id, &live, &grace_pending);
+            let reaped = mgr.reap_orphan_slots(&session_id, &live, &grace_pending);
+            // Reaped roster slots lose their media too (F6): a ghost whose
+            // slot just vanished must not keep streaming to announcement-
+            // driven clients.
+            #[cfg(feature = "av-native")]
+            if let Some(sfu) = &sfu_for_revoke {
+                for inst in &reaped {
+                    sfu.revoke_media(inst);
+                }
+            }
+            #[cfg(not(feature = "av-native"))]
+            let _ = reaped;
             match mgr.join_session(&session_id, &did, &nick, instance_id) {
                 Ok(session) => {
                     let participant_count = mgr.active_participant_count(&session_id);
@@ -2995,7 +3010,13 @@ fn handle_av_tagmsg(
             {
                 set.remove(inst);
             }
+            #[cfg(feature = "av-native")]
+            let sfu_for_revoke = state.sfu_state.lock().clone();
             let mut mgr = state.av_sessions.lock();
+            // If this leave ends the session, every remaining media conn must
+            // die with it (F6) — snapshot instances before the state change.
+            #[cfg(feature = "av-native")]
+            let all_instances = mgr.active_instances(&session_id);
             match mgr.leave_session(&session_id, &did, instance_id) {
                 Ok((session, should_end)) => {
                     let participant_count = if should_end {
@@ -3026,6 +3047,11 @@ fn handle_av_tagmsg(
                         #[cfg(feature = "av-native")]
                         {
                             state.av_bridges.lock().remove(&session_id);
+                            if let Some(sfu) = &sfu_for_revoke {
+                                for inst in &all_instances {
+                                    sfu.revoke_media(inst);
+                                }
+                            }
                         }
                         let backend = state.av_media.lock().clone();
                         let sid = session_id.clone();
@@ -3103,13 +3129,25 @@ fn handle_av_tagmsg(
                 return;
             }
 
+            #[cfg(feature = "av-native")]
+            let sfu_for_revoke = state.sfu_state.lock().clone();
             let mut mgr = state.av_sessions.lock();
+            // Snapshot BEFORE end_session marks everyone left: an explicit
+            // /av end must also close every participant's media conn (F6).
+            #[cfg(feature = "av-native")]
+            let all_instances = mgr.active_instances(&session_id);
             match mgr.end_session(&session_id, Some(&did)) {
                 Ok(session) => {
                     let channel = session.channel.clone();
                     state.with_db(|db| db.save_av_session(&session));
                     drop(mgr);
 
+                    #[cfg(feature = "av-native")]
+                    if let Some(sfu) = &sfu_for_revoke {
+                        for inst in &all_instances {
+                            sfu.revoke_media(inst);
+                        }
+                    }
                     broadcast_av_state(state, target, &session_id, "ended", &nick, "", 0, "");
                     broadcast_av_s2s(
                         state,

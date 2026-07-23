@@ -78,4 +78,54 @@ final class AvStartRaceTests: XCTestCase {
                            currentCallSessionId: nil, pendingStart: true),
             .ignore)
     }
+
+    // ── join → token → dial (audit F7) ──
+
+    func testTokenForOurSessionDialsAndOthersDont() {
+        let pending = PendingMediaDial(channel: "#x", sessionId: "S1", instance: "abc12345")
+        XCTAssertTrue(shouldDialOnToken(pending: pending, tokenSessionId: "S1"))
+        XCTAssertFalse(shouldDialOnToken(pending: pending, tokenSessionId: "S2"))
+        XCTAssertFalse(shouldDialOnToken(pending: nil, tokenSessionId: "S1"))
+    }
+
+    func testFallbackOnlyFiresForTheSameHeldDial() {
+        let pending = PendingMediaDial(channel: "#x", sessionId: "S1", instance: "abc12345")
+        XCTAssertTrue(shouldDialOnFallback(pending: pending, expected: pending))
+        XCTAssertFalse(shouldDialOnFallback(pending: nil, expected: pending))
+        let newer = PendingMediaDial(channel: "#x", sessionId: "S2", instance: "def67890")
+        XCTAssertFalse(shouldDialOnFallback(pending: newer, expected: pending))
+    }
+
+    func testDialUrlCarriesInstanceAndToken() {
+        XCTAssertEqual(mediaDialUrl(base: "https://h:8080", instance: "i", token: nil),
+                       "https://h:8080?inst=i")
+        XCTAssertEqual(mediaDialUrl(base: "https://h:8080", instance: "i", token: "a+b/c="),
+                       "https://h:8080?inst=i&jwt=a%2Bb%2Fc%3D")
+        XCTAssertEqual(mediaDialUrl(base: "https://h:8080", instance: "i", token: ""),
+                       "https://h:8080?inst=i")
+    }
+
+    // ── roster reconciliation (audit F9) ──
+
+    func testReconcileExcludesSelfByInstanceAndKeepsOtherDevice() {
+        let roster = [
+            AvRosterEntry(nick: "chad", instance: "me111111"),
+            AvRosterEntry(nick: "chad", instance: "ipad2222"),
+            AvRosterEntry(nick: "eve", instance: "eve33333"),
+        ]
+        XCTAssertEqual(
+            reconcileCallParticipants(roster: roster, myNick: "chad", myInstance: "me111111"),
+            ["chad", "eve"])
+    }
+
+    func testReconcileLegacyRowsFallBackToNickAndDedupe() {
+        let roster = [
+            AvRosterEntry(nick: "Chad", instance: nil),
+            AvRosterEntry(nick: "Eve", instance: nil),
+            AvRosterEntry(nick: "eve", instance: "e1"),
+        ]
+        XCTAssertEqual(
+            reconcileCallParticipants(roster: roster, myNick: "chad", myInstance: "me111111"),
+            ["Eve"])
+    }
 }

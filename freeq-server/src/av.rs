@@ -629,18 +629,21 @@ impl AvSessionManager {
     ///
     /// Callers should build the live-set by walking current connections
     /// and reading whatever av-instance they registered on join.
+    /// Returns the instance ids of the reaped slots so the caller can revoke
+    /// their media connections (media must not outlive the roster — F6).
     pub fn reap_orphan_slots(
         &mut self,
         session_id: &str,
         live: &std::collections::HashSet<(String, Option<String>)>,
         grace_pending: &std::collections::HashSet<String>,
-    ) {
+    ) -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
+        let mut reaped = Vec::new();
         let Some(session) = self.sessions.get_mut(session_id) else {
-            return;
+            return reaped;
         };
         if !matches!(session.state, AvSessionState::Active) {
-            return;
+            return reaped;
         }
         // A per-call instance suffix is a globally-unique per-device id, so a
         // slot that HAS an instance is live iff its instance is in the live
@@ -671,8 +674,27 @@ impl AvSessionManager {
             };
             if orphan {
                 p.left_at = Some(now);
+                if let Some(inst) = &p.instance_id {
+                    reaped.push(inst.clone());
+                }
             }
         }
+        reaped
+    }
+
+    /// Instance ids of all ACTIVE participants in a session — used to revoke
+    /// every media connection when the whole session is ended (F6).
+    pub fn active_instances(&self, session_id: &str) -> Vec<String> {
+        self.sessions
+            .get(session_id)
+            .map(|s| {
+                s.participants
+                    .values()
+                    .filter(|p| p.left_at.is_none())
+                    .filter_map(|p| p.instance_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Leave all active slots belonging to a DID — used on connection drop.

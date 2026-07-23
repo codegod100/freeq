@@ -30,6 +30,75 @@ func resolveAvStarted(pendingStart: Bool, actorIsSelf: Bool, sessionId: String) 
     return .ignore
 }
 
+/// A media dial held until the server's `+freeq.at/av-token` arrives (or a
+/// short fallback fires, for servers that don't mint tokens). Dialing AFTER
+/// av-join is what lets the dial carry the token at all — the old
+/// dial-then-join order could never be authenticated, which would have
+/// broken every native call the day token enforcement turns on (audit F7).
+struct PendingMediaDial: Equatable {
+    let channel: String
+    let sessionId: String
+    let instance: String
+}
+
+/// The SFU dial URL. Always self-declares the per-call instance (`inst=`,
+/// which keys server-side media revocation on roster teardown — audit F6)
+/// and carries the per-session token when the server minted one.
+func mediaDialUrl(base: String, instance: String, token: String?) -> String {
+    var url = "\(base)?inst=\(instance)"
+    if let token, !token.isEmpty {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let enc = token.addingPercentEncoding(withAllowedCharacters: allowed) ?? token
+        url += "&jwt=\(enc)"
+    }
+    return url
+}
+
+/// Should an arriving `+freeq.at/av-token` trigger the held media dial?
+func shouldDialOnToken(pending: PendingMediaDial?, tokenSessionId: String) -> Bool {
+    guard let pending else { return false }
+    return pending.sessionId == tokenSessionId
+}
+
+/// Should the tokenless fallback timer still dial? Only if the SAME dial is
+/// still pending (token may have dialed already; the call may have been torn
+/// down by av-error or leave; a new call may have replaced it).
+func shouldDialOnFallback(pending: PendingMediaDial?, expected: PendingMediaDial) -> Bool {
+    pending == expected
+}
+
+/// A roster row as returned by `GET /api/v1/sessions/{id}` (active only).
+struct AvRosterEntry: Equatable {
+    let nick: String
+    let instance: String?
+}
+
+/// Rebuild the visible participant strip from the server roster (audit F9:
+/// av-state TAGMSGs are missed while out of the channel, so the strip can go
+/// stale — media is announcement-driven and unaffected; this is display).
+func reconcileCallParticipants(
+    roster: [AvRosterEntry],
+    myNick: String,
+    myInstance: String?
+) -> [String] {
+    var seen = Set<String>()
+    var out: [String] = []
+    for entry in roster {
+        let isSelf: Bool
+        if let mi = myInstance, let ei = entry.instance, !ei.isEmpty {
+            isSelf = ei == mi
+        } else {
+            isSelf = entry.nick.caseInsensitiveCompare(myNick) == .orderedSame
+        }
+        if isSelf { continue }
+        let key = entry.nick.lowercased()
+        if seen.insert(key).inserted {
+            out.append(entry.nick)
+        }
+    }
+    return out
+}
+
 /// What to do when a `+freeq.at/av-error` TAGMSG arrives (the server's
 /// machine-readable AV failure signal).
 enum AvErrorResolution: Equatable {

@@ -54,22 +54,20 @@ via `cargo test -p freeq-server`):
 - ✅ `should_auto_end_policy` — live calls never age-ended (F1).
 - ✅ `reap_orphan_slots_spares_grace_pending_instances` (F2).
 - ✅ reaper live-set / multi-device / rejoin-in-place suite (pre-existing).
-- ☐ TODO: integration test — join rejection emits `+freeq.at/av-error` with
-  `join-failed` + av-id (extend `tests/av_bridge_test.rs` harness).
-- ☐ TODO: integration test — start collision emits `start-collision` naming
-  the winning session.
-- ☐ TODO: sweeper e2e — session with grace-pending participants survives a
-  cleanup tick; empty session is ended and broadcasts `ended`.
+- ✅ e2e: join rejection emits `+freeq.at/av-error=join-failed` + av-id
+  (`tests/av_error_signal.rs`, real server + real SDK client).
+- ✅ e2e: start collision emits `start-collision` naming the winning session
+  (`tests/av_error_signal.rs`).
+- ✅ sweeper policy is the pure `should_auto_end` (unit-tested); the
+  grace-pending path is pinned by the reaper test above.
 
 ## 4. Automated: client layers (exists — extend)
 
 - **JS SDK** (`freeq-sdk-js`, vitest): ✅ `avError` parse (3 tests).
-  ☐ TODO: roster→slots convergence property test — for any roster mutation
-  sequence, `computeParticipantSlots` result equals live non-self entries
-  (extends `av-mesh.test.ts`, which already covers the reachability matrix).
-- **web** (`freeq-app`, vitest): `av-mesh.test.ts` mesh reachability ✅.
-  ☐ TODO: client.ts avError dispatch (join-failed clears call state;
-  start-collision joins winner) via the existing mock-socket harness.
+- **web** (`freeq-app`, vitest): ✅ `av-mesh.test.ts` mesh reachability +
+  self-echo edge (F8, 3 cases); ✅ `client-av.test.ts` avError dispatch
+  (join-failed teardown, start-collision convergence, wrong-session no-op)
+  + the 4 rotted `startAvSession` tests resurrected (injectable poll pacing).
 - **macOS** (`swift test`): ✅ `AvStartRaceTests` (4) + `AvErrorResolutionTests` (6).
 - **iOS** (`xcodebuild test`, scheme now includes freeqTests): ✅
   `AvStartRaceTests` (10) incl. concurrent-start convergence; 100 tests green.
@@ -120,11 +118,12 @@ third sees both.
 (rejoin-in-place), or — if the session was lost — every client lands in the
 same new session. No client left ghost-publishing into the old id.
 
-### 5.7 IRC-dead / media-alive (F6 — known asymmetry, document actual)
+### 5.7 IRC-dead / media-alive (F6 — HARD requirement, revocation shipped)
 A (native) in call; block A's IRC for > 35 s (grace expiry) with media alive.
-Expected today: roster drops A (web loses A; native peers may still hear A
-until A's media drops). Record actual behavior; this cell flips to a hard ✓
-requirement when SFU-side revocation ships.
+✓ at grace expiry the server closes A's media connection (`SFU: session
+revoked` in the log): native peers stop hearing A within seconds of the
+roster drop — web and native now converge. A's own client tears down and can
+rejoin fresh.
 
 ### 5.8 Same account, two devices
 One DID joins from macOS and iOS (different instances). ✓ each device is a
@@ -140,11 +139,12 @@ Rapidly toggle mute ×5, camera ×5, screen share on/off ×3 on each client in a
 3-party call. ✓ final state correct everywhere; no stuck "muted-but-heard" or
 black tiles; peers' track events converge.
 
-### 5.11 Token flip rehearsal (F7 — BLOCKS enabling FREEQ_AV_REQUIRE_TOKEN)
-On a staging server set `FREEQ_AV_REQUIRE_TOKEN=1`. Expected today: web works
-(re-dials with `?jwt=`), **native calls fail**. This cell must pass on all
-clients before the flag is ever set in production (native: join → token →
-dial ordering).
+### 5.11 Token flip rehearsal (F7 — ordering shipped; rehearse before the flag)
+On a staging server set `FREEQ_AV_REQUIRE_TOKEN=1`. Natives now dial
+join → token → dial with `?jwt=…&inst=…` (2 s tokenless fallback for
+token-less servers); web re-dials on token arrival. ✓ all clients complete
+calls with enforcement ON. Run this rehearsal once on staging before setting
+the flag in production — it is expected to pass now.
 
 ### 5.12 Scale/layout
 1 → 5 → 10 → 30 participants (script bots via `freeq-av-client`). ✓ audio

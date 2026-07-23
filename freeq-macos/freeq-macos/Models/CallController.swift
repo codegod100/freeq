@@ -89,6 +89,46 @@ extension AppState {
         }
     }
 
+    /// Reconcile the visible participant strip against the REST roster every
+    /// 5 s while in a call (audit F9: av-state TAGMSGs are missed while out
+    /// of the channel; media is announcement-driven and unaffected).
+    func startRosterReconciliation(sessionId: String) {
+        stopRosterReconciliation()
+        let timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { await self?.reconcileRosterOnce() }
+        }
+        rosterReconcileTimer = timer
+    }
+
+    func stopRosterReconciliation() {
+        rosterReconcileTimer?.invalidate()
+        rosterReconcileTimer = nil
+    }
+
+    func reconcileRosterOnce() async {
+        guard isInCall, let sid = currentCallSessionId,
+              let url = URL(string: "\(avApiBaseUrl)/api/v1/sessions/\(sid)") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 4
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let parts = json["participants"] as? [[String: Any]] else { return }
+        let roster: [AvRosterEntry] = parts.compactMap { p in
+            guard let n = p["nick"] as? String else { return nil }
+            return AvRosterEntry(nick: n, instance: p["instance_id"] as? String)
+        }
+        await MainActor.run {
+            guard self.isInCall, self.currentCallSessionId == sid else { return }
+            for entry in roster {
+                if let inst = entry.instance, !inst.isEmpty {
+                    self.instanceToNick[inst] = entry.nick
+                }
+            }
+            self.callParticipants = reconcileCallParticipants(
+                roster: roster, myNick: self.nick, myInstance: self.currentAvInstance)
+        }
+    }
+
     /// Handle a `+freeq.at/av-error` TAGMSG (machine-readable AV failure).
     /// Decision logic is the pure, unit-tested `resolveAvError`.
     func handleAvError(code: String, sessionId: String, reason: String) {
@@ -143,37 +183,65 @@ extension AppState {
         }
     }
 
-    /// Construct the MoQ session, start mic capture, and announce the join.
+    /// Announce the join, then dial media when the server's av-token lands
+    /// (join → token → dial; see `PendingMediaDial`). A short fallback dials
+    /// tokenless for servers that don't mint tokens.
     func startCall(channel: String, sessionId: String) {
         let instance = currentAvInstance ?? Self.generateAvInstanceId()
         currentAvInstance = instance
+        sendRaw("@+freeq.at/av-join;+freeq.at/av-id=\(sessionId);+freeq.at/av-instance=\(instance) TAGMSG \(channel)")
+        // Fresh call — don't inherit mute/camera/expand from a prior one.
+        isMuted = false
+        isCameraOn = false
+        isScreenSharing = false
+        isCallExpanded = false
+        participantsWithVideo = []
+        callParticipants = []
+        isInCall = true
+        currentCallChannel = channel
+        currentCallSessionId = sessionId
+        let pending = PendingMediaDial(channel: channel, sessionId: sessionId, instance: instance)
+        pendingMediaDial = pending
+        // Tokenless fallback — the same dial only, and only if still pending
+        // (the token may have dialed already; av-error may have torn us down).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self, shouldDialOnFallback(pending: self.pendingMediaDial, expected: pending) else { return }
+            Log.irc.info("AV: no av-token within fallback window — dialing tokenless")
+            self.dialMedia(token: nil)
+        }
+        startRosterReconciliation(sessionId: sessionId)
+    }
+
+    /// `+freeq.at/av-token` TAGMSG — the per-session media token minted by
+    /// the server right after our av-join. Triggers the held dial.
+    func handleAvToken(sessionId: String, token: String) {
+        guard shouldDialOnToken(pending: pendingMediaDial, tokenSessionId: sessionId) else { return }
+        dialMedia(token: token)
+    }
+
+    /// Construct the MoQ session and start mic capture. `token` nil = legacy
+    /// tokenless dial (fallback path).
+    private func dialMedia(token: String?) {
+        guard let pending = pendingMediaDial else { return }
+        pendingMediaDial = nil
+        // The call may have been torn down (av-error, leave) since the join.
+        guard avSession == nil, isInCall, currentCallSessionId == pending.sessionId else { return }
         do {
             let handler = AvCallbackHandler(appState: self)
             avSession = try FreeqAv(
-                serverUrl: sfuBaseUrl,
-                sessionId: sessionId,
+                serverUrl: mediaDialUrl(base: sfuBaseUrl, instance: pending.instance, token: token),
+                sessionId: pending.sessionId,
                 nick: nick,
-                instanceId: instance,
+                instanceId: pending.instance,
                 handler: handler
             )
             startLocalMic()
             if let out = preferredOutputDeviceId {
                 try? avSession?.setOutputDevice(deviceId: out)
             }
-            sendRaw("@+freeq.at/av-join;+freeq.at/av-id=\(sessionId);+freeq.at/av-instance=\(instance) TAGMSG \(channel)")
-            // Fresh call — don't inherit mute/camera/expand from a prior one.
-            isMuted = false
-            isCameraOn = false
-            isScreenSharing = false
-            isCallExpanded = false
-            participantsWithVideo = []
-            callParticipants = []
-            isInCall = true
-            currentCallChannel = channel
-            currentCallSessionId = sessionId
         } catch {
-            print("[av] Failed to start call: \(error)")
-            currentAvInstance = nil
+            print("[av] Failed to dial media: \(error)")
+            tearDownCallLocallyOnDisconnect()
         }
     }
 
@@ -206,6 +274,8 @@ extension AppState {
     }
 
     private func teardownLocal() {
+        pendingMediaDial = nil
+        stopRosterReconciliation()
         cameraCapture?.stop()
         cameraCapture = nil
         screenCapture?.stop()

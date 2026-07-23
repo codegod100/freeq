@@ -444,6 +444,12 @@ class AppState: ObservableObject {
     /// the exact wire payloads we put on the IRC connection.
     internal var rawSenderForTest: ((String) -> Void)? = nil
 
+    /// Media dial held between av-join and the server's av-token TAGMSG
+    /// (tokenless fallback after a short wait). See `mediaDialUrl` (audit F7).
+    internal var pendingMediaDial: PendingMediaDial? = nil
+    /// Periodic roster reconciliation while in a call (audit F9).
+    internal var rosterReconcileTimer: Timer? = nil
+
     /// Test hook: returns the active session id (or .none) for a channel,
     /// replacing the live REST probe used in `discoverAndJoinOrStart`. When
     /// nil (the production default), the REST probe runs normally.
@@ -529,15 +535,10 @@ class AppState: ObservableObject {
 
     func startCall(channel: String, sessionId: String) {
         guard client != nil || rawSenderForTest != nil else { return }
-        // Native clients take the SFU's QUIC listener on :8080 — the
-        // low-latency media path that doesn't starve audio the way the :443
-        // WebSocket path can. The web client rides :443 WebSocket (browsers
-        // can't use the self-signed QUIC cert). Both transports terminate in
-        // the SAME moq_relay::Cluster and — as of the av_sfu.rs root-unify fix
-        // — share one broadcast namespace, so QUIC (native) and WS (web)
-        // participants see and hear each other. (Before that fix QUIC rooted
-        // at "/av/moq" and WS at "", leaving them mutually invisible.)
-        let serverUrl = ServerConfig.sfuBaseUrl
+        // (The dial URL is built in dialMedia — ServerConfig.sfuBaseUrl plus
+        // `inst=` and, when the server mints one, `jwt=`. Native and web both
+        // terminate in the SAME moq_relay::Cluster and share one broadcast
+        // namespace, so QUIC/WS participants see and hear each other.)
 
         // iOS won't let cpal/iroh-live open both mic and speaker until the
         // app's AVAudioSession is configured for two-way voice. Without this,
@@ -556,53 +557,124 @@ class AppState: ObservableObject {
         let instance = currentAvInstance ?? Self.generateAvInstanceId()
         currentAvInstance = instance
 
+        // Join FIRST (join → token → dial; audit F7): the roster admits us
+        // and the server replies with the per-session media token
+        // (+freeq.at/av-token TAGMSG). The media dial is held until the token
+        // lands, with a short tokenless fallback for servers that don't mint.
+        sendRawLine(
+            "@+freeq.at/av-join;+freeq.at/av-id=\(sessionId);+freeq.at/av-instance=\(instance) TAGMSG \(channel)"
+        )
+        // Tests run synchronously without a real RunLoop spinning the
+        // main queue; dispatch async would defer state mutation past the
+        // end of the test. Use `runOnMain` so tests see immediate updates.
+        runOnMain {
+            self.isInCall = true
+            self.isSpeakerOn = true
+            self.currentCallChannel = channel
+            self.currentCallSessionId = sessionId
+            self.startCallActivity(channel: channel, sessionId: sessionId)
+            // Surface as a system call (Recents, lock screen, green pill).
+            CallKitManager.shared.onEnd = { [weak self] in self?.leaveCall() }
+            CallKitManager.shared.onSetMuted = { [weak self] muted in
+                guard let self, self.isMuted != muted else { return }
+                self.toggleMute()
+            }
+            CallKitManager.shared.reportStarted(channel: channel)
+        }
+        let pending = PendingMediaDial(channel: channel, sessionId: sessionId, instance: instance)
+        pendingMediaDial = pending
+        startRosterReconciliation()
+        if rawSenderForTest != nil {
+            // Test harness: no RunLoop to fire the fallback timer — dial
+            // immediately (tokenless), same observable flow as before.
+            dialMedia(token: nil)
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self,
+                      shouldDialOnFallback(pending: self.pendingMediaDial, expected: pending)
+                else { return }
+                print("[av] no av-token within fallback window — dialing tokenless")
+                self.dialMedia(token: nil)
+            }
+        }
+    }
+
+    /// `+freeq.at/av-token` TAGMSG — the per-session media token minted by
+    /// the server right after our av-join. Triggers the held dial.
+    func handleAvToken(sessionId: String, token: String) {
+        guard shouldDialOnToken(pending: pendingMediaDial, tokenSessionId: sessionId) else { return }
+        dialMedia(token: token)
+    }
+
+    /// Construct the MoQ session and start mic capture. `token` nil = legacy
+    /// tokenless dial (fallback/test path).
+    private func dialMedia(token: String?) {
+        guard let pending = pendingMediaDial else { return }
+        pendingMediaDial = nil
+        // The call may have been torn down (av-error, leave) since the join.
+        guard avSession == nil, isInCall, currentCallSessionId == pending.sessionId else { return }
+        let url = mediaDialUrl(base: ServerConfig.sfuBaseUrl, instance: pending.instance, token: token)
         do {
             let handler = AvCallbackHandler(appState: self)
             if let factory = avSessionFactory {
-                avSession = try factory(serverUrl, sessionId, nick, instance, handler)
+                avSession = try factory(url, pending.sessionId, nick, pending.instance, handler)
             } else {
                 avSession = try FreeqAv(
-                    serverUrl: serverUrl,
-                    sessionId: sessionId,
+                    serverUrl: url,
+                    sessionId: pending.sessionId,
                     nick: nick,
-                    instanceId: instance,
+                    instanceId: pending.instance,
                     handler: handler
                 )
             }
             // Start Swift-driven mic capture for the broadcast. Audio is
             // always-on for a call, so this runs for the whole session.
             startLocalMic()
-            // Tell peers we joined this session — instance suffix lets the
-            // server allocate a per-device participant slot. Send BEFORE
-            // flipping `isInCall` so a test observing the synchronously-
-            // captured wire payload sees both the join line and the state
-            // change as a single coherent event.
-            sendRawLine(
-                "@+freeq.at/av-join;+freeq.at/av-id=\(sessionId);+freeq.at/av-instance=\(instance) TAGMSG \(channel)"
-            )
-            // Tests run synchronously without a real RunLoop spinning the
-            // main queue; dispatch async would defer state mutation past the
-            // end of the test. Use `runOnMain` so tests see immediate updates.
-            runOnMain {
-                self.isInCall = true
-                self.isSpeakerOn = true
-                self.currentCallChannel = channel
-                self.currentCallSessionId = sessionId
-                self.startCallActivity(channel: channel, sessionId: sessionId)
-                // Surface as a system call (Recents, lock screen, green pill).
-                CallKitManager.shared.onEnd = { [weak self] in self?.leaveCall() }
-                CallKitManager.shared.onSetMuted = { [weak self] muted in
-                    guard let self, self.isMuted != muted else { return }
-                    self.toggleMute()
-                }
-                CallKitManager.shared.reportStarted(channel: channel)
-            }
         } catch {
-            print("[av] Failed to start call: \(error)")
-            currentAvInstance = nil
-            // Hand the audio hardware back to other paths since the call
-            // never actually engaged it.
+            print("[av] Failed to dial media: \(error)")
+            // Hand the audio hardware back and tear down the half-open call.
             Self.deactivateVoiceCallSession()
+            tearDownCallLocallyOnDisconnect()
+        }
+    }
+
+    /// Reconcile the visible participant strip against the REST roster every
+    /// 5 s while in a call (audit F9). Display-only — media is announcement-
+    /// driven and unaffected.
+    private func startRosterReconciliation() {
+        stopRosterReconciliation()
+        guard rawSenderForTest == nil else { return } // no polling in tests
+        rosterReconcileTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { await self?.reconcileRosterOnce() }
+        }
+    }
+
+    internal func stopRosterReconciliation() {
+        rosterReconcileTimer?.invalidate()
+        rosterReconcileTimer = nil
+    }
+
+    func reconcileRosterOnce() async {
+        guard isInCall, let sid = currentCallSessionId,
+              let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/sessions/\(sid)") else { return }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 4
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let parts = json["participants"] as? [[String: Any]] else { return }
+        let roster: [AvRosterEntry] = parts.compactMap { p in
+            guard let n = p["nick"] as? String else { return nil }
+            return AvRosterEntry(nick: n, instance: p["instance_id"] as? String)
+        }
+        await MainActor.run {
+            guard self.isInCall, self.currentCallSessionId == sid else { return }
+            for entry in roster {
+                if let inst = entry.instance, !inst.isEmpty {
+                    self.avInstanceToNick[inst] = entry.nick
+                }
+            }
+            self.callParticipants = reconcileCallParticipants(
+                roster: roster, myNick: self.nick, myInstance: self.currentAvInstance)
         }
     }
 
@@ -674,6 +746,8 @@ class AppState: ObservableObject {
         }
         // Explicit leave — a reconnect must NOT drag us back into the call.
         pendingCallRejoin = nil
+        pendingMediaDial = nil
+        stopRosterReconciliation()
         cameraCapture?.stop()
         cameraCapture = nil
         micCapture?.stop()
@@ -733,6 +807,8 @@ class AppState: ObservableObject {
     /// gone. Otherwise identical: stop capture, close the MoQ session, clear
     /// UI state.
     internal func tearDownCallLocallyOnDisconnect() {
+        pendingMediaDial = nil
+        stopRosterReconciliation()
         // Capture the call identity BEFORE clearing state so a reconnect that
         // re-joins this channel can rejoin the same session+instance within
         // the server's AV grace window. Only when we're actually in a call.
@@ -2755,6 +2831,14 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 state.handleAvError(code: avError,
                                     sessionId: tags["+freeq.at/av-id"] ?? "",
                                     reason: tags["+freeq.at/av-reason"] ?? "")
+            }
+
+            // Per-session media token (`+freeq.at/av-token`, directed at us
+            // right after our av-join) — triggers the held media dial
+            // (join → token → dial; audit F7).
+            if let avToken = tags["+freeq.at/av-token"],
+               let avId = tags["+freeq.at/av-id"] {
+                state.handleAvToken(sessionId: avId, token: avToken)
             }
 
         case .nickChanged(let oldNick, let newNick):

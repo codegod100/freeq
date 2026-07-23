@@ -86,9 +86,20 @@ function broadcastKey(nick: string, instance?: string | null): string {
  *      to nick. Degenerate; such rows also collide at the publish path.
  */
 function isSelf(p: RosterParticipant, me: SelfIdentity): boolean {
-  if (me.instance || p.instance_id) {
-    return !!me.instance && p.instance_id === me.instance;
+  // Both sides carry an instance: exact match decides (unambiguous).
+  if (me.instance && p.instance_id) {
+    return p.instance_id === me.instance;
   }
+  // The row has an instance but we don't (we're legacy): it's a modern
+  // device — someone else, or our own other device. Either way: subscribe.
+  if (p.instance_id) {
+    return false;
+  }
+  // The row has NO instance. It may be legacy — or it may be OUR OWN row
+  // whose av-instance tag was lost. Fall to DID (then nick) so we never
+  // subscribe to our own broadcast (self-echo — audit F8). Cost: our own
+  // *legacy* second device wouldn't be subscribed; it also collides at the
+  // publish path, so it was already broken — self-echo is strictly worse.
   if (me.did || p.did) {
     return !!me.did && p.did === me.did;
   }

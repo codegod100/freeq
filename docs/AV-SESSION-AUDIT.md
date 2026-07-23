@@ -1,6 +1,6 @@
 # AV Session Deep-Dive Audit — "some can hear each other and some can't"
 
-**Date:** 2026-07-22 · **Status:** fixes for F1–F5 shipped; F6–F9 documented + in test plan
+**Date:** 2026-07-22 · **Status:** ALL findings F1–F9 fixed + tested (no open items)
 **Symptom under investigation:** multiple people join a call; hearing/seeing is
 split in *random directions*, and which client you're on seems to matter.
 
@@ -125,34 +125,52 @@ instance; `join_session` rejoins the slot in place and updates its nick, so the
 roster follows the wire within one poll. (Native publishers never republish on
 rename and never need this.)
 
-### F6 — MEDIUM (documented, not yet fixed): IRC-dead / media-alive ghosts ⇒ class C
-If a participant's IRC connection dies for > 30 s (grace expiry) but their MoQ
-connection survives, the server marks them left: web drops them, natives keep
-hearing them (the broadcast is still announced). Nothing revokes the media.
-Symmetric inverse: SFU connect fails silently → roster lists a participant
-nobody can hear ("silent tile").
-**Direction:** enforce roster⇔media symmetry at the SFU — on roster-leave,
-revoke the session's token / disconnect the broadcast (needs S2 scoped sessions
-+ token enforcement). Until then this is a known, testable asymmetry.
+### F6 — MEDIUM (fixed): IRC-dead / media-alive ghosts ⇒ class C
+If a participant's IRC connection died past the grace window but their MoQ
+connection survived, the roster dropped them while their media kept flowing:
+web lost them, natives kept hearing them, and nothing revoked the media.
 
-### F7 — MEDIUM (landmine, documented): natives never dial with the AV token
-`send_av_token` delivers `+freeq.at/av-token` after av-join; web appends
-`?jwt=` and even re-dials when the token lands. macOS/iOS ignore the token
-**and** dial before joining. The day `FREEQ_AV_REQUIRE_TOKEN=1` is set, every
-native call breaks. Native must: join → await token → dial (or re-dial on
-token arrival like web).
+**Fix: server-side media revocation.** Every client self-declares its per-call
+instance on the SFU dial URL (`?inst=…`); the SFU keeps an instance → conn
+registry (`SfuState::media_conns`), and every roster-teardown path now closes
+the instance's media connection(s): grace-expiry/immediate disconnect teardown
+(`finish_av_slot_teardown`), the join-time orphan reap, explicit `/av end`,
+leave-that-ends-the-session, and the cleanup sweeper. Media membership can no
+longer outlive roster membership. (Cooperative attribution — hostile clients
+are the token flag's concern, which F7 now enables.)
 
-### F8 — LOW (documented): web self-subscription echo edge
-`isSelf` (av-mesh.ts) keys on instance; if *our own* roster row lost its
-instance (av-join tag stripped/legacy), rule 1 fails and we subscribe to our
-own broadcast → self-echo. Roster rows without instances also collide at the
-publish path. Covered in the test plan (matrix row "legacy/no-instance").
+### F7 — MEDIUM (fixed): natives never dialed with the AV token
+macOS/iOS dialed the SFU *before* av-join, so they could never carry the
+`+freeq.at/av-token` — the day `FREEQ_AV_REQUIRE_TOKEN=1` was set, every
+native call would have broken.
 
-### F9 — LOW (documented): `av-state` fan-out requires channel presence
-Roster changes reach clients as channel TAGMSGs; a client not currently joined
-to the IRC channel (blip, slow rejoin) misses joined/left/ended transitions.
-Web self-heals via the 1.2 s poll; macOS/iOS have no poll — they rely on
-announcements for *media* (fine) but their participant strip can go stale.
+**Fix: join → token → dial.** Natives now send av-join first, hold the media
+dial (`PendingMediaDial`), dial with `?jwt=…&inst=…` when the av-token TAGMSG
+lands, and fall back to a tokenless dial after 2 s for servers that don't mint
+tokens. Pure decision helpers (`shouldDialOnToken`/`shouldDialOnFallback`/
+`mediaDialUrl`) are unit-tested on both platforms; teardown/av-error clears the
+held dial so a rejected join can't dial into a dead session.
+
+### F8 — LOW (fixed): web self-subscription echo edge
+`isSelf` (av-mesh.ts) keyed strictly on instance; if *our own* roster row lost
+its instance, we subscribed to our own broadcast → self-echo.
+
+**Fix:** an instance-less roster row now falls through to DID (then nick)
+identity, so our own stale row is recognised as self. Cost: our own *legacy*
+second device wouldn't be subscribed — it already collided at the publish
+path, so it was broken regardless; self-echo is strictly worse. Unit-tested
+(3 new av-mesh cases incl. the guest/nick fallback).
+
+### F9 — LOW (fixed): `av-state` fan-out requires channel presence
+Roster changes reach clients as channel TAGMSGs; a client not joined to the
+channel at that moment missed joined/left/ended transitions. Web self-healed
+via its 1.2 s poll; macOS/iOS had no poll, so their participant strip could go
+stale.
+
+**Fix:** natives now reconcile the strip against `GET /api/v1/sessions/{id}`
+every 5 s while in a call (display-only — media stays announcement-driven).
+The pure `reconcileCallParticipants` (self-exclusion by instance, legacy nick
+fallback, case-insensitive dedupe) is unit-tested on both platforms.
 
 ---
 
@@ -189,6 +207,22 @@ server:
 | macOS av-error handling | `AvStartRace.swift` + `CallController.swift` + `AppState.swift` | 6 new `AvErrorResolutionTests` |
 | iOS av-error + start-race parity | `AvStartRace.swift` (new), `AppState.swift` | new `AvStartRaceTests` (10) |
 | iOS test bundle resurrected | `project.yml` test scheme; stale tests fixed | all 100 iOS tests green + runnable |
+
+## 5. Second pass ("do not leave anything open") — F6–F9 closed
+
+| Change | Where | Tests |
+|---|---|---|
+| SFU media revocation registry + `?inst=` attribution | `av_sfu.rs` (`media_conns`, `revoke_media`, select in `handle_ws_moq`), `web.rs` routes, all roster-teardown call sites | e2e suite + build |
+| Join → token → dial on natives | macOS `CallController` + iOS `AppState` (`PendingMediaDial`, `handleAvToken`, `dialMedia`) | 7 macOS + 3 iOS pure-fn tests |
+| Web self-echo edge | `av-mesh.ts` `isSelf` fall-through | 3 av-mesh tests |
+| Native roster reconciliation | macOS + iOS 5 s poll, `reconcileCallParticipants` | 3 macOS + 2 iOS tests |
+| av-error e2e proof | `freeq-server/tests/av_error_signal.rs` (real server + real SDK clients) | 2 e2e tests |
+| web avError dispatch | `client-av.test.ts` (join-failed teardown, collision convergence) | 3 tests |
+| Resurrected rotted web AV tests | injectable `__setAvStartPollForTests` (in-flight-guard order dependence) | 4 tests un-rotted |
+
+Verification at time of writing: server **1084** tests, macOS **434**, iOS
+**105**, sdk-js **219**, web **753** — all green; `--features av-native`
+compiles clean.
 
 **See `docs/AV-TEST-PLAN.md` for the full cross-client matrix that keeps this
 fixed.**

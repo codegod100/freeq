@@ -295,6 +295,15 @@ export function getAvInstanceId(): string | null {
 // and silently no-op every future button click on that user's session.
 const _startInFlight = new Set<string>();
 
+/// Convergence-poll pacing for startAvSession. Injectable so tests don't sit
+/// through the production 16×500 ms schedule — a timed-out test used to leave
+/// the poll running, and the in-flight guard then silently suppressed every
+/// later startAvSession in the file (order-dependent failures).
+let avStartPoll = { intervalMs: 500, attempts: 16 };
+export function __setAvStartPollForTests(intervalMs: number, attempts: number): void {
+  avStartPoll = { intervalMs, attempts };
+}
+
 /** Seed an AV session into the store from the REST `/sessions` shape, so
  *  CallPanel (which renders `avSessions.get(activeAvSession)`) can mount
  *  immediately rather than waiting for the 5s discovery poll. */
@@ -373,9 +382,9 @@ export async function startAvSession(channel: string, title?: string) {
     // activate it directly. Idempotent with the event: whichever sets
     // activeAvSession first wins; the other no-ops.
     const myDid = store.authDid;
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < avStartPoll.attempts; i++) {
       if (useStore.getState().activeAvSession) { pendingAvStart = null; break; }
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, avStartPoll.intervalMs));
       try {
         const r = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
         if (!r.ok) continue;

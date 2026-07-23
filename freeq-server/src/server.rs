@@ -2232,6 +2232,9 @@ impl Server {
                             .values()
                             .flat_map(|set| set.iter().cloned())
                             .collect();
+                        // Taken before av_sessions (single lock-order rule).
+                        #[cfg(feature = "av-native")]
+                        let sfu_for_revoke = cleanup_state.sfu_state.lock().clone();
                         let mut mgr = cleanup_state.av_sessions.lock();
                         // Auto-end policy lives in av::should_auto_end (unit-tested).
                         let stale_ids: Vec<String> = mgr
@@ -2256,8 +2259,18 @@ impl Server {
                             .map(|s| s.id.clone())
                             .collect();
                         for id in &stale_ids {
+                            // Any lingering media conns die with the session
+                            // (F6). Snapshot before end_session marks them left.
+                            #[cfg(feature = "av-native")]
+                            let stale_instances = mgr.active_instances(id);
                             if let Ok(session) = mgr.end_session(id, None) {
                                 cleanup_state.with_db(|db| db.save_av_session(&session));
+                                #[cfg(feature = "av-native")]
+                                if let Some(sfu) = sfu_for_revoke.as_ref() {
+                                    for inst in &stale_instances {
+                                        sfu.revoke_media(inst);
+                                    }
+                                }
                                 if let Some(ch) = &session.channel {
                                     let ch = ch.clone();
                                     drop(mgr);

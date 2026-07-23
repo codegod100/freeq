@@ -213,7 +213,13 @@ export function CallPanel() {
   const [moqUrl, setMoqUrl] = useState(moqOrigin);
   useEffect(() => {
     const applyToken = (token: string | null) => {
-      const url = token ? `${moqOrigin}?jwt=${encodeURIComponent(token)}` : moqOrigin;
+      // Always self-declare our per-call instance (`inst=`) — it keys
+      // server-side media revocation when our roster slot is torn down
+      // (audit F6). Token folds in as `jwt=` when minted.
+      const inst = encodeURIComponent(getAvInstanceId() || '');
+      const url = token
+        ? `${moqOrigin}?inst=${inst}&jwt=${encodeURIComponent(token)}`
+        : `${moqOrigin}?inst=${inst}`;
       moqUrlRef.current = url;
       setMoqUrl(url);
     };

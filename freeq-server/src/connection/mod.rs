@@ -431,6 +431,18 @@ fn finish_av_slot_teardown(
     should_end: bool,
     instance: &str,
 ) {
+    // Media must not outlive the roster slot (audit F6): close this
+    // instance's SFU connection(s) so announcement-driven clients stop
+    // hearing a roster-ghost. No-op for legacy clients with no instance.
+    // (Guard taken and dropped before any av_sessions lock — single
+    // lock-order: sfu_state is never held while acquiring av_sessions.)
+    #[cfg(feature = "av-native")]
+    {
+        let sfu = state.sfu_state.lock().clone();
+        if let Some(sfu) = sfu {
+            sfu.revoke_media(instance);
+        }
+    }
     if let Some(ch) = channel {
         let participant_count = state.av_sessions.lock().active_participant_count(av_sid);
         if should_end {
