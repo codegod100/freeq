@@ -634,7 +634,7 @@ async fn client_metadata(State(state): State<Arc<BrokerState>>) -> Json<serde_js
         // issued before this change. We never request it at /authorize
         // — the broker only asks for `atproto`. Remove transition:generic
         // once the PDS grace period closes.
-        "scope": "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic",
+        "scope": "atproto blob:image/* repo:app.bsky.actor.profile repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
@@ -690,12 +690,13 @@ async fn auth_login(
     );
     // Identity-only scope by default. The broker's job is to mint a session
     // token for SASL — that needs nothing more than `atproto`. The PFP microapp
-    // opts into a wider grant (`intent=pfp`) so the broker can set the user's
-    // avatar + post on their behalf: `transition:generic` covers blob upload
-    // and repo writes and is already in the advertised client-metadata scope.
-    // Only this opt-in flow sees the broader consent screen.
+    // opts into a *narrow* grant (`intent=pfp`) — exactly what setting an avatar
+    // touches, nothing more: upload image blobs, write the profile record, and
+    // create a post. No `transition:generic` (that's full-account access). Only
+    // this opt-in flow gets that consent screen; every other sign-in stays
+    // identity-only. Each scope here must be within the client-metadata union.
     let scope = if q.intent.as_deref() == Some("pfp") {
-        "atproto transition:generic"
+        "atproto blob:image/* repo:app.bsky.actor.profile repo:app.bsky.feed.post"
     } else {
         "atproto"
     };
