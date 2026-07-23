@@ -153,6 +153,10 @@ mesh holds (spot-check pairs), roster correct, and layout remains usable
 
 ## 6. Diagnostic tooling (build as needed)
 
+- ✅ `cargo run -p freeq-sdk --example av_live_probe` — one-shot LIVE probe
+  against production (guest connect → dead-session join → asserts
+  `av-error=join-failed` → real av-start → asserts `started` + `av-token` →
+  clean `av-end`). Run after every server deploy; exits non-zero on failure.
 - `freeq-av-client` bot flag `--assert-hears=<nick>`: subscribe, verify
   non-silent audio frames from a named peer within N s, exit non-zero
   otherwise — turns any §5 scenario into a scriptable check.
