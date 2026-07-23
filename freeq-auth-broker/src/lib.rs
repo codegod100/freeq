@@ -308,6 +308,11 @@ struct AuthLoginQuery {
     mobile: Option<String>,
     return_to: Option<String>,
     popup: Option<String>,
+    /// Optional flow selector. `intent=pfp` requests the wider grant the PFP
+    /// microapp needs (blob upload + profile/post writes) instead of the
+    /// identity-only default. Every other caller (irc.freeq.at sign-in) is
+    /// untouched, so its consent screen stays identity-only.
+    intent: Option<String>,
 }
 
 fn is_truthy(value: Option<&str>) -> bool {
@@ -683,11 +688,17 @@ async fn auth_login(
         "{}/auth/callback",
         state.config.public_url.trim_end_matches('/')
     );
-    // Identity-only scope. The broker's job is to mint a session token
-    // for SASL — that needs nothing more than `atproto`. PDS-touching
-    // features (image upload, Bluesky cross-post) are step-ups served
-    // by the freeq-server's `/auth/step-up`, never the broker.
-    let scope = "atproto";
+    // Identity-only scope by default. The broker's job is to mint a session
+    // token for SASL — that needs nothing more than `atproto`. The PFP microapp
+    // opts into a wider grant (`intent=pfp`) so the broker can set the user's
+    // avatar + post on their behalf: `transition:generic` covers blob upload
+    // and repo writes and is already in the advertised client-metadata scope.
+    // Only this opt-in flow sees the broader consent screen.
+    let scope = if q.intent.as_deref() == Some("pfp") {
+        "atproto transition:generic"
+    } else {
+        "atproto"
+    };
     let client_id = build_client_id(&state.config.public_url, &redirect_uri);
 
     let dpop_key = DpopKey::generate();
