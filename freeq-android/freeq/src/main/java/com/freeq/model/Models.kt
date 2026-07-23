@@ -1134,7 +1134,24 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                         state.batches[batchId]?.let { batch ->
                             val idx = batch.messages.indexOfFirst { it.id == editTarget }
                             if (idx >= 0) {
-                                batch.messages[idx] = batch.messages[idx].copy(text = ircMsg.text, isEdited = true)
+                                val held = batch.messages[idx]
+                                // Reactions attach to the msgid the user reacted
+                                // to — usually the latest edit id — so replay
+                                // delivers them ON the edit row; merge them or
+                                // reactions on edited messages vanish every
+                                // relaunch. (The id deliberately stays the
+                                // original's: the flush dedupe is id-only, and
+                                // re-keying would append a duplicate beside a
+                                // held copy after an offline-window edit. An
+                                // edit-anchor merge at flush is the follow-up
+                                // that unlocks re-keying.)
+                                for ((emoji, nicks) in msg.reactions) {
+                                    if (nicks.isNotEmpty()) held.reactions[emoji] = nicks
+                                }
+                                batch.messages[idx] = held.copy(
+                                    text = ircMsg.text,
+                                    isEdited = true,
+                                )
                             } else {
                                 batch.messages.add(msg)
                             }
@@ -1171,6 +1188,14 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
                         )
                     }
                 } else {
+                    // Our OWN echoed DM carries the recipient's nick as
+                    // `target` and their canonical DID as `dmKey`. Adopt that
+                    // binding FIRST so a thread opened by nick folds into the
+                    // DID-keyed thread the echo routes to — otherwise the
+                    // sender never sees their own DM until the peer replies.
+                    DmEcho.recipientBinding(isSelf, ircMsg.target, ircMsg.dmKey)?.let { (n, d) ->
+                        state.adoptDmBinding(n, d)
+                    }
                     // The SDK's canonical conversation key (peer DID when
                     // known, else nick) — one person, one thread. Fallback
                     // preserves behavior against an older SDK.

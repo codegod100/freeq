@@ -86,3 +86,23 @@ internal object DidDisplay {
         return true
     }
 }
+
+/**
+ * Binding logic for our OWN echoed DMs. The server echoes a sent DM back
+ * with the wire `target` = the recipient's nick and `dmKey` = their
+ * canonical DID (when resolved). Without adopting that binding, a thread
+ * the sender opened by nick and the DID-keyed thread the echo lands in
+ * stay split — the sender never sees their own message until the peer
+ * replies. Pure; mirrors iOS/macOS DmEcho (12e1a655).
+ */
+internal object DmEcho {
+    fun recipientBinding(isSelf: Boolean, target: String, dmKey: String?): Pair<String, String>? {
+        if (!isSelf) return null
+        val did = dmKey ?: return null
+        if (!DidDisplay.isDid(did)) return null
+        if (target.startsWith("#") || target.startsWith("&")) return null
+        if (DidDisplay.isDid(target)) return null
+        if (target.equals(did, ignoreCase = true)) return null
+        return target to did
+    }
+}
