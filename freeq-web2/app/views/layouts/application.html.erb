@@ -16,6 +16,9 @@
     <%= csrf_meta_tags %>
     <%= csp_meta_tag %>
     <%= action_cable_meta_tag %>
+    <%# Channel GETs JOIN + persist membership. Turbo 8 hover-prefetch would
+        randomly grow My Channels — disable site-wide. %>
+    <meta name="turbo-prefetch" content="false">
     <link rel="manifest" href="/manifest">
     <link rel="icon" href="/favicon.png" type="image/png" sizes="32x32">
     <link rel="icon" href="/icon-192.png" type="image/png" sizes="192x192">
@@ -114,7 +117,9 @@
       #upload-preview-cancel{font-size:1.1rem;padding:.15rem .35rem}
       #messages .msg{display:grid;grid-template-columns:50px 1fr;gap:.3rem;padding:2px 0;font-size:.85rem;line-height:1.4}
       #messages .ts{color:var(--muted);font-size:.68rem;text-align:right;user-select:none;padding-top:.1rem}
-      #messages .body{white-space:pre-wrap;overflow-wrap:anywhere}
+      /* block so link-embed cards (block) lay out under the text, not as
+         anonymous boxes split out of an inline span */
+      #messages .body{display:block;white-space:pre-wrap;overflow-wrap:anywhere}
       #messages .nick{font-weight:600}
       #messages .date-sep{display:flex;align-items:center;gap:.75rem;margin:.75rem 0 .4rem;padding:0 .25rem;user-select:none}
       #messages .date-sep::before,#messages .date-sep::after{content:"";flex:1 1 auto;height:1px;background:var(--border)}
@@ -130,6 +135,66 @@
       #messages a.msg-img-link{display:inline-block;margin-top:4px;max-width:min(420px,100%);border-radius:8px;overflow:hidden;border:1px solid var(--border);vertical-align:top}
       #messages a.msg-img-link:hover{border-color:#7ab7ff}
       #messages img.msg-img{display:block;max-width:100%;max-height:320px;height:auto;object-fit:contain;background:#0a0d12}
+      /* Link embeds (YouTube / Bluesky / OpenGraph) — freeq-app parity */
+      #messages a.link-embed{
+        display:block;margin-top:6px;max-width:min(420px,100%);
+        border:1px solid var(--border);border-radius:10px;overflow:hidden;
+        background:#12161d;text-decoration:none;color:inherit;
+        white-space:normal
+      }
+      #messages a.link-embed:hover{border-color:#7ab7ff}
+      #messages .link-embed-img{
+        display:block;width:100%;max-height:180px;object-fit:cover;background:#0a0d12
+      }
+      #messages .link-embed-img.yt-thumb{max-height:220px}
+      #messages .link-embed-body{padding:8px 10px}
+      #messages .link-embed-site{
+        font-size:.62rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)
+      }
+      #messages .link-embed-title{
+        font-size:.8rem;font-weight:600;color:#7ab7ff;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+      }
+      #messages .link-embed-desc{
+        font-size:.72rem;color:var(--muted);margin-top:2px;
+        display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden
+      }
+      #messages .link-embed-domain{
+        font-size:.65rem;color:var(--muted);margin-top:4px;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+      }
+      #messages .yt-footer{
+        display:flex;align-items:center;gap:6px;font-size:.75rem;color:var(--muted)
+      }
+      #messages .yt-play{color:#ef4444;font-size:.85rem}
+      #messages .bsky-embed .bsky-author{
+        display:flex;align-items:center;gap:6px;padding:10px 10px 4px
+      }
+      #messages .bsky-avatar{
+        width:1.25rem;height:1.25rem;border-radius:999px;object-fit:cover;flex:0 0 auto
+      }
+      #messages .bsky-avatar-fallback{
+        display:inline-flex;align-items:center;justify-content:center;
+        background:#1c2330;color:var(--muted);font-size:.65rem;font-weight:700
+      }
+      #messages .bsky-name{font-size:.75rem;font-weight:600;color:var(--fg)}
+      #messages .bsky-handle{font-size:.65rem;color:var(--muted)}
+      #messages .bsky-text{
+        padding:2px 10px 8px;font-size:.8rem;line-height:1.4;color:var(--fg);
+        display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;
+        white-space:pre-wrap
+      }
+      #messages .bsky-images{
+        display:flex;gap:4px;padding:0 10px 8px;flex-wrap:wrap
+      }
+      #messages .bsky-images img{
+        flex:1 1 0;min-width:0;max-height:140px;object-fit:cover;border-radius:8px
+      }
+      #messages .bsky-footer{
+        display:flex;align-items:center;gap:12px;padding:6px 10px;
+        border-top:1px solid var(--border);font-size:.65rem;color:var(--muted)
+      }
+      #messages .bsky-time{margin-left:auto}
       .reactions{display:inline-flex;flex-wrap:wrap;gap:3px;margin-left:6px;vertical-align:middle}
       .reaction-chip{display:inline-flex;align-items:center;gap:2px;padding:1px 6px;background:rgba(255,255,255,.07);border:1px solid var(--border);border-radius:999px;font-size:.75rem;cursor:pointer}
       .react-btn{opacity:.5;border:1px dashed var(--border);border-radius:999px;width:1.2rem;height:1.2rem;background:transparent;color:var(--muted);cursor:pointer}
@@ -249,23 +314,26 @@
         #send-form button[type=submit]{padding:.5rem .7rem}
       }
 
-      /* ── Channel list page ─────────────────────────────────── */
-      .channel-list-page{flex:1;overflow-y:auto;padding:1rem 1.25rem;max-width:42rem;margin:0 auto;width:100%}
+      /* ── Channel list page (main pane next to sidebar) ─────── */
+      .channel-list-page{
+        flex:1 1 0;min-width:0;min-height:0;overflow-y:auto;
+        padding:1rem 1.25rem;max-width:42rem;margin:0 auto;width:100%
+      }
 
-      .channel-list-page #join-form{display:flex;gap:.5rem;margin-bottom:1rem}
-      .channel-list-page #join-form input{
+      .channel-list-page #index-join-form{display:flex;gap:.5rem;margin-bottom:1rem}
+      .channel-list-page #index-join-form input{
         flex:1;min-width:0;border:1px solid var(--border);background:#151a22;
         border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;color:var(--fg);
         outline:none;transition:border-color .15s
       }
-      .channel-list-page #join-form input:focus{border-color:#7ab7ff}
-      .channel-list-page #join-form input::placeholder{color:var(--muted)}
-      .channel-list-page #join-form button{
+      .channel-list-page #index-join-form input:focus{border-color:#7ab7ff}
+      .channel-list-page #index-join-form input::placeholder{color:var(--muted)}
+      .channel-list-page #index-join-form button{
         border:0;border-radius:.5rem;background:#7ab7ff;padding:.5rem 1rem;
         font-size:.875rem;font-weight:600;color:#0e1116;cursor:pointer;
         transition:background .15s
       }
-      .channel-list-page #join-form button:hover{background:#9cc8ff}
+      .channel-list-page #index-join-form button:hover{background:#9cc8ff}
 
       .channel-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
       .channel-item{
@@ -289,6 +357,8 @@
       /* ── Nav bar (shared between chat + channel list) ─────── */
       #freeq-chat > nav .brand{font-size:.875rem;font-weight:700}
       #freeq-chat > nav .page-title{font-size:.875rem;color:var(--muted)}
+      /* On the channels index, page-title also carries .nav-channel for mobile flex. */
+      #freeq-chat > nav .page-title.nav-channel{color:var(--muted);font-weight:500}
       #freeq-chat > nav .nav-right{margin-left:auto;display:flex;align-items:center;gap:.5rem;font-size:.75rem}
       .auth-badge{color:var(--nick-5)}
       .btn-link{border:0;background:transparent;color:var(--muted);cursor:pointer;font-size:.75rem;text-decoration:none;padding:0}
@@ -407,6 +477,117 @@
       .policy-role-name{font-weight:500;color:var(--fg)}
       .policy-role-mode{font-size:.65rem;font-family:monospace;color:#ffd166;opacity:.8;margin-left:.25rem}
       .policy-role-req{font-size:.7rem;color:var(--muted);margin:.125rem 0 0;padding-left:1.25rem}
+
+      /* ── Voice call UI ─────────────────────────────────────── */
+      .voice-btn{
+        display:inline-flex;align-items:center;justify-content:center;
+        width:1.75rem;height:1.75rem;flex:0 0 auto;margin-left:.25rem;
+        border:0;border-radius:.4rem;background:transparent;color:var(--muted);
+        cursor:pointer;padding:0;-webkit-tap-highlight-color:transparent
+      }
+      .voice-btn:hover:not(:disabled){color:var(--fg);background:rgba(255,255,255,.06)}
+      .voice-btn:disabled{opacity:.35;cursor:default}
+      .voice-btn.has-call{color:var(--self)}
+      .voice-btn.in-call{
+        color:var(--self);background:rgba(92,219,149,.15);
+        box-shadow:0 0 8px rgba(34,197,94,.3)
+      }
+      .voice-btn svg{display:block}
+
+      .call-panel{
+        flex:0 0 auto;border-bottom:1px solid var(--border);
+        background:#12161d
+      }
+      .call-panel[hidden]{display:none!important}
+      .call-notice{
+        padding:.4rem .75rem;font-size:.75rem;color:var(--nick-6);
+        background:rgba(239,71,111,.08);border-bottom:1px solid var(--border)
+      }
+      .call-notice[hidden]{display:none!important}
+      .call-video-grid{
+        display:flex;flex-wrap:wrap;gap:.5rem;padding:.5rem .75rem;
+        justify-content:center;max-height:16rem;overflow-y:auto
+      }
+      .call-video-grid[hidden]{display:none!important}
+      .call-remote-tiles{display:contents}
+      .call-tile{
+        position:relative;width:8rem;height:6rem;border-radius:.5rem;
+        overflow:hidden;background:#1a1f28;flex-shrink:0
+      }
+      .call-tile-avatar{
+        width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+        font-weight:700;font-size:1.1rem;color:#7ab7ff;background:rgba(122,183,255,.12)
+      }
+      .call-tile-avatar.local{color:var(--self);background:rgba(92,219,149,.12)}
+      .call-tile-watch{position:absolute;inset:0}
+      .call-tile-canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+      .call-local-video{
+        position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+        transform:scaleX(-1);z-index:1
+      }
+      .call-local-video[hidden]{display:none!important}
+      .call-tile-label{
+        position:absolute;bottom:.25rem;left:.25rem;z-index:2;
+        font-size:.65rem;background:rgba(0,0,0,.6);color:#fff;
+        padding:1px 5px;border-radius:3px
+      }
+      .call-bar{
+        display:flex;align-items:center;gap:.75rem;
+        padding:.45rem .75rem
+      }
+      .call-bar-status{
+        display:flex;align-items:center;gap:.4rem;
+        font-size:.8rem;font-weight:500;color:var(--self)
+      }
+      .call-bar-count{color:var(--muted);font-weight:400}
+      .call-bar-ctrls{margin-left:auto;display:flex;align-items:center;gap:.4rem}
+      .call-ctrl{
+        display:inline-flex;align-items:center;justify-content:center;
+        width:2.1rem;height:2.1rem;border:0;border-radius:999px;
+        background:#1a1f28;color:var(--fg);cursor:pointer;padding:0
+      }
+      .call-ctrl:hover{background:#232a36}
+      .call-ctrl.muted,.call-panel.is-muted .call-bar-ctrls .call-ctrl:first-child,
+      .voice-connected.is-muted .call-ctrl.muted{
+        background:var(--nick-6);color:#fff
+      }
+      .call-ctrl.on,.call-panel.is-camera-on .call-bar-ctrls .call-ctrl:nth-child(2),
+      .voice-connected.is-camera-on [data-call-target="camBtn"]{
+        background:#7ab7ff;color:#0e1116
+      }
+      .call-ctrl.leave{background:var(--nick-6);color:#fff}
+      .call-ctrl.leave:hover{background:#ff6b8a}
+      .call-moq-publish{display:none}
+
+      .voice-connected{
+        flex:0 0 auto;border-top:1px solid var(--border);
+        margin-top:.35rem;padding:.55rem .35rem .4rem;
+        background:rgba(26,31,40,.55)
+      }
+      .voice-connected[hidden]{display:none!important}
+      .voice-connected-row{
+        display:flex;align-items:center;gap:.35rem;margin-bottom:.25rem
+      }
+      .voice-connected-dot{
+        width:.5rem;height:.5rem;border-radius:50%;background:var(--self);
+        flex:0 0 auto;animation:voice-pulse 1.5s ease-in-out infinite
+      }
+      @keyframes voice-pulse{0%,100%{opacity:1}50%{opacity:.4}}
+      .voice-connected-title{
+        font-size:.65rem;font-weight:600;color:var(--self);letter-spacing:.02em
+      }
+      .voice-connected-row .call-ctrl{margin-left:auto;width:1.6rem;height:1.6rem}
+      .voice-connected-channel{
+        font-size:.75rem;color:var(--muted);margin-bottom:.4rem;
+        overflow:hidden;text-overflow:ellipsis;white-space:nowrap
+      }
+      .voice-connected-ctrls{display:flex;align-items:center;gap:.35rem}
+      .voice-connected-ctrls .call-ctrl{width:1.85rem;height:1.85rem}
+      .voice-end-all{
+        margin-left:auto;border:0;background:transparent;
+        color:var(--nick-6);font-size:.65rem;font-weight:600;cursor:pointer;padding:.15rem
+      }
+      .voice-end-all:hover{color:#ff7a96}
     </style>
   </head>
   <body class="h-full">

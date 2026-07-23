@@ -3,6 +3,7 @@ import consumer from "../channels/consumer";
 import CableReady from "cable_ready";
 import StimulusReflex from "stimulus_reflex";
 import * as dm from "../dm.js";
+import { hydrateLinkEmbeds } from "../link_embeds.js";
 // Client-side chat controller: ChatChannel live updates, reactions, replies.
 export default class ChatController extends Controller {
   connect() {
@@ -16,6 +17,7 @@ export default class ChatController extends Controller {
     this.setupDm();
     this.setupUpload();
     this.hydrateReplyBadges();
+    this.hydrateLinkEmbeds();
     this.localizeTimes();
     this.scrollToBottom();
 
@@ -52,6 +54,7 @@ export default class ChatController extends Controller {
             this.hydrateReplyBadges();
             // Live PRIVMSG rows arrive as ENC3: ciphertext — decrypt in place.
             this.decryptDmRows();
+            this.hydrateLinkEmbeds();
             this.localizeTimes();
             this.scrollToBottom();
           }
@@ -73,6 +76,9 @@ export default class ChatController extends Controller {
     if (this._onReaction) {
       this.element.removeEventListener("freeq:reaction", this._onReaction);
     }
+    this._embedObserver?.disconnect();
+    this._embedObserver = null;
+    clearTimeout(this._embedObsTimer);
     this.teardownUpload?.();
   }
 
@@ -564,6 +570,27 @@ export default class ChatController extends Controller {
         textEl.textContent = t.length > 80 ? t.slice(0, 80) + "…" : t;
       }
     });
+  }
+
+  // YouTube / Bluesky / OpenGraph cards under message text.
+  hydrateLinkEmbeds() {
+    const root = document.getElementById("messages") || this.element;
+    if (!root) return;
+    // Fire-and-forget — OG/Bluesky fetches are async; don't block scroll.
+    hydrateLinkEmbeds(root).catch((e) =>
+      console.warn("hydrateLinkEmbeds", e)
+    );
+    // Catch rows appended outside our CableReady path (or after a late
+    // morph). Cheap: hydrateLinkEmbeds no-ops rows that already have cards.
+    if (!this._embedObserver && typeof MutationObserver !== "undefined") {
+      this._embedObserver = new MutationObserver(() => {
+        clearTimeout(this._embedObsTimer);
+        this._embedObsTimer = setTimeout(() => {
+          hydrateLinkEmbeds(root).catch(() => {});
+        }, 80);
+      });
+      this._embedObserver.observe(root, { childList: true, subtree: true });
+    }
   }
 
   // ── Reactions ────────────────────────────────────────────────────────
@@ -1191,6 +1218,7 @@ export default class ChatController extends Controller {
     const replyBadge = body.querySelector(".reply-badge");
     const btns = body.querySelectorAll("button");
     body.innerHTML = "";
+    delete row.dataset.embedsUrl;
     if (replyBadge) body.appendChild(replyBadge);
     if (nickEl) body.appendChild(nickEl);
     body.appendChild(document.createTextNode(" "));
@@ -1200,6 +1228,8 @@ export default class ChatController extends Controller {
     body.appendChild(textSpan);
     if (reactions) body.appendChild(reactions);
     btns.forEach((b) => body.appendChild(b));
+    // Decrypted plaintext may contain URLs — re-run embeds for this pane.
+    if (!placeholder) this.hydrateLinkEmbeds();
   }
 }
 

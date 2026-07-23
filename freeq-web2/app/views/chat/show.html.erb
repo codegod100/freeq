@@ -1,12 +1,22 @@
 <%# Chat shell for a single channel. StimulusReflex handles mutations;
     CableReady broadcasts from the upstream IRC WS bridge morph/append. %>
+<%
+  call_nick = @session.has_credentials? ? (@session.auth_nick.presence || @session.current_nick) : @session.current_nick
+  call_did = @session.has_credentials? ? @session.auth_did.to_s : ""
+  av_origin = SessionRegistry.instance.rest_base.to_s
+%>
 <div id="freeq-chat"
-     data-controller="chat"
+     data-controller="chat call"
      data-channel="<%= @bare %>"
      data-auth-handle="<%= @session.has_credentials? ? @session.auth_handle : "" %>"
      data-auth-nick="<%= @session.has_credentials? ? @session.auth_nick : (@session.current_nick || "") %>"
-     data-auth-did="<%= @session.has_credentials? ? @session.auth_did : "" %>"
-     data-irc-authenticated="<%= @session.authenticated? %>">
+     data-auth-did="<%= call_did %>"
+     data-irc-authenticated="<%= @session.authenticated? %>"
+     data-call-channel-value="<%= @channel %>"
+     data-call-nick-value="<%= call_nick %>"
+     data-call-did-value="<%= call_did %>"
+     data-call-av-origin-value="<%= av_origin %>"
+     data-call-authenticated-value="<%= @session.has_credentials? && call_did.start_with?("did:") %>">
   <nav>
     <%# Channels drawer — visible only ≤1024px; keeps mobile chrome minimal. %>
     <button type="button" class="mobile-btn" id="btn-channels"
@@ -17,6 +27,19 @@
     </button>
     <span class="brand">freeq</span>
     <span class="nav-channel"><%= @channel %></span>
+    <% unless @is_dm %>
+      <button type="button"
+              class="voice-btn"
+              data-call-target="voiceBtn"
+              data-action="click->call#toggleCall"
+              aria-label="Voice call"
+              title="Start voice call"
+              <%= @session.has_credentials? && call_did.start_with?("did:") ? "" : "disabled" %>>
+        <svg viewBox="0 0 16 16" aria-hidden="true" width="14" height="14" fill="currentColor">
+          <path d="M3.05 3.05a7 7 0 0 1 9.9 0 .5.5 0 0 1-.708.707 6 6 0 0 0-8.484 0 .5.5 0 1 1-.708-.707zm2.122 2.122a4 4 0 0 1 5.656 0 .5.5 0 1 1-.707.707 3 3 0 0 0-4.242 0 .5.5 0 0 1-.707-.707zm2.828 2.829a1 1 0 1 1 0 1.414 1 1 0 0 1 0-1.414z"/>
+        </svg>
+      </button>
+    <% end %>
     <span id="channel-topic" title="Click to edit topic"
           style="margin-left:.5rem;font-size:.7rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:40%;min-width:4rem;cursor:pointer"><%= @topic.presence || "add topic" %></span>
     <form id="topic-form"
@@ -46,66 +69,69 @@
   <div id="drawer-scrim" onclick="window.closeDrawers()" aria-hidden="true"></div>
 
   <div class="chat-body">
-    <%# Sidebar — desktop column; mobile left sheet via .open %>
-    <aside id="sidebar" data-reflex-permanent>
-      <p class="drawer-heading">Channels</p>
-      <div class="sidebar-scroll">
-        <form id="join-form"
-              data-reflex="submit->ChatReflex#join"
-              data-reflex-serialize-form="true">
-          <input
-            type="text"
-            name="channel"
-            placeholder="join #…"
-            autocomplete="off">
-          <button type="submit">+</button>
-        </form>
-        <p class="sidebar-toggle" data-target="my-channels"><span class="arrow">▾</span> MY CHANNELS</p>
-        <ul id="my-channels">
-          <% @my_channels.each do |ch| %>
-            <%= render "chat/channel_link", ch: ch, active: @channel %>
-          <% end %>
-        </ul>
-        <p class="sidebar-toggle collapsed" data-target="all-channels"><span class="arrow">▾</span> ALL CHANNELS</p>
-        <ul id="all-channels" style="display:none">
-          <% @all_channels.each do |ch| %>
-            <%= render "chat/channel_link", ch: ch, active: @channel %>
-          <% end %>
-        </ul>
-        <p class="sidebar-toggle" data-target="dm-list"><span class="arrow">▾</span> DIRECT MESSAGES</p>
-        <ul id="dm-list" class="dm-list">
-        </ul>
-      </div>
-      <div id="user-info">
-        <%# App identity = SASL. OAuth credentials alone show "signing in". %>
-        <% if @session.authenticated? %>
-          <div class="user-handle" id="user-handle">🔒 <%= @session.auth_handle %></div>
-          <div id="user-irc-note" class="user-irc-note" style="display:none;color:var(--muted);font-size:.65rem;margin-top:.15rem"></div>
-          <div class="user-actions">
-            <form method="POST" action="/logout" data-turbo="false" style="display:inline">
-              <button type="submit" class="btn-link">Sign out</button>
-            </form>
-          </div>
-        <% elsif @session.signing_in? %>
-          <div class="user-handle signing-in" id="user-handle">⏳ <%= @session.auth_handle %></div>
-          <div id="user-irc-note" class="user-irc-note" style="display:block;color:var(--muted);font-size:.65rem;margin-top:.15rem">Signing in to IRC (SASL)…</div>
-          <div class="user-actions">
-            <form method="POST" action="/logout" data-turbo="false" style="display:inline">
-              <button type="submit" class="btn-link">Cancel</button>
-            </form>
-          </div>
-        <% else %>
-          <div class="user-handle guest" id="user-handle">👤 <%= @session.current_nick || "guest" %></div>
-          <div id="user-irc-note" class="user-irc-note" style="display:none;color:var(--muted);font-size:.65rem;margin-top:.15rem"></div>
-          <div class="user-actions">
-            <a href="/login" class="btn-link">Sign in</a>
-          </div>
-        <% end %>
-      </div>
-    </aside>
+    <%= render "chat/sidebar", active: @channel, with_voice: true %>
 
     <%# Messages + compose — min-height:0 so #messages scrolls instead of growing. %>
     <section class="chat-main">
+      <%# Inline call panel (audio + optional video grid). %>
+      <div id="call-panel"
+           class="call-panel"
+           data-call-target="panel"
+           data-reflex-permanent
+           hidden>
+        <div class="call-notice" data-call-target="notice" hidden></div>
+        <div class="call-video-grid" data-call-target="videoGrid" hidden>
+          <div class="call-tile call-tile-local">
+            <video data-call-target="localVideo"
+                   autoplay muted playsinline
+                   class="call-local-video"
+                   hidden></video>
+            <div class="call-tile-avatar local">You</div>
+            <span class="call-tile-label">You</span>
+          </div>
+          <div class="call-remote-tiles" data-call-target="remoteTiles"></div>
+        </div>
+        <div class="call-bar">
+          <div class="call-bar-status">
+            <span class="voice-connected-dot" aria-hidden="true"></span>
+            <span data-call-target="status">Voice</span>
+            <span class="call-bar-count">(<span data-call-target="participantCount">1</span>)</span>
+          </div>
+          <div class="call-bar-ctrls">
+            <button type="button"
+                    class="call-ctrl"
+                    data-action="click->call#toggleMute"
+                    title="Mute"
+                    aria-label="Mute">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true">
+                <path d="M3.5 6.5A.5.5 0 0 1 4 7v1a4 4 0 0 0 8 0V7a.5.5 0 0 1 1 0v1a5 5 0 0 1-4.5 4.975V15h3a.5.5 0 0 1 0 1h-7a.5.5 0 0 1 0-1h3v-2.025A5 5 0 0 1 3 8V7a.5.5 0 0 1 .5-.5z"/>
+                <path d="M10 8a2 2 0 1 1-4 0V3a2 2 0 1 1 4 0v5zM8 0a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V3a3 3 0 0 0-3-3z"/>
+              </svg>
+            </button>
+            <button type="button"
+                    class="call-ctrl"
+                    data-action="click->call#toggleCamera"
+                    title="Camera"
+                    aria-label="Camera">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M0 5a2 2 0 0 1 2-2h7.5a2 2 0 0 1 1.983 1.738l3.11-1.382A1 1 0 0 1 16 4.269v7.462a1 1 0 0 1-1.406.913l-3.111-1.382A2 2 0 0 1 9.5 13H2a2 2 0 0 1-2-2V5z"/>
+              </svg>
+            </button>
+            <button type="button"
+                    class="call-ctrl leave"
+                    data-call-target="leaveBtn"
+                    data-action="click->call#leave"
+                    title="Leave call"
+                    aria-label="Leave call">
+              <svg viewBox="0 0 16 16" width="18" height="18" fill="currentColor" aria-hidden="true">
+                <path d="M3.654 1.328a.678.678 0 0 0-1.015-.063L1.605 2.3c-.483.484-.661 1.169-.45 1.77a17.568 17.568 0 0 0 4.168 6.608 17.569 17.569 0 0 0 6.608 4.168c.601.211 1.286.033 1.77-.45l1.034-1.034a.678.678 0 0 0-.063-1.015l-2.307-1.794a.678.678 0 0 0-.58-.122l-2.19.547a1.745 1.745 0 0 1-1.657-.459L5.482 8.062a1.745 1.745 0 0 1-.46-1.657l.548-2.19a.678.678 0 0 0-.122-.58L3.654 1.328z" transform="rotate(135 8 8)"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div data-call-target="publishContainer" class="call-moq-publish" hidden></div>
+      </div>
+
       <div id="messages" data-reflex-permanent>
         <%
           history_html, last_day = IrcRender.render_history_with_separators(
@@ -167,17 +193,5 @@
 
   <div id="react-picker" role="menu" aria-label="React with emoji"></div>
 
-  <div id="policy-modal" onclick="if(event.target===this)window.closePolicy()">
-    <div class="policy-dialog">
-      <div class="policy-header">
-        <span class="policy-icon">🛡️</span>
-        <span class="policy-title">Channel policy</span>
-        <span id="policy-channel-name" class="policy-channel-name"></span>
-        <button type="button" class="policy-close" onclick="window.closePolicy()" aria-label="Close">×</button>
-      </div>
-      <div id="policy-body" class="policy-content">
-        <p class="policy-empty">Loading…</p>
-      </div>
-    </div>
-  </div>
+  <%= render "chat/policy_modal" %>
 </div>

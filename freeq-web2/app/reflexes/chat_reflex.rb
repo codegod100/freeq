@@ -23,7 +23,17 @@ class ChatReflex < ApplicationReflex
     edit_to = params[:edit_to].to_s.strip
     return if msg.empty?
 
-    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, target)
+    # DMs must not JOIN the partner nick as a channel (canonical_channel
+    # would invent #nick and pollute My Channels via older spawn paths).
+    if is_dm
+      session.spawn_upstream_if_needed(
+        SessionRegistry.instance.upstream_url,
+        session.channels.to_a.first || "#freeq",
+        as_dm: true
+      )
+    else
+      session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, target)
+    end
     line =
       if msg.match?(/^\/nick\s+\S/)
         "NICK #{msg[6..].strip}\r\n"
@@ -68,8 +78,9 @@ class ChatReflex < ApplicationReflex
         return
       end
     end
-    # spawn_upstream_if_needed owns the JOIN (deduped via @join_sent) —
-    # don't enqueue a second one here.
+    # Explicit join intent → My Channels, then IRC JOIN (spawn no longer
+    # promotes membership on its own).
+    session.add_channel!(channel)
     session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
     morph :nothing # skip SR page re-render; we redirect instead
     cable_ready.redirect_to(url: "/chat/#{channel.delete('#')}").broadcast
@@ -81,8 +92,8 @@ class ChatReflex < ApplicationReflex
     session.channel_members.delete(channel)
     session.enqueue_outbound("PART #{channel}\r\n")
     # StimulusReflex re-renders the current page after a reflex by default,
-    # which would re-run show → spawn → add_channel! and resurrect the
-    # parted channel. Skip the morph; we redirect or remove the row.
+    # which would re-run show → add_channel! and resurrect the parted
+    # channel. Skip the morph; we redirect or remove the row.
     morph :nothing
 
     bare = channel.delete("#")

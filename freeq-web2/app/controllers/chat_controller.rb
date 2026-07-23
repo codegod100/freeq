@@ -6,10 +6,10 @@ class ChatController < ApplicationController
   # reaction/delete on the attacker's own IRC session.
   skip_before_action :verify_authenticity_token, only: %i[react unreact destroy_message]
 
-  # GET /chat — channel list (the "channels" page).
+  # GET /chat — channel list (the "channels" page) + recent-channel sidebar.
   def index
-    @channels = SessionRegistry.instance.fetch_channels
     @session = current_session
+    @channels = assign_sidebar_channels!
   end
 
   # GET /chat/:channel — chat shell for a channel.
@@ -18,27 +18,32 @@ class ChatController < ApplicationController
     @bare = @channel.delete("#")
     @session = current_session
 
+    # Turbo 8 prefetches links on hover (X-Sec-Purpose: prefetch). Prefetch
+    # must never JOIN or promote the channel into My Channels — that was
+    # the "random channels appear in My Channels" bug.
+    if turbo_prefetch?
+      channels = assign_sidebar_channels!(current: @channel)
+      @topic = channels.find { |c| c["name"].to_s.casecmp?(@channel) }&.dig("topic") || ""
+      @history = []
+      @parent_lookup = {}
+      @own_nick = @session.has_credentials? ? @session.auth_nick : @session.current_nick
+      @known_nicks = @session.known_nicks
+      @members_html = nil
+      return
+    end
+
     # Credentials without SASL → finish SASL first so we never JOIN a
     # policy channel as a guest on page load.
     if @session.has_credentials? && !@session.authenticated?
       @session.ensure_authenticated!(SessionRegistry.instance.upstream_url, timeout: 12.0)
     end
+    # Real navigation = join intent. spawn_upstream only routes IRC; membership
+    # is client-authoritative and must be recorded explicitly.
+    @session.add_channel!(@channel)
     @session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, @channel)
 
-    channels = SessionRegistry.instance.fetch_channels
-    mine = @session.channels.to_a
-    existing = channels.map { |c| c["name"].to_s.downcase }
-    # MY CHANNELS is client-authoritative: show our own list even when the
-    # upstream REST channel list is stale or missing entries.
-    mine.each do |ch|
-      next if existing.include?(ch.downcase)
-      channels << { "name" => ch, "topic" => "", "members" => 0 }
-    end
-
+    channels = assign_sidebar_channels!(current: @channel)
     @topic = channels.find { |c| c["name"].to_s.casecmp?(@channel) }&.dig("topic") || ""
-    @my_channels, @all_channels = channels.partition do |c|
-      mine.any? { |j| j.casecmp?(c["name"].to_s) } || c["name"].to_s.casecmp?(@channel)
-    end
 
     # Restricted channels need Bearer = IRC session_id (API-BEARER after SASL)
     # AND the DID must be a current channel member on freeq-server. Wait for
@@ -109,17 +114,8 @@ class ChatController < ApplicationController
     @bare = @dm_nick
     @session = current_session
 
-    channels = SessionRegistry.instance.fetch_channels
-    mine = @session.channels.to_a
-    existing = channels.map { |c| c["name"].to_s.downcase }
-    mine.each do |ch|
-      next if existing.include?(ch.downcase)
-      channels << { "name" => ch, "topic" => "", "members" => 0 }
-    end
+    assign_sidebar_channels!
     @topic = ""
-    @my_channels, @all_channels = channels.partition do |c|
-      mine.any? { |j| j.casecmp?(c["name"].to_s) }
-    end
 
     # No REST history for DMs — request via CHATHISTORY over WS.
     # allow_replay! is done inside request_dm_backlog! so the BATCH is not
@@ -189,6 +185,36 @@ class ChatController < ApplicationController
   end
 
   private
+
+  # Build @my_channels / @all_channels for the shared sidebar.
+  # MY CHANNELS is client-authoritative: include session channels even when
+  # the upstream REST list is stale or missing entries.
+  # Returns the merged channel list (also used as @channels on the index).
+  def assign_sidebar_channels!(current: nil)
+    channels = SessionRegistry.instance.fetch_channels
+    mine = @session.channels.to_a
+    existing = channels.map { |c| c["name"].to_s.downcase }
+    mine.each do |ch|
+      next if existing.include?(ch.downcase)
+      channels << { "name" => ch, "topic" => "", "members" => 0 }
+    end
+    # Only the persisted membership list. Do not promote `current` alone —
+    # that made Turbo-prefetched shells flash channels into My Channels.
+    # Active styling uses the `active` local on channel_link, not this list.
+    @my_channels, @all_channels = channels.partition do |c|
+      mine.any? { |j| j.casecmp?(c["name"].to_s) }
+    end
+    channels
+  end
+
+  # Turbo 8 sets X-Sec-Purpose: prefetch (and sometimes Purpose: prefetch)
+  # on hover prefetches. Those GETs must not mutate session/IRC state.
+  def turbo_prefetch?
+    purpose = request.headers["X-Sec-Purpose"].to_s
+    purpose = request.headers["Purpose"].to_s if purpose.empty?
+    purpose = request.headers["Sec-Purpose"].to_s if purpose.empty?
+    purpose.downcase.include?("prefetch")
+  end
 
   def enqueue_reaction(added:)
     channel = IrcRender.canonical_channel(params[:channel])

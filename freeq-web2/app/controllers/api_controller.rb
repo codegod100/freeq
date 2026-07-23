@@ -7,13 +7,24 @@ class ApiController < ApplicationController
   # E2EE SDK posts pre-key bundles without a CSRF header; these endpoints
   # are same-origin proxies to freeq-server's public keys API.
   # Upload uses FormData from fetch; same boxd CSRF edge as react/logout.
-  skip_before_action :verify_authenticity_token, only: %i[upload_keys get_keys upload]
+  # AV start/join/leave are same-origin fetch POSTs from the call UI.
+  skip_before_action :verify_authenticity_token,
+                     only: %i[upload_keys get_keys upload av_start av_join av_leave av_end]
+  # Serving application/javascript via a controller triggers Rails'
+  # InvalidCrossOriginRequest on non-XHR GETs (protect_from_forgery).
+  # These are public MoQ module scripts — skip forgery entirely for the
+  # asset proxy (same as static public/ assets).
+  skip_forgery_protection only: :av_asset
 
   # GET /api/policy/:channel — fetch channel policy via POLICY RULES + INFO.
   def policy
     channel = IrcRender.canonical_channel(params[:channel])
     session = current_session
-    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
+    # Ensure IRC is up, but do NOT JOIN the policy channel — peeking at a
+    # channel's policy (sidebar member-count button on ALL CHANNELS) must
+    # not promote it into My Channels or server-side auto-rejoin.
+    primary = session.channels.to_a.first || session.joined.first || "#freeq"
+    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, primary)
 
     rules_lines = fetch_policy_notices(session, channel, "RULES")
     info_lines = fetch_policy_notices(session, channel, "INFO")
@@ -83,6 +94,29 @@ class ApiController < ApplicationController
     proxy_upstream_json(:get, "/api/v1/keys/#{URI.encode_www_form_component(did)}")
   end
 
+  # GET /api/v1/og?url= — proxy OpenGraph fetch to freeq-server (SSRF-safe there).
+  # Used by client-side link embeds in the channel message pane.
+  def og_preview
+    url = params[:url].to_s.strip
+    # Paste noise: zero-width chars, wrapping angles.
+    url = url.gsub(/[\u200B-\u200D\uFEFF\u2060\u00AD]/, "").strip
+    url = url.delete_prefix("<").delete_suffix(">")
+    if url.empty?
+      render json: { error: "url required" }, status: :bad_request
+      return
+    end
+    unless url.match?(/\Ahttps?:\/\//i)
+      render json: { error: "Invalid URL" }, status: :bad_request
+      return
+    end
+    # freeq-server may spend up to ~5s fetching + parsing remote HTML.
+    proxy_upstream_json(
+      :get,
+      "/api/v1/og?url=#{URI.encode_www_form_component(url)}",
+      read_timeout: 10
+    )
+  end
+
   # POST /api/v1/keys — proxy pre-key bundle upload to upstream freeq-server.
   # freeq-server requires Bearer = IRC session_id (from API-BEARER NOTICE).
   # Page load races SASL: wait (throttled re-spawn) before giving up.
@@ -129,6 +163,158 @@ class ApiController < ApplicationController
       did: s.auth_did,
       last_error: s.last_upstream_error
     }
+  end
+
+  # ── AV voice sessions ───────────────────────────────────────────────
+  # Signaling rides IRC TAGMSG; media is browser ↔ SFU (MoQ). These
+  # endpoints enqueue the control-plane lines and proxy roster/token REST.
+
+  # POST /api/av/start { channel, instance, title? }
+  def av_start
+    channel, instance = av_channel_and_instance
+    return if performed?
+
+    title = params[:title].to_s.strip
+    tags = [
+      "+freeq.at/av-start=",
+      "+freeq.at/av-instance=#{IrcRender.escape_tag_value(instance)}"
+    ]
+    tags << "+freeq.at/av-title=#{IrcRender.escape_tag_value(title)}" if title.present?
+    enqueue_av_tagmsg(channel, tags)
+    render json: { ok: true, channel: channel, instance: instance }
+  end
+
+  # POST /api/av/join { channel, session_id, instance }
+  def av_join
+    channel, instance = av_channel_and_instance
+    return if performed?
+
+    session_id = params[:session_id].to_s.strip
+    if session_id.empty?
+      render json: { error: "session_id required" }, status: :bad_request
+      return
+    end
+    tags = [
+      "+freeq.at/av-join=",
+      "+freeq.at/av-instance=#{IrcRender.escape_tag_value(instance)}",
+      "+freeq.at/av-id=#{IrcRender.escape_tag_value(session_id)}"
+    ]
+    enqueue_av_tagmsg(channel, tags)
+    render json: { ok: true, channel: channel, session_id: session_id, instance: instance }
+  end
+
+  # POST /api/av/leave { channel, session_id, instance? }
+  def av_leave
+    channel = av_require_channel
+    return if performed?
+
+    session_id = params[:session_id].to_s.strip
+    if session_id.empty?
+      render json: { error: "session_id required" }, status: :bad_request
+      return
+    end
+    instance = params[:instance].to_s.strip
+    tags = [
+      "+freeq.at/av-leave=",
+      "+freeq.at/av-id=#{IrcRender.escape_tag_value(session_id)}"
+    ]
+    tags << "+freeq.at/av-instance=#{IrcRender.escape_tag_value(instance)}" if instance.present?
+    enqueue_av_tagmsg(channel, tags)
+    render json: { ok: true }
+  end
+
+  # POST /api/av/end { channel, session_id }
+  def av_end
+    channel = av_require_channel
+    return if performed?
+
+    session_id = params[:session_id].to_s.strip
+    if session_id.empty?
+      render json: { error: "session_id required" }, status: :bad_request
+      return
+    end
+    tags = [
+      "+freeq.at/av-end=",
+      "+freeq.at/av-id=#{IrcRender.escape_tag_value(session_id)}"
+    ]
+    enqueue_av_tagmsg(channel, tags)
+    render json: { ok: true }
+  end
+
+  # GET /api/v1/channels/*channel/sessions — proxy active session for a channel.
+  def channel_sessions
+    name = params[:channel].to_s
+    name = "##{name}" unless name.start_with?("#", "&")
+    proxy_upstream_json(:get, "/api/v1/channels/#{URI.encode_www_form_component(name)}/sessions")
+  end
+
+  # GET /api/v1/sessions/:id — roster + metadata for MoQ mesh.
+  def session_detail
+    id = params[:id].to_s
+    if id.empty?
+      render json: { error: "id required" }, status: :bad_request
+      return
+    end
+    proxy_upstream_json(:get, "/api/v1/sessions/#{URI.encode_www_form_component(id)}")
+  end
+
+  # GET /api/v1/av/sessions/:id/token — MoQ JWT (Bearer = IRC session_id).
+  def av_session_token
+    id = params[:id].to_s
+    if id.empty?
+      render json: { error: "id required" }, status: :bad_request
+      return
+    end
+    session = current_session
+    unless session.has_credentials?
+      render json: { error: "Sign in required" }, status: :unauthorized
+      return
+    end
+    primary = session.joined.first || session.channels.to_a.first || "#freeq"
+    bearer = session.wait_for_api_bearer(timeout: 8.0, primary: primary)
+    if bearer.to_s.empty?
+      render json: { error: "Not authenticated to IRC yet" }, status: :unauthorized
+      return
+    end
+    proxy_upstream_json(
+      :get,
+      "/api/v1/av/sessions/#{URI.encode_www_form_component(id)}/token",
+      bearer: bearer
+    )
+  end
+
+  # GET /av/assets/*path — same-origin proxy for moq-publish/moq-watch modules.
+  # Relative imports inside those bundles resolve against this path.
+  def av_asset
+    path = params[:path].to_s
+    unless path.match?(/\A[A-Za-z0-9._\-]+\z/)
+      head :bad_request
+      return
+    end
+    base = SessionRegistry.instance.rest_base
+    uri = URI("#{base}/av/assets/#{path}")
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = (uri.scheme == "https")
+    http.read_timeout = 15
+    http.open_timeout = 5
+    resp = http.request(Net::HTTP::Get.new(uri.request_uri))
+    unless resp.is_a?(Net::HTTPSuccess)
+      head resp.code.to_i
+      return
+    end
+    content_type =
+      if path.end_with?(".js") then "text/javascript; charset=utf-8"
+      elsif path.end_with?(".wasm") then "application/wasm"
+      else resp["Content-Type"].presence || "application/octet-stream"
+      end
+    response.headers["Cache-Control"] = "public, max-age=86400"
+    # ES modules may load sibling chunks cross-origin from the upstream host
+    # if hashes embed absolute URLs; allow CORP for media workers.
+    response.headers["Cross-Origin-Resource-Policy"] = "cross-origin"
+    send_data resp.body, type: content_type, disposition: "inline"
+  rescue StandardError => e
+    Rails.logger.warn("av_asset #{path}: #{e.class}: #{e.message}")
+    head :bad_gateway
   end
 
   # POST /upload — multipart proxy for screenshots/images.
@@ -226,13 +412,52 @@ class ApiController < ApplicationController
     { status: resp.code.to_i, json: json }
   end
 
+  def av_require_auth!
+    session = current_session
+    unless session.has_credentials? && session.auth_did.to_s.start_with?("did:")
+      render json: { error: "Sign in with AT Protocol to use voice" }, status: :unauthorized
+      return false
+    end
+    true
+  end
+
+  def av_require_channel
+    return nil unless av_require_auth!
+
+    raw = params[:channel].to_s.strip
+    if raw.empty?
+      render json: { error: "channel required" }, status: :bad_request
+      return nil
+    end
+    IrcRender.canonical_channel(raw)
+  end
+
+  def av_channel_and_instance
+    channel = av_require_channel
+    return [nil, nil] unless channel
+
+    instance = params[:instance].to_s.strip
+    if instance.empty? || !instance.match?(/\A[0-9a-f]{8}\z/)
+      render json: { error: "instance must be 8 hex chars" }, status: :bad_request
+      return [nil, nil]
+    end
+    [channel, instance]
+  end
+
+  def enqueue_av_tagmsg(channel, tags)
+    session = current_session
+    session.spawn_upstream_if_needed(SessionRegistry.instance.upstream_url, channel)
+    line = "@#{tags.join(';')} TAGMSG #{channel}\r\n"
+    session.enqueue_outbound(line)
+  end
+
   # Forward a JSON request to FREEQ_UPSTREAM_REST and return the response as-is.
-  def proxy_upstream_json(method, path, body: nil, bearer: nil)
+  def proxy_upstream_json(method, path, body: nil, bearer: nil, read_timeout: 5)
     base = SessionRegistry.instance.rest_base
     uri = URI("#{base}#{path}")
     http = Net::HTTP.new(uri.host, uri.port)
     http.use_ssl = (uri.scheme == "https")
-    http.read_timeout = 5
+    http.read_timeout = read_timeout
     http.open_timeout = 3
     req =
       case method

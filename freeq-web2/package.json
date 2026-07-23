@@ -15,6 +15,6 @@
   },
   "scripts": {
     "build": "esbuild app/javascript/application.js --bundle --outfile=app/assets/builds/application.js --format=esm",
-    "build:css": "tailwindcss -i ./app/assets/stylesheets/application.css -o ./app/assets/builds/application.css --minify"
+    "build:css": "mkdir -p app/assets/builds && cp app/assets/stylesheets/application.css app/assets/builds/application.css"
   }
 }

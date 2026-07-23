@@ -29,9 +29,21 @@ Rails.application.routes.draw do
   # (avoids CORS and keeps getServerOrigin() = window.location.origin correct).
   get "api/v1/keys/*did", to: "api#get_keys", format: false
   post "api/v1/keys", to: "api#upload_keys"
+  # OpenGraph link preview — same-origin proxy to freeq-server /api/v1/og.
+  get "api/v1/og", to: "api#og_preview"
   # Screenshot / image upload — proxies multipart to freeq-server /api/v1/upload.
   post "upload", to: "api#upload"
   get "api/irc_status", to: "api#irc_status"
+
+  # AV voice — IRC signaling via BFF; roster/token/assets proxied from freeq-server.
+  post "api/av/start", to: "api#av_start"
+  post "api/av/join", to: "api#av_join"
+  post "api/av/leave", to: "api#av_leave"
+  post "api/av/end", to: "api#av_end"
+  get "api/v1/channels/*channel/sessions", to: "api#channel_sessions", format: false
+  get "api/v1/sessions/:id", to: "api#session_detail", format: false
+  get "api/v1/av/sessions/:id/token", to: "api#av_session_token", format: false
+  get "av/assets/*path", to: "api#av_asset", format: false
   # Temporary OAuth diagnostics (remove when login stickiness is solid).
   get "debug/auth", to: "debug_auth#show"
   get "debug/impersonate_latest", to: "debug_auth#impersonate_latest"

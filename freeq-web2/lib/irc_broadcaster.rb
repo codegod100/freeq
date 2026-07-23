@@ -76,8 +76,12 @@ module IrcBroadcaster
       end
 
     if in_history_batch
-      # Still process NAMES / member changes / reactions.
-      unless IrcRender.is_353?(line) || IrcRender.parse_member_change(line) || IrcRender.parse_tagmsg_reaction(line)
+      # Still process NAMES / member changes / reactions / AV signaling.
+      unless IrcRender.is_353?(line) ||
+             IrcRender.parse_member_change(line) ||
+             IrcRender.parse_tagmsg_reaction(line) ||
+             IrcRender.parse_tagmsg_av_state(line) ||
+             IrcRender.parse_tagmsg_av_token(line)
         return
       end
     end
@@ -88,6 +92,19 @@ module IrcBroadcaster
       # Cache so chips survive page refresh.
       session.apply_reaction(msgid, emoji, nick, added)
       broadcast_reaction(ch, msgid, emoji, nick, added)
+      return
+    end
+
+    # AV call signaling: +freeq.at/av-state (channel broadcast).
+    if (av = IrcRender.parse_tagmsg_av_state(line))
+      broadcast_av_state(session, av)
+      return
+    end
+
+    # MoQ access token: directed +freeq.at/av-token after av-start/av-join.
+    if (tok = IrcRender.parse_tagmsg_av_token(line))
+      session_id, token = tok
+      broadcast_av_token(session, session_id, token)
       return
     end
 
@@ -330,6 +347,49 @@ module IrcBroadcaster
   rescue => e
     # Fallback: just log; chips will catch up on next history load.
     Rails.logger.warn("broadcast_reaction failed: #{e.class}: #{e.message}")
+  end
+
+  # Push AV session state to the channel pane (and session stream for sidebar).
+  def broadcast_av_state(session, av)
+    detail = {
+      state: av[:state],
+      sessionId: av[:session_id],
+      actor: av[:actor],
+      participants: av[:participants],
+      title: av[:title],
+      channel: av[:channel]
+    }
+    ch = av[:channel].to_s
+    if ch.start_with?("#", "&")
+      cable_for(ch).dispatch_event(
+        selector: "#freeq-chat",
+        name: "freeq:av_state",
+        detail: detail
+      ).broadcast
+    end
+    # Session stream so the voice UI updates even when viewing another channel.
+    session_cable = CableReady::Channel.new("freeq:session:#{session.session_id}")
+    session_cable.dispatch_event(
+      selector: "#freeq-chat",
+      name: "freeq:av_state",
+      detail: detail
+    )
+    session_cable.broadcast
+  rescue => e
+    Rails.logger.warn("broadcast_av_state failed: #{e.class}: #{e.message}")
+  end
+
+  def broadcast_av_token(session, session_id, token)
+    detail = { sessionId: session_id, token: token }
+    session_cable = CableReady::Channel.new("freeq:session:#{session.session_id}")
+    session_cable.dispatch_event(
+      selector: "#freeq-chat",
+      name: "freeq:av_token",
+      detail: detail
+    )
+    session_cable.broadcast
+  rescue => e
+    Rails.logger.warn("broadcast_av_token failed: #{e.class}: #{e.message}")
   end
 
   # Remove a message row after +draft/delete (or optimistic local delete).

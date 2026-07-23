@@ -70,7 +70,7 @@ Open `http://127.0.0.1:3000` → redirects to `/chat`.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FREEQ_UPSTREAM` | `wss://irc.freeq.at/irc` | Upstream IRC WebSocket URL (`ws://` or `wss://`) |
-| `FREEQ_UPSTREAM_REST` | `https://irc.freeq.at` | Upstream freeq-server REST base (channels, history) |
+| `FREEQ_UPSTREAM_REST` | `https://irc.freeq.at` | Upstream freeq-server REST base (channels, history, AV sessions). MoQ media dials `{this}/av/moq`. |
 
 ## HTTP surface
 

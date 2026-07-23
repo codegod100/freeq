@@ -1,7 +1,23 @@
-<div id="freeq-chat" data-controller="chat">
+<%
+  # Auth attrs so the chat controller can render the DM list.
+  call_did = @session.has_credentials? ? @session.auth_did.to_s : ""
+%>
+<div id="freeq-chat"
+     data-controller="chat"
+     data-auth-handle="<%= @session.has_credentials? ? @session.auth_handle : "" %>"
+     data-auth-nick="<%= @session.has_credentials? ? @session.auth_nick : (@session.current_nick || "") %>"
+     data-auth-did="<%= call_did %>"
+     data-irc-authenticated="<%= @session.authenticated? %>">
   <nav>
+    <%# Channels drawer — visible only ≤1024px; same chrome as the channel page. %>
+    <button type="button" class="mobile-btn" id="btn-channels"
+            onclick="window.toggleSidebar()" aria-label="Channels" title="Channels">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 7h16M4 12h16M4 17h16"/>
+      </svg>
+    </button>
     <span class="brand">freeq</span>
-    <span class="page-title">channels</span>
+    <span class="page-title nav-channel">channels</span>
     <div class="nav-right">
       <% if @session.authenticated? %>
         <span class="auth-badge">🔒 <%= @session.auth_handle %></span>
@@ -19,35 +35,43 @@
     </div>
   </nav>
 
-  <div class="channel-list-page">
-    <form id="join-form"
-          data-reflex="submit->ChatReflex#join"
-          data-reflex-serialize-form="true">
-      <input
-        type="text"
-        name="channel"
-        placeholder="join #channel"
-        autocomplete="off">
-      <button type="submit">Join</button>
-    </form>
+  <div id="drawer-scrim" onclick="window.closeDrawers()" aria-hidden="true"></div>
 
-    <% if @channels.any? %>
-      <ul class="channel-list">
-        <% @channels.each do |ch| %>
-          <% bare = ch["name"].to_s.delete("#") %>
-          <li>
-            <a href="/chat/<%= bare %>" class="channel-item">
-              <span class="channel-name"><%= ch["name"] %></span>
-              <% if ch["topic"].to_s.present? %>
-                <span class="channel-topic"><%= ch["topic"] %></span>
-              <% end %>
-              <span class="channel-members"><%= ch["members"] %></span>
-            </a>
-          </li>
-        <% end %>
-      </ul>
-    <% else %>
-      <p class="empty-state">No channels available.</p>
-    <% end %>
+  <div class="chat-body">
+    <%= render "chat/sidebar", active: nil, with_voice: false %>
+
+    <div class="channel-list-page">
+      <form id="index-join-form"
+            data-reflex="submit->ChatReflex#join"
+            data-reflex-serialize-form="true">
+        <input
+          type="text"
+          name="channel"
+          placeholder="join #channel"
+          autocomplete="off">
+        <button type="submit">Join</button>
+      </form>
+
+      <% if @channels.any? %>
+        <ul class="channel-list">
+          <% @channels.each do |ch| %>
+            <% bare = ch["name"].to_s.delete("#") %>
+            <li>
+              <a href="/chat/<%= bare %>" class="channel-item" data-turbo-prefetch="false">
+                <span class="channel-name"><%= ch["name"] %></span>
+                <% if ch["topic"].to_s.present? %>
+                  <span class="channel-topic"><%= ch["topic"] %></span>
+                <% end %>
+                <span class="channel-members"><%= ch["members"] %></span>
+              </a>
+            </li>
+          <% end %>
+        </ul>
+      <% else %>
+        <p class="empty-state">No channels available.</p>
+      <% end %>
+    </div>
   </div>
+
+  <%= render "chat/policy_modal" %>
 </div>

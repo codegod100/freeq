@@ -357,6 +357,43 @@ module IrcRender
     [msgid, emoji, nick, added, channel]
   end
 
+  # Returns a hash for +freeq.at/av-state TAGMSG, or nil.
+  # Keys: :state, :session_id, :actor, :participants, :title, :channel
+  def parse_tagmsg_av_state(line)
+    tags, after = parse_irc_tags(line)
+    state = tags["+freeq.at/av-state"]
+    session_id = tags["+freeq.at/av-id"]
+    return nil if state.to_s.empty? || session_id.to_s.empty?
+
+    rest = after[1..] or return nil
+    parts = rest.split
+    return nil unless parts[1].to_s.casecmp?("TAGMSG")
+
+    channel = parts[2].to_s.delete_prefix(":")
+    {
+      state: state,
+      session_id: session_id,
+      actor: tags["+freeq.at/av-actor"].to_s.presence || parts[0].to_s.split("!").first,
+      participants: tags["+freeq.at/av-participants"].to_i,
+      title: tags["+freeq.at/av-title"],
+      channel: channel
+    }
+  end
+
+  # Returns [session_id, token] for a directed +freeq.at/av-token TAGMSG, or nil.
+  def parse_tagmsg_av_token(line)
+    tags, after = parse_irc_tags(line)
+    token = tags["+freeq.at/av-token"]
+    session_id = tags["+freeq.at/av-id"]
+    return nil if token.to_s.empty? || session_id.to_s.empty?
+
+    rest = after[1..] or return nil
+    parts = rest.split
+    return nil unless parts[1].to_s.casecmp?("TAGMSG")
+
+    [session_id, token]
+  end
+
   def parse_353_members(line)
     names = (line.rindex(" :") && line[(line.rindex(" :") + 2)..]) || ""
     names.split(" ").reject(&:empty?).map do |token|

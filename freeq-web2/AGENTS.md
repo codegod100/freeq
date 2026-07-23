@@ -3,6 +3,31 @@
 StimulusReflex + CableReady port of `freeq-webui`. See `../freeq-webui/AGENTS.md`
 for the original Rust/Topcoat BFF this was ported from.
 
+## Deploy to freeq.boxd (required)
+
+**Any change you make under `freeq-web2/` must be deployed to `freeq.boxd`
+before you consider the work done** — not only when the user asks. Live users
+hit `https://freeq.boxd.sh`; local fixes that never ship leave the bug in
+production.
+
+```bash
+# From freeq-web2/ (builds JS if needed, rsyncs, precompiles, restarts puma):
+./script/deploy-boxd.sh
+```
+
+| | |
+|--|--|
+| Host | SSH `freeq.boxd` → `freeq.boxd.sh:10223` (user `boxd`) |
+| App dir | `/home/boxd/freeq-web2` |
+| Service | `sudo systemctl restart freeq-web2` |
+| Public URL | `https://freeq.boxd.sh` |
+| Upstream IRC | `wss://irc.freeq.at/irc` (production freeq-server) |
+
+Do **not** overwrite remote `.env`, `.dev-data/`, `log/`, `tmp/`, or
+`vendor/bundle`. The tree on boxd is **not** a git checkout — rsync is the
+ship path. After deploy, smoke-check `/chat` (200) and that the change is
+visible (grep remote sources or hit the UI).
+
 ## Build
 
 Workspace-sibling. From `freeq-web2/`:
@@ -39,6 +64,9 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
 | `lib/session_store.rb` | AES-256-GCM OAuth session files (FREEQ_WEB2_SESSIONS_DIR) |
 | `lib/session_state.rb` | Per-session state: outbound/inbound queues, upstream WS task, member tracking |
 | `app/javascript/controllers/chat_controller.js` | Stimulus controller: ChatChannel subscription, reaction picker, sidebar toggles |
+| `app/javascript/controllers/call_controller.js` | Voice call UI: start/join/leave, mute/camera, MoQ publish/subscribe |
+| `app/javascript/link_embeds.js` | YouTube / Bluesky / OpenGraph cards under message URLs |
+| `app/javascript/av/` | Mesh paths, MoQ loader, session API helpers |
 | `app/javascript/config/stimulus_reflex.js` | StimulusReflex JS bootstrap |
 | `app/views/chat/index.html.erb` | Channel list |
 | `app/views/chat/show.html.erb` | Chat shell |
@@ -64,7 +92,12 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
   `<sid>.channels` in the sessions dir. The upstream server is a dumb
   relay — on every fresh WS connect we re-assert the whole list, and
   MY CHANNELS renders from our list, never from upstream room state.
-  Join/part mutate the list and persist immediately.
+  Only explicit join intent mutates the list (`add_channel!` from
+  chat#show real visits + ChatReflex#join; part removes).
+  `spawn_upstream_if_needed` only tracks `@joined` for IRC routing —
+  never promotes into My Channels. Turbo prefetch of `/chat/:channel`
+  is disabled (meta + headers) so hover prefetches cannot pollute the
+  list.
 - **`morph :nothing` on redirecting reflexes**: StimulusReflex re-renders
   the current page after a reflex by default; without opting out, a part
   reflex's re-render re-adds the parted channel via `show` →
@@ -86,9 +119,13 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
 - **No DPoP nonce rotation end-to-end** — nonce is captured + re-persisted
   during SASL, but a full re-login is still required if the access token
   itself expires.
-- **No media upload proxy** — `/upload` route not ported.
-- **No channel policy view** — the policy modal + `/api/policy/:channel`
-  endpoint not ported.
+- **Voice / video calls** — ✅ ported (UI + signaling + MoQ media).
+  Stimulus `call` controller: discover/start/join/leave via `/api/av/*`
+  TAGMSG enqueue; roster/token proxies; `moq-publish`/`moq-watch` from
+  `/av/assets/*` (proxied). Media dials the freeq-server SFU at
+  `{FREEQ_UPSTREAM_REST}/av/moq` (WebSocket). Requires signed-in DID.
+  Screen share and device pickers not yet ported; reconnect rejoin is
+  best-effort only.
 - **No WHOIS rendering** — `/whois` slash command enqueues but the result
   numerics aren't rendered to the message pane.
 - **CHATHISTORY fallback for protected channels** — REST scrollback is the
@@ -96,12 +133,13 @@ nix-shell -p gnumake --run 'bin/rails server -b 127.0.0.1 -p 3000'
   the JOIN chathistory replay renders instead (or an explicit
   `CHATHISTORY LATEST` when already joined). Join-failure numerics
   (471/473/474/475/477) render as error notices in the message pane.
-- **Reaction live updates** — `ChatReflex#react`/`#unreact` enqueue the
-  TAGMSG but the broadcaster doesn't yet parse `parse_tagmsg_reaction` to
-  emit `reaction` CableReady events. Client-side optimistic toggle is
-  wired in `chat_controller.js` but server-echoed reactions are a TODO.
-- **Reactions cache** — `freeq-webui` caches reactions in localStorage so
-  chips survive refresh; not ported.
+- **Reaction live updates** — server-echoed reactions via
+  `freeq:reaction` CableReady events are wired; localStorage reaction
+  cache (freeq-app) is not ported.
+- **Link embeds** — ✅ ported (YouTube thumb, Bluesky post card, OpenGraph
+  preview via same-origin `/api/v1/og` → freeq-server). Client hydrates
+  from `data-text` on history load and live CableReady appends. Inline
+  images remain server-rendered via `IrcRender#linkify_urls`.
 - **Connection limits** — `freeq-webui` enforces 20 per-IP; Rails/Puma
   connection limits are not configured here.
 

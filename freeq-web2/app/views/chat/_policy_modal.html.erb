@@ -1,0 +1,13 @@
+<div id="policy-modal" onclick="if(event.target===this)window.closePolicy()">
+  <div class="policy-dialog">
+    <div class="policy-header">
+      <span class="policy-icon">🛡️</span>
+      <span class="policy-title">Channel policy</span>
+      <span id="policy-channel-name" class="policy-channel-name"></span>
+      <button type="button" class="policy-close" onclick="window.closePolicy()" aria-label="Close">×</button>
+    </div>
+    <div id="policy-body" class="policy-content">
+      <p class="policy-empty">Loading…</p>
+    </div>
+  </div>
+</div>

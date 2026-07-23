@@ -136,7 +136,8 @@ class SessionState
     end
   end
 
-  # Join (or re-join) a channel: record it, persist, and route its lines.
+  # Explicit join intent (join form / real channel page visit).
+  # Only this mutates the persisted My Channels list — never spawn/policy/prefetch.
   def add_channel!(channel)
     c = IrcRender.canonical_channel(channel)
     synchronize do
@@ -144,6 +145,14 @@ class SessionState
       @joined << c
     end
     persist_channels!
+  end
+
+  # Temporary IRC routing for a channel we're viewing or JOINing without
+  # promoting it into My Channels (policy checks, history preflight, etc.).
+  def track_joined!(channel)
+    c = IrcRender.canonical_channel(channel)
+    synchronize { @joined << c }
+    c
   end
 
   # Leave a channel: drop from the list, persist, stop routing its lines.
@@ -478,9 +487,9 @@ class SessionState
   end
 
   # Send JOIN even if we already "sent" one (clears sticky join_sent).
+  # Does not touch My Channels — callers that mean "join" must add_channel! first.
   def force_join!(channel)
-    ch = IrcRender.canonical_channel(channel)
-    add_channel!(ch)
+    ch = track_joined!(channel)
     @join_sent << ch
     @join_failed&.delete(ch)
     enqueue_outbound("JOIN #{ch}\r\n")
@@ -549,12 +558,15 @@ class SessionState
     end
     keep.each { |l| @irc_out << l }
 
-    chans = synchronize { (@channels.to_a | @joined.to_a).map { |c| IrcRender.canonical_channel(c) } }
+    # Only re-assert My Channels (persisted list) — not transient @joined
+    # entries from policy peeks / prefetches / mid-view JOINs.
+    chans = synchronize { @channels.to_a.map { |c| IrcRender.canonical_channel(c) } }
     chans = ["#freeq"] if chans.empty?
     @join_sent.clear
     @join_failed = Set.new
     # Keep @policy_accept_sent — ACCEPT is durable per DID; no need to re-spam.
     chans.each do |ch|
+      track_joined!(ch)
       @join_sent << ch
       driver.text("JOIN #{ch}\r\n")
       Rails.logger.info("post-SASL JOIN #{ch}") if defined?(Rails)
@@ -564,8 +576,13 @@ class SessionState
   # ── Upstream WS ───────────────────────────────────────────────────────
 
   # Ensure the upstream IRC WS is running.
-  # - Channel targets (#foo / bare channel name): JOIN + client channel list.
+  # - Channel targets (#foo / bare channel name): JOIN for live routing only.
   # - DM nicks: never JOIN; only ensure WS + broadcaster (and flush DM backlog).
+  #
+  # Does NOT mutate the persisted My Channels list. Callers with explicit
+  # join intent (ChatReflex#join, chat#show on a real visit) must call
+  # add_channel! first. Turbo link prefetches and policy peeks must never
+  # promote channels into My Channels via this path.
   #
   # `as_dm:` must be true when the target is a nick (chat#dm). Bare channel
   # names from chat#show omit # and are still channels.
@@ -596,6 +613,8 @@ class SessionState
         primary = synchronize { @channels.to_a.first } || "#freeq"
         primary = IrcRender.canonical_channel(primary)
         extras = synchronize { @channels.to_a.map { |c| IrcRender.canonical_channel(c) } } - [primary]
+        track_joined!(primary)
+        extras.each { |ch| track_joined!(ch) }
         @join_sent << primary
         @join_sent.merge(extras)
         @task = Thread.new { run_upstream(upstream_url.to_s, primary) }
@@ -604,8 +623,7 @@ class SessionState
       return
     end
 
-    target = IrcRender.canonical_channel(channel)
-    add_channel!(target) # record + persist (client-authoritative)
+    target = track_joined!(channel)
     ensure_broadcaster!
 
     @task_mutex.synchronize do
@@ -632,11 +650,11 @@ class SessionState
         return
       end
 
-      # Fresh WS: re-assert our whole channel list — the upstream keeps
-      # no reliable room state, so we tell it what we're in on every
-      # connect. finish_registration JOINs the primary; the rest flush
-      # after registration.
-      extras = synchronize { @channels.to_a } - [target]
+      # Fresh WS: re-assert My Channels — the upstream keeps no reliable
+      # room state, so we tell it what we're in on every connect.
+      # finish_registration JOINs the primary; the rest flush after registration.
+      extras = synchronize { @channels.to_a.map { |c| IrcRender.canonical_channel(c) } } - [target]
+      extras.each { |ch| track_joined!(ch) }
       @join_sent << target
       @join_sent.merge(extras)
       @task = Thread.new { run_upstream(upstream_url.to_s, target) }
