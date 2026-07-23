@@ -36,6 +36,13 @@ class AppState {
     var authenticatedDID: String?
     var irohEndpointId: String?
     var reconnectAttempts: Int = 0
+    /// Single-flight gate: collapses the many reconnect triggers (SDK
+    /// `disconnected`, system wake, app foreground, retry timer, launch
+    /// restore) into at most ONE in-flight attempt. Without it, concurrent
+    /// triggers each opened a socket — the reconnect storm that stranded
+    /// half-open connections (and duplicate server-side sessions) and dropped
+    /// the user's outgoing message on the floor.
+    @ObservationIgnored private var connectGate = ConnectGate()
 
     // MARK: - Channels & DMs
     var channels: [ChannelState] = []
@@ -462,6 +469,15 @@ class AppState {
         didRequestDmTargets = false
         UserDefaults.standard.set(nick, forKey: "freeq.nick")
 
+        // Tear down any prior client FIRST so its socket closes cleanly
+        // (the SDK sends QUIT + shuts the stream down). Skipping this leaked
+        // the old Rust connection task, whose socket lingered half-open and
+        // showed up server-side as a duplicate/zombie session for our DID.
+        if let old = client {
+            old.disconnect()
+        }
+        client = nil
+
         let handler = AppEventHandler(appState: self)
 
         do {
@@ -481,6 +497,9 @@ class AppState {
             try c.connect()
         } catch {
             connectionState = .disconnected
+            // Release the single-flight gate so the scheduled retry can run;
+            // leaving it latched would strand reconnection forever.
+            connectGate.drop()
             errorMessage = "Connection failed: \(error.localizedDescription)"
             // Auto-reconnect must survive a throwing connect() too, or a
             // failed attempt strands the retry chain.
@@ -491,6 +510,7 @@ class AppState {
     func disconnect() {
         client?.disconnect()
         client = nil
+        connectGate.drop()
         connectionState = .disconnected
         authenticatedDID = nil
         didRequestDmTargets = false
@@ -545,7 +565,13 @@ class AppState {
 
     func reconnectIfSaved() {
         guard connectionState == .disconnected, hasSavedSession else { return }
+        // Single-flight: if an attempt is already in flight (broker fetch or
+        // connect underway) or we're already live, suppress this trigger.
+        // This is the core storm fix — wake + foreground + the retry timer no
+        // longer stack into parallel connects.
+        guard connectGate.beginAttempt() else { return }
         guard let token = brokerToken, !token.isEmpty else {
+            connectGate.drop()
             // Saved-session bit was set but the token is gone (keychain
             // wiped, etc.). Fall back to fresh login instead of crashing
             // the way `brokerToken!` did. `hasSavedSession` is computed
@@ -577,6 +603,9 @@ class AppState {
                 // the UI drops to the sign-in screen instead of looping forever
                 // on "Disconnected — reconnecting…".
                 await MainActor.run {
+                    // Terminal failure: release the gate so the UI can attempt
+                    // a fresh sign-in without the gate stuck latched.
+                    self.connectGate.drop()
                     self.brokerToken = nil
                     self.authenticatedDID = nil
                     KeychainHelper.delete(key: "brokerToken")
@@ -589,6 +618,9 @@ class AppState {
                 // without scheduling used to stall reconnection forever
                 // (the "stuck on Reconnecting… until Retry Now" bug).
                 await MainActor.run {
+                    // Release the gate BEFORE rescheduling so the retry timer's
+                    // reconnectIfSaved can pass beginAttempt().
+                    self.connectGate.drop()
                     self.brokerFailureStreak += 1
                     self.scheduleReconnect()
                 }
@@ -1368,6 +1400,9 @@ extension AppState {
             Log.irc.info("Registered as \(registeredNick, privacy: .public)")
             connectionState = .registered
             reconnectAttempts = 0
+            // Attempt succeeded: latch the gate `live` so stray triggers are
+            // ignored until the connection actually drops.
+            connectGate.settle()
             playSound(.connect)
             nick = registeredNick
             // Auto-join channels
@@ -1950,6 +1985,10 @@ extension AppState {
 
         case .disconnected(let reason):
             connectionState = .disconnected
+            // Release the single-flight gate so scheduleReconnect's attempt is
+            // allowed through; the reconnect is the ONE place a new socket may
+            // open, and only after this drop.
+            connectGate.drop()
             // If we were in a call when the IRC connection dropped, tear it
             // down locally — peers only learn we left via the av-leave TAGMSG,
             // which we can't send on a dead wire.

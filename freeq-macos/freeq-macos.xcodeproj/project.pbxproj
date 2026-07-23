@@ -93,6 +93,7 @@
 		D96E350E7A49137316852CC7 /* CallController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA939865F12BCD7A51A4E5D0 /* CallController.swift */; };
 		DE8F1528542FEB83C2A987CE /* ChannelListBrowser.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9B238AA9ACDF3723BB74BB45 /* ChannelListBrowser.swift */; };
 		E04A550CE7A7BD40DA6CFD36 /* GlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9194BD66D242EE2DD6C3BA20 /* GlobalHotKey.swift */; };
+		E113828BDC95B387B70656BA /* ConnectGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = BE3F9D018791511266759374 /* ConnectGate.swift */; };
 		E1AB7FC16F690AF9462DBBAC /* E2eeManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20B3BED9F9A6237942DD0971 /* E2eeManager.swift */; };
 		E5D568CFB88348DD107086ED /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59A3EE3A6E9D8B6CCE8D4940 /* AppDelegate.swift */; };
 		E7D65B5702985BB69725442A /* MediaViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB6D944E494A3AE591F53C28 /* MediaViews.swift */; };
@@ -205,6 +206,7 @@
 		BBB5BC1861FDFDA899C0C709 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		BBD9C5F061044C8E1FF937DE /* ShareURL.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareURL.swift; sourceTree = "<group>"; };
 		BD5D672B7A5F1D6E78162DE1 /* freeq.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = freeq.swift; sourceTree = "<group>"; };
+		BE3F9D018791511266759374 /* ConnectGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectGate.swift; sourceTree = "<group>"; };
 		BF68A6E75172FAD9338D574F /* freeq-macos.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "freeq-macos.entitlements"; sourceTree = "<group>"; };
 		BF84986DB3E316AB54CFA706 /* CallMicCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallMicCapture.swift; sourceTree = "<group>"; };
 		BFF32EBD38B463CD192010E5 /* VerifiedProofSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VerifiedProofSheet.swift; sourceTree = "<group>"; };
@@ -398,6 +400,7 @@
 				AFDA007C5D2E0294D534B5A4 /* ComposeFormatting.swift */,
 				06360D5F1B334245B936F78F /* ComposeHistory.swift */,
 				AC4F2F58AF835A3E1C6A0286 /* ComposeTextExtraction.swift */,
+				BE3F9D018791511266759374 /* ConnectGate.swift */,
 				0BD56638DA817D921B8F261C /* DebugBridge.swift */,
 				635E43C3825BFA51AFB89DF6 /* DidDisplay.swift */,
 				20B3BED9F9A6237942DD0971 /* E2eeManager.swift */,
@@ -605,6 +608,7 @@
 				C480A25B440D0373E17082D8 /* ComposeFormatting.swift in Sources */,
 				F166A44537B071CBCB90128C /* ComposeHistory.swift in Sources */,
 				A11F5A568FDB0826A635682A /* ComposeTextExtraction.swift in Sources */,
+				E113828BDC95B387B70656BA /* ConnectGate.swift in Sources */,
 				D29F998C6DF599EA13C38C85 /* ConnectView.swift in Sources */,
 				111A631DD747383DB85200BF /* DebugBridge.swift in Sources */,
 				40B19B4620E1FFA3196FBFAD /* DetailPanel.swift in Sources */,
