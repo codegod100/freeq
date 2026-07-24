@@ -725,6 +725,100 @@ defmodule FreeqWeb3.Irc.Render do
     end
   end
 
+  # Image URL detection — aligned with freeq-web2 IrcRender / freeq-app MessageList
+  # and LinkPreview (so OG cards skip URLs that render as inline images).
+  @url_re ~r/https?:\/\/[^\s<>\]\)"'{}|\\^`]+/i
+  @image_ext_re ~r/\.(?:jpg|jpeg|png|gif|webp)(?:\?|#|$)/i
+  @freeq_media_re ~r/\/api\/v1\/media\//i
+  @bsky_cdn_re ~r/cdn\.bsky\.app\/img\//i
+
+  @doc "True when `url` should render as an inline image preview."
+  def image_url?(url) when is_binary(url) do
+    Regex.match?(@image_ext_re, url) or Regex.match?(@freeq_media_re, url) or
+      Regex.match?(@bsky_cdn_re, url)
+  end
+
+  def image_url?(_), do: false
+
+  @doc """
+  Split message text into typed segments for LiveView rendering.
+
+  Returns a list of:
+  - `{:text, binary}` — plain text (may be empty only if input is empty)
+  - `{:link, url}` — http(s) URL (not an image)
+  - `{:image, url}` — direct image URL / freeq media / bsky CDN
+
+  Only `http`/`https` schemes are linkified. Trailing punctuation is stripped
+  from URL matches (web2 parity).
+  """
+  def text_segments(text) when is_binary(text) do
+    if text == "" do
+      [{:text, ""}]
+    else
+      matches = Regex.scan(@url_re, text, return: :index)
+
+      {segments, last} =
+        Enum.reduce(matches, {[], 0}, fn [{start, len}], {acc, cursor} ->
+          raw = binary_part(text, start, len)
+          url = clean_url(raw)
+          # How many trailing chars the regex took that clean_url dropped.
+          trimmed = byte_size(raw) - byte_size(url)
+          url_end = start + len - trimmed
+
+          acc =
+            if start > cursor do
+              acc ++ [{:text, binary_part(text, cursor, start - cursor)}]
+            else
+              acc
+            end
+
+          acc =
+            cond do
+              url == "" ->
+                # Degenerate — keep original bytes as text
+                acc ++ [{:text, binary_part(text, start, len)}]
+
+              image_url?(url) ->
+                acc ++ [{:image, url}]
+
+              true ->
+                case URI.parse(url) do
+                  %URI{scheme: s} when s in ["http", "https"] ->
+                    acc ++ [{:link, url}]
+
+                  _ ->
+                    acc ++ [{:text, url}]
+                end
+            end
+
+          {acc, url_end}
+        end)
+
+      segments =
+        if last < byte_size(text) do
+          segments ++ [{:text, binary_part(text, last, byte_size(text) - last)}]
+        else
+          segments
+        end
+
+      if segments == [], do: [{:text, text}], else: segments
+    end
+  end
+
+  def text_segments(_), do: [{:text, ""}]
+
+  defp clean_url(raw) do
+    url =
+      raw
+      |> to_string()
+      |> String.replace(~r/[\x{200B}-\x{200D}\x{FEFF}\x{2060}\x{00AD}]/u, "")
+      |> String.trim()
+      |> String.trim_leading("<")
+      |> String.trim_trailing(">")
+
+    String.replace(url, ~r/[.,;:!?)'"\]]+\z/, "")
+  end
+
   defp unique_id do
     Base.url_encode64(:crypto.strong_rand_bytes(8), padding: false)
   end

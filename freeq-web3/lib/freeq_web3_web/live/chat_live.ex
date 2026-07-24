@@ -1103,7 +1103,7 @@ defmodule FreeqWeb3Web.ChatLive do
             {preview_text(@msg.parent_text)}
           </span>
         </button>
-        <span class={["nick", @msg[:color] || "n1"]}>{@msg.nick}</span>{" "}{@msg.text}<span
+        <span class={["nick", @msg[:color] || "n1"]}>{@msg.nick}</span>{" "}<.rich_text text={@msg.text} /><span
           :if={@msg[:msgid]}
           class="reactions"
         >
@@ -1146,10 +1146,39 @@ defmodule FreeqWeb3Web.ChatLive do
         <%= if @msg.kind in [:join, :part] do %>
           — {@msg.nick} {@msg.text}
         <% else %>
-          {@msg.text}
+          <.rich_text text={@msg.text} />
         <% end %>
       <% end %>
     </span>
+    """
+  end
+
+  # Linkify http(s) URLs; render direct image URLs as inline previews (web2 msg-img).
+  attr :text, :string, required: true
+
+  defp rich_text(assigns) do
+    assigns = assign(assigns, :segments, Render.text_segments(assigns.text || ""))
+
+    ~H"""
+    <%= for seg <- @segments do %>
+      <%= case seg do %>
+        <% {:text, t} -> %>
+          {t}
+        <% {:link, url} -> %>
+          <a href={url} target="_blank" rel="noopener noreferrer">{url}</a>
+        <% {:image, url} -> %>
+          <a href={url} target="_blank" rel="noopener noreferrer" class="msg-img-url">{url}</a>
+          <a href={url} target="_blank" rel="noopener noreferrer" class="msg-img-link">
+            <img
+              src={url}
+              alt=""
+              class="msg-img"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+            />
+          </a>
+      <% end %>
+    <% end %>
     """
   end
 

@@ -8,6 +8,38 @@ defmodule FreeqWeb3.Irc.RenderTest do
     assert Render.canonical_channel("#freeq") == "#freeq"
   end
 
+  test "image_url? matches extensions, freeq media, and bsky CDN" do
+    assert Render.image_url?("https://cdn.example.com/photo.jpg")
+    assert Render.image_url?("https://cdn.example.com/photo.JPEG?size=large")
+    assert Render.image_url?("https://cdn.example.com/a.png#frag")
+    assert Render.image_url?("https://irc.freeq.at/api/v1/media/abc/SIG/photo.jpg")
+    assert Render.image_url?("https://cdn.bsky.app/img/feed_fullsize/plain/did:plc:x/abc@jpeg")
+    refute Render.image_url?("https://example.com/page")
+    refute Render.image_url?("https://example.com/video.mp4")
+  end
+
+  test "text_segments linkifies URLs and previews image URLs" do
+    assert Render.text_segments("hello") == [{:text, "hello"}]
+    assert Render.text_segments("") == [{:text, ""}]
+
+    assert Render.text_segments("see https://example.com/x ok") == [
+             {:text, "see "},
+             {:link, "https://example.com/x"},
+             {:text, " ok"}
+           ]
+
+    assert Render.text_segments("https://cdn.example.com/a.jpg") == [
+             {:image, "https://cdn.example.com/a.jpg"}
+           ]
+
+    # Trailing punctuation stripped from URL
+    assert Render.text_segments("pic https://ex.com/i.png.") == [
+             {:text, "pic "},
+             {:image, "https://ex.com/i.png"},
+             {:text, "."}
+           ]
+  end
+
   test "ping_token parses freeq-server prefixed PING" do
     # freeq-server: Message::from_server → `:name PING name`
     assert Render.ping_token(":irc.freeq.at PING irc.freeq.at") == "irc.freeq.at"
