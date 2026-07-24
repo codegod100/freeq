@@ -11,7 +11,10 @@ config :freeq_web3,
   generators: [timestamp_type: :utc_datetime],
   # Upstream freeq-server. Override via FREEQ_UPSTREAM / FREEQ_UPSTREAM_REST env.
   upstream_ws: "wss://irc.freeq.at/irc",
-  upstream_rest: "https://irc.freeq.at"
+  upstream_rest: "https://irc.freeq.at",
+  # Short-lived OAuth state/PKCE store (callback recovery). Override via
+  # FREEQ_WEB3_PENDING_OAUTH_DIR.
+  pending_oauth_dir: ".dev-data/web3-pending-oauth"
 
 # Configure the endpoint
 config :freeq_web3, FreeqWeb3Web.Endpoint,

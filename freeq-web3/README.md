@@ -64,6 +64,8 @@ Open `http://127.0.0.1:4000` → LiveView channel list at `/chat`.
 |----------|---------|---------|
 | `FREEQ_UPSTREAM` | `wss://irc.freeq.at/irc` | Upstream IRC WebSocket URL |
 | `FREEQ_UPSTREAM_REST` | `https://irc.freeq.at` | Upstream freeq-server REST base |
+| `FREEQ_PUBLIC_URL` | request base URL | Public origin for OAuth client_id + redirect |
+| `FREEQ_WEB3_PENDING_OAUTH_DIR` | `.dev-data/web3-pending-oauth` | In-flight OAuth PKCE/state store |
 | `PORT` | `4000` | HTTP listen port |
 
 ## HTTP surface
@@ -73,6 +75,11 @@ Open `http://127.0.0.1:4000` → LiveView channel list at `/chat`.
 | GET | `/` | LiveView channel list (same as `/chat`) |
 | GET | `/chat` | Channel list |
 | GET | `/chat/:channel` | Chat shell for a channel |
+| GET | `/login` | AT Protocol OAuth login form |
+| GET | `/login/start` | Start OAuth (handle → PAR → redirect) |
+| GET/POST | `/auth/callback` | OAuth redirect callback + SASL |
+| GET/POST | `/logout` | Sign out (guest reconnect) |
+| GET | `/.well-known/oauth-client-metadata` | Public OAuth client metadata |
 | GET | `/up` | Health check JSON |
 | WS | `/live/websocket` | Phoenix LiveView |
 
@@ -86,13 +93,15 @@ This is a **core-chat** port of freeq-web2. What is ported:
 - Send / join / part / topic via LiveView events
 - IRC line parsing (`Irc.Render`, Elixir port of web2 `IrcRender`)
 - REST scrollback fetch on page load
-- Upstream WS bridge (**guest mode** — no SASL/OAuth yet)
+- Upstream WS bridge (guest + authenticated SASL)
+- AT Protocol OAuth login (`/login` → PAR → callback)
+- SASL `ATPROTO-CHALLENGE` + `API-BEARER` capture on the BFF upstream
+- Sign in / Sign out in the chat shell
 - Dark theme from freeq-web2
 
 What is **not** yet ported (track in AGENTS.md):
 
-- AT Protocol OAuth login + SASL `ATPROTO-CHALLENGE`
-- Encrypted on-disk session persistence
+- Encrypted on-disk session persistence (re-login after process restart)
 - DMs / E2EE
 - Reactions UI + TAGMSG react
 - Voice / video (MoQ)

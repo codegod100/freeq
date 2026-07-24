@@ -47,6 +47,12 @@ defmodule FreeqWeb3Web.ChatLive do
       |> assign(:compose, "")
       |> assign(:reply_to, nil)
       |> assign(:edit_to, nil)
+      |> assign(:av_active, false)
+      |> assign(:av_call_present, false)
+      |> assign(:av_session_id, nil)
+      |> assign(:av_participant_count, 0)
+      |> assign(:av_muted, false)
+      |> assign(:av_instance, generate_av_instance())
       |> stream(:messages, history, reset: true)
       |> assign(:message_count, length(history))
 
@@ -86,6 +92,12 @@ defmodule FreeqWeb3Web.ChatLive do
        |> assign(:compose, "")
        |> assign(:reply_to, nil)
        |> assign(:edit_to, nil)
+       |> assign(:av_active, false)
+       |> assign(:av_call_present, false)
+       |> assign(:av_session_id, nil)
+       |> assign(:av_participant_count, 0)
+       |> assign(:av_muted, false)
+       |> assign(:av_instance, generate_av_instance())
        |> stream(:messages, history, reset: true)
        |> assign(:message_count, length(history))}
     end
@@ -148,6 +160,52 @@ defmodule FreeqWeb3Web.ChatLive do
     {:noreply, assign(socket, :topic, topic)}
   end
 
+  def handle_event("av_start", _params, socket) do
+    sid = socket.assigns.freeq_session
+    ch = socket.assigns.channel
+    instance = socket.assigns.av_instance
+    Session.av_start(sid, ch, instance)
+    {:noreply, assign(socket, av_active: true)}
+  end
+
+  def handle_event("av_join", _params, socket) do
+    sid = socket.assigns.freeq_session
+    ch = socket.assigns.channel
+    session_id_av = socket.assigns.av_session_id
+    instance = socket.assigns.av_instance
+
+    if session_id_av do
+      Session.av_join(sid, ch, session_id_av, instance)
+      {:noreply, assign(socket, av_active: true)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("av_leave", _params, socket) do
+    sid = socket.assigns.freeq_session
+    ch = socket.assigns.channel
+    session_id_av = socket.assigns.av_session_id
+    instance = socket.assigns.av_instance
+
+    if session_id_av do
+      Session.av_leave(sid, ch, session_id_av, instance)
+    end
+
+    {:noreply,
+     socket
+     |> assign(:av_active, false)
+     |> assign(:av_call_present, false)
+     |> assign(:av_session_id, nil)
+     |> assign(:av_participant_count, 0)
+     |> push_event("av_left", %{})}
+  end
+
+  def handle_event("av_toggle_mute", _params, socket) do
+    muted = not socket.assigns.av_muted
+    {:noreply, socket |> assign(:av_muted, muted) |> push_event("av_muted", %{muted: muted})}
+  end
+
   def handle_event("reply", %{"msgid" => msgid}, socket) do
     {:noreply, assign(socket, reply_to: msgid, edit_to: nil)}
   end
@@ -180,6 +238,52 @@ defmodule FreeqWeb3Web.ChatLive do
      |> push_event("scroll_bottom", %{})}
   end
 
+  def handle_info({:av_state, %{channel: ch} = av}, socket) do
+    if String.downcase(Render.canonical_channel(ch)) ==
+         String.downcase(Render.canonical_channel(socket.assigns.channel)) do
+      state = String.downcase(to_string(av.state))
+
+      socket =
+        cond do
+          state in ["started", "joined"] ->
+            socket
+            |> assign(:av_call_present, true)
+            |> assign(:av_session_id, av.session_id)
+            |> assign(:av_participant_count, av.participants || 0)
+            |> push_event("av_state", %{
+              channel: ch,
+              state: av.state,
+              session_id: av.session_id,
+              participants: av.participants || 0,
+              actor: av.actor,
+              instance: av.instance
+            })
+
+          state == "ended" ->
+            socket
+            |> assign(:av_active, false)
+            |> assign(:av_call_present, false)
+            |> assign(:av_session_id, nil)
+            |> assign(:av_participant_count, 0)
+            |> push_event("av_ended", %{session_id: av.session_id})
+
+          true ->
+            socket
+        end
+
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_info({:av_token, %{session_id: sid, token: token}}, socket) do
+    {:noreply,
+     socket
+     |> assign(:av_session_id, sid)
+     |> push_event("av_token", %{session_id: sid, token: token})}
+  end
+
   def handle_info({:members, members}, socket) do
     {:noreply, assign(socket, :members, members)}
   end
@@ -206,6 +310,10 @@ defmodule FreeqWeb3Web.ChatLive do
 
   def handle_info({:nick, nick}, socket) do
     {:noreply, update(socket, :snap, &Map.put(&1, :current_nick, nick))}
+  end
+
+  def handle_info({:auth_changed, auth}, socket) do
+    {:noreply, update(socket, :snap, &Map.merge(&1, auth))}
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -263,6 +371,10 @@ defmodule FreeqWeb3Web.ChatLive do
   defp ws_label(:registering), do: "registering…"
   defp ws_label(_), do: "offline"
 
+  defp generate_av_instance do
+    :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  end
+
   defp format_ts(%DateTime{} = t), do: Calendar.strftime(t, "%H:%M")
   defp format_ts(_), do: ""
 
@@ -272,6 +384,29 @@ defmodule FreeqWeb3Web.ChatLive do
   defp msg_row_class(:part), do: "part"
   defp msg_row_class(:notice), do: "notice"
   defp msg_row_class(_), do: "notice"
+
+  attr :msg, :map, required: true
+
+  defp message_body(assigns) do
+    ~H"""
+    <span class="body"><%= if @msg.kind == :msg do %>
+      <span class={["nick", @msg[:color] || "n1"]}>{@msg.nick}</span>{" "}{@msg.text}<button
+        :if={@msg[:msgid]}
+        type="button"
+        class="reply-btn"
+        title="Reply"
+        phx-click="reply"
+        phx-value-msgid={@msg.msgid}
+      >↩</button>
+    <% else %>
+      <%= if @msg.kind in [:join, :part] do %>
+        — {@msg.nick} {@msg.text}
+      <% else %>
+        {@msg.text}
+      <% end %>
+    <% end %></span>
+    """
+  end
 
   @impl true
   def render(assigns) do
@@ -296,6 +431,36 @@ defmodule FreeqWeb3Web.ChatLive do
             <span class="dot"></span>
             <span>{ws_label(@snap.ws_state)}</span>
           </span>
+          <button
+            type="button"
+            id="av-call-btn"
+            class={[
+              "av-call-btn",
+              if(@av_active, do: "in-call"),
+              if(not @av_active and @av_call_present, do: "has-call")
+            ]}
+            phx-click={
+              if(@av_active,
+                do: "av_leave",
+                else: if(@av_call_present, do: "av_join", else: "av_start")
+              )
+            }
+            disabled={not @snap[:authenticated?] and not @av_active and not @av_call_present}
+            data-channel={@channel}
+            data-nick={@snap.current_nick}
+            data-instance={@av_instance}
+            data-active={@av_active}
+            title={
+              cond do
+                @av_active -> "In call — click to leave"
+                @av_call_present -> "Join call (#{@av_participant_count || 0})"
+                @snap[:authenticated?] -> "Start voice call"
+                true -> "Sign in to start a call"
+              end
+            }
+          >
+            {if(@av_active, do: "📞", else: if(@av_call_present, do: "🔊", else: "🎙️"))}
+          </button>
           <button
             type="button"
             class="mobile-btn"
@@ -356,9 +521,24 @@ defmodule FreeqWeb3Web.ChatLive do
             </ul>
           </div>
           <div id="user-info">
-            <div class="user-handle guest" id="user-handle">👤 {@snap.current_nick || "guest"}</div>
+            <div
+              class={["user-handle", if(@snap[:authenticated?], do: "signed-in", else: "guest")]}
+              id="user-handle"
+            >
+              👤 {if(@snap[:authenticated?],
+                do: @snap[:auth_handle] || @snap.current_nick,
+                else: @snap.current_nick || "guest"
+              )}
+            </div>
             <div class="user-actions">
-              <a href={~p"/chat"} class="btn-link" data-phx-link="redirect" data-phx-link-state="push">All channels</a>
+              <a href={~p"/chat"} class="btn-link" data-phx-link="redirect" data-phx-link-state="push">
+                All channels
+              </a>
+              <%= if @snap[:authenticated?] do %>
+                <a href={~p"/logout"} class="btn-link">Sign out</a>
+              <% else %>
+                <a href={~p"/login"} class="btn-link">Sign in</a>
+              <% end %>
             </div>
           </div>
         </aside>
@@ -374,26 +554,47 @@ defmodule FreeqWeb3Web.ChatLive do
               data-text={msg[:text]}
             >
               <span class="ts">{format_ts(msg.time)}</span>
-              <span class="body">
-                <%= if msg.kind == :msg do %>
-                  <span class={"nick #{msg[:color] || "n1"}"}>{msg.nick}</span>
-                  {" "}{msg.text}<button
-                    :if={msg[:msgid]}
-                    type="button"
-                    class="reply-btn"
-                    title="Reply"
-                    phx-click="reply"
-                    phx-value-msgid={msg.msgid}
-                  >↩</button>
-                <% else %>
-                  <%= if msg.kind in [:join, :part] do %>
-                    — {msg.nick} {msg.text}
-                  <% else %>
-                    {msg.text}
-                  <% end %>
-                <% end %>
-              </span>
+              <.message_body msg={msg} />
             </div>
+          </div>
+
+          <div
+            :if={@av_active}
+            id="av-call-panel"
+            class="av-call-panel active"
+            phx-hook="AvCall"
+            data-channel={@channel}
+            data-nick={@snap.current_nick}
+            data-instance={@av_instance}
+            data-session-id={@av_session_id}
+            data-muted={@av_muted}
+            data-authenticated={@snap[:authenticated?]}
+          >
+            <div class="av-call-bar">
+              <span class="av-call-status">
+                📞 {@channel} · {@av_participant_count || 1} in call
+              </span>
+              <div class="av-call-actions">
+                <button
+                  type="button"
+                  class={["av-call-action", "av-mute-btn", if(@av_muted, do: "muted")]}
+                  phx-click="av_toggle_mute"
+                  title={if(@av_muted, do: "Unmute", else: "Mute")}
+                >
+                  {if(@av_muted, do: "🎤 off", else: "🎤 on")}
+                </button>
+                <button
+                  type="button"
+                  class="av-call-action av-leave-btn"
+                  phx-click="av_leave"
+                  title="Leave call"
+                >
+                  Leave
+                </button>
+              </div>
+            </div>
+            <div id="av-publish-container" phx-update="ignore"></div>
+            <div id="av-remote-tiles" phx-update="ignore"></div>
           </div>
 
           <div :if={@reply_to || @edit_to} id="reply-banner" class="reply-banner">

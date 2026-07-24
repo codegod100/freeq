@@ -17,6 +17,7 @@ defmodule FreeqWeb3.Session.Server do
   use GenServer
   require Logger
 
+  alias FreeqWeb3.Atproto.OAuthSession
   alias FreeqWeb3.Irc.Render
   alias FreeqWeb3.Irc.Upstream
   alias FreeqWeb3.Session
@@ -26,8 +27,10 @@ defmodule FreeqWeb3.Session.Server do
     :upstream_pid,
     :current_nick,
     ws_state: :disconnected,
+    # :guest | %OAuthSession{}
     auth: :guest,
     api_bearer: nil,
+    # :none | :pending | :ok | :failed
     sasl_status: :none,
     channels: MapSet.new(),
     joined: MapSet.new(),
@@ -37,7 +40,9 @@ defmodule FreeqWeb3.Session.Server do
     outbound: :queue.new(),
     known_nicks: MapSet.new(),
     suppress_history_batches: MapSet.new(),
-    last_upstream_error: nil
+    last_upstream_error: nil,
+    # callers waiting on ensure_authenticated / API-BEARER
+    auth_waiters: []
   ]
 
   def start_link(opts) do
@@ -67,11 +72,84 @@ defmodule FreeqWeb3.Session.Server do
       sasl_status: state.sasl_status,
       auth: state.auth,
       authenticated?: authenticated?(state),
+      has_credentials?: has_credentials?(state),
+      auth_handle: auth_handle(state),
+      auth_did: auth_did(state),
+      auth_nick: auth_nick(state),
       channel_members: state.channel_members,
       last_upstream_error: state.last_upstream_error
     }
 
     {:reply, snap, state}
+  end
+
+  def handle_call({:set_auth, %OAuthSession{} = oauth}, _from, state) do
+    nick = OAuthSession.nick(oauth)
+
+    state = %{
+      state
+      | auth: oauth,
+        current_nick: nick || state.current_nick,
+        sasl_status: if(state.api_bearer in [nil, ""], do: :pending, else: :ok)
+    }
+
+    Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:clear_auth, _from, state) do
+    state = %{
+      state
+      | auth: :guest,
+        api_bearer: nil,
+        sasl_status: :none
+    }
+
+    state = disconnect_upstream(state, "logout")
+    state = start_upstream(state, primary_channel(state))
+    Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
+    {:reply, :ok, state}
+  end
+
+  def handle_call(:request_reconnect, _from, state) do
+    state = disconnect_upstream(state, "reconnect")
+    state = start_upstream(state, primary_channel(state))
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:ensure_authenticated, timeout_ms}, from, state) do
+    cond do
+      not has_credentials?(state) ->
+        {:reply, false, state}
+
+      authenticated?(state) ->
+        {:reply, true, state}
+
+      true ->
+        state = %{state | sasl_status: :pending}
+
+        state =
+          cond do
+            alive_upstream?(state) and state.ws_state == :ready and
+                state.api_bearer in [nil, ""] ->
+              # Credentials but no SASL — reconnect to re-run ATPROTO-CHALLENGE.
+              state
+              |> disconnect_upstream("ensure-auth")
+              |> start_upstream(primary_channel(state))
+
+            not alive_upstream?(state) or state.ws_state == :disconnected ->
+              start_upstream(state, primary_channel(state))
+
+            true ->
+              # In-flight registration / SASL — wait.
+              state
+          end
+
+        # Reply when API-BEARER arrives or timeout.
+        ref = Process.send_after(self(), {:auth_wait_timeout, from}, timeout_ms)
+        state = %{state | auth_waiters: [{from, ref} | state.auth_waiters]}
+        {:noreply, state}
+    end
   end
 
   def handle_call({:members, channel}, _from, state) do
@@ -196,6 +274,53 @@ defmodule FreeqWeb3.Session.Server do
     {:reply, :ok, state}
   end
 
+  def handle_call({:av_start, channel, instance, opts}, _from, state) do
+    ch = Render.canonical_channel(channel)
+    title = Keyword.get(opts, :title, "")
+    tags = "+freeq.at/av-start=;+freeq.at/av-instance=#{Render.escape_tag_value(instance)}"
+
+    tags =
+      if title != "",
+        do: "#{tags};+freeq.at/av-title=#{Render.escape_tag_value(title)}",
+        else: tags
+
+    state = ensure_upstream(state, ch)
+    state = maybe_enqueue_join(state, ch)
+    state = enqueue(state, "@#{tags} TAGMSG #{ch}\r\n")
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:av_join, channel, session_id_av, instance}, _from, state) do
+    ch = Render.canonical_channel(channel)
+
+    tags =
+      "+freeq.at/av-join=;+freeq.at/av-id=#{Render.escape_tag_value(session_id_av)};+freeq.at/av-instance=#{Render.escape_tag_value(instance)}"
+
+    state = ensure_upstream(state, ch)
+    state = maybe_enqueue_join(state, ch)
+    state = enqueue(state, "@#{tags} TAGMSG #{ch}\r\n")
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:av_leave, channel, session_id_av, instance}, _from, state) do
+    ch = Render.canonical_channel(channel)
+
+    tags =
+      "+freeq.at/av-leave=;+freeq.at/av-id=#{Render.escape_tag_value(session_id_av)};+freeq.at/av-instance=#{Render.escape_tag_value(instance)}"
+
+    state = ensure_upstream(state, ch)
+    state = enqueue(state, "@#{tags} TAGMSG #{ch}\r\n")
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:av_end, channel, session_id_av}, _from, state) do
+    ch = Render.canonical_channel(channel)
+    tags = "+freeq.at/av-end=;+freeq.at/av-id=#{Render.escape_tag_value(session_id_av)}"
+    state = ensure_upstream(state, ch)
+    state = enqueue(state, "@#{tags} TAGMSG #{ch}\r\n")
+    {:reply, :ok, state}
+  end
+
   @impl true
   def handle_cast({:enqueue, line}, state) do
     {:noreply, enqueue(state, line)}
@@ -260,6 +385,65 @@ defmodule FreeqWeb3.Session.Server do
     {:noreply, state}
   end
 
+  def handle_info({:upstream_api_bearer, bearer}, state) when is_binary(bearer) do
+    state = %{
+      state
+      | api_bearer: bearer,
+        sasl_status: if(has_credentials?(state), do: :ok, else: state.sasl_status)
+    }
+
+    Logger.info(
+      "session #{short(state.session_id)} API-BEARER sasl=#{state.sasl_status} " <>
+        "handle=#{auth_handle(state) || "-"}"
+    )
+
+    Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
+    state = reply_auth_waiters(state, authenticated?(state))
+    {:noreply, state}
+  end
+
+  def handle_info({:upstream_sasl, status}, state)
+      when status in [:pending, :ok, :failed, :none] do
+    state = %{state | sasl_status: status}
+
+    state =
+      if status == :failed do
+        %{state | api_bearer: nil}
+      else
+        state
+      end
+
+    Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
+
+    state =
+      if status == :failed do
+        reply_auth_waiters(state, false)
+      else
+        state
+      end
+
+    {:noreply, state}
+  end
+
+  def handle_info({:upstream_auth_updated, %OAuthSession{} = oauth}, state) do
+    {:noreply, %{state | auth: oauth}}
+  end
+
+  def handle_info({:auth_wait_timeout, from}, state) do
+    waiters =
+      Enum.reject(state.auth_waiters, fn {f, ref} ->
+        if f == from do
+          Process.cancel_timer(ref)
+          GenServer.reply(from, authenticated?(state))
+          true
+        else
+          false
+        end
+      end)
+
+    {:noreply, %{state | auth_waiters: waiters}}
+  end
+
   def handle_info({:FLUSH_OUTBOUND}, state) do
     {:noreply, flush_outbound(state)}
   end
@@ -272,7 +456,72 @@ defmodule FreeqWeb3.Session.Server do
   # ── Internals ──────────────────────────────────────────────────────────
 
   defp authenticated?(state) do
-    state.auth != :guest and state.api_bearer not in [nil, ""] and state.sasl_status == :ok
+    has_credentials?(state) and state.api_bearer not in [nil, ""] and state.sasl_status == :ok
+  end
+
+  defp has_credentials?(%{auth: %OAuthSession{}}), do: true
+  defp has_credentials?(_), do: false
+
+  defp auth_handle(%{auth: %OAuthSession{handle: h}}), do: h
+  defp auth_handle(_), do: nil
+
+  defp auth_did(%{auth: %OAuthSession{did: d}}), do: d
+  defp auth_did(_), do: nil
+
+  defp auth_nick(%{auth: %OAuthSession{} = o}), do: OAuthSession.nick(o)
+  defp auth_nick(_), do: nil
+
+  defp snapshot_auth(state) do
+    %{
+      authenticated?: authenticated?(state),
+      has_credentials?: has_credentials?(state),
+      auth_handle: auth_handle(state),
+      auth_did: auth_did(state),
+      auth_nick: auth_nick(state),
+      current_nick: state.current_nick,
+      sasl_status: state.sasl_status,
+      api_bearer: state.api_bearer
+    }
+  end
+
+  defp reply_auth_waiters(state, result) do
+    Enum.each(state.auth_waiters, fn {from, ref} ->
+      Process.cancel_timer(ref)
+      GenServer.reply(from, result)
+    end)
+
+    %{state | auth_waiters: []}
+  end
+
+  defp primary_channel(state) do
+    case MapSet.to_list(state.channels) do
+      [ch | _] -> ch
+      [] -> "#freeq"
+    end
+  end
+
+  defp alive_upstream?(%{upstream_pid: pid}) when is_pid(pid), do: Process.alive?(pid)
+  defp alive_upstream?(_), do: false
+
+  defp disconnect_upstream(state, reason) do
+    if alive_upstream?(state) do
+      if state.ws_state == :ready do
+        send(state.upstream_pid, {:send_line, "QUIT :#{reason}\r\n"})
+        # Brief grace so freeq-server can release the nick.
+        Process.sleep(150)
+      end
+
+      Process.exit(state.upstream_pid, :kill)
+    end
+
+    %{
+      state
+      | upstream_pid: nil,
+        ws_state: :disconnected,
+        join_sent: MapSet.new(),
+        api_bearer: nil,
+        sasl_status: if(has_credentials?(state), do: :pending, else: :none)
+    }
   end
 
   defp ensure_upstream(%{upstream_pid: pid} = state, primary) when is_pid(pid) do
@@ -291,12 +540,19 @@ defmodule FreeqWeb3.Session.Server do
     primary = Render.canonical_channel(primary)
     extras = MapSet.to_list(state.channels) -- [primary]
 
+    nick =
+      case state.auth do
+        %OAuthSession{} = oauth -> OAuthSession.nick(oauth)
+        _ -> state.current_nick || guest_nick()
+      end
+
     case Upstream.start_link(
            session_pid: self(),
            session_id: state.session_id,
            primary: primary,
-           nick: state.current_nick || guest_nick(),
-           extras: extras
+           nick: nick,
+           extras: extras,
+           auth: state.auth
          ) do
       {:ok, pid} ->
         Process.monitor(pid)
@@ -304,9 +560,11 @@ defmodule FreeqWeb3.Session.Server do
         state = %{
           state
           | upstream_pid: pid,
+            current_nick: nick,
             ws_state: :connecting,
             join_sent: MapSet.put(MapSet.new([primary | extras]), primary),
-            joined: Enum.reduce([primary | extras], state.joined, &MapSet.put(&2, &1))
+            joined: Enum.reduce([primary | extras], state.joined, &MapSet.put(&2, &1)),
+            sasl_status: if(has_credentials?(state), do: :pending, else: state.sasl_status)
         }
 
         Session.broadcast(state.session_id, {:ws_state, :connecting, state.current_nick})
@@ -406,6 +664,45 @@ defmodule FreeqWeb3.Session.Server do
       case Render.parse_tagmsg_reaction(line) do
         {msgid, emoji, nick, added, ch} ->
           Session.broadcast_channel(state.session_id, ch, {:reaction, msgid, emoji, nick, added})
+          state
+
+        nil ->
+          state
+      end
+
+    # AV call state / token.
+    state =
+      case Render.parse_av_state_tagmsg(line) do
+        {ch, av_state, session_id_av, actor, participants, instance, title} ->
+          Session.broadcast_channel(
+            state.session_id,
+            ch,
+            {:av_state,
+             %{
+               channel: ch,
+               state: av_state,
+               session_id: session_id_av,
+               actor: actor,
+               participants: participants,
+               instance: instance,
+               title: title
+             }}
+          )
+
+          state
+
+        nil ->
+          state
+      end
+
+    state =
+      case Render.parse_av_token_tagmsg(line, state.current_nick) do
+        {session_id_av, token} ->
+          Session.broadcast(
+            state.session_id,
+            {:av_token, %{session_id: session_id_av, token: token}}
+          )
+
           state
 
         nil ->

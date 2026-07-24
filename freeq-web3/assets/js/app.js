@@ -24,6 +24,7 @@ import { Socket } from "phoenix";
 import { LiveSocket } from "phoenix_live_view";
 import { hooks as colocatedHooks } from "phoenix-colocated/freeq_web3";
 import topbar from "../vendor/topbar";
+import AvCall from "./av_call";
 
 const ChatScroll = {
   mounted() {
@@ -49,7 +50,7 @@ const csrfToken = document
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: { _csrf_token: csrfToken },
-  hooks: { ...colocatedHooks, ChatScroll },
+  hooks: { ...colocatedHooks, ChatScroll, AvCall },
 });
 
 // Show progress bar on live navigation and form submits

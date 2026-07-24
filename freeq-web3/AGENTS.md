@@ -28,6 +28,9 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 | `lib/freeq_web3_web/live/chat_index_live.ex` | `/chat` channel list |
 | `lib/freeq_web3_web/live/chat_live.ex` | `/chat/:channel` shell |
 | `lib/freeq_web3_web/live/user_session.ex` | `on_mount` → freeq_session cookie + start Session |
+| `lib/freeq_web3/atproto/*` | DPoP, OAuth, OAuthSession, SASL ATPROTO-CHALLENGE |
+| `lib/freeq_web3/pending_oauth_store.ex` | Disk-backed OAuth state/PKCE for callback recovery |
+| `lib/freeq_web3_web/controllers/sessions_controller.ex` | `/login`, callback, logout, client metadata |
 | `assets/css/app.css` | freeq dark theme (ported from web2 layout CSS) |
 
 ## Key decisions
@@ -41,8 +44,9 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 - **Client-authoritative channel list**: `Session.Server` owns `channels`
   (My Channels). Only explicit join intent (`join` event / channel page visit
   via `add_channel`) mutates it. `ensure_upstream` only tracks routing.
-- **Guest mode first**: SASL / OAuth / disk session store are deliberately
-  out of the first cut so the LiveView + Upstream path is auditable alone.
+- **Guest mode first**, then OAuth: LiveView + Upstream path works as guest;
+  AT Protocol login upgrades the same session via SASL without a second
+  browser cookie for tokens.
 
 ## Porting checklist (from freeq-web2)
 
@@ -53,8 +57,8 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 - [x] REST history + channel list
 - [x] Member roster (353 / JOIN / PART / QUIT / MODE)
 - [x] freeq dark theme CSS
-- [ ] AT Protocol OAuth (`/login`, callback, client metadata)
-- [ ] SASL ATPROTO-CHALLENGE + API-BEARER
+- [x] AT Protocol OAuth (`/login`, callback, client metadata)
+- [x] SASL ATPROTO-CHALLENGE + API-BEARER
 - [ ] Encrypted session store (disk) + channel list persistence
 - [ ] Reactions (TAGMSG +react / unreact)
 - [ ] Message edit/delete UI

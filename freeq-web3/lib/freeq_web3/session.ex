@@ -60,6 +60,47 @@ defmodule FreeqWeb3.Session do
     GenServer.call(via(session_id), {:members, channel})
   end
 
+  @doc "Install OAuth credentials (does not mark authenticated until SASL)."
+  def set_auth(session_id, oauth) do
+    GenServer.call(via(session_id), {:set_auth, oauth})
+  end
+
+  @doc "Clear credentials and drop to guest (reconnects upstream)."
+  def clear_auth(session_id) do
+    GenServer.call(via(session_id), :clear_auth, 15_000)
+  end
+
+  @doc """
+  Force upstream reconnect so SASL re-runs with current credentials.
+  Blocks until the session has processed the reconnect kickoff.
+  """
+  def request_reconnect(session_id) do
+    GenServer.call(via(session_id), :request_reconnect, 15_000)
+  end
+
+  @doc """
+  Drive SASL until app identity is real (API-BEARER). Returns true on success.
+  """
+  def ensure_authenticated(session_id, timeout_ms \\ 15_000) do
+    GenServer.call(via(session_id), {:ensure_authenticated, timeout_ms}, timeout_ms + 5_000)
+  end
+
+  def av_start(session_id, channel, instance, opts \\ []) do
+    GenServer.call(via(session_id), {:av_start, channel, instance, opts})
+  end
+
+  def av_join(session_id, channel, session_id_av, instance) do
+    GenServer.call(via(session_id), {:av_join, channel, session_id_av, instance})
+  end
+
+  def av_leave(session_id, channel, session_id_av, instance) do
+    GenServer.call(via(session_id), {:av_leave, channel, session_id_av, instance})
+  end
+
+  def av_end(session_id, channel, session_id_av) do
+    GenServer.call(via(session_id), {:av_end, channel, session_id_av})
+  end
+
   def subscribe(session_id) do
     Phoenix.PubSub.subscribe(FreeqWeb3.PubSub, topic(session_id))
   end

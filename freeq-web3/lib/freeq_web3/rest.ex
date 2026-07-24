@@ -88,4 +88,72 @@ defmodule FreeqWeb3.Rest do
         :error
     end
   end
+
+  @doc "GET /api/v1/channels/:name/sessions"
+  def fetch_channel_sessions(channel) do
+    bare = Render.bare_channel(channel)
+    encoded = URI.encode_www_form(bare)
+    url = FreeqWeb3.upstream_rest() <> "/api/v1/channels/#{encoded}/sessions"
+
+    case Req.get(url, receive_timeout: 5_000, connect_options: [timeout: 3_000]) do
+      {:ok, %{status: 200, body: body}} ->
+        body
+
+      {:ok, %{status: status}} ->
+        Logger.warning("fetch_channel_sessions HTTP #{status}")
+        nil
+
+      {:error, reason} ->
+        Logger.warning("fetch_channel_sessions failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  @doc "GET /api/v1/sessions/:id"
+  def fetch_session_detail(session_id) do
+    url = FreeqWeb3.upstream_rest() <> "/api/v1/sessions/#{URI.encode_www_form(session_id)}"
+
+    case Req.get(url, receive_timeout: 5_000, connect_options: [timeout: 3_000]) do
+      {:ok, %{status: 200, body: body}} ->
+        body
+
+      {:ok, %{status: status}} ->
+        Logger.warning("fetch_session_detail HTTP #{status}")
+        nil
+
+      {:error, reason} ->
+        Logger.warning("fetch_session_detail failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  @doc "GET /api/v1/av/sessions/:id/token"
+  def fetch_av_token(session_id, bearer) do
+    url =
+      FreeqWeb3.upstream_rest() <> "/api/v1/av/sessions/#{URI.encode_www_form(session_id)}/token"
+
+    headers =
+      if bearer not in [nil, ""] do
+        [{"authorization", "Bearer #{bearer}"}]
+      else
+        []
+      end
+
+    case Req.get(url,
+           headers: headers,
+           receive_timeout: 5_000,
+           connect_options: [timeout: 3_000]
+         ) do
+      {:ok, %{status: 200, body: body}} ->
+        body["token"]
+
+      {:ok, %{status: status}} ->
+        Logger.warning("fetch_av_token HTTP #{status}")
+        nil
+
+      {:error, reason} ->
+        Logger.warning("fetch_av_token failed: #{inspect(reason)}")
+        nil
+    end
+  end
 end

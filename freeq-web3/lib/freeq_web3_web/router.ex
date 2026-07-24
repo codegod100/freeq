@@ -20,10 +20,32 @@ defmodule FreeqWeb3Web.Router do
 
     get "/up", PageController, :up
 
+    # AT Protocol OAuth (port of freeq-web2 sessions).
+    get "/login", SessionsController, :new
+    get "/login/start", SessionsController, :create
+    post "/login", SessionsController, :create
+    get "/auth/callback", SessionsController, :callback
+    post "/auth/callback", SessionsController, :callback
+    get "/logout", SessionsController, :destroy
+    post "/logout", SessionsController, :destroy
+    get "/.well-known/oauth-client-metadata", SessionsController, :client_metadata
+
     live_session :chat, on_mount: [FreeqWeb3Web.Live.UserSession] do
       live "/", ChatIndexLive, :index
       live "/chat", ChatIndexLive, :index
       live "/chat/:channel", ChatLive, :show
     end
+
+    # AV call control (same-origin BFF; CSRF token required).
+    post "/api/av/start", ApiController, :av_start
+    post "/api/av/join", ApiController, :av_join
+    post "/api/av/leave", ApiController, :av_leave
+    post "/api/av/end", ApiController, :av_end
+
+    get "/api/v1/channels/:channel/sessions", ApiController, :channel_sessions
+    get "/api/v1/sessions/:id", ApiController, :session_detail
+    get "/api/v1/av/sessions/:id/token", ApiController, :av_token
+
+    get "/av/assets/*path", ApiController, :av_asset
   end
 end

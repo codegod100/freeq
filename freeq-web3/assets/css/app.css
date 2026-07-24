@@ -177,13 +177,13 @@ body {
 }
 
 #freeq-chat {
-    display: flex;
-    flex-direction: column;
-    height: 100dvh;
-    max-height: 100dvh;
-    overflow: hidden;
-    font-size: 13px;
-    line-height: 1.2;
+	display: flex;
+	flex-direction: column;
+	height: 100dvh;
+	max-height: 100dvh;
+	overflow: hidden;
+	font-size: 14px;
+	line-height: 1.25;
 }
 #freeq-chat > nav {
     flex: 0 0 auto;
@@ -204,7 +204,7 @@ body {
 	flex: 0 0 10.5rem;
 	overflow: hidden;
 	border-right: 1px solid var(--border);
-	padding: 0.3rem 0.15rem 0.3rem 0.3rem;
+	padding: 0.3rem 0.1rem 0.3rem 0.3rem;
 	font-size: 0.8rem;
 	display: flex;
 	flex-direction: column;
@@ -309,10 +309,10 @@ body {
 	flex: 1 1 0;
 	min-height: 0;
 	overflow-y: auto;
-	padding: 0.15rem 0.25rem 0.2rem 0.1rem;
+	padding: 0.15rem 0.25rem 0.2rem 0;
 	display: flex;
 	flex-direction: column;
-	line-height: 1.2;
+	line-height: 1.25;
 }
 #messages::before {
     content: "";
@@ -374,33 +374,33 @@ body {
 #messages .part,
 #messages .row {
 	display: grid;
-	grid-template-columns: 30px minmax(0, 1fr);
-	column-gap: 0.15rem;
+	grid-template-columns: 28px minmax(0, 1fr);
+	column-gap: 0.05rem;
 	row-gap: 0;
 	flex: 0 0 auto;
 	align-items: baseline;
 	margin: 0;
 	padding: 0;
-	font-size: 0.8rem;
-	line-height: 1.2;
+	font-size: 0.85rem;
+	line-height: 1.25;
 	min-height: 0;
 }
 #messages .ts {
-    color: var(--muted);
-    font-size: 0.6rem;
-    text-align: right;
-    user-select: none;
-    padding: 0;
-    line-height: 1.2;
-    font-variant-numeric: tabular-nums;
+	color: var(--muted);
+	font-size: 0.65rem;
+	text-align: right;
+	user-select: none;
+	padding: 0;
+	line-height: 1.25;
+	font-variant-numeric: tabular-nums;
 }
 #messages .body {
-    display: block;
-    margin: 0;
-    padding: 0;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-    line-height: 1.2;
+	display: block;
+	margin: 0;
+	padding: 0;
+	white-space: normal;
+	overflow-wrap: anywhere;
+	line-height: 1.25;
 }
 #messages .nick {
     font-weight: 600;
@@ -431,20 +431,20 @@ body {
 }
 #messages .notice,
 #messages .notice .body {
-    color: var(--muted);
-    font-style: italic;
-    font-size: 0.72rem;
-    line-height: 1.15;
+	color: var(--muted);
+	font-style: italic;
+	font-size: 0.78rem;
+	line-height: 1.2;
 }
 #messages .join .body {
-    color: var(--nick-5);
-    font-size: 0.72rem;
-    line-height: 1.15;
+	color: var(--nick-5);
+	font-size: 0.78rem;
+	line-height: 1.2;
 }
 #messages .part .body {
-    color: var(--nick-6);
-    font-size: 0.72rem;
-    line-height: 1.15;
+	color: var(--nick-6);
+	font-size: 0.78rem;
+	line-height: 1.2;
 }
 #status .dot {
     display: inline-block;
@@ -492,12 +492,144 @@ body {
     font-weight: 600;
 }
 .reply-banner-cancel {
-    border: 0;
-    background: transparent;
-    color: var(--muted);
-    cursor: pointer;
-    font-size: 1rem;
-    margin-left: auto;
+	border: 0;
+	background: transparent;
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 1rem;
+	margin-left: auto;
+}
+
+/* ── AV call panel ───────────────────────────────────────────────────── */
+.av-call-btn {
+	background: transparent;
+	border: 1px solid var(--border);
+	border-radius: 0.35rem;
+	color: var(--muted);
+	cursor: pointer;
+	padding: 0.15rem 0.35rem;
+	font-size: 0.85rem;
+	line-height: 1.2;
+	transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.av-call-btn:hover:not(:disabled) {
+	background: #151a22;
+	color: var(--fg);
+}
+.av-call-btn.has-call {
+	color: var(--self);
+	border-color: var(--self);
+}
+.av-call-btn.in-call {
+	background: var(--self);
+	color: #0e1116;
+	border-color: var(--self);
+}
+.av-call-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.av-call-panel {
+	flex: 0 0 auto;
+	background: #151a22;
+	border-top: 1px solid var(--border);
+	padding: 0.4rem;
+	min-height: 0;
+}
+.av-call-bar {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin-bottom: 0.3rem;
+}
+.av-call-status {
+	font-size: 0.75rem;
+	color: var(--self);
+	font-weight: 600;
+}
+.av-call-actions {
+	display: flex;
+	gap: 0.35rem;
+	margin-left: auto;
+}
+.av-call-action {
+	border: 1px solid var(--border);
+	background: var(--bg);
+	color: var(--fg);
+	border-radius: 0.3rem;
+	padding: 0.2rem 0.45rem;
+	font-size: 0.7rem;
+	cursor: pointer;
+	line-height: 1.2;
+}
+.av-call-action:hover {
+	background: #1a1f28;
+}
+.av-mute-btn.muted {
+	background: var(--error);
+	color: var(--error-content);
+	border-color: var(--error);
+}
+.av-leave-btn {
+	background: var(--error);
+	color: var(--error-content);
+	border-color: var(--error);
+}
+.av-leave-btn:hover {
+	background: oklch(52% 0.22 17.585);
+}
+#av-publish-container {
+	display: none;
+}
+#av-remote-tiles {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.35rem;
+	min-height: 0;
+}
+.av-remote-tile {
+	position: relative;
+	width: 4.5rem;
+	height: 4.5rem;
+	background: #0e1116;
+	border: 1px solid var(--border);
+	border-radius: 0.35rem;
+	overflow: hidden;
+}
+.av-tile-watch {
+	position: absolute;
+	inset: 0;
+}
+.av-tile-avatar {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 1.1rem;
+	font-weight: 700;
+	color: var(--nick-1);
+	text-transform: uppercase;
+}
+.av-tile-label {
+	position: absolute;
+	bottom: 0;
+	left: 0;
+	right: 0;
+	padding: 0.1rem 0.2rem;
+	background: rgba(0, 0, 0, 0.6);
+	color: var(--fg);
+	font-size: 0.6rem;
+	text-align: center;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.av-tile-canvas {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
 }
 
 .brand {

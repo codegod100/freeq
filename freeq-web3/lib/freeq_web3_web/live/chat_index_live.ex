@@ -67,6 +67,14 @@ defmodule FreeqWeb3Web.ChatIndexLive do
     {:noreply, assign(socket, :snap, snap)}
   end
 
+  def handle_info({:auth_changed, auth}, socket) do
+    snap =
+      socket.assigns.snap
+      |> Map.merge(auth)
+
+    {:noreply, assign(socket, :snap, snap)}
+  end
+
   def handle_info(_msg, socket), do: {:noreply, socket}
 
   defp my_channel_entries(channels, all) do
@@ -110,7 +118,14 @@ defmodule FreeqWeb3Web.ChatIndexLive do
         <span class="brand">freeq</span>
         <span class="page-title nav-channel">channels</span>
         <div class="nav-right">
-          <span class="auth-badge guest">guest · {@snap.current_nick || "…"}</span>
+          <%= if @snap[:authenticated?] do %>
+            <span class="auth-badge signed-in" title={@snap[:auth_did]}>
+              🔒 {@snap[:auth_handle] || @snap.current_nick}
+            </span>
+          <% else %>
+            <span class="auth-badge guest">guest · {@snap.current_nick || "…"}</span>
+            <a href={~p"/login"} class="btn-link" style="margin-left:0.5rem">Sign in</a>
+          <% end %>
         </div>
       </nav>
 
@@ -215,9 +230,22 @@ defmodule FreeqWeb3Web.ChatIndexLive do
         </ul>
       </div>
       <div id="user-info">
-        <div class="user-handle guest" id="user-handle">👤 {@snap.current_nick || "guest"}</div>
+        <div
+          class={["user-handle", if(@snap[:authenticated?], do: "signed-in", else: "guest")]}
+          id="user-handle"
+        >
+          👤 {if(@snap[:authenticated?],
+            do: @snap[:auth_handle] || @snap.current_nick,
+            else: @snap.current_nick || "guest"
+          )}
+        </div>
         <div class="user-actions">
           <span class="status-hint">{ws_label(@snap.ws_state)}</span>
+          <%= if @snap[:authenticated?] do %>
+            <a href={~p"/logout"} class="btn-link" data-method="get">Sign out</a>
+          <% else %>
+            <a href={~p"/login"} class="btn-link">Sign in</a>
+          <% end %>
         </div>
       </div>
     </aside>

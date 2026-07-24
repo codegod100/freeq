@@ -606,6 +606,63 @@ defmodule FreeqWeb3.Irc.Render do
     end
   end
 
+  @doc """
+  Parse an AV state broadcast TAGMSG.
+  Returns `{channel, state, session_id, actor, participants, instance, title}` or nil.
+  """
+  def parse_av_state_tagmsg(line) do
+    {tags, after_line} = parse_irc_tags(line)
+
+    if is_nil(tags["+freeq.at/av-state"]) or tags["+freeq.at/av-state"] == "" do
+      nil
+    else
+      rest =
+        if String.starts_with?(after_line, ":"),
+          do: String.slice(after_line, 1..-1//1),
+          else: after_line
+
+      parts = String.split(rest)
+      channel = (Enum.at(parts, 2) || "") |> String.trim_leading(":")
+      participants = String.to_integer(tags["+freeq.at/av-participants"] || "0")
+
+      {
+        canonical_channel(channel),
+        tags["+freeq.at/av-state"],
+        tags["+freeq.at/av-id"],
+        tags["+freeq.at/av-actor"],
+        participants,
+        tags["+freeq.at/av-instance"],
+        tags["+freeq.at/av-title"]
+      }
+    end
+  end
+
+  @doc """
+  Parse an AV token directed TAGMSG. Returns `{session_id, token}` or nil.
+  Only matches when the message target equals `own_nick`.
+  """
+  def parse_av_token_tagmsg(line, own_nick) do
+    {tags, after_line} = parse_irc_tags(line)
+
+    if is_nil(tags["+freeq.at/av-token"]) or tags["+freeq.at/av-token"] == "" do
+      nil
+    else
+      rest =
+        if String.starts_with?(after_line, ":"),
+          do: String.slice(after_line, 1..-1//1),
+          else: after_line
+
+      parts = String.split(rest)
+
+      if String.upcase(to_string(Enum.at(parts, 1))) == "TAGMSG" and
+           nick_matches?(Enum.at(parts, 2) || "", own_nick) do
+        {tags["+freeq.at/av-id"], tags["+freeq.at/av-token"]}
+      else
+        nil
+      end
+    end
+  end
+
   def sanitize_nick(handle) when is_binary(handle) do
     out =
       handle
