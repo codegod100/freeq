@@ -114,3 +114,6 @@ freeq-site/docs/
 freeq-site/.git_commit
 freeq-ios/.build/
 /result
+
+# Erlang crash dumps
+erl_crash.dump
