@@ -31,6 +31,9 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 | `lib/freeq_web3/atproto/*` | DPoP, OAuth, OAuthSession, SASL ATPROTO-CHALLENGE |
 | `lib/freeq_web3/pending_oauth_store.ex` | Disk-backed OAuth state/PKCE for callback recovery |
 | `lib/freeq_web3_web/controllers/sessions_controller.ex` | `/login`, callback, logout, client metadata |
+| `lib/freeq_web3/link_preview.ex` | Server-side previews; downloads images to local cache |
+| `lib/freeq_web3_web/controllers/preview_controller.ex` | Serves `/preview-cache/:id` (same-origin images) |
+| `lib/freeq_web3_web/controllers/api_controller.ex` | BFF: OG proxy, AV control, assets |
 | `assets/css/app.css` | freeq dark theme (ported from web2 layout CSS) |
 
 ## Key decisions
@@ -64,7 +67,8 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 - [ ] Message edit/delete UI
 - [ ] DMs + E2EE key proxy
 - [ ] Voice/video (call controller + MoQ)
-- [ ] Link embeds + upload proxy
+- [x] Link embeds (server-side; local `/preview-cache/*` images, no client OG fetch)
+- [ ] Upload proxy
 - [ ] PWA manifest + service worker
 - [ ] Policy modal
 

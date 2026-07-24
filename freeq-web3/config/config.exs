@@ -14,7 +14,9 @@ config :freeq_web3,
   upstream_rest: "https://irc.freeq.at",
   # Short-lived OAuth state/PKCE store (callback recovery). Override via
   # FREEQ_WEB3_PENDING_OAUTH_DIR.
-  pending_oauth_dir: ".dev-data/web3-pending-oauth"
+  pending_oauth_dir: ".dev-data/web3-pending-oauth",
+  # Server-side link-preview image/meta cache (same-origin /preview-cache/:id).
+  preview_cache_dir: ".dev-data/web3-preview-cache"
 
 # Configure the endpoint
 config :freeq_web3, FreeqWeb3Web.Endpoint,

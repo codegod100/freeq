@@ -3,6 +3,7 @@ defmodule FreeqWeb3Web.ChatLive do
   use FreeqWeb3Web, :live_view
 
   alias FreeqWeb3.Irc.Render
+  alias FreeqWeb3.LinkPreview
   alias FreeqWeb3.Rest
   alias FreeqWeb3.Session
 
@@ -28,8 +29,13 @@ defmodule FreeqWeb3Web.ChatLive do
 
     history =
       case Rest.fetch_history(ch, 50, bearer: snap.api_bearer) do
-        nil -> []
-        rows -> rows
+        nil ->
+          []
+
+        rows ->
+          # Server-side previews: download remote OG/YT images into local
+          # cache so the page only loads same-origin /preview-cache/* URLs.
+          LinkPreview.attach_many(rows, max_concurrency: 4, timeout: 6_000)
       end
 
     members = Session.members(sid, ch)
@@ -77,7 +83,10 @@ defmodule FreeqWeb3Web.ChatLive do
       snap = Session.snapshot(sid)
       all = socket.assigns.all_channels
       topic = topic_for(all, ch)
-      history = Rest.fetch_history(ch, 50, bearer: snap.api_bearer) || []
+      history =
+        (Rest.fetch_history(ch, 50, bearer: snap.api_bearer) || [])
+        |> LinkPreview.attach_many(max_concurrency: 4, timeout: 6_000)
+
       members = Session.members(sid, ch)
 
       {:noreply,
@@ -224,18 +233,33 @@ defmodule FreeqWeb3Web.ChatLive do
 
   @impl true
   def handle_info({:message, row}, socket) do
-    # Edits replace the existing stream item when msgid matches.
-    socket =
-      if row[:msgid] && row.kind == :msg do
-        stream_insert(socket, :messages, row, at: -1)
-      else
-        stream_insert(socket, :messages, row, at: -1)
-      end
+    # Prefer cache-only for the first paint; resolve+download off the LV process.
+    row_fast = LinkPreview.attach_cache_only(row)
 
-    {:noreply,
-     socket
-     |> assign(:message_count, socket.assigns.message_count + 1)
-     |> push_event("scroll_bottom", %{})}
+    socket =
+      socket
+      |> stream_insert(:messages, row_fast, at: -1)
+      |> assign(:message_count, socket.assigns.message_count + 1)
+      |> push_event("scroll_bottom", %{})
+
+    if row_fast.kind == :msg and is_nil(row_fast[:embed]) and is_binary(row_fast[:text]) do
+      lv = self()
+
+      Task.start(fn ->
+        full = LinkPreview.attach(row)
+
+        if full[:embed] do
+          send(lv, {:message_embed, full})
+        end
+      end)
+    end
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:message_embed, row}, socket) do
+    # Update the existing stream row with a fully resolved local preview.
+    {:noreply, stream_insert(socket, :messages, row, at: -1)}
   end
 
   def handle_info({:av_state, %{channel: ch} = av}, socket) do
@@ -408,6 +432,69 @@ defmodule FreeqWeb3Web.ChatLive do
     """
   end
 
+  attr :embed, :map, required: true
+
+  defp link_embed(assigns) do
+    ~H"""
+    <a
+      href={@embed.href}
+      target="_blank"
+      rel="noopener noreferrer"
+      class={[
+        "link-embed",
+        @embed.kind == :youtube && "yt-embed",
+        @embed.kind == :bsky && "bsky-embed"
+      ]}
+      style="grid-column: 2"
+    >
+      <%= if @embed.kind == :bsky && @embed[:bsky] do %>
+        <div class="bsky-author">
+          <%= if @embed.bsky[:avatar_url] do %>
+            <img class="bsky-avatar" src={@embed.bsky.avatar_url} alt="" loading="lazy" />
+          <% else %>
+            <span class="bsky-avatar bsky-avatar-fallback">
+              {String.first(@embed.bsky[:handle] || "?") |> String.upcase()}
+            </span>
+          <% end %>
+          <span class="bsky-name">{@embed.bsky[:display]}</span>
+          <span class="bsky-handle">@{@embed.bsky[:handle]}</span>
+        </div>
+        <div class="bsky-text">{@embed.bsky[:text]}</div>
+        <img
+          :if={@embed[:image_url]}
+          class="link-embed-img"
+          src={@embed.image_url}
+          alt=""
+          loading="lazy"
+        />
+        <div class="bsky-footer">
+          <span>♥ {@embed.bsky[:likes] || 0}</span>
+          <span>↻ {@embed.bsky[:reposts] || 0}</span>
+          <span class="bsky-time">🦋 {@embed.bsky[:time]}</span>
+        </div>
+      <% else %>
+        <img
+          :if={@embed[:image_url]}
+          class={["link-embed-img", @embed.kind == :youtube && "yt-thumb"]}
+          src={@embed.image_url}
+          alt=""
+          loading="lazy"
+        />
+        <div class={["link-embed-body", @embed.kind == :youtube && "yt-footer"]}>
+          <%= if @embed.kind == :youtube do %>
+            <span class="yt-play">▶</span> YouTube
+          <% else %>
+            <div :if={@embed[:site_name]} class="link-embed-site">{@embed.site_name}</div>
+            <div :if={@embed[:title]} class="link-embed-title">{@embed.title}</div>
+            <div :if={@embed[:description]} class="link-embed-desc">{@embed.description}</div>
+            <div :if={@embed[:domain]} class="link-embed-domain">{@embed.domain}</div>
+          <% end %>
+        </div>
+      <% end %>
+    </a>
+    """
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -555,6 +642,7 @@ defmodule FreeqWeb3Web.ChatLive do
             >
               <span class="ts">{format_ts(msg.time)}</span>
               <.message_body msg={msg} />
+              <.link_embed :if={msg[:embed]} embed={msg.embed} />
             </div>
           </div>
 

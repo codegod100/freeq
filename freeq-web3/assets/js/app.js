@@ -26,16 +26,20 @@ import { hooks as colocatedHooks } from "phoenix-colocated/freeq_web3";
 import topbar from "../vendor/topbar";
 import AvCall from "./av_call";
 
+// Link previews are rendered server-side with locally cached images
+// (`/preview-cache/:id`). No client-side OG/image fetch on page load.
 const ChatScroll = {
   mounted() {
-    this.scrollToBottom();
+    // Double rAF so layout (including server-rendered preview cards) settles.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => this.scrollToBottom());
+    });
     this.handleEvent("scroll_bottom", () => this.scrollToBottom());
   },
   updated() {
-    // Keep pinned to bottom when near the end.
     const el = this.el.querySelector("#messages");
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
     if (nearBottom) this.scrollToBottom();
   },
   scrollToBottom() {

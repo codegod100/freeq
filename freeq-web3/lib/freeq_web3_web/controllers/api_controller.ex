@@ -60,6 +60,42 @@ defmodule FreeqWeb3Web.ApiController do
     end
   end
 
+  # GET /api/v1/og?url= — same-origin proxy to freeq-server (SSRF-safe there).
+  # Used by client-side link embeds in the channel message pane.
+  def og_preview(conn, params) do
+    url =
+      (params["url"] || "")
+      |> to_string()
+      # Strip zero-width / bidi paste noise (U+200B..U+200D, FEFF, 2060, soft hyphen).
+      |> String.replace(~r/[\x{200B}-\x{200D}\x{FEFF}\x{2060}\x{00AD}]/u, "")
+      |> String.trim()
+      |> String.trim_leading("<")
+      |> String.trim_trailing(">")
+
+    cond do
+      url == "" ->
+        conn
+        |> put_status(:bad_request)
+        |> json(%{error: "url required"})
+
+      not Regex.match?(~r/\Ahttps?:\/\//i, url) ->
+        conn
+        |> put_status(:bad_request)
+        |> json(%{error: "Invalid URL"})
+
+      true ->
+        case Rest.fetch_og(url) do
+          nil ->
+            conn
+            |> put_status(:bad_gateway)
+            |> json(%{error: "Fetch failed"})
+
+          body when is_map(body) ->
+            json(conn, body)
+        end
+    end
+  end
+
   def av_asset(conn, %{"path" => path}) do
     upstream = FreeqWeb3.upstream_rest()
     url = "#{upstream}/av/assets/#{Enum.join(path, "/")}"

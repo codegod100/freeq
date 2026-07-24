@@ -45,6 +45,10 @@ defmodule FreeqWeb3Web.Router do
     get "/api/v1/channels/:channel/sessions", ApiController, :channel_sessions
     get "/api/v1/sessions/:id", ApiController, :session_detail
     get "/api/v1/av/sessions/:id/token", ApiController, :av_token
+    # OpenGraph metadata proxy (used by server-side LinkPreview; also public).
+    get "/api/v1/og", ApiController, :og_preview
+    # Locally cached preview images (downloaded server-side for page-load).
+    get "/preview-cache/:id", PreviewController, :show
 
     get "/av/assets/*path", ApiController, :av_asset
   end

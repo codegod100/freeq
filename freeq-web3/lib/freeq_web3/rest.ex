@@ -127,6 +127,31 @@ defmodule FreeqWeb3.Rest do
     end
   end
 
+  @doc """
+  GET /api/v1/og?url= — OpenGraph preview (SSRF-safe on freeq-server).
+
+  Returns a map (`title`, `description`, `image`, `site_name`) or `nil`.
+  """
+  def fetch_og(url) when is_binary(url) do
+    encoded = URI.encode_www_form(url)
+    endpoint = FreeqWeb3.upstream_rest() <> "/api/v1/og?url=#{encoded}"
+
+    case Req.get(endpoint, receive_timeout: 10_000, connect_options: [timeout: 5_000]) do
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
+        body
+
+      {:ok, %{status: status, body: body}} ->
+        Logger.info("fetch_og HTTP #{status}: #{inspect(body) |> String.slice(0, 120)}")
+        nil
+
+      {:error, reason} ->
+        Logger.warning("fetch_og failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  def fetch_og(_), do: nil
+
   @doc "GET /api/v1/av/sessions/:id/token"
   def fetch_av_token(session_id, bearer) do
     url =

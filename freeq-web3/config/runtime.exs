@@ -13,6 +13,10 @@ if dir = System.get_env("FREEQ_WEB3_PENDING_OAUTH_DIR") do
   config :freeq_web3, :pending_oauth_dir, dir
 end
 
+if dir = System.get_env("FREEQ_WEB3_PREVIEW_CACHE_DIR") do
+  config :freeq_web3, :preview_cache_dir, dir
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration
