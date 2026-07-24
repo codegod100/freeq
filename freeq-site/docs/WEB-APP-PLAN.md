@@ -176,7 +176,7 @@ Already P0 in TODO. Every message from a DID-authenticated user carries a crypto
 | **Tailwind CSS** | Utility-first, consistent with modern design teams |
 | **Zustand** | Minimal state management, no boilerplate |
 | **IndexedDB (Dexie)** | Local message cache, offline search, read markers |
-| **Separate repo** | `freeq-app/` or `github.com/freeq-irc/freeq-app`. Clean separation from infrastructure |
+| **Separate repo** | `freeq-app/` or `github.com/chad/freeq-app`. Clean separation from infrastructure |
 
 ### 3.2 Connection Layer
 
