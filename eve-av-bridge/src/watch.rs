@@ -207,18 +207,23 @@ fn mkfifo(path: &Path) -> Result<()> {
 /// Shared live/HLS-friendly input flags (single demux).
 fn live_input_args(url: &str) -> Vec<String> {
     [
+        // Required: we pre-create named-pipe outputs; without -y ffmpeg 6.x
+        // refuses ("File already exists") and exits before opening the FIFOs,
+        // which hangs the readers and leaves a black freeq tile.
+        "-y",
         "-hide_banner",
         "-loglevel",
         "error",
-        // Prefer low-latency demux over perfect A/V recovery.
+        // Prefer low-latency demux over perfect A/V recovery. probesize must
+        // still be large enough for stream.place fMP4 init + first segment.
         "-fflags",
         "nobuffer+genpts+discardcorrupt",
         "-flags",
         "low_delay",
         "-probesize",
-        "32768",
+        "5000000",
         "-analyzeduration",
-        "0",
+        "2000000",
         "-reconnect",
         "1",
         "-reconnect_streamed",
@@ -255,31 +260,48 @@ pub fn start_watch(
     let run_dir = std::env::temp_dir().join(format!("eve-watch-{}", uuid::Uuid::new_v4()));
     fs::create_dir_all(&run_dir)
         .with_context(|| format!("create {}", run_dir.display()))?;
-    let video_fifo = run_dir.join("v.rgba");
-    let audio_fifo = run_dir.join("a.f32le");
-    mkfifo(&video_fifo)?;
-    mkfifo(&audio_fifo)?;
 
     let stop_task = stop.clone();
     let run_dir_task = run_dir.clone();
-    let video_fifo_task = video_fifo;
-    let audio_fifo_task = audio_fifo;
 
     let task = tokio::spawn(async move {
         info!(%url, "watch demux (single ffmpeg A+V)");
-        if let Err(e) = run_demux(
-            &ffmpeg,
-            &url,
-            speaker,
-            tile,
-            stop_task,
-            &mut session_alive,
-            &video_fifo_task,
-            &audio_fifo_task,
-        )
-        .await
-        {
-            warn!(error = %e, "watch demux ended");
+        // Restart demux on HLS blips / ffmpeg exit so the tile doesn't stick black.
+        while !stop_task.load(Ordering::Relaxed) && *session_alive.borrow() {
+            let video_fifo = run_dir_task.join("v.rgba");
+            let audio_fifo = run_dir_task.join("a.f32le");
+            let _ = fs::remove_file(&video_fifo);
+            let _ = fs::remove_file(&audio_fifo);
+            if let Err(e) = mkfifo(&video_fifo) {
+                warn!(error = %e, "watch mkfifo video");
+                break;
+            }
+            if let Err(e) = mkfifo(&audio_fifo) {
+                warn!(error = %e, "watch mkfifo audio");
+                break;
+            }
+
+            match run_demux(
+                &ffmpeg,
+                &url,
+                speaker.clone(),
+                tile.clone(),
+                stop_task.clone(),
+                &mut session_alive,
+                &video_fifo,
+                &audio_fifo,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(e) => warn!(error = %e, "watch demux ended"),
+            }
+
+            if stop_task.load(Ordering::Relaxed) || !*session_alive.borrow() {
+                break;
+            }
+            info!("watch demux restart in 1s");
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
         let _ = fs::remove_dir_all(&run_dir_task);
     });
@@ -306,11 +328,16 @@ async fn run_demux(
         "scale={WATCH_W}:{WATCH_H}:force_original_aspect_ratio=decrease,\
 pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
     );
+    let ar = SPEAK_RATE.to_string();
+    let v_out = video_fifo.to_str().context("video fifo utf8")?.to_string();
+    let a_out = audio_fifo.to_str().context("audio fifo utf8")?.to_string();
 
     let mut args = live_input_args(url);
-    // Video → FIFO
+    // Explicit maps: stream.place master has separate audio+video renditions.
     args.extend(
         [
+            "-map",
+            "0:v:0",
             "-an",
             "-vf",
             &vf,
@@ -318,33 +345,27 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
             "rgba",
             "-f",
             "rawvideo",
-            video_fifo.to_str().context("video fifo utf8")?,
-        ]
-        .into_iter()
-        .map(str::to_string),
-    );
-    // Audio → FIFO (same demux)
-    args.extend(
-        [
+            &v_out,
+            "-map",
+            "0:a:0?",
             "-vn",
             "-ac",
             "1",
             "-ar",
-            &SPEAK_RATE.to_string(),
+            &ar,
             "-f",
             "f32le",
-            audio_fifo.to_str().context("audio fifo utf8")?,
+            &a_out,
         ]
         .into_iter()
         .map(str::to_string),
     );
 
-    // Open FIFOs in parallel *before* ffmpeg writers fully attach.
-    // Blocking open waits for the peer; spawn_blocking avoids stalling the runtime.
+    // Open FIFOs in parallel with ffmpeg writers. Without a writer peer the
+    // blocking open hangs forever — time out and surface the failure.
     let v_path = video_fifo.to_path_buf();
     let a_path = audio_fifo.to_path_buf();
     let open_v = tokio::task::spawn_blocking(move || {
-        // O_RDONLY; optional nonblock then clear — plain open is fine with peer spawn.
         fs::OpenOptions::new().read(true).open(v_path)
     });
     let open_a = tokio::task::spawn_blocking(move || {
@@ -360,20 +381,36 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
         .spawn()
         .with_context(|| format!("spawn {ffmpeg} watch demux"))?;
 
-    let v_std = open_v
-        .await
-        .context("join video fifo open")?
-        .context("open video fifo")?;
-    let a_std = open_a
-        .await
-        .context("join audio fifo open")?
-        .context("open audio fifo")?;
+    let open_timeout = Duration::from_secs(20);
+    let (v_std, a_std) = match tokio::time::timeout(open_timeout, async {
+        let v = open_v.await.context("join video fifo open")??;
+        let a = open_a.await.context("join audio fifo open")??;
+        Ok::<_, anyhow::Error>((v, a))
+    })
+    .await
+    {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => {
+            let _ = child.kill().await;
+            let err = drain_stderr(&mut child).await;
+            bail!("open watch fifos: {e}{err}");
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let err = drain_stderr(&mut child).await;
+            bail!("timeout opening watch fifos (ffmpeg never attached){err}");
+        }
+    };
 
     let mut v_reader = tokio::fs::File::from_std(v_std);
     let mut a_reader = tokio::fs::File::from_std(a_std);
 
-    let stop_a = stop.clone();
-    let stop_v = stop.clone();
+    // Pumps use a local stop so a single demux exit doesn't mark the whole
+    // watch handle stopped (outer loop restarts demux).
+    let demux_stop = Arc::new(AtomicBool::new(false));
+    let stop_a = demux_stop.clone();
+    let stop_v = demux_stop.clone();
+    let global_stop = stop.clone();
     let mut alive_a = session_alive.clone();
     let mut alive_v = session_alive.clone();
     let tile_v = tile;
@@ -391,7 +428,7 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
 
     // Tear down when either pump ends, session dies, or stop is requested.
     loop {
-        if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
+        if global_stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
             break;
         }
         if audio.is_finished() || video.is_finished() {
@@ -407,11 +444,29 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
         }
     }
 
-    stop.store(true, Ordering::Relaxed);
+    demux_stop.store(true, Ordering::Relaxed);
     let _ = child.kill().await;
+    let stderr = drain_stderr(&mut child).await;
     let _ = audio.await;
     let _ = video.await;
+    if !stderr.is_empty() {
+        warn!(%stderr, "watch ffmpeg stderr");
+    }
     Ok(())
+}
+
+async fn drain_stderr(child: &mut tokio::process::Child) -> String {
+    let Some(mut err) = child.stderr.take() else {
+        return String::new();
+    };
+    let mut buf = Vec::new();
+    let _ = tokio::io::AsyncReadExt::read_to_end(&mut err, &mut buf).await;
+    let s = String::from_utf8_lossy(&buf).trim().to_string();
+    if s.is_empty() {
+        String::new()
+    } else {
+        format!("; ffmpeg: {}", s.chars().take(400).collect::<String>())
+    }
 }
 
 async fn pump_audio(
