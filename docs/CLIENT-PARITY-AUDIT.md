@@ -33,7 +33,7 @@ considered call.
 | away-notify | ✅ | ✅ | ✅ | |
 | Read markers (draft/read-marker) | ⚠️ | ⚠️ | ⚠️ | stored server-side; minimal "new" UI everywhere |
 | Signed-message badge | ✅ | ✅ | ✅ | verified in the staged shots |
-| Multi-message block copy → clean transcript | ❌ | ✅ | ❌ | **macOS-only** (shipped 2026-07-23) |
+| Multi-message block copy → clean transcript | ✅ | ✅ | — | ✅ **web shipped 2026-07-24** (≥2-row selection → clean copy); iOS skipped (mobile multi-select is a larger, less-natural UX) |
 
 ### Identity & trust
 | Feature | Web | macOS | iOS | Notes |
@@ -70,9 +70,9 @@ considered call.
 | On-device smart replies | ❌ | ❌ | ✅ | **iOS-only** (`IntelligenceService`) |
 | Catch-up digest | ❌ | ❌ | ✅ | **iOS-only** (`CatchUpDigestSheet`) |
 | Voice messages + transcription | ⚠️ | ✅ | ✅ | iOS deepest; web is basically `AudioTest` only |
-| Sound design | ⚠️ | ✅ | ✅ | web is thin |
+| Sound design | ✅ | ✅ | ✅ | ✅ **web upgraded 2026-07-24** — distinct DM/mention/message tones |
 | Onboarding flow | ✅ | ✅ | ✅ | ✅ **iOS shipped 2026-07-24** (first-run sheet, on-pitch) |
-| Jumbomoji (≤3 emoji → large) | ❌ | ❌ | ❌ | **nobody** — designed in DESIGN doc, unbuilt |
+| Jumbomoji (≤3 emoji → large) | ✅ | ✅ | ✅ | ✅ **all shipped 2026-07-24** — shared 1–3 emoji policy |
 
 ### Platform-native reach
 | Feature | Web | macOS | iOS | Notes |
@@ -179,16 +179,29 @@ arrives on every client).
 3. **AV parity (P1) — NOT STARTED.** grid auto-layout to web/iOS;
    click-to-focus everywhere; camera effects to web/iOS. *Do these against a
    live multi-participant call — high-gamma AV, verify don't guess.*
-4. **Delight pass (P2) — NOT STARTED.** jumbomoji + reaction morphs in a
-   shared policy; smart-replies/catch-up to macOS; block-copy to web/iOS;
-   sound on web.
+4. **Delight pass (P2) — PARTLY DONE (2026-07-24).** ✅ jumbomoji (all 3),
+   ✅ block-copy to web, ✅ distinct notification sounds on web. Remaining:
+   reaction morphs; smart-replies/catch-up → macOS (needs the on-device
+   model port — do deliberately).
 
-### Landed this run
-- P0 coordination cards: FFI `CoordinationEvent`, macOS + iOS renderers
-  (7 card tests each + 3 FFI mapping tests).
-- iOS channel E2EE (32 ported crypto tests), bookmarks, join-gate
-  (3 tests), onboarding. iOS core tests 55 → 90.
-- All builds green; verified iOS onboarding + cards render in the simulator.
+### Landed across this work (2026-07-24)
+- **P0 coordination cards:** FFI `CoordinationEvent`, macOS + iOS renderers
+  (7 card tests each + 3 FFI mapping tests). *Needs prod server redeploy for
+  replayed events to carry the tags.*
+- **iOS parity sprint:** channel E2EE (32 crypto tests), bookmarks, join-gate
+  (3 tests), onboarding, slash-command expansion. iOS core tests 55 → 90.
+- **Delight:** jumbomoji on all 3 (6 tests each), web clean block-copy
+  (5 tests), distinct web notification sounds (4 tests).
+- All builds green (web tsc + 768 vitest; macOS 464 core; iOS 90 core);
+  verified iOS onboarding + cards render in the simulator.
+
+### Still open (needs deliberate / live work)
+- **AV parity (P1):** grid auto-layout → web/iOS; click-to-focus → all;
+  camera effects → web/iOS. **Do against a live multi-participant call.**
+- **Smart-replies / catch-up → macOS:** requires porting the iOS on-device
+  IntelligenceService; sizable, do deliberately.
+- **iOS scroll-to-message** (bookmarks/search jump lands on the channel, not
+  the exact row) and continued iOS test-coverage growth.
 
 Each item above wants tests first on the high-gamma files (per `AGENTS.md`),
 especially anything touching `store.ts`, `MessageList.tsx`, `AppState`, and
