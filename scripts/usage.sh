@@ -5,6 +5,16 @@
 # content) plus optional journald connection events. Safe to run against a
 # live server.
 #
+# COUNTING NOTE (important): `messages.sender` is a full IRC hostmask,
+# `nick!user@freeq/<class>/<prefix>`. Counting DISTINCT sender massively
+# OVERCOUNTS people, because the same human appears once per device/session
+# (web, macOS, iOS) and every guest reconnect mints a fresh nick. This script
+# dedupes by the auth suffix (the DID prefix), and reports identity classes
+# separately:
+#   freeq/plc/<x>  = authenticated human (Bluesky did:plc)  <- the real count
+#   freeq/key/<x>  = agent/bot (locally-minted did:key)
+#   freeq/guest    = throwaway, inherently uncountable (no stable identity)
+#
 #   On the server:   ./scripts/usage.sh
 #   From your box:    ssh chad@tech.blueyard.com 'cd src/freeq && ./scripts/usage.sh'
 #
@@ -35,13 +45,41 @@ UNION ALL SELECT 'talkers 24h', count(DISTINCT sender) FROM messages WHERE times
 UNION ALL SELECT 'talkers 7d',  count(DISTINCT sender) FROM messages WHERE timestamp > strftime('%s','now')-604800
 UNION ALL SELECT 'active chans 7d', count(DISTINCT channel) FROM messages WHERE timestamp > strftime('%s','now')-604800;
 .print ''
-.print '=== per day (activity) ==='
-SELECT date(timestamp,'unixepoch') day, count(*) msgs, count(DISTINCT sender) people
+.print '=== 7d by identity class (deduped by DID prefix) ==='
+SELECT
+  CASE
+    WHEN sender LIKE '%@freeq/plc/%' THEN '1 authenticated human (did:plc)'
+    WHEN sender LIKE '%@freeq/key/%' THEN '2 agent/bot (did:key)'
+    WHEN sender LIKE '%@freeq/guest' THEN '3 guest (throwaway, uncountable)'
+    ELSE '4 bare/legacy sender'
+  END AS class,
+  count(DISTINCT CASE WHEN sender LIKE '%@%'
+                      THEN substr(sender, instr(sender,'@')+1)
+                      ELSE sender END) AS identities,
+  count(*) AS msgs
+FROM messages WHERE timestamp > strftime('%s','now')-604800
+GROUP BY class ORDER BY class;
+.print ''
+.print '=== the actual authenticated humans, 7d (one row per person) ==='
+SELECT substr(sender, instr(sender,'@')+1) AS did_prefix,
+       min(substr(sender,1,instr(sender,'!')-1)) AS nick,
+       count(*) msgs, count(DISTINCT channel) chans,
+       count(DISTINCT substr(sender,1,instr(sender,'!')-1)) AS nicks_used
+FROM messages
+WHERE timestamp > strftime('%s','now')-604800 AND sender LIKE '%@freeq/plc/%'
+GROUP BY did_prefix ORDER BY msgs DESC;
+.print ''
+.print '=== per day (activity; people = deduped identities) ==='
+SELECT date(timestamp,'unixepoch') day, count(*) msgs,
+       count(DISTINCT CASE WHEN sender LIKE '%@%'
+                           THEN substr(sender, instr(sender,'@')+1)
+                           ELSE sender END) people
 FROM messages WHERE timestamp > strftime('%s','now')-${SECS} GROUP BY day ORDER BY day;
 .print ''
-.print '=== NEW arrivals per day (first-ever message) ==='
-SELECT date(first,'unixepoch') day, count(*) new_people FROM
- (SELECT sender, min(timestamp) first FROM messages GROUP BY sender)
+.print '=== NEW authenticated humans per day (first-ever message, by DID) ==='
+SELECT date(first,'unixepoch') day, count(*) new_humans FROM
+ (SELECT substr(sender, instr(sender,'@')+1) AS ident, min(timestamp) first
+  FROM messages WHERE sender LIKE '%@freeq/plc/%' GROUP BY ident)
  WHERE first > strftime('%s','now')-${SECS} GROUP BY day ORDER BY day;
 .print ''
 .print '=== top channels 7d (dm:* are E2EE — counts only) ==='
