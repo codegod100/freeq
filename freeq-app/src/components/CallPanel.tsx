@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '../store';
+import { gridTileSize } from '../lib/call-grid';
 import { getAvInstanceId, getClient, joinAvSession, leaveAvSession } from '../irc/client';
 import { loadMoqComponents } from '../lib/moq-loader';
 import { broadcastName, computeParticipantSlots } from '../lib/av-mesh';
@@ -738,11 +739,35 @@ export function CallPanel() {
     if (channel && sessionId) leaveAvSession(channel, sessionId);
   };
 
+  // Meet/Zoom-style auto-layout: measure the grid and size every tile so the
+  // whole gallery fits with no scrolling (fullscreen, no screen-share). The
+  // math is the shared CallGridLayout policy (parity with macOS/iOS). Hooks
+  // must precede the early return below (rules of hooks).
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [gridSize, setGridSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el || !fullscreen) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r) setGridSize({ w: r.width, h: r.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fullscreen]);
+
   if (!avAudioActive || !sessionId) return null;
 
   const participantCount = (session?.participants.size || 0);
   const showVideoGrid = avCameraOn || participantSlots.length > 0;
   const anyScreen = avScreenShareOn || liveScreens.size > 0;
+  const gridTotal = 1 + participantSlots.length; // local + remotes
+  const autoTile = fullscreen && !anyScreen && gridSize.w > 0
+    ? gridTileSize(gridTotal, gridSize.w, gridSize.h, 16)
+    : null;
+  const autoTileStyle = autoTile
+    ? { width: autoTile.width, height: autoTile.height }
+    : undefined;
   const authDid = useStore.getState().authDid;
   const myAvatar = authDid ? getCachedProfile(authDid)?.avatar : null;
 
@@ -794,14 +819,18 @@ export function CallPanel() {
       {/* Video grid — shown when camera is on or participants exist */}
       {showVideoGrid && (
         <div
+          ref={gridRef}
           className={
             fullscreen
-              ? 'flex-1 flex flex-wrap gap-4 p-4 justify-center items-center content-center overflow-y-auto'
+              ? `flex-1 flex flex-wrap gap-4 p-4 justify-center items-center content-center ${autoTile ? 'overflow-hidden' : 'overflow-y-auto'}`
               : 'flex flex-wrap gap-2 p-2 justify-center max-h-64 overflow-y-auto'
           }
         >
           {/* Local tile */}
-          <div className={tileClasses(fullscreen)}>
+          <div
+            className={autoTileStyle ? AUTO_TILE_CLASS : tileClasses(fullscreen)}
+            style={autoTileStyle}
+          >
             {avCameraOn ? (
               <video
                 ref={localVideoRef}
@@ -829,6 +858,7 @@ export function CallPanel() {
               slot={slot}
               moqOrigin={moqUrl}
               fullscreen={fullscreen}
+              tileStyle={autoTileStyle}
             />
           ))}
         </div>
@@ -966,6 +996,11 @@ type Slot = { nick: string; broadcastKey: string; broadcastName: string };
 /// as a fallback when the participant hasn't enabled their camera.
 /// Tile sizing — tiny thumbnails inline, large 16:9 tiles in full
 /// screen (16:9 so eliza's video isn't cropped).
+// Tile chrome with no fixed size — used when the auto-layout supplies an
+// explicit width/height via style (Meet/Zoom-style gallery).
+const AUTO_TILE_CLASS =
+  'relative aspect-video rounded-xl overflow-hidden bg-bg-tertiary flex-shrink-0';
+
 function tileClasses(fullscreen: boolean): string {
   return fullscreen
     ? 'relative w-[42vw] max-w-[820px] min-w-[280px] aspect-video rounded-xl overflow-hidden bg-bg-tertiary flex-shrink-0'
@@ -1076,10 +1111,12 @@ function RemoteTile({
   slot,
   moqOrigin,
   fullscreen,
+  tileStyle,
 }: {
   slot: Slot;
   moqOrigin: string;
   fullscreen: boolean;
+  tileStyle?: React.CSSProperties;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const profile = getCachedProfile(slot.nick);
@@ -1124,7 +1161,10 @@ function RemoteTile({
   }, [slot.broadcastName, moqOrigin]);
 
   return (
-    <div className={tileClasses(fullscreen)}>
+    <div
+      className={tileStyle ? AUTO_TILE_CLASS : tileClasses(fullscreen)}
+      style={tileStyle}
+    >
       <AvatarTile name={slot.nick} avatarUrl={profile?.avatar} />
       <div ref={mountRef} className="absolute inset-0" />
       <span className="absolute bottom-1 left-1 text-[10px] bg-black/60 text-white px-1 rounded z-10">
