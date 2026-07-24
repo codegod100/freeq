@@ -1184,6 +1184,35 @@ body {
     min-width: 0;
     flex: 0 1 auto;
 }
+#channel-topic.editable {
+    cursor: pointer;
+    border-radius: 0.2rem;
+    padding: 0 0.15rem;
+}
+#channel-topic.editable:hover {
+    color: #7ab7ff;
+    background: rgba(122, 183, 255, 0.08);
+}
+#topic-form {
+    flex: 0 1 40%;
+    min-width: 6rem;
+    max-width: 50%;
+    margin: 0;
+}
+#topic-form input {
+    width: 100%;
+    font-size: 0.65rem;
+    line-height: 1.2;
+    padding: 0.15rem 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    background: #151a22;
+    color: var(--fg);
+    outline: none;
+}
+#topic-form input:focus {
+    border-color: #7ab7ff;
+}
 .nav-channel-meta .av-call-btn {
     flex-shrink: 0;
     margin-left: 0.1rem;
@@ -1467,7 +1496,8 @@ body {
     #freeq-chat > nav .brand {
         display: none;
     }
-    #channel-topic {
+    #channel-topic,
+    #topic-form {
         display: none !important;
     }
     /* ≥16px avoids iOS focus-zoom which fights visualViewport sizing. */

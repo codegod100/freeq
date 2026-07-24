@@ -32,6 +32,7 @@ defmodule FreeqWeb3Web.ChatLive do
       |> assign(:bare, "")
       |> assign(:snap, snap)
       |> assign(:topic, "")
+      |> assign(:editing_topic, false)
       |> assign(:all_channels, all)
       |> assign(:my_channels, my)
       |> assign(:members, %{})
@@ -142,14 +143,36 @@ defmodule FreeqWeb3Web.ChatLive do
     end
   end
 
+  def handle_event("edit_topic", _params, socket) do
+    if can_edit_topic?(socket.assigns.members, socket.assigns.snap) do
+      {:noreply, assign(socket, :editing_topic, true)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  def handle_event("cancel_topic_edit", _params, socket) do
+    {:noreply, assign(socket, :editing_topic, false)}
+  end
+
   def handle_event("set_topic", %{"topic" => topic}, socket) do
     ch = socket.assigns.channel
+    topic = topic |> to_string() |> String.trim()
 
-    if ch in [nil, ""] do
-      {:noreply, socket}
-    else
-      Session.set_topic(socket.assigns.freeq_session, ch, topic)
-      {:noreply, assign(socket, :topic, topic)}
+    cond do
+      ch in [nil, ""] ->
+        {:noreply, socket}
+
+      not can_edit_topic?(socket.assigns.members, socket.assigns.snap) ->
+        {:noreply, assign(socket, :editing_topic, false)}
+
+      true ->
+        Session.set_topic(socket.assigns.freeq_session, ch, topic)
+
+        {:noreply,
+         socket
+         |> assign(:topic, topic)
+         |> assign(:editing_topic, false)}
     end
   end
 
@@ -681,6 +704,27 @@ defmodule FreeqWeb3Web.ChatLive do
     end
   end
 
+  # Channel +o (and half-op) can set topic when +t is on; server enforces 482.
+  defp can_edit_topic?(members, snap) when is_map(members) do
+    nick = to_string(snap[:current_nick] || "")
+    if nick == "" do
+      false
+    else
+      entry =
+        Enum.find_value(members, fn {k, v} ->
+          if String.downcase(to_string(k)) == String.downcase(nick), do: v
+        end)
+
+      case entry do
+        %{op: true} -> true
+        %{halfop: true} -> true
+        _ -> false
+      end
+    end
+  end
+
+  defp can_edit_topic?(_, _), do: false
+
   defp member_list(members) do
     members
     |> Map.values()
@@ -721,6 +765,7 @@ defmodule FreeqWeb3Web.ChatLive do
     |> assign(:channel, nil)
     |> assign(:bare, "")
     |> assign(:topic, "")
+    |> assign(:editing_topic, false)
     |> assign(:snap, snap)
     |> assign(:all_channels, all)
     |> assign(:my_channels, my_channel_entries(snap.channels, all))
@@ -776,6 +821,7 @@ defmodule FreeqWeb3Web.ChatLive do
     |> assign(:bare, bare)
     |> assign(:snap, snap)
     |> assign(:topic, topic)
+    |> assign(:editing_topic, false)
     |> assign(:all_channels, all)
     |> assign(:my_channels, my_channel_entries(snap.channels, all))
     |> assign(:members, members)
@@ -1295,7 +1341,36 @@ defmodule FreeqWeb3Web.ChatLive do
             <span class="nav-channel page-title">channels</span>
           <% else %>
             <span class="nav-channel">{@channel}</span>
-            <span id="channel-topic" title="Channel topic">{@topic || "add topic"}</span>
+            <%= if @editing_topic do %>
+              <form id="topic-form" phx-submit="set_topic">
+                <input
+                  id="topic-input"
+                  type="text"
+                  name="topic"
+                  value={@topic}
+                  placeholder="Set topic… (Enter to save, Esc to cancel)"
+                  autocomplete="off"
+                  maxlength="390"
+                  phx-keydown="cancel_topic_edit"
+                  phx-key="Escape"
+                  phx-mounted={JS.focus()}
+                />
+              </form>
+            <% else %>
+              <span
+                id="channel-topic"
+                class={if(can_edit_topic?(@members, @snap), do: "editable")}
+                title={
+                  if(can_edit_topic?(@members, @snap),
+                    do: "Click to edit topic",
+                    else: "Channel topic"
+                  )
+                }
+                phx-click={if(can_edit_topic?(@members, @snap), do: "edit_topic")}
+              >
+                {if(@topic not in [nil, ""], do: @topic, else: "add topic")}
+              </span>
+            <% end %>
           <% end %>
           <button
             :if={@view == :channel or @av_active}
