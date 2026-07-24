@@ -56,6 +56,7 @@
 		6B98C423EE9A7D82D1973063 /* NetworkMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5DDE25216F85C26CCEE21C66 /* NetworkMonitor.swift */; };
 		6CF94674DE60637F09B1C0B1 /* freeqWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 59139B7746A5521BDD375C83 /* freeqWatchApp.swift */; };
 		6D8E851C233BB10642BA1220 /* StatusEditorSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 908FF04F8C100160DE7BABD5 /* StatusEditorSheet.swift */; };
+		6FB6DD8819D5E4D9BDC18BA5 /* CallLayoutPolicies.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D130A54164E29335DD58872 /* CallLayoutPolicies.swift */; };
 		6FCCCE776FF655CBB045B733 /* LinkPreview.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A59A5F928CAB65BE2BEF71E /* LinkPreview.swift */; };
 		73B0EF11CF92FDC4CFCACA72 /* ChannelE2eeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6283782A8FA9C9B10BEE7C3E /* ChannelE2eeState.swift */; };
 		74F15A4EE7F80408B8A358C7 /* ImageLightbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DE07EAC6B16A20177585C57 /* ImageLightbox.swift */; };
@@ -165,6 +166,7 @@
 		03FEC306B6E024D2BBF561BE /* SharedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStore.swift; sourceTree = "<group>"; };
 		09AFFD5DE516371B6CC31172 /* AudioTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioTestView.swift; sourceTree = "<group>"; };
 		0CFEA027394A64C46A1780F5 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
+		0D130A54164E29335DD58872 /* CallLayoutPolicies.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallLayoutPolicies.swift; sourceTree = "<group>"; };
 		0F2B162069D9FEB43A008621 /* JoinChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinChannelSheet.swift; sourceTree = "<group>"; };
 		13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPayloads.swift; sourceTree = "<group>"; };
 		1553940F560E15659B1C240D /* Jumbomoji.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Jumbomoji.swift; sourceTree = "<group>"; };
@@ -433,6 +435,7 @@
 				6A89F3346DBDAF7DC582C4DE /* BufferNavigation.swift */,
 				78CD9FF3B40DF51F4177AA84 /* CallCameraCapture.swift */,
 				81C362339EDE04DE16E1064E /* CallKitManager.swift */,
+				0D130A54164E29335DD58872 /* CallLayoutPolicies.swift */,
 				17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */,
 				B911F97D1975D8B4F98A4647 /* ChannelAccessNotice.swift */,
 				D7F95757B1DFF9633B574E18 /* ChannelCrypto.swift */,
@@ -732,6 +735,7 @@
 				ECAFF392124C53BB4F56182B /* CallCameraCapture.swift in Sources */,
 				3388DF50A1619B493BB018C1 /* CallControlIntents.swift in Sources */,
 				FACB4B51AB62E6D09EB8121A /* CallKitManager.swift in Sources */,
+				6FB6DD8819D5E4D9BDC18BA5 /* CallLayoutPolicies.swift in Sources */,
 				B851BB1F9C23ED67884D5621 /* CallMicCapture.swift in Sources */,
 				0D90DB6A860ED297CC10A2CF /* CallView.swift in Sources */,
 				160583C1C4A46B49DB909D79 /* CatchUpDigestSheet.swift in Sources */,

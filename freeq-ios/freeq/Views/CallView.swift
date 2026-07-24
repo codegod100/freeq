@@ -118,21 +118,44 @@ struct CallView: View {
         }
     }
 
-    /// Full-screen layout — every tile fills the screen, stacked
-    /// vertically, so the call is big enough to actually use on a phone.
+    /// Full-screen layout. Screen shares get top billing (stacked); the
+    /// camera tiles below auto-arrange into a Meet/Zoom-style grid whose
+    /// column count + tile size come from the shared `CallGridLayout` policy
+    /// (parity with web + macOS), so 1→~30 people all fit with no scrolling.
     private var expandedGrid: some View {
-        VStack(spacing: 6) {
-            // Screen shares get top billing — they're the reason you expand.
-            ForEach(screenSharers, id: \.self) { nick in
-                expandedScreenTile(nick: nick)
+        GeometryReader { geo in
+            let shares = screenSharers
+            // Camera tiles: every remote participant + the local tile.
+            let camNicks = appState.callParticipants + [appState.currentNick ?? "You"]
+            // Reserve the top ~55% for a screen share when present.
+            let shareH = shares.isEmpty ? 0 : geo.size.height * 0.55
+            let gridH = geo.size.height - shareH
+            let tile = CallGridLayout.tileSize(
+                for: camNicks.count,
+                in: CGSize(width: geo.size.width - 16, height: max(1, gridH - 16)),
+                spacing: 6)
+            let cols = CallGridLayout.columns(
+                for: camNicks.count,
+                in: CGSize(width: geo.size.width - 16, height: max(1, gridH - 16)))
+            let columns = Array(repeating: GridItem(.fixed(tile.width), spacing: 6), count: max(1, cols))
+
+            VStack(spacing: 6) {
+                ForEach(shares, id: \.self) { nick in
+                    expandedScreenTile(nick: nick)
+                        .frame(height: shareH - 6)
+                }
+                LazyVGrid(columns: columns, spacing: 6) {
+                    ForEach(camNicks, id: \.self) { nick in
+                        expandedTile(nick: nick, isLocal: nick == (appState.currentNick ?? "You"))
+                            .frame(width: tile.width, height: tile.height)
+                    }
+                }
+                .frame(maxWidth: .infinity)
+                Spacer(minLength: 0)
             }
-            ForEach(appState.callParticipants, id: \.self) { nick in
-                expandedTile(nick: nick, isLocal: false)
-            }
-            expandedTile(nick: appState.currentNick ?? "You", isLocal: true)
+            .padding(8)
+            .frame(width: geo.size.width, height: geo.size.height)
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// One large letterboxed screen-share tile in the expanded layout.
