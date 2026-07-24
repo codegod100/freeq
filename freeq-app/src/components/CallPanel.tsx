@@ -745,6 +745,10 @@ export function CallPanel() {
   // must precede the early return below (rules of hooks).
   const gridRef = useRef<HTMLDivElement>(null);
   const [gridSize, setGridSize] = useState({ w: 0, h: 0 });
+  // Click-to-focus: 'local' | remote broadcastKey | null. Clicking a tile
+  // spotlights it (fills the grid); others drop to a strip. Click again to
+  // return to the auto-grid.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
   useEffect(() => {
     const el = gridRef.current;
     if (!el || !fullscreen) return;
@@ -768,6 +772,21 @@ export function CallPanel() {
   const autoTileStyle = autoTile
     ? { width: autoTile.width, height: autoTile.height }
     : undefined;
+
+  // Per-tile style under click-to-focus: the focused tile fills the row, the
+  // rest shrink to a strip (CSS `order` moves the focused one first, so no
+  // video element is duplicated). Falls back to the auto-grid style.
+  const focusActive = fullscreen && focusedKey != null && gridSize.w > 0;
+  const tileStyleFor = (key: string): React.CSSProperties | undefined => {
+    if (focusActive) {
+      return key === focusedKey
+        ? { width: '100%', height: Math.max(120, gridSize.h - 150), order: -1 }
+        : { width: 168, height: 94, order: 0, flex: '0 0 auto' };
+    }
+    return autoTileStyle;
+  };
+  const toggleFocus = (key: string) =>
+    setFocusedKey((cur) => (cur === key ? null : key));
   const authDid = useStore.getState().authDid;
   const myAvatar = authDid ? getCachedProfile(authDid)?.avatar : null;
 
@@ -828,8 +847,9 @@ export function CallPanel() {
         >
           {/* Local tile */}
           <div
-            className={autoTileStyle ? AUTO_TILE_CLASS : tileClasses(fullscreen)}
-            style={autoTileStyle}
+            className={(focusActive || autoTileStyle) ? AUTO_TILE_CLASS + ' cursor-pointer' : tileClasses(fullscreen) + (fullscreen ? ' cursor-pointer' : '')}
+            style={tileStyleFor('local')}
+            onClick={fullscreen ? () => toggleFocus('local') : undefined}
           >
             {avCameraOn ? (
               <video
@@ -858,7 +878,8 @@ export function CallPanel() {
               slot={slot}
               moqOrigin={moqUrl}
               fullscreen={fullscreen}
-              tileStyle={autoTileStyle}
+              tileStyle={tileStyleFor(slot.broadcastKey)}
+              onClick={fullscreen ? () => toggleFocus(slot.broadcastKey) : undefined}
             />
           ))}
         </div>
@@ -1112,11 +1133,13 @@ function RemoteTile({
   moqOrigin,
   fullscreen,
   tileStyle,
+  onClick,
 }: {
   slot: Slot;
   moqOrigin: string;
   fullscreen: boolean;
   tileStyle?: React.CSSProperties;
+  onClick?: () => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const profile = getCachedProfile(slot.nick);
@@ -1162,8 +1185,9 @@ function RemoteTile({
 
   return (
     <div
-      className={tileStyle ? AUTO_TILE_CLASS : tileClasses(fullscreen)}
+      className={(tileStyle ? AUTO_TILE_CLASS : tileClasses(fullscreen)) + (onClick ? ' cursor-pointer' : '')}
       style={tileStyle}
+      onClick={onClick}
     >
       <AvatarTile name={slot.nick} avatarUrl={profile?.avatar} />
       <div ref={mountRef} className="absolute inset-0" />
