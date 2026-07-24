@@ -14,6 +14,17 @@ the thing*, then show why it can be trusted.
 > protocol substrate, and ends as the place where signed human and agent
 > intent causes regenerable systems to exist.
 
+**The freeq ↔ Phoenix relationship (the endgame the arc earns):** the book
+*Regenerative Software* ("Phoenix" — aicoding.leaflet.pub) argues the durable
+asset is the **system**, not the code, and that implementations are regenerated
+from four primitives — **specification, evaluation, context boundary,
+provenance** — with **provenance replacing version control**. The book names an
+unsolved problem: *nobody has built the general-purpose provenance layer yet.*
+freeq is a candidate for exactly that layer — the persistent, addressable,
+identity-bound, policy-governed room where signed human + agent intent becomes
+durable provenance. The campaign should make that inevitable by week 12, not
+staple it on.
+
 **It is one launch, not twelve posts.** Same persistent world, identities,
 agents, rooms, and servers throughout. Each week adds a capability to the
 environment the reader has already met:
@@ -249,25 +260,43 @@ views are secondary.
 - **Channel:** lobste.rs + Bluesky; co-promote with iroh & Automerge.
 
 ### 12. "Conversation is the commit." — *field notes (capstone)*
-- **Job:** the payoff that reveals what freeq is *for*, and the honest bridge to
-  Phoenix. Demonstrate a complete causal chain, all signed and in-room:
+- **Job:** the payoff that reveals what freeq is *for*, and the earned bridge
+  to **Regenerative Software** (the "Phoenix" book — aicoding.leaflet.pub;
+  drafts in `../writing/books/the-phoenix-architecture`). Demonstrate one
+  complete causal chain, all signed and in-room:
   ```
   human intent → signed request → governed agent act → agent→agent handoff
     → generated/modified system → provenance manifest → evaluation result
     → deployment observation → signed result returned to the room
   ```
   Then show pause, resume, revoke, expiration, replacement.
-- **The message:** not "agents can coordinate in chat," but that **conversation
-  becomes a durable, signed, causally-connected part of a system's construction
-  and operation.** freeq is the coordination + provenance substrate where human
-  and machine intent is preserved; Phoenix is the regenerative execution
-  architecture that can compile/regenerate implementations from that substrate.
-- **Honesty note:** demonstrate what's real today (signed act cards —
-  JCS-canonical, cross-SDK vectors; governance verbs; provenance; heartbeats)
-  and frame the Phoenix regeneration step as the direction, clearly marked as
-  vision where it isn't yet runnable. **Ground the Phoenix specifics before
-  drafting.**
-- **Channel:** HN + lobste.rs.
+- **The bridge, in the book's own terms.** Regenerative Software says the
+  durable asset is the *system*, not the code; implementations are disposable
+  and regenerated from four primitives — **specification, evaluation, context
+  boundary, provenance** — via the **regeneration control loop** (intent → spec
+  → generation → evaluation → deployment → compaction), and **provenance
+  replaces version control** (causation, not diffs). The book's open problem is
+  stated plainly in *The Regenerative Primitives*: *nobody has built the
+  general-purpose provenance layer yet — teams are stitching it together with
+  baling wire.* **freeq is a candidate for that layer.** A signed freeq
+  conversation *is* provenance at the level of intent: who asked for what, which
+  agent acted, which evaluation validated it, what triggered the regeneration —
+  addressable, verifiable, and independent of any relay. "Conversation is the
+  commit" because in a world where code is generated, the durable record isn't
+  the diff — it's the signed intent that caused the regeneration, and that's
+  what freeq preserves. **Manual edits that bypass the room are provenance
+  debt.**
+- **The claim (one line):** freeq is the coordination + provenance substrate
+  where signed human and machine intent is preserved; Regenerative Software is
+  the architecture that regenerates implementations from it.
+- **Honesty note (keep it checkable):** *demonstrate* what's runnable in freeq
+  today — signed `act` cards (JCS-canonical, cross-SDK test vectors),
+  governance verbs, provenance manifests, heartbeats — and the causal chain
+  through evaluation + deployment *observation posted back to the room*. Mark
+  the full compile-from-provenance regeneration step as the book's thesis, link
+  it, and don't claim freeq performs regeneration itself. The defensible,
+  demonstrable claim is the **provenance layer**, not the compiler.
+- **Channel:** HN + lobste.rs; cross-link the book (aicoding.leaflet.pub).
 
 ---
 
@@ -299,4 +328,10 @@ views are secondary.
 - **Confirm freeqworld is demo-ready** at a public URL before post 1.
 - **Stand up the builder channel** (the funnel target) with the authors
   present, and the house agents/rooms the series reuses.
-- **Ground the Phoenix bridge** (post 12) in what's actually runnable.
+- **Phoenix bridge (post 12): grounded.** Anchor it in *Regenerative Software*
+  (aicoding.leaflet.pub; `../writing`): the four primitives (specification /
+  evaluation / context boundary / provenance), the regeneration control loop,
+  and "provenance is the new version control." Position freeq as the
+  **provenance layer** the book says is still missing — demonstrate the signed
+  in-room causal chain; don't claim freeq regenerates code itself. Coordinate
+  the post with the book's launch so they reinforce each other.
