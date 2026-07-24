@@ -634,6 +634,7 @@ function wireEvents(c: FreeqClient) {
         isDM ? `DM from ${message.from}` : channel,
         `${message.from}: ${message.text.slice(0, 100)}`,
         () => useStore.getState().setActiveChannel(channel),
+        isDM ? 'dm' : 'mention',
       );
     }
   });
