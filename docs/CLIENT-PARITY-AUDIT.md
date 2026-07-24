@@ -86,6 +86,12 @@ considered call.
 | PWA install / offline shell | ✅ | — | — | web-only |
 | MetricKit / perf signposts | — | ✅ | ⚠️ | macOS instruments hitches |
 
+### Favorites & roaming state
+| Feature | Web | macOS | iOS | Notes |
+|---|:--:|:--:|:--:|---|
+| Favorite channels | ✅ | ✅ | ✅ | all had them (per-device) |
+| **Roam per user (per-DID)** | ✅ | ✅ | ✅ | ✅ **shipped 2026-07-24** — `/api/v1/favorites` (Bearer-authed, per-DID); pull+union on connect, push on toggle. Server deployed + verified. Shared `merge` policy (server order wins, no device loses one). |
+
 ### Navigation & power-user
 | Feature | Web | macOS | iOS | Notes |
 |---|:--:|:--:|:--:|---|
@@ -197,6 +203,14 @@ arrives on every client).
   (5 tests), distinct web notification sounds (4 tests).
 - All builds green (web tsc + 768 vitest; macOS 464 core; iOS 90 core);
   verified iOS onboarding + cards render in the simulator.
+
+### Also landed 2026-07-24 (post-deploy)
+- **Production server deploy** — done via `ssh chad@tech.blueyard.com`
+  (systemd `freeq-server`, git checkout; NOT the Miren `club` app). Shipped
+  the reaction-durability + coordination-tag-replay fixes and rebuilt the
+  live web client. Verified: fresh coordination events now replay with
+  `+freeq.at/event`; `/api/v1/favorites` gated (401 unauth).
+- **Roaming favorites** — server `user_favorites` + REST + all three clients.
 
 ### Still open (needs deliberate / live work)
 - **AV parity (P1):** ✅ grid auto-layout done (web+iOS). Remaining:
