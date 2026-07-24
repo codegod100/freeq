@@ -24,6 +24,18 @@ defmodule FreeqWeb3Web.SessionsControllerTest do
     assert is_list(json_response(conn, 200)["redirect_uris"])
   end
 
+  test "GET /.well-known/oauth-client-metadata accepts application/json", %{conn: conn} do
+    # Authorization servers (PAR) fetch with Accept: application/json only —
+    # must not 406 via the html-only :browser pipeline.
+    conn =
+      conn
+      |> put_req_header("accept", "application/json")
+      |> get(~p"/.well-known/oauth-client-metadata")
+
+    assert json_response(conn, 200)["client_name"] == "freeq-web3"
+    assert get_resp_header(conn, "content-type") |> hd() =~ "application/json"
+  end
+
   test "GET /logout redirects to chat", %{conn: conn} do
     conn = get(conn, ~p"/logout")
     assert redirected_to(conn) == ~p"/chat"

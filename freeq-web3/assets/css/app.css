@@ -322,6 +322,10 @@ body {
     flex-direction: column;
     line-height: 1.25;
 }
+#messages.is-hidden,
+#messages[hidden] {
+    display: none !important;
+}
 #messages::before {
     content: "";
     flex: 1 0 0;

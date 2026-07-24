@@ -1,5 +1,10 @@
 defmodule FreeqWeb3Web.ChatLive do
-  @moduledoc "GET /chat/:channel — chat shell for a single channel."
+  @moduledoc """
+  Chat shell: channel list (`/chat`) and per-channel pane (`/chat/:channel`).
+
+  Both routes share this LiveView so an active AV call (AvCall hook) is not
+  destroyed when browsing "All channels".
+  """
   use FreeqWeb3Web, :live_view
 
   alias FreeqWeb3.Irc.Render
@@ -8,61 +13,35 @@ defmodule FreeqWeb3Web.ChatLive do
   alias FreeqWeb3.Session
 
   @impl true
-  def mount(%{"channel" => channel}, _session, socket) do
-    ch = Render.canonical_channel(channel)
-    bare = Render.bare_channel(ch)
+  def mount(_params, _session, socket) do
     sid = socket.assigns.freeq_session
 
     if connected?(socket) do
       Session.subscribe(sid)
-      Session.subscribe_channel(sid, ch)
     end
-
-    # Explicit join intent (mirrors freeq-web2 chat#show).
-    Session.add_channel(sid, ch)
-    Session.ensure_upstream(sid, ch)
 
     snap = Session.snapshot(sid)
     all = Rest.fetch_channels()
     my = my_channel_entries(snap.channels, all)
-    topic = topic_for(all, ch)
-
-    # Fast path: history + cache-only embeds. Network preview resolution
-    # (OG fetch + image download) must NOT block mount — that made busy
-    # channels like #freeq take tens of seconds to open.
-    history =
-      case Rest.fetch_history(ch, 50, bearer: snap.api_bearer) do
-        nil -> []
-        rows -> Enum.map(rows, &LinkPreview.attach_cache_only/1)
-      end
-
-    parent_lookup = parent_lookup_from_rows(history)
-
-    history =
-      history
-      |> Enum.map(&attach_parent_info(&1, parent_lookup))
-      |> Enum.map(&ensure_reactions/1)
-
-    rows_by_msgid = rows_by_msgid_from(history)
-    members = Session.members(sid, ch)
 
     socket =
       socket
-      |> assign(:page_title, ch)
-      |> assign(:channel, ch)
-      |> assign(:bare, bare)
+      |> assign(:view, :index)
+      |> assign(:page_title, "channels")
+      |> assign(:channel, nil)
+      |> assign(:bare, "")
       |> assign(:snap, snap)
-      |> assign(:topic, topic)
+      |> assign(:topic, "")
       |> assign(:all_channels, all)
       |> assign(:my_channels, my)
-      |> assign(:members, members)
+      |> assign(:members, %{})
       |> assign(:compose, "")
       |> assign(:reply_to, nil)
       |> assign(:edit_to, nil)
       |> assign(:reply_preview_nick, nil)
       |> assign(:reply_preview_text, nil)
-      |> assign(:parent_lookup, parent_lookup)
-      |> assign(:rows_by_msgid, rows_by_msgid)
+      |> assign(:parent_lookup, %{})
+      |> assign(:rows_by_msgid, %{})
       |> assign(:react_picker_msgid, nil)
       |> assign(:av_active, false)
       |> assign(:av_call_present, false)
@@ -72,18 +51,16 @@ defmodule FreeqWeb3Web.ChatLive do
       |> assign(:av_muted, false)
       |> assign(:av_camera, false)
       |> assign(:av_instance, generate_av_instance())
-      |> stream(:messages, history, reset: true)
-      |> assign(:message_count, length(history))
+      |> stream(:messages, [], reset: true)
+      |> assign(:message_count, 0)
 
     if connected?(socket) do
-      schedule_preview_warmup(history)
       send(self(), :poll_channel_call)
       # Keep discovering live calls while the page is open.
       :timer.send_interval(4_000, self(), :poll_channel_call)
     end
 
-    socket = apply_channel_call(socket, ch)
-
+    # handle_params loads :index or :channel after mount.
     {:ok, socket}
   end
 
@@ -91,84 +68,16 @@ defmodule FreeqWeb3Web.ChatLive do
   def handle_params(%{"channel" => channel}, _uri, socket) do
     ch = Render.canonical_channel(channel)
 
-    if ch == socket.assigns.channel do
+    if socket.assigns.view == :channel and ch == socket.assigns.channel do
       {:noreply, socket}
     else
-      # Navigating between channels reuses the LiveView process when routed
-      # under the same live_session — remount-like re-setup.
-      bare = Render.bare_channel(ch)
-      sid = socket.assigns.freeq_session
-      Session.subscribe_channel(sid, ch)
-      Session.add_channel(sid, ch)
-      Session.ensure_upstream(sid, ch)
-
-      snap = Session.snapshot(sid)
-      all = socket.assigns.all_channels
-      topic = topic_for(all, ch)
-      history =
-        (Rest.fetch_history(ch, 50, bearer: snap.api_bearer) || [])
-        |> Enum.map(&LinkPreview.attach_cache_only/1)
-
-      parent_lookup = parent_lookup_from_rows(history)
-      history =
-        history
-        |> Enum.map(&attach_parent_info(&1, parent_lookup))
-        |> Enum.map(&ensure_reactions/1)
-
-      rows_by_msgid = rows_by_msgid_from(history)
-      members = Session.members(sid, ch)
-      schedule_preview_warmup(history)
-
-      # Stay in the AV call when switching text channels — only reset AV
-      # discovery/state when we are not actively in a call.
-      keep_av? = socket.assigns.av_active == true
-      prev_channel = socket.assigns.channel
-
-      socket =
-        socket
-        |> assign(:page_title, ch)
-        |> assign(:channel, ch)
-        |> assign(:bare, bare)
-        |> assign(:snap, snap)
-        |> assign(:topic, topic)
-        |> assign(:my_channels, my_channel_entries(snap.channels, all))
-        |> assign(:members, members)
-        |> assign(:compose, "")
-        |> assign(:reply_to, nil)
-        |> assign(:edit_to, nil)
-        |> assign(:reply_preview_nick, nil)
-        |> assign(:reply_preview_text, nil)
-        |> assign(:parent_lookup, parent_lookup)
-        |> assign(:rows_by_msgid, rows_by_msgid)
-        |> assign(:react_picker_msgid, nil)
-        |> stream(:messages, history, reset: true)
-        |> assign(:message_count, length(history))
-        |> then(fn s ->
-          if keep_av? do
-            # Pin av_channel if missing so leave/signaling still target the call.
-            if s.assigns[:av_channel] in [nil, ""] do
-              assign(s, :av_channel, prev_channel)
-            else
-              s
-            end
-          else
-            s
-            |> assign(:av_active, false)
-            |> assign(:av_call_present, false)
-            |> assign(:av_session_id, nil)
-            |> assign(:av_channel, nil)
-            |> assign(:av_participant_count, 0)
-            |> assign(:av_muted, false)
-            |> assign(:av_camera, false)
-            |> assign(:av_instance, generate_av_instance())
-            |> apply_channel_call(ch)
-          end
-        end)
-        # Hook is not remounted on live channel nav — force scroll after reset.
-        |> push_event("scroll_bottom", %{})
-
-      {:noreply, socket}
+      {:noreply, load_channel(socket, ch)}
     end
+  end
+
+  def handle_params(_params, _uri, socket) do
+    # Channel list — keep AV assigns / AvCall panel mounted.
+    {:noreply, show_channel_list(socket)}
   end
 
   @impl true
@@ -176,27 +85,31 @@ defmodule FreeqWeb3Web.ChatLive do
     sid = socket.assigns.freeq_session
     ch = socket.assigns.channel
 
-    opts =
-      []
-      |> then(fn o ->
-        if socket.assigns.reply_to,
-          do: Keyword.put(o, :reply_to, socket.assigns.reply_to),
-          else: o
-      end)
-      |> then(fn o ->
-        if socket.assigns.edit_to, do: Keyword.put(o, :edit_to, socket.assigns.edit_to), else: o
-      end)
+    if ch in [nil, ""] do
+      {:noreply, socket}
+    else
+      opts =
+        []
+        |> then(fn o ->
+          if socket.assigns.reply_to,
+            do: Keyword.put(o, :reply_to, socket.assigns.reply_to),
+            else: o
+        end)
+        |> then(fn o ->
+          if socket.assigns.edit_to, do: Keyword.put(o, :edit_to, socket.assigns.edit_to), else: o
+        end)
 
-    Session.send_message(sid, ch, msg, opts)
+      Session.send_message(sid, ch, msg, opts)
 
-    {:noreply,
-     socket
-     |> assign(:compose, "")
-     |> assign(:reply_to, nil)
-     |> assign(:edit_to, nil)
-     |> assign(:reply_preview_nick, nil)
-     |> assign(:reply_preview_text, nil)
-     |> focus_compose()}
+      {:noreply,
+       socket
+       |> assign(:compose, "")
+       |> assign(:reply_to, nil)
+       |> assign(:edit_to, nil)
+       |> assign(:reply_preview_nick, nil)
+       |> assign(:reply_preview_text, nil)
+       |> focus_compose()}
+    end
   end
 
   def handle_event("join", %{"channel" => raw}, socket) do
@@ -215,8 +128,10 @@ defmodule FreeqWeb3Web.ChatLive do
   def handle_event("part", %{"channel" => ch}, socket) do
     Session.part(socket.assigns.freeq_session, ch)
 
-    if Render.canonical_channel(ch) == socket.assigns.channel do
-      {:noreply, push_navigate(socket, to: ~p"/chat")}
+    if socket.assigns.view == :channel and
+         Render.canonical_channel(ch) == socket.assigns.channel do
+      # Stay on this LiveView — do not navigate to ChatIndexLive (would kill AV).
+      {:noreply, push_patch(socket, to: ~p"/chat")}
     else
       snap = Session.snapshot(socket.assigns.freeq_session)
 
@@ -228,8 +143,14 @@ defmodule FreeqWeb3Web.ChatLive do
   end
 
   def handle_event("set_topic", %{"topic" => topic}, socket) do
-    Session.set_topic(socket.assigns.freeq_session, socket.assigns.channel, topic)
-    {:noreply, assign(socket, :topic, topic)}
+    ch = socket.assigns.channel
+
+    if ch in [nil, ""] do
+      {:noreply, socket}
+    else
+      Session.set_topic(socket.assigns.freeq_session, ch, topic)
+      {:noreply, assign(socket, :topic, topic)}
+    end
   end
 
   def handle_event("av_start", _params, socket) do
@@ -237,29 +158,34 @@ defmodule FreeqWeb3Web.ChatLive do
     ch = socket.assigns.channel
     instance = socket.assigns.av_instance
 
-    # Already in a call (possibly on another text channel) — keep it.
-    if socket.assigns.av_active do
-      {:noreply, socket}
-    else
-      # Guests may start calls — freeq-server uses did "guest:{nick}".
-      # If a live session already exists, join it instead of erroring.
-      socket = apply_channel_call(socket, ch)
+    cond do
+      socket.assigns.av_active ->
+        {:noreply, socket}
 
-      if socket.assigns.av_call_present and socket.assigns.av_session_id not in [nil, ""] do
-        Session.av_join(sid, ch, socket.assigns.av_session_id, instance)
+      ch in [nil, ""] ->
+        # Channel list view — start requires an open channel.
+        {:noreply, socket}
 
-        {:noreply,
-         socket
-         |> assign(:av_active, true)
-         |> assign(:av_channel, ch)}
-      else
-        Session.av_start(sid, ch, instance)
+      true ->
+        # Guests may start calls — freeq-server uses did "guest:{nick}".
+        # If a live session already exists, join it instead of erroring.
+        socket = apply_channel_call(socket, ch)
 
-        {:noreply,
-         socket
-         |> assign(:av_active, true)
-         |> assign(:av_channel, ch)}
-      end
+        if socket.assigns.av_call_present and socket.assigns.av_session_id not in [nil, ""] do
+          Session.av_join(sid, ch, socket.assigns.av_session_id, instance)
+
+          {:noreply,
+           socket
+           |> assign(:av_active, true)
+           |> assign(:av_channel, ch)}
+        else
+          Session.av_start(sid, ch, instance)
+
+          {:noreply,
+           socket
+           |> assign(:av_active, true)
+           |> assign(:av_channel, ch)}
+        end
     end
   end
 
@@ -268,29 +194,34 @@ defmodule FreeqWeb3Web.ChatLive do
     ch = socket.assigns.channel
     instance = socket.assigns.av_instance
 
-    if socket.assigns.av_active do
-      {:noreply, socket}
-    else
-      # Refresh discovery in case session id arrived after page load.
-      socket = apply_channel_call(socket, ch)
-      session_id_av = socket.assigns.av_session_id
+    cond do
+      socket.assigns.av_active ->
+        {:noreply, socket}
 
-      if session_id_av not in [nil, ""] do
-        Session.av_join(sid, ch, session_id_av, instance)
+      ch in [nil, ""] ->
+        {:noreply, socket}
 
-        {:noreply,
-         socket
-         |> assign(:av_active, true)
-         |> assign(:av_channel, ch)}
-      else
-        # No known session — fall back to start (server may still reject if race).
-        Session.av_start(sid, ch, instance)
+      true ->
+        # Refresh discovery in case session id arrived after page load.
+        socket = apply_channel_call(socket, ch)
+        session_id_av = socket.assigns.av_session_id
 
-        {:noreply,
-         socket
-         |> assign(:av_active, true)
-         |> assign(:av_channel, ch)}
-      end
+        if session_id_av not in [nil, ""] do
+          Session.av_join(sid, ch, session_id_av, instance)
+
+          {:noreply,
+           socket
+           |> assign(:av_active, true)
+           |> assign(:av_channel, ch)}
+        else
+          # No known session — fall back to start (server may still reject if race).
+          Session.av_start(sid, ch, instance)
+
+          {:noreply,
+           socket
+           |> assign(:av_active, true)
+           |> assign(:av_channel, ch)}
+        end
     end
   end
 
@@ -555,7 +486,13 @@ defmodule FreeqWeb3Web.ChatLive do
 
   def handle_info({:av_state, %{channel: ch} = av}, socket) do
     ch_canon = String.downcase(Render.canonical_channel(ch))
-    view_ch = String.downcase(Render.canonical_channel(socket.assigns.channel))
+
+    view_ch =
+      case socket.assigns.channel do
+        nil -> nil
+        "" -> nil
+        c -> String.downcase(Render.canonical_channel(c))
+      end
 
     av_ch =
       case socket.assigns[:av_channel] do
@@ -564,7 +501,7 @@ defmodule FreeqWeb3Web.ChatLive do
       end
 
     our_call? = socket.assigns.av_active == true and av_ch != nil and av_ch == ch_canon
-    view_channel? = ch_canon == view_ch
+    view_channel? = view_ch != nil and ch_canon == view_ch
 
     # Ignore call signals for channels we are neither viewing nor in a call on.
     if not our_call? and not view_channel? do
@@ -687,11 +624,16 @@ defmodule FreeqWeb3Web.ChatLive do
 
   def handle_info(:poll_channel_call, socket) do
     # Don't clobber local "in call" state (including when viewing another
-    # text channel while still in the AV call).
-    if socket.assigns.av_active do
-      {:noreply, socket}
-    else
-      {:noreply, apply_channel_call(socket, socket.assigns.channel)}
+    # text channel or the channel list while still in the AV call).
+    cond do
+      socket.assigns.av_active ->
+        {:noreply, socket}
+
+      socket.assigns.view != :channel or socket.assigns.channel in [nil, ""] ->
+        {:noreply, socket}
+
+      true ->
+        {:noreply, apply_channel_call(socket, socket.assigns.channel)}
     end
   end
 
@@ -752,6 +694,114 @@ defmodule FreeqWeb3Web.ChatLive do
 
   defp generate_av_instance do
     :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  end
+
+  # ── View modes (index list vs channel pane) ───────────────────────────
+
+  defp show_channel_list(socket) do
+    sid = socket.assigns.freeq_session
+    snap = Session.snapshot(sid)
+    all = socket.assigns[:all_channels] || Rest.fetch_channels()
+
+    socket
+    |> assign(:view, :index)
+    |> assign(:page_title, "channels")
+    # Keep last text channel in assigns only as a soft hint; UI uses :view.
+    # Do not clear :channel if we want? Clear for nav title but keep av_channel.
+    |> assign(:channel, nil)
+    |> assign(:bare, "")
+    |> assign(:topic, "")
+    |> assign(:snap, snap)
+    |> assign(:all_channels, all)
+    |> assign(:my_channels, my_channel_entries(snap.channels, all))
+    |> assign(:members, %{})
+    |> assign(:compose, "")
+    |> assign(:reply_to, nil)
+    |> assign(:edit_to, nil)
+    |> assign(:reply_preview_nick, nil)
+    |> assign(:reply_preview_text, nil)
+    |> assign(:react_picker_msgid, nil)
+    # Empty stream — index has no message pane. AV panel (if any) stays.
+    |> stream(:messages, [], reset: true)
+    |> assign(:message_count, 0)
+    # AV state deliberately unchanged — browsing the directory must not leave.
+  end
+
+  defp load_channel(socket, ch) do
+    bare = Render.bare_channel(ch)
+    sid = socket.assigns.freeq_session
+    Session.subscribe_channel(sid, ch)
+    Session.add_channel(sid, ch)
+    Session.ensure_upstream(sid, ch)
+
+    snap = Session.snapshot(sid)
+    all = socket.assigns[:all_channels] || Rest.fetch_channels()
+    topic = topic_for(all, ch)
+
+    # Fast path: history + cache-only embeds. Network preview resolution
+    # must NOT block navigation.
+    history =
+      (Rest.fetch_history(ch, 50, bearer: snap.api_bearer) || [])
+      |> Enum.map(&LinkPreview.attach_cache_only/1)
+
+    parent_lookup = parent_lookup_from_rows(history)
+
+    history =
+      history
+      |> Enum.map(&attach_parent_info(&1, parent_lookup))
+      |> Enum.map(&ensure_reactions/1)
+
+    rows_by_msgid = rows_by_msgid_from(history)
+    members = Session.members(sid, ch)
+    schedule_preview_warmup(history)
+
+    keep_av? = socket.assigns.av_active == true
+    prev_channel = socket.assigns.channel
+    prev_av_channel = socket.assigns[:av_channel]
+
+    socket
+    |> assign(:view, :channel)
+    |> assign(:page_title, ch)
+    |> assign(:channel, ch)
+    |> assign(:bare, bare)
+    |> assign(:snap, snap)
+    |> assign(:topic, topic)
+    |> assign(:all_channels, all)
+    |> assign(:my_channels, my_channel_entries(snap.channels, all))
+    |> assign(:members, members)
+    |> assign(:compose, "")
+    |> assign(:reply_to, nil)
+    |> assign(:edit_to, nil)
+    |> assign(:reply_preview_nick, nil)
+    |> assign(:reply_preview_text, nil)
+    |> assign(:parent_lookup, parent_lookup)
+    |> assign(:rows_by_msgid, rows_by_msgid)
+    |> assign(:react_picker_msgid, nil)
+    |> stream(:messages, history, reset: true)
+    |> assign(:message_count, length(history))
+    |> then(fn s ->
+      if keep_av? do
+        # Pin av_channel if missing so leave/signaling still target the call.
+        if s.assigns[:av_channel] in [nil, ""] do
+          assign(s, :av_channel, prev_av_channel || prev_channel)
+        else
+          s
+        end
+      else
+        s
+        |> assign(:av_active, false)
+        |> assign(:av_call_present, false)
+        |> assign(:av_session_id, nil)
+        |> assign(:av_channel, nil)
+        |> assign(:av_participant_count, 0)
+        |> assign(:av_muted, false)
+        |> assign(:av_camera, false)
+        |> assign(:av_instance, generate_av_instance())
+        |> apply_channel_call(ch)
+      end
+    end)
+    # Hook is not remounted on live channel nav — force scroll after reset.
+    |> push_event("scroll_bottom", %{})
   end
 
   # Defer network-heavy preview work until after the page is interactive.
@@ -838,6 +888,15 @@ defmodule FreeqWeb3Web.ChatLive do
   # do not already have (by msgid). Dedupes against the live stream.
   defp backfill_history_gap(socket) do
     ch = socket.assigns.channel
+
+    if socket.assigns.view != :channel or ch in [nil, ""] do
+      socket
+    else
+      do_backfill_history_gap(socket, ch)
+    end
+  end
+
+  defp do_backfill_history_gap(socket, ch) do
     bearer = socket.assigns.snap[:api_bearer]
 
     case Rest.fetch_history(ch, 50, bearer: bearer) do
@@ -983,22 +1042,27 @@ defmodule FreeqWeb3Web.ChatLive do
   # Discover live call on this channel via freeq-server REST (works for guests).
   # Never overwrites an active AV session (which may be on another channel).
   defp apply_channel_call(socket, channel) do
-    if socket.assigns[:av_active] do
-      socket
-    else
-      case Rest.fetch_channel_sessions(channel) |> Rest.active_call_from_sessions() do
-        %{session_id: sid} = info when is_binary(sid) and sid != "" ->
-          socket
-          |> assign(:av_call_present, true)
-          |> assign(:av_session_id, sid)
-          |> assign(:av_participant_count, info.participant_count || 0)
+    cond do
+      socket.assigns[:av_active] ->
+        socket
 
-        _ ->
-          socket
-          |> assign(:av_call_present, false)
-          |> assign(:av_session_id, nil)
-          |> assign(:av_participant_count, 0)
-      end
+      channel in [nil, ""] ->
+        socket
+
+      true ->
+        case Rest.fetch_channel_sessions(channel) |> Rest.active_call_from_sessions() do
+          %{session_id: sid} = info when is_binary(sid) and sid != "" ->
+            socket
+            |> assign(:av_call_present, true)
+            |> assign(:av_session_id, sid)
+            |> assign(:av_participant_count, info.participant_count || 0)
+
+          _ ->
+            socket
+            |> assign(:av_call_present, false)
+            |> assign(:av_session_id, nil)
+            |> assign(:av_participant_count, 0)
+        end
     end
   rescue
     _ -> socket
@@ -1184,9 +1248,14 @@ defmodule FreeqWeb3Web.ChatLive do
         </button>
         <span class="brand">freeq</span>
         <div class="nav-channel-meta">
-          <span class="nav-channel">{@channel}</span>
-          <span id="channel-topic" title="Channel topic">{@topic || "add topic"}</span>
+          <%= if @view == :index do %>
+            <span class="nav-channel page-title">channels</span>
+          <% else %>
+            <span class="nav-channel">{@channel}</span>
+            <span id="channel-topic" title="Channel topic">{@topic || "add topic"}</span>
+          <% end %>
           <button
+            :if={@view == :channel or @av_active}
             type="button"
             id="av-call-btn"
             class={[
@@ -1200,7 +1269,7 @@ defmodule FreeqWeb3Web.ChatLive do
                 else: if(@av_call_present, do: "av_join", else: "av_start")
               )
             }
-            data-channel={@channel}
+            data-channel={@av_channel || @channel}
             data-nick={@snap.current_nick}
             data-instance={@av_instance}
             data-active={@av_active}
@@ -1229,6 +1298,7 @@ defmodule FreeqWeb3Web.ChatLive do
             <span>{ws_label(@snap.ws_state)}</span>
           </span>
           <button
+            :if={@view == :channel}
             type="button"
             class="mobile-btn"
             phx-click={
@@ -1299,7 +1369,12 @@ defmodule FreeqWeb3Web.ChatLive do
               )}
             </div>
             <div class="user-actions">
-              <a href={~p"/chat"} class="btn-link" data-phx-link="redirect" data-phx-link-state="push">
+              <a
+                href={~p"/chat"}
+                class="btn-link"
+                data-phx-link="patch"
+                data-phx-link-state="push"
+              >
                 All channels
               </a>
               <%= if @snap[:authenticated?] do %>
@@ -1312,7 +1387,48 @@ defmodule FreeqWeb3Web.ChatLive do
         </aside>
 
         <section class="chat-main">
-          <div id="messages" phx-update="stream">
+          <%!-- Channel directory (same LiveView as chat so AV call survives). --%>
+          <div :if={@view == :index} class="channel-list-page">
+            <form id="index-join-form" phx-submit="join">
+              <input
+                type="text"
+                name="channel"
+                placeholder="join #channel"
+                autocomplete="off"
+              />
+              <button type="submit">Join</button>
+            </form>
+
+            <%= if @all_channels != [] do %>
+              <ul class="channel-list">
+                <li :for={ch <- @all_channels}>
+                  <% bare = Render.bare_channel(ch["name"] || ch[:name] || "") %>
+                  <a
+                    href={~p"/chat/#{bare}"}
+                    class="channel-item"
+                    data-phx-link="patch"
+                    data-phx-link-state="push"
+                  >
+                    <span class="channel-name">{ch["name"] || ch[:name]}</span>
+                    <span :if={(ch["topic"] || ch[:topic] || "") != ""} class="channel-topic">
+                      {ch["topic"] || ch[:topic]}
+                    </span>
+                    <span class="channel-members">{ch["members"] || ch[:members] || 0}</span>
+                  </a>
+                </li>
+              </ul>
+            <% else %>
+              <p class="empty-state">No channels available (is freeq-server reachable?).</p>
+            <% end %>
+          </div>
+
+          <%!-- Keep stream container mounted across index/channel (phx-update=stream). --%>
+          <div
+            id="messages"
+            phx-update="stream"
+            class={if(@view == :index, do: "is-hidden")}
+            hidden={@view == :index}
+          >
             <div
               :for={{dom_id, msg} <- @streams.messages}
               id={dom_id}
@@ -1404,7 +1520,7 @@ defmodule FreeqWeb3Web.ChatLive do
             <div id="av-publish-container" class="av-publish-container" phx-update="ignore"></div>
           </div>
 
-          <div :if={@reply_to || @edit_to} id="reply-banner" class="reply-banner">
+          <div :if={@view == :channel and (@reply_to || @edit_to)} id="reply-banner" class="reply-banner">
             <span class="reply-banner-label">
               <%= if @edit_to do %>
                 Editing message
@@ -1425,7 +1541,7 @@ defmodule FreeqWeb3Web.ChatLive do
             </button>
           </div>
 
-          <div id="send-bar">
+          <div :if={@view == :channel} id="send-bar">
             <form id="send-form" phx-submit="send" phx-change="compose_change">
               <input
                 id="message-input"
@@ -1442,7 +1558,7 @@ defmodule FreeqWeb3Web.ChatLive do
           </div>
         </section>
 
-        <aside id="member-panel">
+        <aside :if={@view == :channel} id="member-panel">
           <p class="drawer-heading">People</p>
           <div id="member-list">
             <%= if map_size(@members) == 0 do %>

@@ -30,6 +30,20 @@ defmodule FreeqWeb3Web.Router do
     plug :put_secure_browser_headers
   end
 
+  # Public discovery docs — no session/CSRF. Authorization servers fetch with
+  # `Accept: application/json` (and sometimes */*); the :browser pipeline only
+  # accepts html and returns 406 for those, which breaks PAR / client metadata.
+  pipeline :well_known do
+    plug :accepts, ["json", "html", "*/*"]
+    plug :put_secure_browser_headers
+  end
+
+  scope "/", FreeqWeb3Web do
+    pipe_through :well_known
+
+    get "/.well-known/oauth-client-metadata", SessionsController, :client_metadata
+  end
+
   scope "/", FreeqWeb3Web do
     pipe_through :browser
 
@@ -43,11 +57,12 @@ defmodule FreeqWeb3Web.Router do
     post "/auth/callback", SessionsController, :callback
     get "/logout", SessionsController, :destroy
     post "/logout", SessionsController, :destroy
-    get "/.well-known/oauth-client-metadata", SessionsController, :client_metadata
 
+    # Single LiveView for index + channel so an active AV call is not torn
+    # down when browsing "All channels" (different LVs remount + leave call).
     live_session :chat, on_mount: [FreeqWeb3Web.Live.UserSession] do
-      live "/", ChatIndexLive, :index
-      live "/chat", ChatIndexLive, :index
+      live "/", ChatLive, :index
+      live "/chat", ChatLive, :index
       live "/chat/:channel", ChatLive, :show
     end
   end
