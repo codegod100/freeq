@@ -196,6 +196,10 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/api/v1/channels/{name}/export", get(api_channel_export))
         .route("/api/v1/channels/{name}/topic", get(api_channel_topic))
         .route("/api/v1/channels/{name}/pins", get(api_channel_pins))
+        .route(
+            "/api/v1/favorites",
+            get(api_get_favorites).put(api_set_favorites),
+        )
         .route("/api/v1/users/{nick}", get(api_user))
         .route("/api/v1/users/{nick}/whois", get(api_user_whois))
         .route("/api/v1/upload", axum::routing::post(api_upload))
@@ -1392,6 +1396,59 @@ async fn api_channels(State(state): State<Arc<SharedState>>) -> Json<Vec<Channel
     // Sort: most members first, then alphabetically
     list.sort_by(|a, b| b.members.cmp(&a.members).then(a.name.cmp(&b.name)));
     Json(list)
+}
+
+/// GET /api/v1/favorites — the authenticated user's roaming favorite channels
+/// (in saved order). Per-DID, so a user's favorites follow them across all
+/// their devices. Requires a Bearer session.
+async fn api_get_favorites(
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(did) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+    let favs = state
+        .with_db(|db| db.get_user_favorites(&did))
+        .unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({ "favorites": favs })))
+}
+
+/// PUT /api/v1/favorites {"favorites": ["#a", "#b", ...]} — replace the
+/// authenticated user's roaming favorites (order preserved). Channel names
+/// only; capped at 200 to bound abuse. Returns the stored list.
+async fn api_set_favorites(
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(did) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+    let favs: Vec<String> = body
+        .get("favorites")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|c| c.starts_with('#') || c.starts_with('&'))
+                .map(|c| c.to_lowercase())
+                .take(200)
+                .collect()
+        })
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    state.with_db(|db| db.set_user_favorites(&did, &favs, now));
+    (StatusCode::OK, Json(serde_json::json!({ "favorites": favs })))
 }
 
 /// Resolve the authenticated caller DID from a `Bearer <session-id>` header.

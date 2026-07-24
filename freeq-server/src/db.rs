@@ -393,6 +393,17 @@ impl Db {
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (did, target)
             );
+
+            -- Per-DID favorite channels, so a user's favorites roam across
+            -- their devices (synced via the REST /api/v1/favorites endpoint).
+            -- `ord` preserves the user's ordering (Favorites section + ⌃⌘1-9).
+            CREATE TABLE IF NOT EXISTS user_favorites (
+                did        TEXT NOT NULL,
+                channel    TEXT NOT NULL,
+                ord        INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (did, channel)
+            );
             ",
         )?;
 
@@ -1767,6 +1778,32 @@ impl Db {
         Ok(())
     }
 
+    // ── Roaming favorites (per-DID) ────────────────────────────────────
+
+    /// The user's favorite channels in saved order.
+    pub fn get_user_favorites(&self, did: &str) -> SqlResult<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT channel FROM user_favorites WHERE did = ?1 ORDER BY ord ASC")?;
+        let rows = stmt.query_map(params![did], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Replace the user's favorites with `channels` (order = slice order).
+    /// Atomic replace-all so a device's PUT is the authority for its DID.
+    pub fn set_user_favorites(&self, did: &str, channels: &[String], updated_at: u64) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM user_favorites WHERE did = ?1", params![did])?;
+        for (i, ch) in channels.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO user_favorites (did, channel, ord, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![did, ch, i as i64, updated_at as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ── Identities (DID-nick bindings) ─────────────────────────────────
 
     /// Bind a DID to a nick. Overwrites any previous binding for that DID.
@@ -2534,6 +2571,33 @@ mod tests {
         assert_eq!(msg_reactions[0].emoji, "👍");
         assert_eq!(msg_reactions[1].reactor_nick, "bob");
         assert_eq!(msg_reactions[2].emoji, "❤️");
+    }
+
+    #[test]
+    fn user_favorites_roundtrip_preserves_order() {
+        let db = Db::open_memory().unwrap();
+        assert!(db.get_user_favorites("did:plc:a").unwrap().is_empty());
+        db.set_user_favorites("did:plc:a", &["#z".into(), "#a".into(), "#m".into()], 100).unwrap();
+        assert_eq!(db.get_user_favorites("did:plc:a").unwrap(), vec!["#z", "#a", "#m"]);
+    }
+
+    #[test]
+    fn user_favorites_replace_is_atomic_and_scoped_per_did() {
+        let db = Db::open_memory().unwrap();
+        db.set_user_favorites("did:plc:a", &["#a".into(), "#b".into()], 100).unwrap();
+        db.set_user_favorites("did:plc:b", &["#x".into()], 100).unwrap();
+        // Replace a's list entirely; b is untouched.
+        db.set_user_favorites("did:plc:a", &["#c".into()], 200).unwrap();
+        assert_eq!(db.get_user_favorites("did:plc:a").unwrap(), vec!["#c"]);
+        assert_eq!(db.get_user_favorites("did:plc:b").unwrap(), vec!["#x"]);
+    }
+
+    #[test]
+    fn user_favorites_empty_clears() {
+        let db = Db::open_memory().unwrap();
+        db.set_user_favorites("did:plc:a", &["#a".into()], 100).unwrap();
+        db.set_user_favorites("did:plc:a", &[], 200).unwrap();
+        assert!(db.get_user_favorites("did:plc:a").unwrap().is_empty());
     }
 
     #[test]

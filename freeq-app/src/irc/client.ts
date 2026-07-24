@@ -10,6 +10,47 @@ import { useStore } from '../store';
 import { notify } from '../lib/notifications';
 import { prefetchProfiles } from '@freeq/sdk';
 import { shouldRejoinCall, AV_REJOIN_WINDOW_MS, type PendingCallRejoin } from '../lib/av-mesh';
+import { fetchFavorites, pushFavorites, mergeFavorites, favoritesEqual } from '../lib/favorites-sync';
+
+// Roaming-favorites state (module scope so it survives reconnects).
+let favoritesSynced = false;
+let favoritesPushWired = false;
+
+/** Pull the DID's server favorites, union with local, write back if changed,
+ *  and wire a debounced push for future toggles. No-op without a bearer. */
+async function syncFavorites(c: FreeqClient): Promise<void> {
+  // The API-BEARER notice can land just after 'registered'; poll briefly.
+  let bearer = c.apiBearer;
+  for (let i = 0; !bearer && i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    bearer = c.apiBearer;
+  }
+  if (!bearer) return; // guest / no authenticated session
+  try {
+    const server = await fetchFavorites(bearer);
+    const local = [...useStore.getState().favorites];
+    const merged = mergeFavorites(server, local);
+    if (!favoritesEqual(merged, local)) useStore.getState().setFavorites(merged);
+    if (!favoritesEqual(merged, server)) await pushFavorites(bearer, merged);
+    favoritesSynced = true;
+  } catch { /* transient; try again next connect */ }
+
+  // Push future changes (debounced). Wire once; guarded by favoritesSynced
+  // so the initial merge above doesn't echo a redundant push.
+  if (favoritesPushWired) return;
+  favoritesPushWired = true;
+  let last = [...useStore.getState().favorites].join(',');
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  useStore.subscribe((st) => {
+    const b = c.apiBearer;
+    if (!favoritesSynced || !b) return;
+    const now = [...st.favorites].join(',');
+    if (now === last) return;
+    last = now;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { pushFavorites(b, [...st.favorites]).catch(() => {}); }, 400);
+  });
+}
 
 // ── Singleton SDK client ──
 
@@ -513,6 +554,12 @@ function wireEvents(c: FreeqClient) {
         if (ch) useStore.getState().setActiveChannel(savedActive);
       }, 500);
     }
+
+    // Roaming favorites: pull the DID's server-side favorites, union with
+    // local (no device loses one), write back if changed, then keep the
+    // server in sync on subsequent toggles. Only for authenticated users
+    // (the bearer arrives via the API-BEARER notice around SASL success).
+    syncFavorites(c);
   });
 
   c.on('nickChanged', (nick) => {

@@ -254,6 +254,7 @@ export interface Store {
   setShowJoinPart: (v: boolean) => void;
   setLoadExternalMedia: (v: boolean) => void;
   toggleFavorite: (channel: string) => void;
+  setFavorites: (channels: string[]) => void;
   toggleMuted: (channel: string) => void;
   hideDM: (nick: string) => void;
   unhideDM: (nick: string) => void;
@@ -1010,6 +1011,13 @@ export const useStore = create<Store>((set, get) => ({
     const favs = new Set(s.favorites);
     const key = channel.toLowerCase();
     if (favs.has(key)) favs.delete(key); else favs.add(key);
+    localStorage.setItem('freeq-favorites', JSON.stringify([...favs]));
+    return { favorites: favs };
+  }),
+  // Bulk replace (used by roaming-favorites sync so a server pull doesn't
+  // fire N per-item pushes). Order preserved for the Favorites section.
+  setFavorites: (channels) => set(() => {
+    const favs = new Set(channels.map((c) => c.toLowerCase()));
     localStorage.setItem('freeq-favorites', JSON.stringify([...favs]));
     return { favorites: favs };
   }),
