@@ -863,6 +863,9 @@ struct MessageListView: View {
                 .font(.fqSubheadline)
                 .italic()
                 .foregroundColor(Theme.textSecondary)
+        } else if let coord = msg.coordination {
+            // Agent coordination event → structured card (parity with web + macOS).
+            CoordinationCardView(info: coord, text: msg.text)
         } else if let (url, durationLabel) = extractVoiceMessage(msg.text) {
             // Voice messages — must check before image/video to avoid CDN URL misdetection
             InlineAudioPlayer(url: url, label: durationLabel)

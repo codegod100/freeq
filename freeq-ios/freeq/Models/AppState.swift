@@ -2495,6 +2495,11 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 isSigned: ircMsg.isSigned,
                 origin: ircMsg.origin,
                 editOf: ircMsg.editOf,
+                coordination: ircMsg.coordination.map {
+                    CoordinationInfo(
+                        eventType: $0.eventType, taskId: $0.taskId, phase: $0.phase,
+                        evidenceType: $0.evidenceType, reference: $0.reference, payload: $0.payload)
+                },
                 reactions: initialReactions
             )
 

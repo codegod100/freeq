@@ -25,6 +25,9 @@ struct ChatMessage: Identifiable, Equatable {
     // replays BOTH rows). Dedup keys off both so they collapse to one
     // (parity with macOS ChatMessage.editOf).
     var editOf: String? = nil
+    // Agent coordination event (+freeq.at/event family). When set, the row
+    // renders as a structured task/evidence card (parity with web + macOS).
+    var coordination: CoordinationInfo? = nil
     var reactions: [String: Set<String>] = [:]  // emoji -> set of nicks
 
     // Equality is memberwise (synthesized). An id-only == here made SwiftUI

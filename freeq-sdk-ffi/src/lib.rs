@@ -2483,6 +2483,60 @@ mod tests {
     }
 
     #[test]
+    fn convert_event_message_parses_coordination_tags() {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "01ABC".to_string());
+        tags.insert("+freeq.at/event".to_string(), "task_update".to_string());
+        tags.insert("+freeq.at/task-id".to_string(), "T4821".to_string());
+        tags.insert("+freeq.at/phase".to_string(), "testing".to_string());
+        tags.insert("+freeq.at/payload".to_string(), "{\"step\":3}".to_string());
+        let ev = freeq_sdk::event::Event::Message {
+            from: "relay-agent".to_string(),
+            target: "#ship-it".to_string(),
+            text: "cart ok".to_string(),
+            tags,
+            dm_key: None,
+        };
+        let FreeqEvent::Message { msg } = convert_event(&ev).expect("event") else {
+            panic!("expected Message");
+        };
+        let coord = msg.coordination.expect("coordination populated");
+        assert_eq!(coord.event_type, "task_update");
+        assert_eq!(coord.task_id.as_deref(), Some("T4821"));
+        assert_eq!(coord.phase.as_deref(), Some("testing"));
+        assert_eq!(coord.payload.as_deref(), Some("{\"step\":3}"));
+    }
+
+    #[test]
+    fn convert_event_message_unprefixed_coordination_fallback() {
+        // Some senders emit `freeq.at/event` without the leading `+`.
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("freeq.at/event".to_string(), "task_complete".to_string());
+        let ev = freeq_sdk::event::Event::Message {
+            from: "a".to_string(), target: "#c".to_string(), text: "done".to_string(),
+            tags, dm_key: None,
+        };
+        let FreeqEvent::Message { msg } = convert_event(&ev).expect("event") else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.coordination.expect("coord").event_type, "task_complete");
+    }
+
+    #[test]
+    fn convert_event_message_no_event_tag_yields_no_coordination() {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "01Q".to_string());
+        let ev = freeq_sdk::event::Event::Message {
+            from: "a".to_string(), target: "#c".to_string(), text: "plain".to_string(),
+            tags, dm_key: None,
+        };
+        let FreeqEvent::Message { msg } = convert_event(&ev).expect("event") else {
+            panic!("expected Message");
+        };
+        assert!(msg.coordination.is_none());
+    }
+
+    #[test]
     fn convert_event_message_no_reactions_tag_yields_empty() {
         let mut tags = std::collections::HashMap::new();
         tags.insert("msgid".to_string(), "01XYZ".to_string());

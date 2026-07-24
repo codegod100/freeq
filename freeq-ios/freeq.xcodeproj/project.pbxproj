@@ -15,6 +15,7 @@
 		1223DEEA3B6C431275E0AC0C /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D567BC948344D3BCA2F31223 /* SwiftUI.framework */; };
 		160583C1C4A46B49DB909D79 /* CatchUpDigestSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7209B1DA2E14FE9EC7681E46 /* CatchUpDigestSheet.swift */; };
 		1AF9A87111E0AB6A8533B406 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA65B8D6263AAF104F9B06CE /* Security.framework */; };
+		1BD7A46E4BD6D8A4BE35029A /* CoordinationCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = F04E1A3210EB33E4454CE74D /* CoordinationCard.swift */; };
 		1C03827BA2B28F3D2A0FEE28 /* AvMediaFlowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90CFA49BA9803132D1A9979D /* AvMediaFlowTests.swift */; };
 		1D0A256D49EDDC69B0E09E66 /* SpotlightIndexer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91D4028719D43D3BBF97FA82 /* SpotlightIndexer.swift */; };
 		1F2A16FBB786A03B28150914 /* WatchPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */; };
@@ -78,6 +79,7 @@
 		B0B30A71D723A43E4225953F /* AvStartRaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9801936979D608D0162632A4 /* AvStartRaceTests.swift */; };
 		B198511552ED975806FF24E9 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CC6F468E7EEBA9A6B686019 /* ContentView.swift */; };
 		B2DF4E800D832B107555FD28 /* CallActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7278D584F74B58B9922F23BC /* CallActivityAttributes.swift */; };
+		B41304C5131C07D3928E5596 /* CoordinationCardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01F3FF90C3280207C507F1F7 /* CoordinationCardView.swift */; };
 		B62B3DA9AC4576EACB59616B /* ChannelState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5CA24DC11B2BF464C7175F93 /* ChannelState.swift */; };
 		B757EEF191C41D1327706DB2 /* FreeqSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 71E14BE7827AB5FE22AC3FF6 /* FreeqSDK.xcframework */; };
 		B792746D241CB91D4B15E377 /* SearchSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F40F27BC70CA9C7E4307D2A3 /* SearchSheet.swift */; };
@@ -153,6 +155,7 @@
 /* Begin PBXFileReference section */
 		00499E45672763D6A58D9A8A /* freeq.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = freeq.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0115700FA5AE53FD60E9FEAA /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
+		01F3FF90C3280207C507F1F7 /* CoordinationCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoordinationCardView.swift; sourceTree = "<group>"; };
 		03FEC306B6E024D2BBF561BE /* SharedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStore.swift; sourceTree = "<group>"; };
 		09AFFD5DE516371B6CC31172 /* AudioTestView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioTestView.swift; sourceTree = "<group>"; };
 		0CFEA027394A64C46A1780F5 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
@@ -251,6 +254,7 @@
 		E69472A0DAAB1972CC0FB351 /* BufferRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferRoutingTests.swift; sourceTree = "<group>"; };
 		EA65B8D6263AAF104F9B06CE /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		ED2B936BFFD2FB65A3BBA961 /* WatchKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchKit.framework; path = System/Library/Frameworks/WatchKit.framework; sourceTree = SDKROOT; };
+		F04E1A3210EB33E4454CE74D /* CoordinationCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoordinationCard.swift; sourceTree = "<group>"; };
 		F40F27BC70CA9C7E4307D2A3 /* SearchSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SearchSheet.swift; sourceTree = "<group>"; };
 		F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
 		F8A70269A0B1FFBA4A6B8F51 /* EmptyStateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmptyStateView.swift; sourceTree = "<group>"; };
@@ -366,6 +370,7 @@
 				E4A25735A9E045465A3F1BAD /* ChatsTab.swift */,
 				9E160E4F6AA98C972AA5B794 /* ComposeView.swift */,
 				5623F20307924888306278FF /* ConnectView.swift */,
+				01F3FF90C3280207C507F1F7 /* CoordinationCardView.swift */,
 				8114EBF122CE613364A0CAE7 /* DiscoverTab.swift */,
 				F8A70269A0B1FFBA4A6B8F51 /* EmptyStateView.swift */,
 				B46D635B8FB436FDCECA93FE /* FreeqLogo.swift */,
@@ -417,6 +422,7 @@
 				17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */,
 				5CA24DC11B2BF464C7175F93 /* ChannelState.swift */,
 				F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */,
+				F04E1A3210EB33E4454CE74D /* CoordinationCard.swift */,
 				DA678EF1B2762175E6668C55 /* DidDisplay.swift */,
 				87BB1081CEB9C7213E2A317E /* FreeqDirectory.swift */,
 				25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */,
@@ -718,6 +724,8 @@
 				D96D2C4DCB89EED18C1AED57 /* ComposeView.swift in Sources */,
 				D0209F9328C9586D5B2849DE /* ConnectView.swift in Sources */,
 				B198511552ED975806FF24E9 /* ContentView.swift in Sources */,
+				1BD7A46E4BD6D8A4BE35029A /* CoordinationCard.swift in Sources */,
+				B41304C5131C07D3928E5596 /* CoordinationCardView.swift in Sources */,
 				4047D67A42E04325ACEFECDA /* DidDisplay.swift in Sources */,
 				F5578CDEA68BCCE1C35408EF /* DiscoverTab.swift in Sources */,
 				BDE5C52E5FD4C024CDA4D798 /* EmptyStateView.swift in Sources */,
