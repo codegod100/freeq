@@ -380,14 +380,16 @@ pub(super) fn handle_tagmsg(
     }
 
     // ── Remove reactions (+freeq.at/unreact with +reply) ──
-    // The reactor is identified by the connection's current nick — same key the
-    // add path uses to scope a reaction. The TAGMSG itself still relays through
-    // the broadcast below so other clients can drop the pill from the UI.
+    // Identity-keyed: authenticated users remove by DID (so a nick change
+    // doesn't strand their reaction, and a nick squatter can't strip it);
+    // guests remove only their own DID-less rows. The TAGMSG itself still
+    // relays through the broadcast below so other clients drop the pill.
     if let (Some(emoji), Some(target_msgid)) = (tags.get("+freeq.at/unreact"), tags.get("+reply")) {
         let nick = conn.nick_or_star().to_string();
+        let did = conn.authenticated_did.clone();
         let target_msgid = target_msgid.clone();
         let emoji = emoji.clone();
-        state.with_db(|db| db.remove_reaction(&target_msgid, &nick, &emoji));
+        state.with_db(|db| db.remove_reaction(&target_msgid, &nick, did.as_deref(), &emoji));
     }
 
     let hostmask = conn.hostmask();

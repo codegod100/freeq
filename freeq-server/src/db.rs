@@ -1351,17 +1351,34 @@ impl Db {
         Ok(())
     }
 
-    /// Remove a reaction.
+    /// Remove a reaction. Identity-keyed, not just nick-keyed:
+    ///
+    /// - An **authenticated** remover (did = Some) deletes rows stored under
+    ///   their DID — regardless of what nick they reacted under (nick changes
+    ///   must not make a reaction irremovable) — plus any DID-less row under
+    ///   their current nick (their own pre-auth reaction; they own the nick).
+    /// - A **guest** remover (did = None) deletes only DID-less rows under
+    ///   their nick. A guest squatting a previously-authenticated user's nick
+    ///   must not be able to strip that user's reactions.
     pub fn remove_reaction(
         &self,
         target_msgid: &str,
         reactor_nick: &str,
+        reactor_did: Option<&str>,
         emoji: &str,
     ) -> SqlResult<usize> {
-        let changed = self.conn.execute(
-            "DELETE FROM reactions WHERE target_msgid = ?1 AND reactor_nick = ?2 AND emoji = ?3",
-            params![target_msgid, reactor_nick, emoji],
-        )?;
+        let changed = match reactor_did {
+            Some(did) => self.conn.execute(
+                "DELETE FROM reactions WHERE target_msgid = ?1 AND emoji = ?2
+                   AND (reactor_did = ?3 OR (reactor_did IS NULL AND reactor_nick = ?4))",
+                params![target_msgid, emoji, did, reactor_nick],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM reactions WHERE target_msgid = ?1 AND emoji = ?2
+                   AND reactor_nick = ?3 AND reactor_did IS NULL",
+                params![target_msgid, emoji, reactor_nick],
+            )?,
+        };
         Ok(changed)
     }
 
@@ -2539,13 +2556,61 @@ mod tests {
         db.store_reaction("msg001", "#test", "alice", None, "❤️", 1001)
             .unwrap();
 
-        let removed = db.remove_reaction("msg001", "alice", "👍").unwrap();
+        let removed = db.remove_reaction("msg001", "alice", None, "👍").unwrap();
         assert_eq!(removed, 1);
 
         let reactions = db.get_reactions_for_messages(&["msg001"]).unwrap();
         let msg_reactions = reactions.get("msg001").unwrap();
         assert_eq!(msg_reactions.len(), 1);
         assert_eq!(msg_reactions[0].emoji, "❤️");
+    }
+
+    #[test]
+    fn remove_reaction_by_did_survives_nick_change() {
+        // A DID user reacted under nick "alice", then changed nick to "alia".
+        // Removal must key on the DID — otherwise their reaction is
+        // accidentally immortal (the durability bug's evil twin).
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#t", "alice", Some("did:plc:aaa"), "👍", 1000)
+            .unwrap();
+
+        let removed = db
+            .remove_reaction("msg001", "alia", Some("did:plc:aaa"), "👍")
+            .unwrap();
+        assert_eq!(removed, 1, "DID match must remove regardless of nick");
+        assert!(db.get_reactions_for_messages(&["msg001"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn guest_cannot_remove_did_users_reaction_by_squatting_nick() {
+        // alice (authenticated) reacted; later an unauthenticated guest holds
+        // the nick "alice". The guest's unreact must NOT delete the DID
+        // user's persisted reaction.
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#t", "alice", Some("did:plc:aaa"), "👍", 1000)
+            .unwrap();
+
+        let removed = db.remove_reaction("msg001", "alice", None, "👍").unwrap();
+        assert_eq!(removed, 0, "guest must not remove a DID-keyed reaction");
+        assert_eq!(
+            db.get_reactions_for_messages(&["msg001"]).unwrap()["msg001"].len(),
+            1
+        );
+    }
+
+    #[test]
+    fn did_user_can_remove_own_guest_era_reaction_under_owned_nick() {
+        // A reaction stored before the user authenticated (no DID) under the
+        // nick they now own: the authenticated remover with that nick may
+        // clear it — it's their row.
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#t", "alice", None, "👍", 1000)
+            .unwrap();
+
+        let removed = db
+            .remove_reaction("msg001", "alice", Some("did:plc:aaa"), "👍")
+            .unwrap();
+        assert_eq!(removed, 1);
     }
 
     #[test]

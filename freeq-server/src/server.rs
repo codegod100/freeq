@@ -3474,6 +3474,22 @@ pub(crate) async fn process_s2s_message(
                 });
             }
 
+            // Persist reaction REMOVALS too. Without this, a federated
+            // unreact relayed to live clients but the peer's DB kept the row —
+            // the removed reaction resurrected for every fresh join and after
+            // every restart on this side of the federation.
+            if let (Some(emoji), Some(target_msgid)) =
+                (tags.get("+freeq.at/unreact"), tags.get("+reply"))
+            {
+                let nick = from.split('!').next().unwrap_or(&from).to_string();
+                let did = state.nick_owners.lock().get(&nick.to_lowercase()).cloned();
+                let emoji = emoji.clone();
+                let target_msgid = target_msgid.clone();
+                state.with_db(|db| {
+                    db.remove_reaction(&target_msgid, &nick, did.as_deref(), &emoji)
+                });
+            }
+
             // Wire forms — identical for channel and DM delivery.
             let tag_msg = crate::irc::Message {
                 tags: tags.clone(),
@@ -6437,6 +6453,62 @@ mod s2s_adversarial_tests {
         assert!(
             msg.contains("+react="),
             "Should contain reaction, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_unreact_removes_persisted_reaction() {
+        // A federated reaction followed by a federated UNREACT: the removal
+        // must reach the DB, or the reaction resurrects for fresh joins and
+        // after restarts (it did — the unreact path only relayed live).
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#s2s-unreact");
+
+        let mut react = HashMap::new();
+        react.insert("+react".to_string(), "🎉".to_string());
+        react.insert("+reply".to_string(), "01MSGID".to_string());
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:r1"),
+                from: "alice!a@remote".to_string(),
+                target: "#s2s-unreact".to_string(),
+                tags: react,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+        let stored = state
+            .with_db(|db| db.get_reactions_for_messages(&["01MSGID"]))
+            .expect("db present");
+        assert_eq!(stored.get("01MSGID").map(|v| v.len()), Some(1), "react persisted");
+
+        let mut unreact = HashMap::new();
+        unreact.insert("+freeq.at/unreact".to_string(), "🎉".to_string());
+        unreact.insert("+reply".to_string(), "01MSGID".to_string());
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:r2"),
+                from: "alice!a@remote".to_string(),
+                target: "#s2s-unreact".to_string(),
+                tags: unreact,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+        let after = state
+            .with_db(|db| db.get_reactions_for_messages(&["01MSGID"]))
+            .expect("db present");
+        assert!(
+            after.get("01MSGID").is_none_or(|v| v.is_empty()),
+            "federated unreact must remove the persisted reaction: {after:?}"
         );
     }
 
