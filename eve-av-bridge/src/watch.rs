@@ -41,11 +41,12 @@ const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 20; // 50ms
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
 
 /// Prebuffer before MoQ starts hearing stream audio.
-const PRIME_SECS: f32 = 0.8;
-/// How far ahead of wall-clock we allow the speaker queue to run.
-const MAX_AHEAD_SECS: f32 = 2.0;
-/// Absolute safety valve (seconds of PCM in Speaker).
-const MAX_QUEUE_SECS: f32 = 3.5;
+/// Large enough to absorb multi-second HLS / MoQ jitter.
+const PRIME_SECS: f32 = 4.0;
+/// How far ahead of wall-clock we allow enqueued playout to run.
+const MAX_AHEAD_SECS: f32 = 10.0;
+/// Absolute safety valve (seconds of PCM in Speaker ring).
+const MAX_QUEUE_SECS: f32 = 15.0;
 
 const FRAME_BYTES: usize = (WATCH_W as usize) * (WATCH_H as usize) * 4;
 
@@ -212,9 +213,9 @@ fn hls_input_args(url: &str) -> Vec<String> {
         "1",
         "-reconnect_delay_max",
         "5",
-        // A few 1s segments of slack without dumping a huge backlog.
+        // Stay further behind live edge so the big ring can fill smoothly.
         "-live_start_index",
-        "-3",
+        "-8",
         "-i",
         url,
     ]
@@ -421,7 +422,7 @@ fn run_audio_blocking(
             }
 
             if speaker.queued_secs() > MAX_QUEUE_SECS {
-                speaker.trim_to_secs(MAX_QUEUE_SECS * 0.5);
+                speaker.trim_to_secs(MAX_QUEUE_SECS * 0.75);
             }
 
             speaker.enqueue(&pcm, SPEAK_RATE);
