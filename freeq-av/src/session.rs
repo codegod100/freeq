@@ -280,6 +280,34 @@ async fn run_subscriber<V, MkV>(
     }
 }
 
+
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
+fn env_u64(key: &str) -> Option<u64> {
+    std::env::var(key).ok()?.parse().ok()
+}
+
+/// `AV_VIDEO_PRESET`: 180p / 360p / 720p / 1080p (default 360p).
+fn video_preset_from_env() -> VideoPreset {
+    match std::env::var("AV_VIDEO_PRESET")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "180" | "180p" | "p180" => VideoPreset::P180,
+        "720" | "720p" | "p720" => VideoPreset::P720,
+        "1080" | "1080p" | "p1080" => VideoPreset::P1080,
+        "360" | "360p" | "p360" | "" => VideoPreset::P360,
+        other => {
+            tracing::warn!(%other, "unknown AV_VIDEO_PRESET — using 360p");
+            VideoPreset::P360
+        }
+    }
+}
+
 /// One MoQ session: connect, publish the agent's broadcast, tap every
 /// participant, until the transport drops. Tap tasks are owned by a
 /// local [`JoinSet`] so when this returns (for any reason) they're all
@@ -310,10 +338,30 @@ where
     // Audio-only beings skip the video tile entirely — no H.264 encode, which
     // is what frees a 2-core host to hold a stable voice call.
     if !config.audio_only {
-        // P360 @ 30fps with 0.5s IDR so freeq clients recover quickly from MoQ loss
-        // (watch plane holds last frame; short GOPs avoid multi-second freezes).
-        let preset = VideoPreset::P360;
-        let enc_config = VideoEncoderConfig::from_preset(preset).keyframe_interval(15);
+        // Env overrides for tiny tiles (stream-watch on a 2-core box):
+        //   AV_VIDEO_PRESET=180p|360p|720p|1080p  (default 360p)
+        //   AV_VIDEO_FPS=<n>                      (default = preset fps, usually 30)
+        //   AV_VIDEO_BITRATE=<bps>                (default = codec auto)
+        let preset = video_preset_from_env();
+        let mut enc_config = VideoEncoderConfig::from_preset(preset);
+        if let Some(fps) = env_u32("AV_VIDEO_FPS") {
+            enc_config = enc_config.framerate(fps.max(1));
+        }
+        if let Some(bps) = env_u64("AV_VIDEO_BITRATE") {
+            enc_config = enc_config.bitrate(bps.max(32_000));
+        }
+        // ~1s IDR at configured fps (was hard-coded 15 @ 30fps).
+        let ki = enc_config.framerate.max(1);
+        enc_config = enc_config.keyframe_interval(ki);
+        tracing::info!(
+            %preset,
+            width = enc_config.width,
+            height = enc_config.height,
+            fps = enc_config.framerate,
+            bitrate = ?enc_config.bitrate,
+            keyframe_interval = ki,
+            "agent broadcast video encode"
+        );
         let catalog = H264Encoder::config_for(&enc_config).into();
         let mut renditions = VideoRenditions::empty(video);
         renditions.add_with_callback(

@@ -5,7 +5,7 @@
 //!
 //! Performance notes (smoothness):
 //! - **One ffmpeg** demuxes A+V (named-pipe outputs) so HLS isn't opened twice.
-//! - **30 fps** matches `VideoPreset::P360` encoder cadence.
+//! - **15 fps / 180p** matches tiny freeq tile + `AV_VIDEO_PRESET=180p`.
 //! - **Hold-last-frame** with advancing PTS so encoder never starves mid-segment.
 //! - **Always drain both FIFOs** — never backpressure ffmpeg by pausing audio
 //!   reads (dual-output pipe deadlock = multi-second freezes / cutouts).
@@ -29,12 +29,13 @@ use tokio::process::Command;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-/// Tile size for freeq MoQ H.264 path (matches radio viz / P360).
-pub const WATCH_W: u32 = 640;
-pub const WATCH_H: u32 = 360;
+/// Tile size for freeq MoQ H.264 path (matches `VideoPreset::P180`).
+/// Tiny freeq window — keep decode/encode cheap on 2-core VMs.
+pub const WATCH_W: u32 = 320;
+pub const WATCH_H: u32 = 180;
 
-/// Match `VideoPreset::P360` encoder framerate (iroh-live: all presets are 30).
-const FPS: u32 = 30;
+/// Match low-CPU watch encode (override via AV_VIDEO_FPS on the bridge).
+const FPS: u32 = 15;
 
 const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 10;
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
