@@ -21,6 +21,7 @@ defmodule FreeqWeb3.Session.Server do
   alias FreeqWeb3.Irc.Render
   alias FreeqWeb3.Irc.Upstream
   alias FreeqWeb3.Session
+  alias FreeqWeb3.SessionStore
 
   defstruct [
     :session_id,
@@ -57,6 +58,7 @@ defmodule FreeqWeb3.Session.Server do
   def init(opts) do
     session_id = Keyword.fetch!(opts, :session_id)
     state = %__MODULE__{session_id: session_id, current_nick: guest_nick()}
+    state = restore_from_disk(state)
     {:ok, state}
   end
 
@@ -93,11 +95,14 @@ defmodule FreeqWeb3.Session.Server do
         sasl_status: if(state.api_bearer in [nil, ""], do: :pending, else: :ok)
     }
 
+    persist_auth(state)
     Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
     {:reply, :ok, state}
   end
 
   def handle_call(:clear_auth, _from, state) do
+    SessionStore.remove(state.session_id)
+
     state = %{
       state
       | auth: :guest,
@@ -115,6 +120,39 @@ defmodule FreeqWeb3.Session.Server do
     state = disconnect_upstream(state, "reconnect")
     state = start_upstream(state, primary_channel(state))
     {:reply, :ok, state}
+  end
+
+  # Re-check disk for OAuth credentials (e.g. after restart, or if OAuth
+  # completed under this id while we were still a guest). May reconnect
+  # upstream so SASL re-runs with restored credentials.
+  def handle_call(:maybe_restore_auth, _from, state) do
+    if has_credentials?(state) do
+      {:reply, false, state}
+    else
+      case apply_disk_auth(state) do
+        {true, state} ->
+          # apply_disk_auth clears api_bearer; if IRC is already up as guest,
+          # reconnect so SASL re-runs with restored credentials.
+          state =
+            if state.ws_state == :ready do
+              Logger.info(
+                "session #{short(state.session_id)} disk credentials on guest IRC — reconnecting for SASL"
+              )
+
+              state
+              |> disconnect_upstream("restore-auth")
+              |> start_upstream(primary_channel(state))
+            else
+              state
+            end
+
+          Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
+          {:reply, true, state}
+
+        {false, state} ->
+          {:reply, false, state}
+      end
+    end
   end
 
   def handle_call({:ensure_authenticated, timeout_ms}, from, state) do
@@ -167,6 +205,7 @@ defmodule FreeqWeb3.Session.Server do
         joined: MapSet.put(state.joined, ch)
     }
 
+    persist_channels(state)
     {:reply, :ok, state}
   end
 
@@ -181,6 +220,7 @@ defmodule FreeqWeb3.Session.Server do
         join_sent: MapSet.delete(state.join_sent, ch)
     }
 
+    persist_channels(state)
     {:reply, :ok, state}
   end
 
@@ -193,6 +233,7 @@ defmodule FreeqWeb3.Session.Server do
         joined: MapSet.put(state.joined, ch)
     }
 
+    persist_channels(state)
     state = ensure_upstream(state, ch)
     state = maybe_enqueue_join(state, ch)
     Session.broadcast(state.session_id, {:channels_changed, MapSet.to_list(state.channels)})
@@ -210,6 +251,7 @@ defmodule FreeqWeb3.Session.Server do
         join_sent: MapSet.delete(state.join_sent, ch)
     }
 
+    persist_channels(state)
     state = enqueue(state, "PART #{ch}\r\n")
     Session.broadcast(state.session_id, {:channels_changed, MapSet.to_list(state.channels)})
     {:reply, :ok, state}
@@ -459,7 +501,11 @@ defmodule FreeqWeb3.Session.Server do
   end
 
   def handle_info({:upstream_auth_updated, %OAuthSession{} = oauth}, state) do
-    {:noreply, %{state | auth: oauth}}
+    # Token refresh / DPoP nonce update — keep disk credentials current so
+    # SASL still works after process restart.
+    state = %{state | auth: oauth}
+    persist_auth(state)
+    {:noreply, state}
   end
 
   def handle_info({:auth_wait_timeout, from}, state) do
@@ -487,6 +533,90 @@ defmodule FreeqWeb3.Session.Server do
   end
 
   # ── Internals ──────────────────────────────────────────────────────────
+
+  defp restore_from_disk(state) do
+    state =
+      case apply_disk_auth(state) do
+        {true, s} -> s
+        {false, s} -> s
+      end
+
+    restore_disk_channels(state)
+  end
+
+  # Returns `{restored?, state}`.
+  defp apply_disk_auth(state) do
+    if has_credentials?(state) do
+      {false, state}
+    else
+      case SessionStore.load(state.session_id) do
+        %OAuthSession{} = oauth ->
+          nick = OAuthSession.nick(oauth)
+
+          state = %{
+            state
+            | auth: oauth,
+              current_nick: nick || state.current_nick,
+              # Credentials restored — app identity still needs SASL.
+              sasl_status: :pending,
+              api_bearer: nil
+          }
+
+          Logger.info(
+            "session #{short(state.session_id)} restored OAuth from disk did=#{oauth.did}"
+          )
+
+          {true, state}
+
+        _ ->
+          {false, state}
+      end
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "session #{short(state.session_id)} restore_auth failed: #{Exception.message(e)}"
+      )
+
+      {false, state}
+  end
+
+  defp restore_disk_channels(state) do
+    channels =
+      state.session_id
+      |> SessionStore.load_channels()
+      |> Enum.map(&Render.canonical_channel/1)
+      |> Enum.reject(&(&1 in [nil, ""]))
+
+    if channels == [] do
+      state
+    else
+      set = MapSet.new(channels)
+
+      Logger.info(
+        "session #{short(state.session_id)} restored #{MapSet.size(set)} channel(s) from disk"
+      )
+
+      %{state | channels: set, joined: MapSet.union(state.joined, set)}
+    end
+  rescue
+    e ->
+      Logger.warning(
+        "session #{short(state.session_id)} restore_channels failed: #{Exception.message(e)}"
+      )
+
+      state
+  end
+
+  defp persist_auth(%{auth: %OAuthSession{} = oauth, session_id: sid}) do
+    SessionStore.save(sid, oauth)
+  end
+
+  defp persist_auth(_), do: :ok
+
+  defp persist_channels(state) do
+    SessionStore.save_channels(state.session_id, MapSet.to_list(state.channels))
+  end
 
   defp authenticated?(state) do
     has_credentials?(state) and state.api_bearer not in [nil, ""] and state.sasl_status == :ok
@@ -704,12 +834,13 @@ defmodule FreeqWeb3.Session.Server do
       end
 
     # AV call state / token.
+    # Broadcast on the session topic (not channel) so LiveView still receives
+    # call updates after the user patches to another text channel.
     state =
       case Render.parse_av_state_tagmsg(line) do
         {ch, av_state, session_id_av, actor, participants, instance, title} ->
-          Session.broadcast_channel(
+          Session.broadcast(
             state.session_id,
-            ch,
             {:av_state,
              %{
                channel: ch,

@@ -15,6 +15,9 @@ config :freeq_web3,
   # Short-lived OAuth state/PKCE store (callback recovery). Override via
   # FREEQ_WEB3_PENDING_OAUTH_DIR.
   pending_oauth_dir: ".dev-data/web3-pending-oauth",
+  # Encrypted OAuth + channel-list persistence (SASL reauth after restart).
+  # Override via FREEQ_WEB3_SESSIONS_DIR; set empty to disable.
+  sessions_dir: ".dev-data/web3-sessions",
   # Server-side link-preview image/meta cache (same-origin /preview-cache/:id).
   preview_cache_dir: ".dev-data/web3-preview-cache"
 

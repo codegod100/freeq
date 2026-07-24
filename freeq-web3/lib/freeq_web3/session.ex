@@ -8,19 +8,41 @@ defmodule FreeqWeb3.Session do
 
   alias FreeqWeb3.Session.Supervisor
 
-  @doc "Get or start the session process for `session_id`."
+  @doc """
+  Get or start the session process for `session_id`.
+
+  On first create, OAuth credentials (and the client channel list) are
+  restored from the encrypted disk store when present so SASL can re-run
+  after a freeq-web3 restart. Existing guest processes also re-check disk
+  in case credentials landed after an earlier touch.
+  """
   def get_or_start(session_id) when is_binary(session_id) do
     case Registry.lookup(FreeqWeb3.Session.Registry, session_id) do
       [{pid, _}] ->
+        # Best-effort: restore disk credentials onto a guest process.
+        _ = maybe_restore_auth(session_id)
         {:ok, pid}
 
       [] ->
         case Supervisor.start_session(session_id) do
-          {:ok, pid} -> {:ok, pid}
-          {:error, {:already_started, pid}} -> {:ok, pid}
-          other -> other
+          {:ok, pid} ->
+            {:ok, pid}
+
+          {:error, {:already_started, pid}} ->
+            _ = maybe_restore_auth(session_id)
+            {:ok, pid}
+
+          other ->
+            other
         end
     end
+  end
+
+  @doc false
+  def maybe_restore_auth(session_id) when is_binary(session_id) do
+    GenServer.call(via(session_id), :maybe_restore_auth, 10_000)
+  catch
+    :exit, _ -> false
   end
 
   def via(session_id), do: {:via, Registry, {FreeqWeb3.Session.Registry, session_id}}

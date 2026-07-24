@@ -66,6 +66,7 @@ Open `http://127.0.0.1:4000` → LiveView channel list at `/chat`.
 | `FREEQ_UPSTREAM_REST` | `https://irc.freeq.at` | Upstream freeq-server REST base |
 | `FREEQ_PUBLIC_URL` | request base URL | Public origin for OAuth client_id + redirect |
 | `FREEQ_WEB3_PENDING_OAUTH_DIR` | `.dev-data/web3-pending-oauth` | In-flight OAuth PKCE/state store |
+| `FREEQ_WEB3_SESSIONS_DIR` | `.dev-data/web3-sessions` | Encrypted OAuth + channel list (empty = off) |
 | `FREEQ_WEB3_PREVIEW_CACHE_DIR` | `.dev-data/web3-preview-cache` | Downloaded link-preview images + meta |
 | `PORT` | `4000` | HTTP listen port |
 
@@ -106,7 +107,6 @@ This is a **core-chat** port of freeq-web2. What is ported:
 
 What is **not** yet ported (track in AGENTS.md):
 
-- Encrypted on-disk session persistence (re-login after process restart)
 - DMs / E2EE
 - Reactions UI + TAGMSG react
 - Voice / video (MoQ)

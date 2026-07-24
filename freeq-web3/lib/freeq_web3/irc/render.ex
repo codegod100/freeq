@@ -309,9 +309,19 @@ defmodule FreeqWeb3.Irc.Render do
     end
   end
 
+  @doc """
+  Channel target only (`#` / `&` / `+` / `!`). Nick targets return nil so
+  callers can treat them as DMs rather than channel messages.
+
+  JOIN/PART must be included — otherwise `should_emit?/2` treats them as
+  channel-less and fans one join out into every joined pane (re-JOIN after
+  SASL becomes "nandi.uk join" spam N times).
+  """
   def extract_irc_target(after_prefix) do
     case String.split(after_prefix, " ", parts: 3) do
-      [command, target | _] when command in ~w(PRIVMSG NOTICE TOPIC MODE KICK INVITE) ->
+      [command, target | _]
+      when command in ~w(PRIVMSG NOTICE TOPIC MODE KICK INVITE JOIN PART) ->
+        target = String.trim_leading(target, ":")
         if String.starts_with?(target, ["#", "&", "+", "!"]), do: target, else: nil
 
       _ ->

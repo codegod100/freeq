@@ -30,6 +30,7 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 | `lib/freeq_web3_web/live/user_session.ex` | `on_mount` → freeq_session cookie + start Session |
 | `lib/freeq_web3/atproto/*` | DPoP, OAuth, OAuthSession, SASL ATPROTO-CHALLENGE |
 | `lib/freeq_web3/pending_oauth_store.ex` | Disk-backed OAuth state/PKCE for callback recovery |
+| `lib/freeq_web3/session_store.ex` | Encrypted OAuth + channel list (SASL reauth after restart) |
 | `lib/freeq_web3_web/controllers/sessions_controller.ex` | `/login`, callback, logout, client metadata |
 | `lib/freeq_web3/link_preview.ex` | Server-side previews; downloads images to local cache |
 | `lib/freeq_web3_web/controllers/preview_controller.ex` | Serves `/preview-cache/:id` (same-origin images) |
@@ -62,7 +63,7 @@ Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 - [x] freeq dark theme CSS
 - [x] AT Protocol OAuth (`/login`, callback, client metadata)
 - [x] SASL ATPROTO-CHALLENGE + API-BEARER
-- [ ] Encrypted session store (disk) + channel list persistence
+- [x] Encrypted session store (disk) + channel list persistence
 - [ ] Reactions (TAGMSG +react / unreact)
 - [ ] Message edit/delete UI
 - [ ] DMs + E2EE key proxy

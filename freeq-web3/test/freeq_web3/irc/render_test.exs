@@ -22,6 +22,29 @@ defmodule FreeqWeb3.Irc.RenderTest do
     refute Render.should_emit?(line, "#other")
   end
 
+  test "should_emit? scopes JOIN/PART to the target channel (no fan-out)" do
+    join = ":nandi.uk!u@h JOIN #dev"
+    assert Render.should_emit?(join, "#dev")
+    refute Render.should_emit?(join, "#freeq")
+    refute Render.should_emit?(join, "#other")
+
+    # Extended-join / colon form used by some servers.
+    join_colon = ":nandi.uk!u@h JOIN :#freeq"
+    assert Render.should_emit?(join_colon, "#freeq")
+    refute Render.should_emit?(join_colon, "#dev")
+
+    part = ":nandi.uk!u@h PART #dev :bye"
+    assert Render.should_emit?(part, "#dev")
+    refute Render.should_emit?(part, "#freeq")
+  end
+
+  test "extract_irc_target handles JOIN with optional colon" do
+    assert Render.extract_irc_target("JOIN #freeq") == "#freeq"
+    assert Render.extract_irc_target("JOIN :#freeq") == "#freeq"
+    assert Render.extract_irc_target("PART #dev :reason") == "#dev"
+    assert Render.extract_irc_target("PRIVMSG alice :hi") == nil
+  end
+
   test "should_emit? ignores TAGMSG and CAP" do
     refute Render.should_emit?("@+react=👍 :a!u@h TAGMSG #freeq", "#freeq")
     refute Render.should_emit?(":server CAP * ACK :sasl", "#freeq")

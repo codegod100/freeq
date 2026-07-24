@@ -13,6 +13,11 @@ if dir = System.get_env("FREEQ_WEB3_PENDING_OAUTH_DIR") do
   config :freeq_web3, :pending_oauth_dir, dir
 end
 
+# Empty string disables encrypted session persistence.
+if System.get_env("FREEQ_WEB3_SESSIONS_DIR") != nil do
+  config :freeq_web3, :sessions_dir, System.get_env("FREEQ_WEB3_SESSIONS_DIR")
+end
+
 if dir = System.get_env("FREEQ_WEB3_PREVIEW_CACHE_DIR") do
   config :freeq_web3, :preview_cache_dir, dir
 end

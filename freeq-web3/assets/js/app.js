@@ -31,11 +31,10 @@ import TabComplete from "./tab_complete";
 // (`/preview-cache/:id`). No client-side OG/image fetch on page load.
 const ChatScroll = {
   mounted() {
+    this._channel = this.el.dataset.channel || "";
     // Double rAF so layout (including server-rendered preview cards) settles.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => this.scrollToBottom());
-    });
-    this.handleEvent("scroll_bottom", () => this.scrollToBottom());
+    this.scrollToBottomSoon();
+    this.handleEvent("scroll_bottom", () => this.scrollToBottomSoon());
     this.handleEvent("focus_compose", () => this.focusCompose());
     this.handleEvent("scroll_to_message", ({ msgid }) =>
       this.scrollToMessage(msgid),
@@ -43,15 +42,39 @@ const ChatScroll = {
     this.hydrateReplyBadges();
   },
   updated() {
+    const channel = this.el.dataset.channel || "";
+    const channelChanged = channel !== this._channel;
+    this._channel = channel;
+
     const el = this.el.querySelector("#messages");
     if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
-    if (nearBottom) this.scrollToBottom();
+
+    // Live navigation between channels reuses this hook (no remount). Stream
+    // reset leaves scroll at the top unless we force bottom.
+    if (channelChanged) {
+      this.scrollToBottomSoon();
+    } else {
+      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
+      if (nearBottom) this.scrollToBottom();
+    }
     this.hydrateReplyBadges();
   },
   scrollToBottom() {
     const el = this.el.querySelector("#messages");
     if (el) el.scrollTop = el.scrollHeight;
+  },
+  /** After stream reset / history paint, height may lag a frame or two. */
+  scrollToBottomSoon() {
+    this.scrollToBottom();
+    requestAnimationFrame(() => {
+      this.scrollToBottom();
+      requestAnimationFrame(() => {
+        this.scrollToBottom();
+        // Preview images / fonts can still grow the pane slightly.
+        clearTimeout(this._scrollTimer);
+        this._scrollTimer = setTimeout(() => this.scrollToBottom(), 80);
+      });
+    });
   },
   focusCompose() {
     // After LV patches (reply/edit/send), restore keyboard focus to compose.
