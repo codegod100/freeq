@@ -221,6 +221,9 @@ class AppState: ObservableObject {
     /// the unread-divider / catch-up UI can consume it.
     var readMarkers: [String: String] = [:]
     @Published var serverAddress: String = ServerConfig.ircServer
+    /// Per-session REST bearer (session id), parsed from the API-BEARER
+    /// NOTICE. Identifies our DID for authenticated REST (roaming favorites).
+    var apiBearerSessionId: String?
     @Published var authBrokerBase: String = ServerConfig.authBrokerBase
     @Published var channels: [ChannelState] = []
     @Published var activeChannel: String? = nil {
@@ -2094,6 +2097,44 @@ class AppState: ObservableObject {
             if !favoritesOrder.contains(channel) { favoritesOrder.append(channel) }
         }
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        pushFavorites()
+    }
+
+    private func favoritesURL() -> URL? {
+        let host = serverAddress.split(separator: ":").first.map(String.init) ?? "irc.freeq.at"
+        return URL(string: "https://\(host)/api/v1/favorites")
+    }
+
+    /// Roaming favorites: pull the DID's server list, union with local
+    /// (order-preserving), write back if changed. Per-DID (parity w/ web+macOS).
+    func syncFavoritesFromServer() {
+        guard let bearer = apiBearerSessionId, let url = favoritesURL() else { return }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let server = json["favorites"] as? [String] else { return }
+            Task { @MainActor in
+                let local = self.favoritesOrder
+                let merged = FavoritesSync.merge(server: server, local: local)
+                if merged != self.favoritesOrder {
+                    self.favoritesOrder = merged
+                    self.favorites = Set(merged)
+                }
+                if !FavoritesSync.equal(merged, server) { self.pushFavorites() }
+            }
+        }.resume()
+    }
+
+    private func pushFavorites() {
+        guard let bearer = apiBearerSessionId, let url = favoritesURL() else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["favorites": favoritesOrder])
+        URLSession.shared.dataTask(with: req).resume()
     }
 
     func toggleTheme() {
@@ -3011,6 +3052,15 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             } else if text.hasPrefix("MOTD:") {
                 if state.collectingMotd {
                     state.motdLines.append(String(text.dropFirst(5)))
+                }
+            } else if text.hasPrefix("API-BEARER ") {
+                // Capture the per-session REST bearer (parity with macOS) so
+                // authenticated REST (roaming favorites) can identify our DID.
+                let sid = String(text.dropFirst("API-BEARER ".count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !sid.isEmpty {
+                    state.apiBearerSessionId = sid
+                    state.syncFavoritesFromServer()
                 }
             } else if let denial = ChannelAccessNotice.parse(text) {
                 // Surface WHY a gated join failed instead of silently doing

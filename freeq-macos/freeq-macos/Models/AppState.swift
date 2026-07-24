@@ -1294,6 +1294,46 @@ class AppState {
         let key = channel.lowercased()
         if favorites.contains(key) { favorites.remove(key) } else { favorites.insert(key) }
         UserDefaults.standard.set(Array(favorites), forKey: "freeq.favorites")
+        pushFavorites()
+    }
+
+    private func favoritesURL() -> URL? {
+        let host = serverAddress.split(separator: ":").first.map(String.init) ?? "irc.freeq.at"
+        return URL(string: "https://\(host)/api/v1/favorites")
+    }
+
+    /// Roaming favorites: pull the DID's server list, union with local (no
+    /// device loses one), write back if changed. Called once the API bearer
+    /// is available. Per-DID via the REST endpoint (parity with web/iOS).
+    func syncFavoritesFromServer() {
+        guard let bearer = apiBearerSessionId, let url = favoritesURL() else { return }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        URLSession.shared.dataTask(with: req) { [weak self] data, _, _ in
+            guard let self, let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let server = json["favorites"] as? [String] else { return }
+            Task { @MainActor in
+                let local = Array(self.favorites)
+                let merged = FavoritesSync.merge(server: server, local: local)
+                if Set(merged) != self.favorites {
+                    self.favorites = Set(merged)
+                    UserDefaults.standard.set(merged, forKey: "freeq.favorites")
+                }
+                if !FavoritesSync.equal(merged, server) { self.pushFavorites() }
+            }
+        }.resume()
+    }
+
+    /// Write the current favorites to the server for this DID (fire-and-forget).
+    private func pushFavorites() {
+        guard let bearer = apiBearerSessionId, let url = favoritesURL() else { return }
+        var req = URLRequest(url: url)
+        req.httpMethod = "PUT"
+        req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try? JSONSerialization.data(withJSONObject: ["favorites": Array(favorites)])
+        URLSession.shared.dataTask(with: req).resume()
     }
 
     func toggleMuted(_ channel: String) {
@@ -1991,6 +2031,8 @@ extension AppState {
                 return
             case .apiBearer(let sessionId):
                 apiBearerSessionId = sessionId
+                // Bearer is now available — pull roaming favorites for this DID.
+                syncFavoritesFromServer()
                 return
             case .channelAccessDenied(let channel, let reason):
                 let ch = getOrCreateChannel(channel)

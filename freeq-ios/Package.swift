@@ -28,6 +28,7 @@ let package = Package(
                 "CoordinationCard.swift",
                 "Jumbomoji.swift",
                 "CallLayoutPolicies.swift",
+                "FavoritesSync.swift",
                 "ChannelCrypto.swift",
                 "ChannelE2eeState.swift",
                 "ChannelAccessNotice.swift",

@@ -13,6 +13,7 @@
 		02AB33740D36A2AA483B8980 /* NewDMSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22B90ADE5391CABDCBEF6FF3 /* NewDMSheet.swift */; };
 		0707953E63730121B32C90F1 /* freeqApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10926193239F585762C38F1 /* freeqApp.swift */; };
 		0D90DB6A860ED297CC10A2CF /* CallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1613B43E3F87D0A8567A57BB /* CallView.swift */; };
+		0DA768C09CA8CC7B361234E4 /* FavoritesSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E5226D9C982E6895916387C /* FavoritesSync.swift */; };
 		1223DEEA3B6C431275E0AC0C /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D567BC948344D3BCA2F31223 /* SwiftUI.framework */; };
 		160583C1C4A46B49DB909D79 /* CatchUpDigestSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7209B1DA2E14FE9EC7681E46 /* CatchUpDigestSheet.swift */; };
 		1AF9A87111E0AB6A8533B406 /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = EA65B8D6263AAF104F9B06CE /* Security.framework */; };
@@ -182,6 +183,7 @@
 		34D75D9768B423C15C80F711 /* SidebarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarView.swift; sourceTree = "<group>"; };
 		39851CF7C369A289DB8E3E93 /* MemberListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemberListView.swift; sourceTree = "<group>"; };
 		3A59A5F928CAB65BE2BEF71E /* LinkPreview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinkPreview.swift; sourceTree = "<group>"; };
+		3E5226D9C982E6895916387C /* FavoritesSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesSync.swift; sourceTree = "<group>"; };
 		40EA2E012985430B01C97EBC /* CallControlIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallControlIntents.swift; sourceTree = "<group>"; };
 		427121549BC7B078C6A911D1 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		4601D5B9F9DC30C03EDC4344 /* freeqWatch.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = freeqWatch.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -444,6 +446,7 @@
 				F48AA8A24FB24A8AC4F30461 /* ChatMessage.swift */,
 				F04E1A3210EB33E4454CE74D /* CoordinationCard.swift */,
 				DA678EF1B2762175E6668C55 /* DidDisplay.swift */,
+				3E5226D9C982E6895916387C /* FavoritesSync.swift */,
 				87BB1081CEB9C7213E2A317E /* FreeqDirectory.swift */,
 				25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */,
 				1553940F560E15659B1C240D /* Jumbomoji.swift */,
@@ -755,6 +758,7 @@
 				4047D67A42E04325ACEFECDA /* DidDisplay.swift in Sources */,
 				F5578CDEA68BCCE1C35408EF /* DiscoverTab.swift in Sources */,
 				BDE5C52E5FD4C024CDA4D798 /* EmptyStateView.swift in Sources */,
+				0DA768C09CA8CC7B361234E4 /* FavoritesSync.swift in Sources */,
 				4BC265FF53A0BB0A3BFECD1A /* FreeqCommands.swift in Sources */,
 				F2E0B068BB1C6C8B6183F2F9 /* FreeqDirectory.swift in Sources */,
 				91C1537B636D828A2764A878 /* FreeqIntents.swift in Sources */,
