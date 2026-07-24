@@ -424,6 +424,17 @@ struct MessageListView: View {
         }
 
         Button(action: {
+            let wasBookmarked = appState.isBookmarked(msg.id)
+            appState.toggleBookmark(channel: channel.name, msg: msg)
+            ToastManager.shared.show(wasBookmarked ? "Removed bookmark" : "Bookmarked",
+                                     icon: wasBookmarked ? "bookmark.slash" : "bookmark.fill")
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        }) {
+            Label(appState.isBookmarked(msg.id) ? "Remove Bookmark" : "Bookmark",
+                  systemImage: appState.isBookmarked(msg.id) ? "bookmark.slash" : "bookmark")
+        }
+
+        Button(action: {
             UIPasteboard.general.string = msg.id
             ToastManager.shared.show("Message ID copied", icon: "number")
         }) {

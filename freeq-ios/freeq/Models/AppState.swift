@@ -258,6 +258,37 @@ class AppState: ObservableObject {
         didSet { UserDefaults.standard.set(favoritesOrder, forKey: "freeq.favoritesOrder") }
     }
 
+    /// Saved messages (parity with web + macOS). Persisted to UserDefaults.
+    struct Bookmark: Identifiable, Codable, Equatable {
+        var id: String { msgId }
+        let channel: String
+        let msgId: String
+        let from: String
+        let text: String
+        let timestamp: Date
+    }
+    @Published var bookmarks: [Bookmark] = [] {
+        didSet {
+            if let data = try? JSONEncoder().encode(bookmarks) {
+                UserDefaults.standard.set(data, forKey: "freeq.bookmarks")
+            }
+        }
+    }
+    @Published var showBookmarks = false
+
+    func isBookmarked(_ msgId: String) -> Bool {
+        bookmarks.contains { $0.msgId == msgId }
+    }
+
+    func toggleBookmark(channel: String, msg: ChatMessage) {
+        if let idx = bookmarks.firstIndex(where: { $0.msgId == msg.id }) {
+            bookmarks.remove(at: idx)
+        } else {
+            bookmarks.append(Bookmark(channel: channel, msgId: msg.id,
+                                      from: msg.from, text: msg.text, timestamp: msg.timestamp))
+        }
+    }
+
     // Command-driven sheet triggers (hardware-keyboard shortcuts on iPad).
     @Published var showQuickSwitcher = false
     @Published var showJoinSheet = false
@@ -1228,6 +1259,10 @@ class AppState: ObservableObject {
         }
         if let savedFavorites = UserDefaults.standard.stringArray(forKey: "freeq.favorites") {
             favorites = Set(savedFavorites)
+        }
+        if let data = UserDefaults.standard.data(forKey: "freeq.bookmarks"),
+           let saved = try? JSONDecoder().decode([Bookmark].self, from: data) {
+            bookmarks = saved
         }
         // Ordered favorites (for the Favorites section order + ⌃⌘1–9). Migrate
         // from the unordered set on first run, and reconcile any drift.

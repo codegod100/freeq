@@ -95,6 +95,22 @@ struct SettingsTab: View {
 
                     // Connection
                     Section {
+                        NavigationLink {
+                            BookmarksView()
+                        } label: {
+                            HStack {
+                                Label("Saved Messages", systemImage: "bookmark.fill")
+                                    .foregroundColor(Theme.textPrimary)
+                                Spacer()
+                                Text("\(appState.bookmarks.count)")
+                                    .font(.fqFootnote)
+                                    .foregroundColor(Theme.textSecondary)
+                            }
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+                    }
+
+                    Section {
                         HStack {
                             Label("Server", systemImage: "server.rack")
                                 .foregroundColor(Theme.textPrimary)
