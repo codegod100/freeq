@@ -19,6 +19,12 @@ struct ChatMessage: Identifiable, Equatable {
     // nil = locally-originated. Drives "via {origin}" + suppresses the local
     // verified/signed badges, which would overstate trust for a peer-vouched msg.
     var origin: String? = nil
+    // The original msgid this message replaces, when it arrived as an edit
+    // (+draft/edit). One logical message can surface under two msgids — the
+    // original (edited in place locally) and the edit's msgid (CHATHISTORY
+    // replays BOTH rows). Dedup keys off both so they collapse to one
+    // (parity with macOS ChatMessage.editOf).
+    var editOf: String? = nil
     var reactions: [String: Set<String>] = [:]  // emoji -> set of nicks
 
     // Equality is memberwise (synthesized). An id-only == here made SwiftUI

@@ -70,7 +70,14 @@ class ChannelState: ObservableObject, Identifiable {
             }
             return
         }
+        // An edit whose ORIGINAL we already hold must not append as a second
+        // row — the server's history replays both the (edited-in-place)
+        // original row and the edit row. Register both ids so either replay
+        // order collapses to one row (the duplicated-edited-message bug,
+        // caught staging screenshots 2026-07-23; parity with macOS).
+        if let editOf = msg.editOf, messageIds.contains(editOf) { return }
         messageIds.insert(msg.id)
+        if let editOf = msg.editOf { messageIds.insert(editOf) }
 
         // If the message is older than the last message, insert in sorted
         // position (history backfill) — this shifts subsequent indices, so
@@ -90,14 +97,23 @@ class ChannelState: ObservableObject, Identifiable {
     }
 
     func applyEdit(originalId: String, newId: String?, newText: String) {
-        if let idx = findMessage(byId: originalId) {
+        // Match the current id OR a prior editOf: chained edits keep
+        // referencing the original msgid after the first edit rewrote the
+        // in-memory id (parity with macOS).
+        if let idx = findMessage(byId: originalId)
+            ?? messages.firstIndex(where: { $0.editOf == originalId }) {
             messages[idx].text = newText
             messages[idx].isEdited = true
+            messages[idx].editOf = messages[idx].editOf ?? originalId
+            // Keep the original id registered so a replayed pre-edit row
+            // dedups instead of resurrecting alongside the edited one.
+            messageIds.insert(originalId)
             if let newId = newId {
+                let oldId = messages[idx].id
                 messages[idx].id = newId
                 messageIds.insert(newId)
                 // Re-key the index: the slot is unchanged, only its id moved.
-                messageIndex.removeValue(forKey: originalId)
+                messageIndex.removeValue(forKey: oldId)
                 messageIndex[newId] = idx
             }
         }

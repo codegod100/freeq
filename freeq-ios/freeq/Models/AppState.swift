@@ -2494,15 +2494,20 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                 replyTo: ircMsg.replyTo,
                 isSigned: ircMsg.isSigned,
                 origin: ircMsg.origin,
+                editOf: ircMsg.editOf,
                 reactions: initialReactions
             )
 
             // Handle edits
             if let editOf = ircMsg.editOf {
                 if let batchId = ircMsg.batchId, var batch = state.batches[batchId] {
-                    if let idx = batch.messages.firstIndex(where: { $0.id == editOf }) {
+                    // Match the original id OR a prior editOf — chained edits
+                    // keep referencing the original msgid after the first edit
+                    // rewrote the in-memory id (parity with macOS).
+                    if let idx = batch.messages.firstIndex(where: { $0.id == editOf || $0.editOf == editOf }) {
                         batch.messages[idx].text = ircMsg.text
                         batch.messages[idx].isEdited = true
+                        batch.messages[idx].editOf = batch.messages[idx].editOf ?? editOf
                         if let newId = ircMsg.msgid { batch.messages[idx].id = newId }
                     } else {
                         batch.messages.append(msg)

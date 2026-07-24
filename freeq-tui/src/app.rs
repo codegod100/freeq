@@ -185,6 +185,12 @@ pub struct Buffer {
     /// True once we've seen an empty CHATHISTORY batch — no older messages
     /// exist on the server, so we should stop firing requests.
     pub history_exhausted: bool,
+    /// Original msgids of lines that were rewritten by a `+draft/edit`
+    /// (apply_edit swaps the line's msgid to the EDIT's msgid). A racing
+    /// second CHATHISTORY replay re-sends the original row under the old
+    /// msgid; without this alias set the dedup in `end_batch` misses it and
+    /// the buffer shows both the edited and the pre-edit copy.
+    pub edit_aliases: HashSet<String>,
 }
 
 /// In-progress BATCH buffer (e.g., CHATHISTORY).
@@ -197,6 +203,10 @@ pub struct BatchBuffer {
     /// the buffer's history as exhausted. Without this, an empty batch
     /// of an unrelated type would permanently disable scroll-up fetch.
     pub batch_type: String,
+    /// Original msgids rewritten by an in-batch `+draft/edit` (the line now
+    /// carries the edit's msgid). Merged into the target buffer's
+    /// `edit_aliases` at flush so later replays of the pre-edit row dedup.
+    pub edit_aliases: HashSet<String>,
 }
 
 impl BatchBuffer {
@@ -221,6 +231,7 @@ impl BatchBuffer {
                 if let Some(id) = new_msgid {
                     line.msgid = Some(id.to_string());
                 }
+                self.edit_aliases.insert(original_msgid.to_string());
                 return true;
             }
         }
@@ -258,10 +269,23 @@ impl Buffer {
             pinned: HashSet::new(),
             history_in_flight: false,
             history_exhausted: false,
+            edit_aliases: HashSet::new(),
         }
     }
 
     pub fn push(&mut self, mut line: BufferLine) {
+        // Dedup by msgid at the single chokepoint: the server replays
+        // history BOTH unbatched on JOIN and via CHATHISTORY batches, and a
+        // message can arrive live first. Without this, a rejoin doubles the
+        // buffer. `edit_aliases` covers lines whose msgid was rewritten by a
+        // `+draft/edit` (the pre-edit row replays under the ORIGINAL id).
+        if let Some(ref id) = line.msgid {
+            if self.edit_aliases.contains(id)
+                || self.messages.iter().any(|l| l.msgid.as_deref() == Some(id))
+            {
+                return;
+            }
+        }
         // SECURITY: a hostile peer can put ANSI escapes (cursor moves, color
         // resets, screen clears) into their nick or message body. We render
         // both directly into the terminal, so we strip control chars at the
@@ -400,6 +424,10 @@ impl Buffer {
             if let Some(id) = new_msgid {
                 line.msgid = Some(id.to_string());
             }
+            // Keep the ORIGINAL id recognizable as "already present" so a
+            // later history replay of the pre-edit row dedups instead of
+            // resurrecting the old text alongside the edited line.
+            self.edit_aliases.insert(original_msgid.to_string());
             // Carry pin through the msgid swap. Without this the
             // renderer's `msg.msgid in buffer.pinned` check silently
             // drops the 📌 marker after every edit of a pinned message.
@@ -857,6 +885,7 @@ impl App {
                 target: target.to_string(),
                 lines: Vec::new(),
                 batch_type: batch_type.to_string(),
+                edit_aliases: HashSet::new(),
             },
         );
     }
@@ -881,17 +910,25 @@ impl App {
                 return;
             }
             let buf = self.buffer_mut(&batch.target);
+            // Aliases learned inside the batch (in-batch edit rewrote a
+            // line's msgid) must survive into the buffer, or the NEXT replay
+            // resurrects the pre-edit row.
+            buf.edit_aliases.extend(batch.edit_aliases.drain());
             batch.lines.sort_by_key(|a| a.0);
             let was_empty = batch.lines.is_empty();
             let was_chathistory = batch.batch_type.eq_ignore_ascii_case("chathistory");
             // Skip lines already in the buffer by msgid. A CHATHISTORY LATEST
             // fetch (used to backfill a DM on open) overlaps messages that
             // arrived live, which would otherwise double them.
-            let present: HashSet<String> = buf
+            let mut present: HashSet<String> = buf
                 .messages
                 .iter()
                 .filter_map(|l| l.msgid.clone())
                 .collect();
+            // Edited lines carry the EDIT's msgid; their original ids live in
+            // `edit_aliases`. Both count as present, or a second replay
+            // duplicates every edited message (the pre-edit row sneaks past).
+            present.extend(buf.edit_aliases.iter().cloned());
             // Prepend in order (oldest first)
             for (_, line) in batch.lines.into_iter().rev() {
                 if let Some(ref id) = line.msgid
@@ -948,17 +985,23 @@ impl App {
         new_msgid: Option<&str>,
         new_text: &str,
     ) -> bool {
+        let mut applied = false;
         if let Some(id) = batch_id
             && let Some(batch) = self.batches.get_mut(id)
         {
-            return batch.apply_edit(editor_nick, original_msgid, new_msgid, new_text);
+            applied = batch.apply_edit(editor_nick, original_msgid, new_msgid, new_text);
         }
+        // ALSO apply to the live buffer (not either/or): the server replays
+        // history both unbatched on JOIN and via CHATHISTORY batches, so the
+        // pre-edit row may already sit in the buffer while the edit row
+        // arrives inside a batch. Rewriting only the batch copy left the
+        // buffer's stale row co-existing with the batch's edited one (the
+        // duplicated-edited-message bug, 2026-07-23).
         let key = buffer_key(buf_name);
         if let Some(buf) = self.buffers.get_mut(&key) {
-            buf.apply_edit(editor_nick, original_msgid, new_msgid, new_text)
-        } else {
-            false
+            applied |= buf.apply_edit(editor_nick, original_msgid, new_msgid, new_text);
         }
+        applied
     }
 
     /// Apply a `+draft/delete` either to an in-flight batch or the live
@@ -1798,6 +1841,7 @@ mod tests {
                 (2, line_with_msgid("unrelated", Some("01BBB"))),
             ],
             batch_type: "chathistory".into(),
+            edit_aliases: HashSet::new(),
         };
         assert!(batch.apply_edit("alice", "01AAA", Some("01CCC"), "v2"));
         assert_eq!(batch.lines[0].1.text, "v2");
@@ -1814,6 +1858,7 @@ mod tests {
             target: "#test".into(),
             lines: vec![(1, line_with_msgid("secret", Some("01AAA")))],
             batch_type: "chathistory".into(),
+            edit_aliases: HashSet::new(),
         };
         assert!(batch.apply_delete("alice", "01AAA"));
         assert!(batch.lines[0].1.is_deleted);
@@ -1927,6 +1972,104 @@ mod tests {
         // A non-DID never becomes a thread key.
         app.record_member_did("alice", "not-a-did");
         assert!(!app.did_names.contains_key("not-a-did"));
+    }
+
+
+    #[test]
+    fn push_dedups_unbatched_join_replay() {
+        // The server replays history unbatched on JOIN; a line that already
+        // arrived (live or via a batch) must not double when pushed again.
+        let mut app = App::new("me", false);
+        app.buffer_mut("#ship").push(line("hello", "ana", Some("01A")));
+        app.buffer_mut("#ship").push(line("hello", "ana", Some("01A")));
+        assert_eq!(app.buffers.get("#ship").unwrap().messages.len(), 1);
+
+        // Pre-edit row replayed unbatched after a live edit: alias dedup.
+        app.buffer_mut("#ship").push(line("v1", "chad", Some("01B")));
+        app.apply_edit("chad", None, "#ship", "01B", Some("01C"), "v2");
+        app.buffer_mut("#ship").push(line("v1", "chad", Some("01B")));
+        let buf = app.buffers.get("#ship").unwrap();
+        assert_eq!(buf.messages.len(), 2, "{:?}", buf.messages);
+    }
+
+
+    #[test]
+    fn edit_in_batch_also_rewrites_live_buffer_row() {
+        // JOIN replay put the pre-edit row in the BUFFER; the edit row then
+        // arrives inside a CHATHISTORY batch. The edit must rewrite the
+        // buffer's copy too, or the flush appends an edited duplicate.
+        let mut app = App::new("me", false);
+        app.buffer_mut("#ship").push(line("v1", "chad", Some("01A")));
+
+        app.start_batch_typed("h1", "#ship", "chathistory");
+        app.add_batch_line("h1", 1, line("v1", "chad", Some("01A")));
+        app.apply_edit("chad", Some("h1"), "#ship", "01A", Some("01B"), "v2");
+        app.end_batch("h1");
+
+        let buf = app.buffers.get("#ship").unwrap();
+        assert_eq!(
+            buf.messages.len(), 1,
+            "one row after batch edit over join-replayed original: {:?}",
+            buf.messages.iter().map(|l| (&l.text, &l.msgid)).collect::<Vec<_>>()
+        );
+        let row = buf.messages.front().unwrap();
+        assert_eq!(row.text, "v2");
+        assert!(row.is_edited);
+        assert_eq!(row.msgid.as_deref(), Some("01B"));
+    }
+
+    #[test]
+    fn second_history_replay_does_not_resurrect_pre_edit_row() {
+        // The staging bug (2026-07-23): join-time + activate-time CHATHISTORY
+        // both fire. Batch 1 replays original(01A) + edit row — apply_edit
+        // rewrites the line's msgid to 01B. Batch 2 replays the SAME rows;
+        // the pre-edit row (01A) must dedup via the edit alias, not re-append
+        // the stale text alongside the edited line.
+        let mut app = App::new("me", false);
+
+        // Batch 1: original + in-batch edit.
+        app.start_batch_typed("h1", "#ship", "chathistory");
+        app.add_batch_line("h1", 1, line("shipping it aa", "chad", Some("01A")));
+        app.apply_edit("chad", Some("h1"), "#ship", "01A", Some("01B"), "shipping it 🚀");
+        app.end_batch("h1");
+        {
+            let buf = app.buffers.get("#ship").unwrap();
+            assert_eq!(buf.messages.len(), 1);
+            assert_eq!(buf.messages.front().unwrap().msgid.as_deref(), Some("01B"));
+            assert!(buf.messages.front().unwrap().is_edited);
+        }
+
+        // Batch 2 (racing duplicate request): same two rows again.
+        app.start_batch_typed("h2", "#ship", "chathistory");
+        app.add_batch_line("h2", 1, line("shipping it aa", "chad", Some("01A")));
+        app.apply_edit("chad", Some("h2"), "#ship", "01A", Some("01B"), "shipping it 🚀");
+        app.end_batch("h2");
+
+        let buf = app.buffers.get("#ship").unwrap();
+        assert_eq!(
+            buf.messages.len(),
+            1,
+            "pre-edit row must not resurrect on a second replay: {:?}",
+            buf.messages.iter().map(|l| (&l.text, &l.msgid)).collect::<Vec<_>>()
+        );
+        assert_eq!(buf.messages.front().unwrap().text, "shipping it 🚀");
+    }
+
+    #[test]
+    fn live_edit_then_history_replay_of_original_dedups() {
+        // Live path variant: message arrived live (01A), a live edit rewrote
+        // it to 01B, then a CHATHISTORY backfill replays the original row.
+        let mut app = App::new("me", false);
+        app.buffer_mut("#ship").push(line("v1", "chad", Some("01A")));
+        app.apply_edit("chad", None, "#ship", "01A", Some("01B"), "v2");
+
+        app.start_batch_typed("h1", "#ship", "chathistory");
+        app.add_batch_line("h1", 1, line("v1", "chad", Some("01A")));
+        app.end_batch("h1");
+
+        let buf = app.buffers.get("#ship").unwrap();
+        assert_eq!(buf.messages.len(), 1, "original row must dedup via edit alias");
+        assert_eq!(buf.messages.front().unwrap().text, "v2");
     }
 
     #[test]

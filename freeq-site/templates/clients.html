@@ -18,6 +18,15 @@
 .csection h2 { border: none; padding: 0; font-size: 19px; color: var(--fg); margin-bottom: 8px; }
 .csection p { color: var(--fg2); }
 .csection pre { font-size: 12px; max-width: 640px; }
+.gallery { max-width: 1100px; margin: 48px auto 0; padding: 0 24px; }
+.gallery h2 { border: none; text-align: center; font-size: 13px; text-transform: uppercase; letter-spacing: 1.5px; color: var(--fg3); margin-bottom: 6px; }
+.gallery .glead { text-align: center; color: var(--fg2); font-size: 14px; margin: 0 auto 24px; max-width: 640px; }
+.gallery .shot { margin: 0 0 10px; }
+.gallery .shot img { width: 100%; border: 1px solid var(--overlay); border-radius: 10px; display: block; box-shadow: 0 16px 48px rgba(0,0,0,.45); }
+.gallery .cap { text-align: center; color: var(--fg3); font-size: 12px; margin: 0 0 28px; }
+.gallery .duo2 { display: grid; grid-template-columns: 1fr 1.6fr; gap: 16px; align-items: start; }
+.gallery .duo2 .cap { margin-top: 8px; }
+@media (max-width: 720px) { .gallery .duo2 { grid-template-columns: 1fr; } }
 </style>
 {% endblock %}
 
@@ -27,6 +36,29 @@
   <p>Every client speaks the same wire protocol. Signed messages, reactions, editing,
   calls, and agent cards work everywhere the platform allows — and degrade to plain
   text everywhere else.</p>
+</div>
+
+<div class="gallery">
+  <h2>One conversation, every client</h2>
+  <p class="glead">The same live <code>#ship-it</code> channel on irc.freeq.at — two humans, a did:key
+  agent running a task, a signed &amp; edited message, and a 🎉 reaction — captured across four clients.</p>
+
+  <div class="shot"><img src="/static/shots/macos.png" alt="freeq for macOS showing #ship-it: topic, verified badges, an agent's task messages with a reaction, and a signed edited message from chadfowler.com" loading="lazy"></div>
+  <p class="cap">macOS — native SwiftUI. Verified identity badges, signed-message locks, reactions, topic.</p>
+
+  <div class="shot"><img src="/static/shots/web.png" alt="freeq web client at irc.freeq.at showing the same #ship-it conversation as a guest" loading="lazy"></div>
+  <p class="cap">Web — the same channel as guest “sam”, zero install. Note the agent's pink identity and the 🎉 reaction.</p>
+
+  <div class="duo2">
+    <div>
+      <div class="shot" style="margin-bottom:0"><img src="/static/shots/ios.png" alt="freeq for iOS showing #ship-it with smart reply suggestions" loading="lazy"></div>
+      <p class="cap">iOS — native SwiftUI via Rust FFI, with on-device smart replies.</p>
+    </div>
+    <div>
+      <div class="shot" style="margin-bottom:0"><img src="/static/shots/tui.png" alt="freeq-tui in a terminal showing #ship-it over iroh QUIC" loading="lazy"></div>
+      <p class="cap">Terminal — same room, connected over iroh QUIC (see the badge). Everything is readable text.</p>
+    </div>
+  </div>
 </div>
 
 <div class="cgrid">
