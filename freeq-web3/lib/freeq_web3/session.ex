@@ -52,6 +52,19 @@ defmodule FreeqWeb3.Session do
     GenServer.call(via(session_id), {:send_message, target, text, opts})
   end
 
+  @doc """
+  Toggle a reaction on a message via IRCv3 TAGMSG.
+
+  `added: true` → `+react=<emoji>;+reply=<msgid>`
+  `added: false` → `+freeq.at/unreact=<emoji>;+reply=<msgid>`
+
+  Optimistically broadcasts `{:reaction, msgid, emoji, nick, added}` on the
+  channel topic so the clicker sees the chip without waiting for the echo.
+  """
+  def react(session_id, channel, msgid, emoji, added?) when is_boolean(added?) do
+    GenServer.call(via(session_id), {:react, channel, msgid, emoji, added?})
+  end
+
   def set_topic(session_id, channel, topic) do
     GenServer.call(via(session_id), {:set_topic, channel, topic})
   end

@@ -11,8 +11,23 @@ defmodule FreeqWeb3Web.Router do
     plug :put_secure_browser_headers
   end
 
-  pipeline :api do
+  # Session cookie only — no CSRF. Used for same-origin GET JSON and for
+  # proxying JS modules (Plug.CSRFProtection rejects application/javascript
+  # GETs without X-Requested-With as "cross-origin embed").
+  pipeline :browser_api do
+    plug :accepts, ["json", "javascript", "html", "*/*"]
+    plug :fetch_session
+    plug FreeqWeb3Web.Plugs.SessionId
+    plug :put_secure_browser_headers
+  end
+
+  # Same-origin JSON POSTs that need the CSRF token (call control).
+  pipeline :browser_api_csrf do
     plug :accepts, ["json"]
+    plug :fetch_session
+    plug FreeqWeb3Web.Plugs.SessionId
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
   end
 
   scope "/", FreeqWeb3Web do
@@ -35,21 +50,26 @@ defmodule FreeqWeb3Web.Router do
       live "/chat", ChatIndexLive, :index
       live "/chat/:channel", ChatLive, :show
     end
+  end
 
-    # AV call control (same-origin BFF; CSRF token required).
+  scope "/", FreeqWeb3Web do
+    pipe_through :browser_api_csrf
+
     post "/api/av/start", ApiController, :av_start
     post "/api/av/join", ApiController, :av_join
     post "/api/av/leave", ApiController, :av_leave
     post "/api/av/end", ApiController, :av_end
+  end
+
+  scope "/", FreeqWeb3Web do
+    pipe_through :browser_api
 
     get "/api/v1/channels/:channel/sessions", ApiController, :channel_sessions
     get "/api/v1/sessions/:id", ApiController, :session_detail
     get "/api/v1/av/sessions/:id/token", ApiController, :av_token
-    # OpenGraph metadata proxy (used by server-side LinkPreview; also public).
     get "/api/v1/og", ApiController, :og_preview
-    # Locally cached preview images (downloaded server-side for page-load).
     get "/preview-cache/:id", PreviewController, :show
-
+    # MoQ publish/watch JS modules — must not go through protect_from_forgery.
     get "/av/assets/*path", ApiController, :av_asset
   end
 end

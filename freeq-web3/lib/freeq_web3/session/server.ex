@@ -274,6 +274,39 @@ defmodule FreeqWeb3.Session.Server do
     {:reply, :ok, state}
   end
 
+  def handle_call({:react, channel, msgid, emoji, added?}, _from, state) do
+    ch = Render.canonical_channel(channel)
+    msgid = msgid |> to_string() |> String.trim()
+    emoji = emoji |> to_string() |> String.trim()
+
+    if msgid == "" or emoji == "" do
+      {:reply, {:error, :invalid}, state}
+    else
+      tag = if added?, do: "+react", else: "+freeq.at/unreact"
+
+      line =
+        "@#{tag}=#{Render.escape_tag_value(emoji)};+reply=#{Render.escape_tag_value(msgid)} TAGMSG #{ch}\r\n"
+
+      state =
+        state
+        |> then(fn s -> %{s | joined: MapSet.put(s.joined, ch)} end)
+        |> ensure_upstream(ch)
+        |> maybe_enqueue_join(ch)
+        |> enqueue(line)
+
+      nick =
+        cond do
+          is_binary(state.current_nick) and state.current_nick != "" -> state.current_nick
+          true -> auth_nick(state) || "me"
+        end
+
+      # Optimistic local fan-out (mirrors freeq-web2 enqueue_reaction).
+      Session.broadcast_channel(state.session_id, ch, {:reaction, msgid, emoji, nick, added?})
+
+      {:reply, {:ok, nick}, state}
+    end
+  end
+
   def handle_call({:av_start, channel, instance, opts}, _from, state) do
     ch = Render.canonical_channel(channel)
     title = Keyword.get(opts, :title, "")
@@ -696,8 +729,12 @@ defmodule FreeqWeb3.Session.Server do
       end
 
     state =
-      case Render.parse_av_token_tagmsg(line, state.current_nick) do
+      case Render.parse_av_token_tagmsg(line, av_token_nicks(state)) do
         {session_id_av, token} ->
+          Logger.info(
+            "session #{short(state.session_id)} AV token TAGMSG for sid=#{session_id_av}"
+          )
+
           Session.broadcast(
             state.session_id,
             {:av_token, %{session_id: session_id_av, token: token}}
@@ -706,6 +743,14 @@ defmodule FreeqWeb3.Session.Server do
           state
 
         nil ->
+          # Debug missed tokens (nick mismatch is the usual cause).
+          if String.contains?(line, "av-token") do
+            Logger.debug(
+              "session #{short(state.session_id)} ignored av-token line " <>
+                "nick=#{state.current_nick} line=#{String.slice(line, 0, 160)}"
+            )
+          end
+
           state
       end
 
@@ -845,4 +890,23 @@ defmodule FreeqWeb3.Session.Server do
   end
 
   defp short(sid), do: String.slice(sid, 0, 8)
+
+  # Nick candidates the server may address +freeq.at/av-token TAGMSG to.
+  defp av_token_nicks(state) do
+    auth_nick =
+      case state.auth do
+        %OAuthSession{} = o -> OAuthSession.nick(o)
+        _ -> nil
+      end
+
+    auth_handle =
+      case state.auth do
+        %OAuthSession{handle: h} -> h
+        _ -> nil
+      end
+
+    [state.current_nick, auth_nick, auth_handle]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
+  end
 end

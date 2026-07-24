@@ -151,7 +151,8 @@ defmodule FreeqWeb3.Irc.Render do
                 own: own,
                 color: nick_color_class(nick),
                 parent: reply_parent_msgid(tags),
-                account: tags["account"] || tags["+account"]
+                account: tags["account"] || tags["+account"],
+                reactions: parse_reactions_tag(tags["+freeq.at/reactions"] || "")
               }
 
             cmd in ~w(JOIN PART QUIT) ->
@@ -639,12 +640,22 @@ defmodule FreeqWeb3.Irc.Render do
 
   @doc """
   Parse an AV token directed TAGMSG. Returns `{session_id, token}` or nil.
-  Only matches when the message target equals `own_nick`.
+
+  `own_nicks` may be a single nick string or a list of candidates (current
+  nick, auth nick, etc.) — freeq-server addresses the token to the IRC nick
+  at join time, which can race with renames.
   """
-  def parse_av_token_tagmsg(line, own_nick) do
+  def parse_av_token_tagmsg(line, own_nicks) do
+    own_list =
+      own_nicks
+      |> List.wrap()
+      |> Enum.map(&to_string/1)
+      |> Enum.reject(&(&1 in [nil, ""]))
+
     {tags, after_line} = parse_irc_tags(line)
 
-    if is_nil(tags["+freeq.at/av-token"]) or tags["+freeq.at/av-token"] == "" do
+    if is_nil(tags["+freeq.at/av-token"]) or tags["+freeq.at/av-token"] == "" or
+         own_list == [] do
       nil
     else
       rest =
@@ -653,9 +664,10 @@ defmodule FreeqWeb3.Irc.Render do
           else: after_line
 
       parts = String.split(rest)
+      target = Enum.at(parts, 2) || ""
 
       if String.upcase(to_string(Enum.at(parts, 1))) == "TAGMSG" and
-           nick_matches?(Enum.at(parts, 2) || "", own_nick) do
+           Enum.any?(own_list, &nick_matches?(target, &1)) do
         {tags["+freeq.at/av-id"], tags["+freeq.at/av-token"]}
       else
         nil

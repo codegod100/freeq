@@ -25,6 +25,7 @@ import { LiveSocket } from "phoenix_live_view";
 import { hooks as colocatedHooks } from "phoenix-colocated/freeq_web3";
 import topbar from "../vendor/topbar";
 import AvCall from "./av_call";
+import TabComplete from "./tab_complete";
 
 // Link previews are rendered server-side with locally cached images
 // (`/preview-cache/:id`). No client-side OG/image fetch on page load.
@@ -35,16 +36,74 @@ const ChatScroll = {
       requestAnimationFrame(() => this.scrollToBottom());
     });
     this.handleEvent("scroll_bottom", () => this.scrollToBottom());
+    this.handleEvent("focus_compose", () => this.focusCompose());
+    this.handleEvent("scroll_to_message", ({ msgid }) =>
+      this.scrollToMessage(msgid),
+    );
+    this.hydrateReplyBadges();
   },
   updated() {
     const el = this.el.querySelector("#messages");
     if (!el) return;
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160;
     if (nearBottom) this.scrollToBottom();
+    this.hydrateReplyBadges();
   },
   scrollToBottom() {
     const el = this.el.querySelector("#messages");
     if (el) el.scrollTop = el.scrollHeight;
+  },
+  focusCompose() {
+    // After LV patches (reply/edit/send), restore keyboard focus to compose.
+    requestAnimationFrame(() => {
+      const input = this.el.querySelector("#message-input");
+      if (input) input.focus();
+    });
+  },
+  scrollToMessage(msgid) {
+    const mid = String(msgid || "");
+    if (!mid) return;
+    const row = this.el.querySelector(
+      `#messages [data-msgid="${CSS.escape(mid)}"]`,
+    );
+    if (!row) return;
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    row.classList.add("highlight");
+    setTimeout(() => row.classList.remove("highlight"), 1200);
+  },
+  // If a reply badge has no nick/text (parent not in server lookup), fill
+  // from a parent row still present in the DOM.
+  hydrateReplyBadges() {
+    this.el.querySelectorAll(".reply-badge[data-reply-to]").forEach((badge) => {
+      const mid = badge.getAttribute("data-reply-to");
+      if (!mid) return;
+      const nickEl = badge.querySelector(".reply-nick");
+      const textEl = badge.querySelector(".reply-text");
+      const needsNick =
+        !nickEl || !nickEl.textContent || nickEl.textContent === "message";
+      const needsText = !textEl || !textEl.textContent;
+      if (!needsNick && !needsText) return;
+
+      const parent = this.el.querySelector(
+        `#messages [data-msgid="${CSS.escape(mid)}"]`,
+      );
+      if (!parent) return;
+      if (needsNick && nickEl && parent.dataset.nick) {
+        nickEl.textContent = parent.dataset.nick;
+      }
+      if (parent.dataset.text) {
+        const t = parent.dataset.text.replace(/\s+/g, " ");
+        const snippet = t.length > 80 ? t.slice(0, 80) + "…" : t;
+        if (textEl) {
+          textEl.textContent = snippet;
+        } else if (needsText) {
+          const span = document.createElement("span");
+          span.className = "reply-text";
+          span.textContent = snippet;
+          badge.appendChild(span);
+        }
+      }
+    });
   },
 };
 
@@ -54,7 +113,7 @@ const csrfToken = document
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: { _csrf_token: csrfToken },
-  hooks: { ...colocatedHooks, ChatScroll, AvCall },
+  hooks: { ...colocatedHooks, ChatScroll, AvCall, TabComplete },
 });
 
 // Show progress bar on live navigation and form submits

@@ -47,16 +47,37 @@ defmodule FreeqWeb3Web.ApiController do
 
   def av_token(conn, %{"id" => id}) do
     sid = session_id(conn)
-    snap = Session.snapshot(sid)
 
-    case Rest.fetch_av_token(id, snap.api_bearer) do
-      nil ->
-        conn
-        |> put_status(403)
-        |> json(%{error: "unable to mint token"})
+    # REST token requires SASL API-BEARER + DID participant. Guests always
+    # get tokens via IRC +freeq.at/av-token TAGMSG (no REST). Don't block
+    # long waiting for a bearer that will never come for guests.
+    bearer =
+      case Session.get_or_start(sid) do
+        {:ok, _} ->
+          snap = Session.snapshot(sid)
+          snap.api_bearer
 
-      token ->
-        json(conn, %{token: token})
+        _ ->
+          nil
+      end
+
+    if bearer in [nil, ""] do
+      conn
+      |> put_status(:unauthorized)
+      |> json(%{
+        error: "guest — use +freeq.at/av-token TAGMSG (REST needs SASL)",
+        guest: true
+      })
+    else
+      case Rest.fetch_av_token(id, bearer) do
+        nil ->
+          conn
+          |> put_status(:forbidden)
+          |> json(%{error: "upstream refused token"})
+
+        token when is_binary(token) ->
+          json(conn, %{token: token})
+      end
     end
   end
 

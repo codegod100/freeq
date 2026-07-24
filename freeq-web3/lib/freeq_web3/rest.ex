@@ -89,18 +89,24 @@ defmodule FreeqWeb3.Rest do
     end
   end
 
-  @doc "GET /api/v1/channels/:name/sessions"
+  @doc """
+  GET /api/v1/channels/:name/sessions
+
+  freeq-server indexes sessions by the IRC channel name **with** `#`
+  (lowercased). Always send the canonical form.
+  """
   def fetch_channel_sessions(channel) do
-    bare = Render.bare_channel(channel)
-    encoded = URI.encode_www_form(bare)
+    ch = Render.canonical_channel(channel)
+    # Path segment: encode # as %23 so it isn't treated as a fragment.
+    encoded = URI.encode(ch, &(&1 != ?# and URI.char_unreserved?(&1)))
     url = FreeqWeb3.upstream_rest() <> "/api/v1/channels/#{encoded}/sessions"
 
     case Req.get(url, receive_timeout: 5_000, connect_options: [timeout: 3_000]) do
-      {:ok, %{status: 200, body: body}} ->
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
         body
 
       {:ok, %{status: status}} ->
-        Logger.warning("fetch_channel_sessions HTTP #{status}")
+        Logger.warning("fetch_channel_sessions HTTP #{status} for #{ch}")
         nil
 
       {:error, reason} ->
@@ -108,6 +114,34 @@ defmodule FreeqWeb3.Rest do
         nil
     end
   end
+
+  @doc """
+  Extract active call info from a channel sessions payload.
+
+  Returns `%{session_id, participant_count, title}` or `nil`.
+  """
+  def active_call_from_sessions(nil), do: nil
+
+  def active_call_from_sessions(data) when is_map(data) do
+    active = data["active"] || data[:active]
+    if is_map(active) and active_call_state?(active) do
+      %{
+        session_id: active["id"] || active[:id],
+        participant_count:
+          active["participant_count"] || active[:participant_count] ||
+            length(active["participants"] || active[:participants] || []),
+        title: active["title"] || active[:title]
+      }
+    end
+  end
+
+  def active_call_from_sessions(_), do: nil
+
+  defp active_call_state?(active) do
+    state = to_string(active["state"] || active[:state] || "")
+    String.downcase(state) in ["active", "started"]
+  end
+
 
   @doc "GET /api/v1/sessions/:id"
   def fetch_session_detail(session_id) do

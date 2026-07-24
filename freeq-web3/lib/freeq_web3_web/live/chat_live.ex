@@ -27,17 +27,23 @@ defmodule FreeqWeb3Web.ChatLive do
     my = my_channel_entries(snap.channels, all)
     topic = topic_for(all, ch)
 
+    # Fast path: history + cache-only embeds. Network preview resolution
+    # (OG fetch + image download) must NOT block mount — that made busy
+    # channels like #freeq take tens of seconds to open.
     history =
       case Rest.fetch_history(ch, 50, bearer: snap.api_bearer) do
-        nil ->
-          []
-
-        rows ->
-          # Server-side previews: download remote OG/YT images into local
-          # cache so the page only loads same-origin /preview-cache/* URLs.
-          LinkPreview.attach_many(rows, max_concurrency: 4, timeout: 6_000)
+        nil -> []
+        rows -> Enum.map(rows, &LinkPreview.attach_cache_only/1)
       end
 
+    parent_lookup = parent_lookup_from_rows(history)
+
+    history =
+      history
+      |> Enum.map(&attach_parent_info(&1, parent_lookup))
+      |> Enum.map(&ensure_reactions/1)
+
+    rows_by_msgid = rows_by_msgid_from(history)
     members = Session.members(sid, ch)
 
     socket =
@@ -53,14 +59,29 @@ defmodule FreeqWeb3Web.ChatLive do
       |> assign(:compose, "")
       |> assign(:reply_to, nil)
       |> assign(:edit_to, nil)
+      |> assign(:reply_preview_nick, nil)
+      |> assign(:reply_preview_text, nil)
+      |> assign(:parent_lookup, parent_lookup)
+      |> assign(:rows_by_msgid, rows_by_msgid)
+      |> assign(:react_picker_msgid, nil)
       |> assign(:av_active, false)
       |> assign(:av_call_present, false)
       |> assign(:av_session_id, nil)
       |> assign(:av_participant_count, 0)
       |> assign(:av_muted, false)
+      |> assign(:av_camera, false)
       |> assign(:av_instance, generate_av_instance())
       |> stream(:messages, history, reset: true)
       |> assign(:message_count, length(history))
+
+    if connected?(socket) do
+      schedule_preview_warmup(history)
+      send(self(), :poll_channel_call)
+      # Keep discovering live calls while the page is open.
+      :timer.send_interval(4_000, self(), :poll_channel_call)
+    end
+
+    socket = apply_channel_call(socket, ch)
 
     {:ok, socket}
   end
@@ -85,30 +106,47 @@ defmodule FreeqWeb3Web.ChatLive do
       topic = topic_for(all, ch)
       history =
         (Rest.fetch_history(ch, 50, bearer: snap.api_bearer) || [])
-        |> LinkPreview.attach_many(max_concurrency: 4, timeout: 6_000)
+        |> Enum.map(&LinkPreview.attach_cache_only/1)
 
+      parent_lookup = parent_lookup_from_rows(history)
+      history =
+        history
+        |> Enum.map(&attach_parent_info(&1, parent_lookup))
+        |> Enum.map(&ensure_reactions/1)
+
+      rows_by_msgid = rows_by_msgid_from(history)
       members = Session.members(sid, ch)
+      schedule_preview_warmup(history)
 
-      {:noreply,
-       socket
-       |> assign(:page_title, ch)
-       |> assign(:channel, ch)
-       |> assign(:bare, bare)
-       |> assign(:snap, snap)
-       |> assign(:topic, topic)
-       |> assign(:my_channels, my_channel_entries(snap.channels, all))
-       |> assign(:members, members)
-       |> assign(:compose, "")
-       |> assign(:reply_to, nil)
-       |> assign(:edit_to, nil)
-       |> assign(:av_active, false)
-       |> assign(:av_call_present, false)
-       |> assign(:av_session_id, nil)
-       |> assign(:av_participant_count, 0)
-       |> assign(:av_muted, false)
-       |> assign(:av_instance, generate_av_instance())
-       |> stream(:messages, history, reset: true)
-       |> assign(:message_count, length(history))}
+      socket =
+        socket
+        |> assign(:page_title, ch)
+        |> assign(:channel, ch)
+        |> assign(:bare, bare)
+        |> assign(:snap, snap)
+        |> assign(:topic, topic)
+        |> assign(:my_channels, my_channel_entries(snap.channels, all))
+        |> assign(:members, members)
+        |> assign(:compose, "")
+        |> assign(:reply_to, nil)
+        |> assign(:edit_to, nil)
+        |> assign(:reply_preview_nick, nil)
+        |> assign(:reply_preview_text, nil)
+        |> assign(:parent_lookup, parent_lookup)
+        |> assign(:rows_by_msgid, rows_by_msgid)
+        |> assign(:react_picker_msgid, nil)
+        |> assign(:av_active, false)
+        |> assign(:av_call_present, false)
+        |> assign(:av_session_id, nil)
+        |> assign(:av_participant_count, 0)
+        |> assign(:av_muted, false)
+        |> assign(:av_camera, false)
+        |> assign(:av_instance, generate_av_instance())
+        |> stream(:messages, history, reset: true)
+        |> assign(:message_count, length(history))
+        |> apply_channel_call(ch)
+
+      {:noreply, socket}
     end
   end
 
@@ -134,7 +172,10 @@ defmodule FreeqWeb3Web.ChatLive do
      socket
      |> assign(:compose, "")
      |> assign(:reply_to, nil)
-     |> assign(:edit_to, nil)}
+     |> assign(:edit_to, nil)
+     |> assign(:reply_preview_nick, nil)
+     |> assign(:reply_preview_text, nil)
+     |> focus_compose()}
   end
 
   def handle_event("join", %{"channel" => raw}, socket) do
@@ -173,21 +214,36 @@ defmodule FreeqWeb3Web.ChatLive do
     sid = socket.assigns.freeq_session
     ch = socket.assigns.channel
     instance = socket.assigns.av_instance
-    Session.av_start(sid, ch, instance)
-    {:noreply, assign(socket, av_active: true)}
+
+    # Guests may start calls — freeq-server uses did "guest:{nick}".
+    # If a live session already exists, join it instead of erroring.
+    socket = apply_channel_call(socket, ch)
+
+    if socket.assigns.av_call_present and socket.assigns.av_session_id not in [nil, ""] do
+      Session.av_join(sid, ch, socket.assigns.av_session_id, instance)
+      {:noreply, assign(socket, av_active: true)}
+    else
+      Session.av_start(sid, ch, instance)
+      {:noreply, assign(socket, av_active: true)}
+    end
   end
 
   def handle_event("av_join", _params, socket) do
     sid = socket.assigns.freeq_session
     ch = socket.assigns.channel
-    session_id_av = socket.assigns.av_session_id
     instance = socket.assigns.av_instance
 
-    if session_id_av do
+    # Refresh discovery in case session id arrived after page load.
+    socket = apply_channel_call(socket, ch)
+    session_id_av = socket.assigns.av_session_id
+
+    if session_id_av not in [nil, ""] do
       Session.av_join(sid, ch, session_id_av, instance)
       {:noreply, assign(socket, av_active: true)}
     else
-      {:noreply, socket}
+      # No known session — fall back to start (server may still reject if race).
+      Session.av_start(sid, ch, instance)
+      {:noreply, assign(socket, av_active: true)}
     end
   end
 
@@ -207,7 +263,9 @@ defmodule FreeqWeb3Web.ChatLive do
      |> assign(:av_call_present, false)
      |> assign(:av_session_id, nil)
      |> assign(:av_participant_count, 0)
-     |> push_event("av_left", %{})}
+     |> assign(:av_muted, false)
+     |> assign(:av_camera, false)
+     |> push_event("av_ended", %{})}
   end
 
   def handle_event("av_toggle_mute", _params, socket) do
@@ -215,29 +273,148 @@ defmodule FreeqWeb3Web.ChatLive do
     {:noreply, socket |> assign(:av_muted, muted) |> push_event("av_muted", %{muted: muted})}
   end
 
-  def handle_event("reply", %{"msgid" => msgid}, socket) do
-    {:noreply, assign(socket, reply_to: msgid, edit_to: nil)}
+  def handle_event("av_toggle_camera", _params, socket) do
+    camera = not socket.assigns.av_camera
+
+    {:noreply,
+     socket
+     |> assign(:av_camera, camera)
+     |> push_event("av_camera", %{camera: camera})}
   end
 
-  def handle_event("edit", %{"msgid" => msgid}, socket) do
-    {:noreply, assign(socket, edit_to: msgid, reply_to: nil)}
+  def handle_event("av_roster", %{"count" => count}, socket) do
+    n =
+      case count do
+        n when is_integer(n) -> n
+        n when is_binary(n) -> String.to_integer(n)
+        _ -> socket.assigns.av_participant_count
+      end
+
+    {:noreply, assign(socket, :av_participant_count, n)}
+  rescue
+    _ -> {:noreply, socket}
+  end
+
+  def handle_event("reply", params, socket) do
+    msgid = params["msgid"] || ""
+    nick = params["nick"] || "message"
+    text = params["text"] || ""
+
+    {:noreply,
+     socket
+     |> assign(:reply_to, msgid)
+     |> assign(:edit_to, nil)
+     |> assign(:reply_preview_nick, nick)
+     |> assign(:reply_preview_text, preview_text(text))
+     |> focus_compose()}
+  end
+
+  def handle_event("edit", params, socket) do
+    msgid = params["msgid"] || ""
+    text = params["text"] || ""
+
+    {:noreply,
+     socket
+     |> assign(:edit_to, msgid)
+     |> assign(:reply_to, nil)
+     |> assign(:reply_preview_nick, nil)
+     |> assign(:reply_preview_text, preview_text(text))
+     |> assign(:compose, text)
+     |> focus_compose()}
   end
 
   def handle_event("cancel_reply", _, socket) do
-    {:noreply, assign(socket, reply_to: nil, edit_to: nil)}
+    # Cancelling an edit clears the compose draft; cancelling a reply keeps typed text.
+    was_editing? = not is_nil(socket.assigns.edit_to)
+
+    socket =
+      socket
+      |> assign(:reply_to, nil)
+      |> assign(:edit_to, nil)
+      |> assign(:reply_preview_nick, nil)
+      |> assign(:reply_preview_text, nil)
+      |> then(fn s -> if was_editing?, do: assign(s, :compose, ""), else: s end)
+      |> focus_compose()
+
+    {:noreply, socket}
   end
 
   def handle_event("compose_change", %{"msg" => msg}, socket) do
     {:noreply, assign(socket, :compose, msg)}
   end
 
+  def handle_event("scroll_to_message", %{"msgid" => msgid}, socket) do
+    {:noreply, push_event(socket, "scroll_to_message", %{msgid: msgid})}
+  end
+
+  def handle_event("open_react_picker", %{"msgid" => msgid}, socket) do
+    {:noreply, assign(socket, :react_picker_msgid, msgid)}
+  end
+
+  def handle_event("close_react_picker", _, socket) do
+    {:noreply, assign(socket, :react_picker_msgid, nil)}
+  end
+
+  def handle_event("toggle_reaction", %{"msgid" => msgid, "emoji" => emoji}, socket) do
+    msgid = to_string(msgid || "")
+    emoji = to_string(emoji || "")
+
+    if msgid == "" or emoji == "" do
+      {:noreply, assign(socket, :react_picker_msgid, nil)}
+    else
+      aliases = my_reaction_aliases(socket)
+      row = Map.get(socket.assigns.rows_by_msgid || %{}, msgid)
+      reactions = (row && row[:reactions]) || %{}
+      nicks = Map.get(reactions, emoji, [])
+      mine? = nick_in_list?(nicks, aliases)
+      added? = not mine?
+
+      # Enqueue TAGMSG + optimistic channel broadcast (Session.react).
+      _ = Session.react(socket.assigns.freeq_session, socket.assigns.channel, msgid, emoji, added?)
+
+      {:noreply, assign(socket, :react_picker_msgid, nil)}
+    end
+  end
+
+  def handle_event("keydown", %{"key" => "Escape"}, socket) do
+    socket =
+      cond do
+        socket.assigns.react_picker_msgid ->
+          assign(socket, :react_picker_msgid, nil)
+
+        socket.assigns.reply_to || socket.assigns.edit_to ->
+          was_editing? = not is_nil(socket.assigns.edit_to)
+
+          socket
+          |> assign(:reply_to, nil)
+          |> assign(:edit_to, nil)
+          |> assign(:reply_preview_nick, nil)
+          |> assign(:reply_preview_text, nil)
+          |> then(fn s -> if was_editing?, do: assign(s, :compose, ""), else: s end)
+
+        true ->
+          socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_event("keydown", _, socket), do: {:noreply, socket}
+
   @impl true
   def handle_info({:message, row}, socket) do
     # Prefer cache-only for the first paint; resolve+download off the LV process.
-    row_fast = LinkPreview.attach_cache_only(row)
+    lookup = remember_parent(socket.assigns.parent_lookup || %{}, row)
+    row_fast =
+      row
+      |> LinkPreview.attach_cache_only()
+      |> attach_parent_info(lookup)
+      |> ensure_reactions()
 
     socket =
       socket
+      |> assign(:parent_lookup, lookup)
+      |> track_row(row_fast)
       |> stream_insert(:messages, row_fast, at: -1)
       |> assign(:message_count, socket.assigns.message_count + 1)
       |> push_event("scroll_bottom", %{})
@@ -246,7 +423,11 @@ defmodule FreeqWeb3Web.ChatLive do
       lv = self()
 
       Task.start(fn ->
-        full = LinkPreview.attach(row)
+        full =
+          row
+          |> LinkPreview.attach()
+          |> attach_parent_info(lookup)
+          |> ensure_reactions()
 
         if full[:embed] do
           send(lv, {:message_embed, full})
@@ -259,7 +440,64 @@ defmodule FreeqWeb3Web.ChatLive do
 
   def handle_info({:message_embed, row}, socket) do
     # Update the existing stream row with a fully resolved local preview.
-    {:noreply, stream_insert(socket, :messages, row, at: -1)}
+    # Re-attach parent info so the reply badge survives the embed patch.
+    row =
+      row
+      |> attach_parent_info(socket.assigns.parent_lookup || %{})
+      |> ensure_reactions()
+      |> merge_tracked_reactions(socket.assigns.rows_by_msgid || %{})
+
+    socket =
+      socket
+      |> track_row(row)
+      |> stream_insert(:messages, row, update_only: true)
+
+    {:noreply, socket}
+  end
+
+  def handle_info({:reaction, msgid, emoji, nick, added}, socket) do
+    msgid = to_string(msgid || "")
+    emoji = to_string(emoji || "")
+    nick = to_string(nick || "")
+
+    if msgid == "" or emoji == "" do
+      {:noreply, socket}
+    else
+      {:noreply, apply_reaction(socket, msgid, emoji, nick, added)}
+    end
+  end
+
+  def handle_info({:preview_warmup, rows}, socket) when is_list(rows) do
+    # Background: resolve uncached previews and patch stream rows in place.
+    # Does not block mount / first paint.
+    lv = self()
+
+    Task.start(fn ->
+      rows
+      |> Enum.filter(fn row ->
+        row[:kind] == :msg and is_nil(row[:embed]) and is_binary(row[:text]) and
+          String.contains?(row[:text], "http")
+      end)
+      # Newest-looking rows last in history list — warm a reasonable batch.
+      |> Enum.take(30)
+      |> Task.async_stream(&LinkPreview.attach/1,
+        max_concurrency: 3,
+        timeout: 8_000,
+        on_timeout: :kill_task,
+        ordered: false
+      )
+      |> Enum.each(fn
+        {:ok, row} ->
+          if is_map(row) and row[:embed] do
+            send(lv, {:message_embed, row})
+          end
+
+        _ ->
+          :ok
+      end)
+    end)
+
+    {:noreply, socket}
   end
 
   def handle_info({:av_state, %{channel: ch} = av}, socket) do
@@ -270,10 +508,18 @@ defmodule FreeqWeb3Web.ChatLive do
       socket =
         cond do
           state in ["started", "joined"] ->
+            # Anyone in the channel sees a live call; joiners/starters get av_active.
             socket
             |> assign(:av_call_present, true)
             |> assign(:av_session_id, av.session_id)
             |> assign(:av_participant_count, av.participants || 0)
+            |> then(fn s ->
+              if s.assigns.av_active or av_state_is_self?(av, s) do
+                assign(s, :av_active, true)
+              else
+                s
+              end
+            end)
             |> push_event("av_state", %{
               channel: ch,
               state: av.state,
@@ -283,13 +529,20 @@ defmodule FreeqWeb3Web.ChatLive do
               instance: av.instance
             })
 
-          state == "ended" ->
-            socket
-            |> assign(:av_active, false)
-            |> assign(:av_call_present, false)
-            |> assign(:av_session_id, nil)
-            |> assign(:av_participant_count, 0)
-            |> push_event("av_ended", %{session_id: av.session_id})
+          state in ["ended", "left"] ->
+            # "left" from others must not tear down our call; only full end.
+            if state == "ended" do
+              socket
+              |> assign(:av_active, false)
+              |> assign(:av_call_present, false)
+              |> assign(:av_session_id, nil)
+              |> assign(:av_participant_count, 0)
+              |> push_event("av_ended", %{session_id: av.session_id})
+            else
+              # Peer left — refresh count via discovery soon.
+              send(self(), :poll_channel_call)
+              socket
+            end
 
           true ->
             socket
@@ -338,6 +591,15 @@ defmodule FreeqWeb3Web.ChatLive do
 
   def handle_info({:auth_changed, auth}, socket) do
     {:noreply, update(socket, :snap, &Map.merge(&1, auth))}
+  end
+
+  def handle_info(:poll_channel_call, socket) do
+    # Don't clobber local "in call" state; only refresh discovery badge.
+    if socket.assigns.av_active do
+      {:noreply, socket}
+    else
+      {:noreply, apply_channel_call(socket, socket.assigns.channel)}
+    end
   end
 
   def handle_info(_msg, socket), do: {:noreply, socket}
@@ -399,6 +661,207 @@ defmodule FreeqWeb3Web.ChatLive do
     :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
   end
 
+  # Defer network-heavy preview work until after the page is interactive.
+  defp schedule_preview_warmup(history) when is_list(history) do
+    send(self(), {:preview_warmup, history})
+  end
+
+  defp schedule_preview_warmup(_), do: :ok
+
+  # Banner / badge snippet of a parent message (matches freeq-web2 ~80 char cap).
+  defp preview_text(text) when is_binary(text) do
+    text
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> String.slice(0, 80)
+  end
+
+  defp preview_text(_), do: ""
+
+  defp focus_compose(socket) do
+    push_event(socket, "focus_compose", %{})
+  end
+
+  # msgid → %{nick:, text:} so reply badges can show the original in-channel.
+  defp parent_lookup_from_rows(rows) when is_list(rows) do
+    Enum.reduce(rows, %{}, &remember_parent(&2, &1))
+  end
+
+  defp parent_lookup_from_rows(_), do: %{}
+
+  defp remember_parent(lookup, %{msgid: mid, nick: nick, text: text})
+       when is_binary(mid) and mid != "" and is_map(lookup) do
+    lookup = Map.put(lookup, mid, %{nick: to_string(nick || ""), text: to_string(text || "")})
+
+    # Bound growth (same idea as freeq-web2 SessionState#parent_lookup).
+    if map_size(lookup) > 2000 do
+      lookup
+      |> Enum.take(-1000)
+      |> Map.new()
+    else
+      lookup
+    end
+  end
+
+  defp remember_parent(lookup, _), do: lookup || %{}
+
+  defp attach_parent_info(%{parent: parent} = row, lookup)
+       when is_binary(parent) and parent != "" and is_map(lookup) do
+    case Map.get(lookup, parent) do
+      %{nick: nick, text: text} ->
+        Map.merge(row, %{parent_nick: nick, parent_text: text})
+
+      _ ->
+        Map.merge(row, %{parent_nick: nil, parent_text: nil})
+    end
+  end
+
+  defp attach_parent_info(row, _), do: row
+
+  # freeq-web2 reaction palette.
+  defp react_emojis, do: ~w(👍 ❤️ 😂 🎉 🔥 👀 💯 ✨)
+
+  defp ensure_reactions(%{} = row) do
+    Map.update(row, :reactions, %{}, fn
+      m when is_map(m) -> m
+      _ -> %{}
+    end)
+  end
+
+  defp ensure_reactions(row), do: row
+
+  defp rows_by_msgid_from(rows) when is_list(rows) do
+    Enum.reduce(rows, %{}, fn row, acc ->
+      case row do
+        %{msgid: mid} when is_binary(mid) and mid != "" -> Map.put(acc, mid, row)
+        _ -> acc
+      end
+    end)
+  end
+
+  defp rows_by_msgid_from(_), do: %{}
+
+  defp track_row(socket, %{msgid: mid} = row) when is_binary(mid) and mid != "" do
+    update(socket, :rows_by_msgid, fn map -> Map.put(map || %{}, mid, row) end)
+  end
+
+  defp track_row(socket, _), do: socket
+
+  # Keep live reaction chips when a link-preview patch rebuilds the row.
+  defp merge_tracked_reactions(%{msgid: mid} = row, rows_by_msgid)
+       when is_binary(mid) and mid != "" and is_map(rows_by_msgid) do
+    case Map.get(rows_by_msgid, mid) do
+      %{reactions: rx} when is_map(rx) and map_size(rx) > 0 ->
+        Map.put(row, :reactions, rx)
+
+      _ ->
+        row
+    end
+  end
+
+  defp merge_tracked_reactions(row, _), do: row
+
+  defp my_reaction_aliases(%Phoenix.LiveView.Socket{} = socket) do
+    my_reaction_aliases(socket.assigns[:snap] || %{})
+  end
+
+  defp my_reaction_aliases(snap) when is_map(snap) do
+    [snap[:current_nick], snap[:auth_nick], snap[:auth_handle]]
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.map(&String.downcase/1)
+    |> Enum.uniq()
+  end
+
+  defp my_reaction_aliases(_), do: []
+
+  defp nick_in_list?(nicks, aliases) when is_list(nicks) and is_list(aliases) do
+    Enum.any?(nicks, fn n -> String.downcase(to_string(n)) in aliases end)
+  end
+
+  defp nick_in_list?(_, _), do: false
+
+  defp apply_reaction(socket, msgid, emoji, nick, added) do
+    rows = socket.assigns.rows_by_msgid || %{}
+
+    case Map.get(rows, msgid) do
+      nil ->
+        # Parent not in the loaded window — nothing to paint.
+        socket
+
+      row ->
+        reactions = apply_reaction_map(row[:reactions] || %{}, emoji, nick, added)
+        row = Map.put(row, :reactions, reactions)
+
+        socket
+        |> track_row(row)
+        |> stream_insert(:messages, row, update_only: true)
+    end
+  end
+
+  defp apply_reaction_map(reactions, emoji, nick, added) when is_map(reactions) do
+    nick = to_string(nick)
+    nicks = Map.get(reactions, emoji, []) |> Enum.map(&to_string/1)
+
+    nicks =
+      if added do
+        if Enum.any?(nicks, &(String.downcase(&1) == String.downcase(nick))) do
+          nicks
+        else
+          nicks ++ [nick]
+        end
+      else
+        Enum.reject(nicks, &(String.downcase(&1) == String.downcase(nick)))
+      end
+
+    if nicks == [] do
+      Map.delete(reactions, emoji)
+    else
+      Map.put(reactions, emoji, nicks)
+    end
+  end
+
+  defp reaction_chip_label(emoji, nicks) when is_list(nicks) do
+    if length(nicks) <= 1, do: emoji, else: "#{emoji} #{length(nicks)}"
+  end
+
+  defp reaction_mine?(nicks, aliases), do: nick_in_list?(nicks, aliases)
+
+  # Treat av-state as "ours" when the actor nick matches our nick/handle.
+  defp av_state_is_self?(av, socket) do
+    actor = to_string(av[:actor] || "")
+    nick = to_string(socket.assigns.snap[:current_nick] || "")
+    handle = to_string(socket.assigns.snap[:auth_handle] || "")
+    auth_nick = to_string(socket.assigns.snap[:auth_nick] || "")
+
+    actor != "" and
+      Enum.any?([nick, handle, auth_nick], fn n ->
+        n != "" and String.downcase(n) == String.downcase(actor)
+      end)
+  end
+
+  # Discover live call on this channel via freeq-server REST (works for guests).
+  defp apply_channel_call(socket, channel) do
+    case Rest.fetch_channel_sessions(channel) |> Rest.active_call_from_sessions() do
+      %{session_id: sid} = info when is_binary(sid) and sid != "" ->
+        socket
+        |> assign(:av_call_present, true)
+        |> assign(:av_session_id, sid)
+        |> assign(:av_participant_count, info.participant_count || 0)
+
+      _ ->
+        if socket.assigns[:av_active] do
+          socket
+        else
+          socket
+          |> assign(:av_call_present, false)
+          |> assign(:av_session_id, nil)
+          |> assign(:av_participant_count, 0)
+        end
+    end
+  rescue
+    _ -> socket
+  end
+
   defp format_ts(%DateTime{} = t), do: Calendar.strftime(t, "%H:%M")
   defp format_ts(_), do: ""
 
@@ -410,27 +873,85 @@ defmodule FreeqWeb3Web.ChatLive do
   defp msg_row_class(_), do: "notice"
 
   attr :msg, :map, required: true
+  attr :my_aliases, :list, default: []
 
   defp message_body(assigns) do
     ~H"""
-    <span class="body"><%= if @msg.kind == :msg do %>
-      <span class={["nick", @msg[:color] || "n1"]}>{@msg.nick}</span>{" "}{@msg.text}<button
-        :if={@msg[:msgid]}
-        type="button"
-        class="reply-btn"
-        title="Reply"
-        phx-click="reply"
-        phx-value-msgid={@msg.msgid}
-      >↩</button>
-    <% else %>
-      <%= if @msg.kind in [:join, :part] do %>
-        — {@msg.nick} {@msg.text}
+    <span class="body">
+      <%= if @msg.kind == :msg do %>
+        <button
+          :if={@msg[:parent] not in [nil, ""]}
+          type="button"
+          class="reply-badge"
+          data-reply-to={@msg.parent}
+          title="Jump to original"
+          phx-click="scroll_to_message"
+          phx-value-msgid={@msg.parent}
+        >
+          ↪ <span class="reply-nick">{@msg[:parent_nick] || "message"}</span>
+          <span :if={@msg[:parent_text] not in [nil, ""]} class="reply-text">
+            {preview_text(@msg.parent_text)}
+          </span>
+        </button>
+        <span class={["nick", @msg[:color] || "n1"]}>{@msg.nick}</span>{" "}{@msg.text}<span
+          :if={@msg[:msgid]}
+          class="reactions"
+        >
+          <button
+            :for={{emoji, nicks} <- reaction_entries(@msg[:reactions])}
+            type="button"
+            class={["reaction-chip", reaction_mine?(nicks, @my_aliases) && "mine"]}
+            title={Enum.join(nicks, ", ")}
+            data-emoji={emoji}
+            data-msgid={@msg.msgid}
+            phx-click="toggle_reaction"
+            phx-value-msgid={@msg.msgid}
+            phx-value-emoji={emoji}
+          >
+            {reaction_chip_label(emoji, nicks)}
+          </button>
+          <button
+            type="button"
+            class="react-btn"
+            title="React"
+            phx-click="open_react_picker"
+            phx-value-msgid={@msg.msgid}
+          >
+            +
+          </button>
+        </span>
+        <button
+          :if={@msg[:msgid]}
+          type="button"
+          class="reply-btn"
+          title="Reply"
+          phx-click="reply"
+          phx-value-msgid={@msg.msgid}
+          phx-value-nick={@msg.nick}
+          phx-value-text={@msg.text}
+        >
+          ↩
+        </button>
       <% else %>
-        {@msg.text}
+        <%= if @msg.kind in [:join, :part] do %>
+          — {@msg.nick} {@msg.text}
+        <% else %>
+          {@msg.text}
+        <% end %>
       <% end %>
-    <% end %></span>
+    </span>
     """
   end
+
+  # Stable chip order: sort emoji keys so the stream patch doesn't reshuffle.
+  defp reaction_entries(nil), do: []
+  defp reaction_entries(reactions) when is_map(reactions) do
+    reactions
+    |> Enum.filter(fn {_e, nicks} -> is_list(nicks) and nicks != [] end)
+    |> Enum.sort_by(fn {emoji, _} -> emoji end)
+  end
+
+  defp reaction_entries(_), do: []
 
   attr :embed, :map, required: true
 
@@ -498,7 +1019,12 @@ defmodule FreeqWeb3Web.ChatLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <div id="freeq-chat" phx-hook="ChatScroll" data-channel={@bare}>
+    <div
+      id="freeq-chat"
+      phx-hook="ChatScroll"
+      data-channel={@bare}
+      phx-window-keydown="keydown"
+    >
       <nav>
         <button
           type="button"
@@ -511,13 +1037,9 @@ defmodule FreeqWeb3Web.ChatLive do
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
         </button>
         <span class="brand">freeq</span>
-        <span class="nav-channel">{@channel}</span>
-        <span id="channel-topic" title="Channel topic">{@topic || "add topic"}</span>
-        <div class="nav-right">
-          <span id="status" class={if @snap.ws_state == :ready, do: "connected"}>
-            <span class="dot"></span>
-            <span>{ws_label(@snap.ws_state)}</span>
-          </span>
+        <div class="nav-channel-meta">
+          <span class="nav-channel">{@channel}</span>
+          <span id="channel-topic" title="Channel topic">{@topic || "add topic"}</span>
           <button
             type="button"
             id="av-call-btn"
@@ -532,7 +1054,6 @@ defmodule FreeqWeb3Web.ChatLive do
                 else: if(@av_call_present, do: "av_join", else: "av_start")
               )
             }
-            disabled={not @snap[:authenticated?] and not @av_active and not @av_call_present}
             data-channel={@channel}
             data-nick={@snap.current_nick}
             data-instance={@av_instance}
@@ -540,14 +1061,25 @@ defmodule FreeqWeb3Web.ChatLive do
             title={
               cond do
                 @av_active -> "In call — click to leave"
-                @av_call_present -> "Join call (#{@av_participant_count || 0})"
-                @snap[:authenticated?] -> "Start voice call"
-                true -> "Sign in to start a call"
+                @av_call_present ->
+                  n = @av_participant_count || 0
+                  "Join voice call (#{n} #{if n == 1, do: "person", else: "people"})"
+                true -> "Start voice call"
               end
             }
           >
             {if(@av_active, do: "📞", else: if(@av_call_present, do: "🔊", else: "🎙️"))}
+            <span
+              :if={not @av_active and @av_call_present}
+              class="av-call-badge"
+            >{@av_participant_count || "!"}</span>
           </button>
+        </div>
+        <div class="nav-right">
+          <span id="status" class={if @snap.ws_state == :ready, do: "connected"}>
+            <span class="dot"></span>
+            <span>{ws_label(@snap.ws_state)}</span>
+          </span>
           <button
             type="button"
             class="mobile-btn"
@@ -641,7 +1173,7 @@ defmodule FreeqWeb3Web.ChatLive do
               data-text={msg[:text]}
             >
               <span class="ts">{format_ts(msg.time)}</span>
-              <.message_body msg={msg} />
+              <.message_body msg={msg} my_aliases={my_reaction_aliases(@snap)} />
               <.link_embed :if={msg[:embed]} embed={msg.embed} />
             </div>
           </div>
@@ -649,14 +1181,21 @@ defmodule FreeqWeb3Web.ChatLive do
           <div
             :if={@av_active}
             id="av-call-panel"
-            class="av-call-panel active"
+            class={[
+              "av-call-panel",
+              "active",
+              if(@av_camera, do: "is-camera-on"),
+              if(@av_muted, do: "is-muted")
+            ]}
             phx-hook="AvCall"
             data-channel={@channel}
             data-nick={@snap.current_nick}
             data-instance={@av_instance}
-            data-session-id={@av_session_id}
+            data-session-id={@av_session_id || ""}
             data-muted={@av_muted}
+            data-camera={@av_camera}
             data-authenticated={@snap[:authenticated?]}
+            data-av-origin={FreeqWeb3.av_origin()}
           >
             <div class="av-call-bar">
               <span class="av-call-status">
@@ -673,6 +1212,14 @@ defmodule FreeqWeb3Web.ChatLive do
                 </button>
                 <button
                   type="button"
+                  class={["av-call-action", "av-cam-btn", if(@av_camera, do: "on")]}
+                  phx-click="av_toggle_camera"
+                  title={if(@av_camera, do: "Turn off camera", else: "Turn on camera")}
+                >
+                  {if(@av_camera, do: "📷 on", else: "📷 off")}
+                </button>
+                <button
+                  type="button"
                   class="av-call-action av-leave-btn"
                   phx-click="av_leave"
                   title="Leave call"
@@ -681,14 +1228,52 @@ defmodule FreeqWeb3Web.ChatLive do
                 </button>
               </div>
             </div>
-            <div id="av-publish-container" phx-update="ignore"></div>
-            <div id="av-remote-tiles" phx-update="ignore"></div>
+
+            <%!-- Media tiles: local + remote. phx-update=ignore so MoQ DOM survives LV patches. --%>
+            <div id="av-video-grid" class="av-video-grid" phx-update="ignore">
+              <div
+                class="av-tile av-tile-local"
+                id="av-local-tile"
+                title="Click to enlarge"
+                role="button"
+                tabindex="0"
+              >
+                <video
+                  id="av-local-video"
+                  class="av-local-video"
+                  autoplay
+                  muted
+                  playsinline
+                  hidden
+                >
+                </video>
+                <div class="av-tile-avatar local">You</div>
+                <span class="av-tile-label">You</span>
+              </div>
+              <div id="av-remote-tiles" class="av-remote-tiles"></div>
+            </div>
+            <div id="av-publish-container" class="av-publish-container" phx-update="ignore"></div>
           </div>
 
           <div :if={@reply_to || @edit_to} id="reply-banner" class="reply-banner">
-            <span class="reply-banner-label">{if(@edit_to, do: "Editing", else: "Replying")}</span>
-            <span class="reply-banner-text">{@reply_to || @edit_to}</span>
-            <button type="button" class="reply-banner-cancel" phx-click="cancel_reply">×</button>
+            <span class="reply-banner-label">
+              <%= if @edit_to do %>
+                Editing message
+              <% else %>
+                Replying to {@reply_preview_nick || "message"}
+              <% end %>
+            </span>
+            <span :if={@reply_preview_text not in [nil, ""]} class="reply-banner-text">
+              {@reply_preview_text}
+            </span>
+            <button
+              type="button"
+              class="reply-banner-cancel"
+              title="Cancel"
+              phx-click="cancel_reply"
+            >
+              ×
+            </button>
           </div>
 
           <div id="send-bar">
@@ -700,6 +1285,7 @@ defmodule FreeqWeb3Web.ChatLive do
                 value={@compose}
                 placeholder={"Message #{@channel}"}
                 autocomplete="off"
+                phx-hook="TabComplete"
                 phx-mounted={JS.focus()}
               />
               <button type="submit">Send</button>
@@ -732,6 +1318,32 @@ defmodule FreeqWeb3Web.ChatLive do
             <% end %>
           </div>
         </aside>
+      </div>
+
+      <%!-- Emoji reaction picker (centered overlay; freeq-web2 parity) --%>
+      <div
+        :if={@react_picker_msgid}
+        id="react-picker-backdrop"
+        class="react-picker-backdrop"
+        phx-click="close_react_picker"
+      >
+      </div>
+      <div
+        :if={@react_picker_msgid}
+        id="react-picker"
+        class="open"
+        role="menu"
+        aria-label="React with emoji"
+      >
+        <button
+          :for={emoji <- react_emojis()}
+          type="button"
+          phx-click="toggle_reaction"
+          phx-value-msgid={@react_picker_msgid}
+          phx-value-emoji={emoji}
+        >
+          {emoji}
+        </button>
       </div>
     </div>
     """

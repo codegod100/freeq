@@ -65,4 +65,40 @@ defmodule FreeqWeb3.Irc.RenderTest do
     assert row.text == "hi"
     assert row.msgid == "ulid1"
   end
+
+  test "parse_reactions_tag" do
+    map = Render.parse_reactions_tag("👍:alice,bob;❤️:carol")
+    assert map["👍"] == ["alice", "bob"]
+    assert map["❤️"] == ["carol"]
+  end
+
+  test "history_row includes reactions from freeq.at/reactions tag" do
+    row =
+      Render.history_row(%{
+        "sender" => "alice!a@h",
+        "text" => "hi",
+        "timestamp" => 1_700_000_000,
+        "msgid" => "ulid1",
+        "tags" => %{"+freeq.at/reactions" => "👍:alice"}
+      })
+
+    assert row.reactions["👍"] == ["alice"]
+  end
+
+  test "parse_tagmsg_reaction add" do
+    line = "@+react=👍;+reply=msg123 :bob!b@h TAGMSG #freeq"
+    assert {"msg123", "👍", "bob", true, "#freeq"} = Render.parse_tagmsg_reaction(line)
+  end
+
+  test "parse_tagmsg_reaction remove" do
+    line = "@+freeq.at/unreact=❤️;+reply=msg99 :alice!a@h TAGMSG #freeq"
+    assert {"msg99", "❤️", "alice", false, "#freeq"} = Render.parse_tagmsg_reaction(line)
+  end
+
+  test "parse_message_line captures +reply parent" do
+    line = "@msgid=m2;+reply=m1 :bob!b@h PRIVMSG #freeq :replying"
+    row = Render.parse_message_line(line)
+    assert row.parent == "m1"
+    assert row.reactions == %{}
+  end
 end
