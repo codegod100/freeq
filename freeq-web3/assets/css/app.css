@@ -391,8 +391,9 @@ body {
 #messages .part,
 #messages .row {
     display: grid;
-    grid-template-columns: 28px minmax(0, 1fr);
-    column-gap: 0.05rem;
+    /* Wide enough for 12h "12:05 PM" (NBSP) without overflowing into .body */
+    grid-template-columns: 3.75rem minmax(0, 1fr);
+    column-gap: 0.35rem;
     row-gap: 0;
     flex: 0 0 auto;
     align-items: baseline;
@@ -408,6 +409,7 @@ body {
     text-align: right;
     user-select: none;
     white-space: nowrap;
+    overflow: hidden;
     padding: 0;
     line-height: 1.25;
     font-variant-numeric: tabular-nums;
