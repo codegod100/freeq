@@ -15,6 +15,10 @@ struct ChatMessage: Identifiable, Equatable {
     var isEdited: Bool = false
     var isDeleted: Bool = false
     var isSigned: Bool = false
+    // True when the body arrived (or was sent) as channel E2EE ciphertext
+    // (the `+encrypted` wire tag). Stored `text` is already the decrypted
+    // form; this drives the lock badge. Parity with macOS.
+    var isEncrypted: Bool = false
     // Origin server name when relayed from a federated peer (+freeq.at/origin).
     // nil = locally-originated. Drives "via {origin}" + suppresses the local
     // verified/signed badges, which would overstate trust for a peer-vouched msg.

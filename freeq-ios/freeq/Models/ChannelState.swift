@@ -9,6 +9,9 @@ class ChannelState: ObservableObject, Identifiable {
     @Published var topic: String = ""
     @Published var typingUsers: [String: Date] = [:]  // nick -> last typing time
     @Published var pins: Set<String> = []  // pinned message IDs
+    /// True when this channel has a local E2EE passphrase key set — drives
+    /// the lock indicator in the header. Parity with macOS.
+    @Published var isEncrypted: Bool = false
     /// Tracks the most recent activity (message, join, topic change, etc.)
     var lastActivity: Date = Date()
 

@@ -667,6 +667,24 @@ struct ComposeView: View {
             if let rest = parts.dropFirst().first, let channel = appState.activeChannel {
                 appState.sendRaw("TOPIC \(channel) :\(rest)")
             }
+        case "encrypt", "e2ee":
+            guard let channel = appState.activeChannel, channel.hasPrefix("#") else {
+                ToastManager.shared.show("Encryption is only for channels", icon: "lock.slash")
+                break
+            }
+            let passphrase = parts.dropFirst().first.map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            if passphrase.isEmpty {
+                ToastManager.shared.show("Usage: /encrypt <passphrase>", icon: "lock")
+            } else {
+                appState.setChannelKey(channel, passphrase: passphrase)
+                ToastManager.shared.show("\u{1F512} Encryption on — others need the same passphrase", icon: "lock.fill")
+            }
+        case "decrypt", "unencrypt":
+            if let channel = appState.activeChannel, channel.hasPrefix("#") {
+                appState.removeChannelKey(channel)
+                ToastManager.shared.show("\u{1F513} Encryption off", icon: "lock.open")
+            }
         default:
             appState.sendRaw(String(input.dropFirst()))
         }

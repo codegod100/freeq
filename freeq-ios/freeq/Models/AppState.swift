@@ -213,6 +213,9 @@ class AppState: ObservableObject {
 
     @Published var connectionState: ConnectionState = .disconnected
     @Published var nick: String = ""
+    /// Passphrase channel E2EE (parity with web + macOS). Value type; mutated
+    /// in place. Keys persist to the keychain per channel.
+    var channelE2ee = ChannelE2eeState()
     /// Cross-device read markers (draft/read-marker): target (lowercased) →
     /// latest read timestamp. Forward-only, enforced server-side. Stored so
     /// the unread-divider / catch-up UI can consume it.
@@ -1652,8 +1655,52 @@ class AppState: ObservableObject {
 
     /// Send a message. Returns true on success, false on failure (so caller can preserve text).
     @discardableResult
+    // MARK: - Channel E2EE (passphrase)
+
+    private static func channelKeyKeychainKey(_ channel: String) -> String {
+        "channelKey.\(channel.lowercased())"
+    }
+
+    func setChannelKey(_ channel: String, passphrase: String) {
+        channelE2ee.setKey(channel: channel, passphrase: passphrase)
+        if let exported = channelE2ee.exportKey(channel: channel) {
+            _ = KeychainHelper.save(key: Self.channelKeyKeychainKey(channel), value: exported)
+        }
+        getOrCreateChannel(channel).isEncrypted = true
+        objectWillChange.send()
+    }
+
+    func removeChannelKey(_ channel: String) {
+        channelE2ee.removeKey(channel: channel)
+        KeychainHelper.delete(key: Self.channelKeyKeychainKey(channel))
+        channels.first { $0.name.lowercased() == channel.lowercased() }?.isEncrypted = false
+        objectWillChange.send()
+    }
+
+    /// Rehydrate a channel key saved by a prior /encrypt (called on join).
+    func restoreChannelKeyIfSaved(_ channel: String) {
+        guard !channelE2ee.hasKey(channel: channel),
+              let b64 = KeychainHelper.load(key: Self.channelKeyKeychainKey(channel)) else { return }
+        channelE2ee.importKey(channel: channel, base64: b64)
+        getOrCreateChannel(channel).isEncrypted = true
+    }
+
     func sendMessage(target: String, text: String) -> Bool {
         guard !text.isEmpty else { return false }
+        // Channel E2EE: relay ciphertext with the `+encrypted` tag (matches
+        // web + macOS). The echo cache restores our plaintext on echo.
+        if target.hasPrefix("#"), let wire = channelE2ee.outgoing(text: text, channel: target) {
+            if let editing = editingMessage {
+                sendRaw("@+draft/edit=\(editing.id);+encrypted PRIVMSG \(target) :\(wire)")
+                editingMessage = nil
+            } else if let reply = replyingTo {
+                sendRaw("@+reply=\(reply.id);+encrypted PRIVMSG \(target) :\(wire)")
+                replyingTo = nil
+            } else {
+                sendRaw("@+encrypted PRIVMSG \(target) :\(wire)")
+            }
+            return true
+        }
         // Clear typing indicator for remote users
         sendRaw("@+typing=done TAGMSG \(target)")
         lastTypingSent = .distantPast
@@ -2389,6 +2436,9 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             let ch = state.getOrCreateChannel(channel)
             ch.lastActivity = Date()
             if nick.lowercased() == state.nick.lowercased() {
+                // Rehydrate a saved channel E2EE key so encrypted history
+                // decrypts on rejoin (parity with macOS).
+                state.restoreChannelKeyIfSaved(channel)
                 if state.activeChannel == nil {
                     state.activeChannel = channel
                 }
@@ -2479,6 +2529,15 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             // behavior against an older SDK build.
             let dmBufName = ircMsg.dmKey ?? (isSelf ? target : from)
 
+            // Channel E2EE: map ENC1 ciphertext to its display form (our own
+            // echo-cached plaintext, a decrypt with the channel key, or a
+            // placeholder when we lack the key). Parity with macOS.
+            var displayText = ircMsg.text
+            var wasEncrypted = false
+            if target.hasPrefix("#") {
+                (displayText, wasEncrypted) = state.channelE2ee.incoming(text: ircMsg.text, channel: target)
+            }
+
             // SDK normalizes both wire forms (draft/multiline BATCH and
             // legacy +freeq.at/multiline) into real `\n` before this
             // point; no decode here. SwiftUI Text renders `\n` natively.
@@ -2488,11 +2547,12 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             let msg = ChatMessage(
                 id: ircMsg.msgid ?? UUID().uuidString,
                 from: isSelf ? state.nick : from,
-                text: ircMsg.text,
+                text: displayText,
                 isAction: ircMsg.isAction,
                 timestamp: Date(timeIntervalSince1970: Double(ircMsg.timestampMs) / 1000.0),
                 replyTo: ircMsg.replyTo,
                 isSigned: ircMsg.isSigned,
+                isEncrypted: wasEncrypted,
                 origin: ircMsg.origin,
                 editOf: ircMsg.editOf,
                 coordination: ircMsg.coordination.map {
@@ -2510,7 +2570,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
                     // keep referencing the original msgid after the first edit
                     // rewrote the in-memory id (parity with macOS).
                     if let idx = batch.messages.firstIndex(where: { $0.id == editOf || $0.editOf == editOf }) {
-                        batch.messages[idx].text = ircMsg.text
+                        batch.messages[idx].text = displayText
                         batch.messages[idx].isEdited = true
                         batch.messages[idx].editOf = batch.messages[idx].editOf ?? editOf
                         if let newId = ircMsg.msgid { batch.messages[idx].id = newId }
@@ -2523,10 +2583,10 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
 
                 if target.hasPrefix("#") {
                     let ch = state.getOrCreateChannel(target)
-                    ch.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
+                    ch.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: displayText)
                 } else {
                     let dm = state.getOrCreateDM(dmBufName)
-                    dm.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: ircMsg.text)
+                    dm.applyEdit(originalId: editOf, newId: ircMsg.msgid, newText: displayText)
                 }
                 return
             }

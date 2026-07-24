@@ -129,9 +129,17 @@ struct ChatDetailView: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
-                    Text(displayName)
-                        .font(.fqCallout.weight(.semibold))
-                        .foregroundColor(Theme.textPrimary)
+                    HStack(spacing: 4) {
+                        if channelState?.isEncrypted == true {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(Theme.verify)
+                                .accessibilityLabel("End-to-end encrypted")
+                        }
+                        Text(displayName)
+                            .font(.fqCallout.weight(.semibold))
+                            .foregroundColor(Theme.textPrimary)
+                    }
 
                     if let channel = channelState {
                         if !channel.activeTypers.isEmpty {
