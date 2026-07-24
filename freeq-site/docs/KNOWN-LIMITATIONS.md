@@ -38,7 +38,7 @@
   ciphertext** (~5.6 KB plaintext / ~7.5 KB ciphertext). Smaller
   messages ride in a single `+encrypted` PRIVMSG and are unaffected.
   Larger messages are sent as ciphertext-chunked across a multiline
-  BATCH with `+draft/multiline-concat`; fallback receivers see the
+  BATCH with `draft/multiline-concat`; fallback receivers see the
   fragments as separate PRIVMSGs, none of which decrypt individually
   (they're slices of one AES-GCM ciphertext). Note that vanilla IRC
   clients in `+E` channels have no useful UX regardless — they can't
