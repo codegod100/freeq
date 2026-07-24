@@ -685,6 +685,52 @@ struct ComposeView: View {
                 appState.removeChannelKey(channel)
                 ToastManager.shared.show("\u{1F513} Encryption off", icon: "lock.open")
             }
+        // — Moderation / channel ops (sendRaw wrappers; parity with macOS) —
+        case "whois", "wi":
+            if let target = parts.dropFirst().first { appState.sendRaw("WHOIS \(target)") }
+        case "away":
+            let reason = parts.count > 1 ? String(parts[1]) : ""
+            appState.sendRaw(reason.isEmpty ? "AWAY" : "AWAY :\(reason)")
+        case "op", "deop", "voice", "devoice":
+            if let chan = appState.activeChannel, let who = parts.dropFirst().first {
+                let mode = ["op": "+o", "deop": "-o", "voice": "+v", "devoice": "-v"][cmd.lowercased()] ?? "+o"
+                appState.sendRaw("MODE \(chan) \(mode) \(who)")
+            }
+        case "kick":
+            if let chan = appState.activeChannel {
+                let kp = String(parts.dropFirst().first ?? "").split(separator: " ", maxSplits: 1)
+                if let who = kp.first {
+                    let reason = kp.count > 1 ? " :\(kp[1])" : ""
+                    appState.sendRaw("KICK \(chan) \(who)\(reason)")
+                }
+            }
+        case "ban":
+            if let chan = appState.activeChannel, let mask = parts.dropFirst().first {
+                appState.sendRaw("MODE \(chan) +b \(mask)")
+            }
+        case "unban":
+            if let chan = appState.activeChannel, let mask = parts.dropFirst().first {
+                appState.sendRaw("MODE \(chan) -b \(mask)")
+            }
+        case "invite":
+            if let chan = appState.activeChannel, let who = parts.dropFirst().first {
+                appState.sendRaw("INVITE \(who) \(chan)")
+            }
+        case "mode", "m":
+            if parts.count > 1 { appState.sendRaw("MODE \(parts[1])") }
+        case "names":
+            if let chan = appState.activeChannel { appState.sendRaw("NAMES \(chan)") }
+        case "who":
+            let target = parts.dropFirst().first.map(String.init) ?? appState.activeChannel ?? ""
+            if !target.isEmpty { appState.sendRaw("WHO \(target)") }
+        case "pin", "unpin":
+            if let chan = appState.activeChannel, let mid = parts.dropFirst().first {
+                appState.sendRaw("\(cmd.uppercased()) \(chan) \(mid)")
+            }
+        case "oper":
+            if parts.count > 1 { appState.sendRaw("OPER \(parts[1])") }
+        case "raw", "quote":
+            if parts.count > 1 { appState.sendRaw(String(parts[1])) }
         default:
             appState.sendRaw(String(input.dropFirst()))
         }
