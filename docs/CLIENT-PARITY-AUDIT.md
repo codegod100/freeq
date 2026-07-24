@@ -1,6 +1,7 @@
 # Client Parity & Delight Audit — Web · macOS · iOS
 
-Date: 2026-07-23. Method: source survey of `freeq-app/` (React/TS),
+Date: 2026-07-23 (updated 2026-07-24 with a parity-sprint progress pass).
+Method: source survey of `freeq-app/` (React/TS),
 `freeq-macos/` (SwiftUI+AppKit / Rust core), `freeq-ios/` (SwiftUI / Rust
 core), cross-checked against live behavior staged for the client
 screenshots. Legend: ✅ full · ⚠️ partial/basic · ❌ absent · — n/a for
@@ -40,9 +41,9 @@ considered call.
 | Bluesky OAuth login | ✅ | ✅ | ✅ | |
 | Guest connect | ✅ | ✅ | ✅ | |
 | Verified / DID badges | ✅ | ✅ | ✅ | |
-| Channel E2EE (passphrase / VC) | ✅ | ✅ | ❌ | **iOS has none** — `ChannelE2ee`/`channelKey` absent |
+| Channel E2EE (passphrase / VC) | ✅ | ✅ | ✅ | ✅ **iOS shipped 2026-07-24** (ported crypto core + /encrypt + keychain + lock) |
 | P2P (iroh) direct DMs | ❌ | ✅ | ❌ | **macOS-only** |
-| Policy / join-gate UI | ✅ | ✅ | ❌ | **iOS shows no gate prompt** (`joingate`/`accessdenied` = 0) |
+| Policy / join-gate UI | ✅ | ✅ | ✅ | ✅ **iOS shipped 2026-07-24** (access-denied banner + toast) |
 
 ### Audio / video (sessions)
 | Feature | Web | macOS | iOS | Notes |
@@ -58,7 +59,7 @@ considered call.
 ### Agent & session observability — *the pitch surface*
 | Feature | Web | macOS | iOS | Notes |
 |---|:--:|:--:|:--:|---|
-| Coordination cards (task_request/update/complete) | ✅ | ❌ | ❌ | **web-only** — the agent-native UI lives only on web |
+| Coordination cards (task_request/update/complete) | ✅ | ✅ | ✅ | ✅ **native shipped 2026-07-24** (FFI `CoordinationEvent` + card views). NB: production `freeq-server` must be redeployed for replayed events to carry the tags |
 | Task timeline | ✅ | ❌ | ❌ | web-only |
 | Audit / governance timeline | ✅ | ❌ | ❌ | web-only |
 | Session history browser | ✅ | ⚠️ | ⚠️ | web `SessionHistory`/`SessionIndicator`; native shows live call state only |
@@ -70,7 +71,7 @@ considered call.
 | Catch-up digest | ❌ | ❌ | ✅ | **iOS-only** (`CatchUpDigestSheet`) |
 | Voice messages + transcription | ⚠️ | ✅ | ✅ | iOS deepest; web is basically `AudioTest` only |
 | Sound design | ⚠️ | ✅ | ✅ | web is thin |
-| Onboarding flow | ✅ | ✅ | ❌ | **iOS has none** |
+| Onboarding flow | ✅ | ✅ | ✅ | ✅ **iOS shipped 2026-07-24** (first-run sheet, on-pitch) |
 | Jumbomoji (≤3 emoji → large) | ❌ | ❌ | ❌ | **nobody** — designed in DESIGN doc, unbuilt |
 
 ### Platform-native reach
@@ -90,7 +91,7 @@ considered call.
 |---|:--:|:--:|:--:|---|
 | Quick switcher (⌘K) | ✅ | ✅ | ✅ | |
 | Slash-command UI | ⚠️ | ✅ | ❌ | macOS `CommandRegistry` richest; **iOS none** |
-| Bookmarks | ✅ | ✅ | ❌ | **iOS none** |
+| Bookmarks | ✅ | ✅ | ✅ | ✅ **iOS shipped 2026-07-24** (context-menu + Saved Messages) |
 | Keyboard shortcuts panel | ✅ | ✅ | ⚠️ | |
 
 ### Engineering quality (tested surface)
@@ -164,16 +165,30 @@ arrives on every client).
 
 ---
 
-## 5. Suggested sequencing
+## 5. Suggested sequencing — progress
 
-1. **Card port (P0):** shared spec doc → macOS renderer → iOS renderer.
-   Single biggest strategic win; makes every client tell the pitch.
-2. **iOS parity sprint (P1):** E2EE, join-gate UI, bookmarks, slash commands,
-   onboarding + a test-coverage push.
-3. **AV parity (P1):** grid auto-layout to web/iOS; click-to-focus everywhere;
-   camera effects to web/iOS.
-4. **Delight pass (P2):** jumbomoji + reaction morphs in shared policy;
-   smart-replies/catch-up to macOS; block-copy to web/iOS; sound on web.
+1. ✅ **Card port (P0) — DONE (2026-07-24).** FFI now surfaces a typed
+   `CoordinationEvent`; macOS + iOS render coordination cards (pure style
+   policy + card views), with unit + FFI-mapping tests. Every client tells
+   the pitch. *Caveat: production freeq-server needs a redeploy so replayed
+   coordination events carry the `+freeq.at/event` tags to clients.*
+2. **iOS parity sprint (P1):** ✅ E2EE, ✅ join-gate UI, ✅ bookmarks,
+   ✅ onboarding — all DONE 2026-07-24. Remaining: expand slash-command set
+   (iOS already has join/part/nick/me/msg/topic; macOS has ~20 more), and
+   the test-coverage push (iOS core 55→90 tests this pass; keep going).
+3. **AV parity (P1) — NOT STARTED.** grid auto-layout to web/iOS;
+   click-to-focus everywhere; camera effects to web/iOS. *Do these against a
+   live multi-participant call — high-gamma AV, verify don't guess.*
+4. **Delight pass (P2) — NOT STARTED.** jumbomoji + reaction morphs in a
+   shared policy; smart-replies/catch-up to macOS; block-copy to web/iOS;
+   sound on web.
+
+### Landed this run
+- P0 coordination cards: FFI `CoordinationEvent`, macOS + iOS renderers
+  (7 card tests each + 3 FFI mapping tests).
+- iOS channel E2EE (32 ported crypto tests), bookmarks, join-gate
+  (3 tests), onboarding. iOS core tests 55 → 90.
+- All builds green; verified iOS onboarding + cards render in the simulator.
 
 Each item above wants tests first on the high-gamma files (per `AGENTS.md`),
 especially anything touching `store.ts`, `MessageList.tsx`, `AppState`, and
