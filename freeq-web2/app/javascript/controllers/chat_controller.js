@@ -16,6 +16,7 @@ export default class ChatController extends Controller {
     this.setupTabComplete();
     this.setupDm();
     this.setupUpload();
+    this.setupImagePreviews();
     this.hydrateReplyBadges();
     this.hydrateLinkEmbeds();
     this.localizeTimes();
@@ -41,7 +42,10 @@ export default class ChatController extends Controller {
     this.bare = channel;
 
     if (this.element.dataset.authHandle) {
-      document.body.setAttribute("data-auth-handle", this.element.dataset.authHandle);
+      document.body.setAttribute(
+        "data-auth-handle",
+        this.element.dataset.authHandle,
+      );
     }
 
     this.subscription = consumer.subscriptions.create(
@@ -67,7 +71,7 @@ export default class ChatController extends Controller {
           // leaving the UI stuck if no later status broadcast fired.
         },
         disconnected: () => this.setStatus("reconnecting…", false),
-      }
+      },
     );
   }
 
@@ -79,7 +83,50 @@ export default class ChatController extends Controller {
     this._embedObserver?.disconnect();
     this._embedObserver = null;
     clearTimeout(this._embedObsTimer);
+    this.teardownImagePreviews?.();
     this.teardownUpload?.();
+  }
+
+  // ── Image link previews (msg-img) ───────────────────────────────────
+  // Frame size is reserved in CSS (aspect-ratio). Images are always
+  // visible; we only mark broken loads and re-pin scroll near bottom.
+
+  setupImagePreviews() {
+    const messages = document.getElementById("messages");
+    if (!messages) return;
+
+    const nearBottom = () =>
+      messages.scrollHeight - messages.scrollTop - messages.clientHeight < 120;
+
+    const markImg = (img, ok) => {
+      const link = img.closest?.("a.msg-img-link");
+      if (!link) return;
+      link.classList.toggle("is-broken", !ok);
+      if (nearBottom()) this.scrollToBottom();
+    };
+
+    const onLoad = (ev) => {
+      const t = ev.target;
+      if (t?.classList?.contains("msg-img")) markImg(t, true);
+    };
+    const onError = (ev) => {
+      const t = ev.target;
+      if (t?.classList?.contains("msg-img")) markImg(t, false);
+    };
+
+    // Capture phase: load/error do not bubble.
+    messages.addEventListener("load", onLoad, true);
+    messages.addEventListener("error", onError, true);
+    this.teardownImagePreviews = () => {
+      messages.removeEventListener("load", onLoad, true);
+      messages.removeEventListener("error", onError, true);
+    };
+
+    // Cached images may already be complete before listeners attach.
+    messages.querySelectorAll("img.msg-img").forEach((img) => {
+      if (!img.complete) return;
+      markImg(img, img.naturalHeight > 0);
+    });
   }
 
   // ── Image upload (+ button, paste, optional drop) ───────────────────
@@ -150,9 +197,8 @@ export default class ChatController extends Controller {
       "";
 
     const channelName = () => {
-      const isDm = document
-        .getElementById("send-form")
-        ?.dataset?.isDm === "true";
+      const isDm =
+        document.getElementById("send-form")?.dataset?.isDm === "true";
       if (isDm) return "";
       const bare =
         this.bare ||
@@ -169,7 +215,10 @@ export default class ChatController extends Controller {
       if (form) {
         // StimulusReflex listens for submit — requestSubmit triggers it.
         if (typeof form.requestSubmit === "function") form.requestSubmit();
-        else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+        else
+          form.dispatchEvent(
+            new Event("submit", { bubbles: true, cancelable: true }),
+          );
       }
     };
 
@@ -219,7 +268,9 @@ export default class ChatController extends Controller {
           data = { error: await res.text() };
         }
         if (!res.ok) {
-          throw new Error(data.error || data.message || `Upload failed (${res.status})`);
+          throw new Error(
+            data.error || data.message || `Upload failed (${res.status})`,
+          );
         }
         if (!data.url) throw new Error("Upload succeeded but no URL returned");
 
@@ -236,10 +287,7 @@ export default class ChatController extends Controller {
 
     const onAttachClick = () => {
       if (!authDid().startsWith("did:")) {
-        showPreview(
-          new File([], "image"),
-          "Sign in to upload images"
-        );
+        showPreview(new File([], "image"), "Sign in to upload images");
         // Fake empty file looks odd — just status toast via preview strip.
         if (previewImg) previewImg.hidden = true;
         if (previewName) previewName.textContent = "Upload";
@@ -259,7 +307,10 @@ export default class ChatController extends Controller {
       const items = e.clipboardData && e.clipboardData.items;
       if (!items) return;
       for (const item of items) {
-        if (item.kind === "file" && (!item.type || item.type.startsWith("image/"))) {
+        if (
+          item.kind === "file" &&
+          (!item.type || item.type.startsWith("image/"))
+        ) {
           const file = item.getAsFile();
           if (file) {
             e.preventDefault();
@@ -398,8 +449,8 @@ export default class ChatController extends Controller {
     if (!messages) return;
     const existing = new Set(
       Array.from(messages.querySelectorAll("[data-msgid]")).map((el) =>
-        el.getAttribute("data-msgid")
-      )
+        el.getAttribute("data-msgid"),
+      ),
     );
     for (let i = operations.length - 1; i >= 0; i--) {
       const op = operations[i];
@@ -421,7 +472,7 @@ export default class ChatController extends Controller {
       msgid = String(msgid || "");
       if (!msgid) return;
       const row = document.querySelector(
-        `.msg[data-msgid="${CSS.escape(msgid)}"]`
+        `.msg[data-msgid="${CSS.escape(msgid)}"]`,
       );
       const nick = row?.dataset?.nick || "message";
       const text = (row?.dataset?.text || "").replace(/\s+/g, " ").slice(0, 80);
@@ -449,7 +500,7 @@ export default class ChatController extends Controller {
     window.scrollToMessage = (msgid) => {
       msgid = String(msgid || "");
       const row = document.querySelector(
-        `.msg[data-msgid="${CSS.escape(msgid)}"]`
+        `.msg[data-msgid="${CSS.escape(msgid)}"]`,
       );
       if (!row) return;
       row.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -480,7 +531,7 @@ export default class ChatController extends Controller {
       msgid = String(msgid || "");
       if (!msgid) return;
       const row = document.querySelector(
-        `.msg[data-msgid="${CSS.escape(msgid)}"]`
+        `.msg[data-msgid="${CSS.escape(msgid)}"]`,
       );
       if (!row) return;
       const input = document.getElementById("message-input");
@@ -528,14 +579,11 @@ export default class ChatController extends Controller {
       try {
         const payload = new FormData();
         payload.append("msgid", msgid);
-        const res = await fetch(
-          `/chat/${encodeURIComponent(target)}/delete`,
-          {
-            method: "POST",
-            body: payload,
-            credentials: "same-origin",
-          }
-        );
+        const res = await fetch(`/chat/${encodeURIComponent(target)}/delete`, {
+          method: "POST",
+          body: payload,
+          credentials: "same-origin",
+        });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           console.error("delete failed", res.status, err);
@@ -543,7 +591,7 @@ export default class ChatController extends Controller {
         }
         // Optimistic remove — server echo also removes via CableReady.
         const row = document.querySelector(
-          `.msg[data-msgid="${CSS.escape(msgid)}"]`
+          `.msg[data-msgid="${CSS.escape(msgid)}"]`,
         );
         row?.remove();
         window.cancelEdit();
@@ -555,21 +603,24 @@ export default class ChatController extends Controller {
 
   // Fill in reply badge nick/text from the parent .msg[data-msgid] if present.
   hydrateReplyBadges() {
-    document.querySelectorAll(".reply-badge[data-reply-to]").forEach((badge) => {
-      const mid = badge.getAttribute("data-reply-to");
-      if (!mid) return;
-      const parent = document.querySelector(
-        `.msg[data-msgid="${CSS.escape(mid)}"]`
-      );
-      if (!parent) return;
-      const nickEl = badge.querySelector(".reply-nick");
-      const textEl = badge.querySelector(".reply-text");
-      if (nickEl && parent.dataset.nick) nickEl.textContent = parent.dataset.nick;
-      if (textEl && parent.dataset.text) {
-        const t = parent.dataset.text.replace(/\s+/g, " ");
-        textEl.textContent = t.length > 80 ? t.slice(0, 80) + "…" : t;
-      }
-    });
+    document
+      .querySelectorAll(".reply-badge[data-reply-to]")
+      .forEach((badge) => {
+        const mid = badge.getAttribute("data-reply-to");
+        if (!mid) return;
+        const parent = document.querySelector(
+          `.msg[data-msgid="${CSS.escape(mid)}"]`,
+        );
+        if (!parent) return;
+        const nickEl = badge.querySelector(".reply-nick");
+        const textEl = badge.querySelector(".reply-text");
+        if (nickEl && parent.dataset.nick)
+          nickEl.textContent = parent.dataset.nick;
+        if (textEl && parent.dataset.text) {
+          const t = parent.dataset.text.replace(/\s+/g, " ");
+          textEl.textContent = t.length > 80 ? t.slice(0, 80) + "…" : t;
+        }
+      });
   }
 
   // YouTube / Bluesky / OpenGraph cards under message text.
@@ -623,7 +674,7 @@ export default class ChatController extends Controller {
     window.toggleReaction = async (msgid, emoji) => {
       const channel = self.bare || self.channel.replace(/^#/, "");
       const el = document.querySelector(
-        `.reaction-chip[data-emoji="${CSS.escape(emoji)}"][data-msgid="${CSS.escape(msgid)}"]`
+        `.reaction-chip[data-emoji="${CSS.escape(emoji)}"][data-msgid="${CSS.escape(msgid)}"]`,
       );
       const mine = el?.classList.contains("mine");
       const path = mine ? "unreact" : "react";
@@ -632,15 +683,18 @@ export default class ChatController extends Controller {
       payload.append("msgid", msgid);
       payload.append("emoji", emoji);
       try {
-        const res = await fetch(`/chat/${encodeURIComponent(channel)}/${path}`, {
-          method: "POST",
-          headers: {
-            "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')
-              .content,
+        const res = await fetch(
+          `/chat/${encodeURIComponent(channel)}/${path}`,
+          {
+            method: "POST",
+            headers: {
+              "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')
+                .content,
+            },
+            body: payload,
+            credentials: "same-origin",
           },
-          body: payload,
-          credentials: "same-origin",
-        });
+        );
         if (!res.ok) {
           console.error("toggleReaction HTTP", res.status);
           return;
@@ -676,7 +730,7 @@ export default class ChatController extends Controller {
     nick = String(nick || "");
     if (!msgid || !emoji) return;
     const row = document.querySelector(
-      `.msg[data-msgid="${CSS.escape(msgid)}"]`
+      `.msg[data-msgid="${CSS.escape(msgid)}"]`,
     );
     if (!row) return;
     let container = row.querySelector(".reactions");
@@ -686,7 +740,7 @@ export default class ChatController extends Controller {
       (row.querySelector(".body") || row).appendChild(container);
     }
     let chip = container.querySelector(
-      `.reaction-chip[data-emoji="${CSS.escape(emoji)}"]`
+      `.reaction-chip[data-emoji="${CSS.escape(emoji)}"]`,
     );
     const me = this.myReactionNick();
     if (!chip && added) {
@@ -704,7 +758,7 @@ export default class ChatController extends Controller {
     const aliases = new Set(
       [nick, me, this.element.dataset.authHandle, this.element.dataset.authNick]
         .filter(Boolean)
-        .map((s) => s.toLowerCase())
+        .map((s) => s.toLowerCase()),
     );
     let nicks = (chip.getAttribute("title") || "")
       .split(", ")
@@ -854,8 +908,7 @@ export default class ChatController extends Controller {
           pos <= wordStart + insertedLen &&
           value.substring(wordStart, wordStart + insertedLen) === inserted;
         if (stillThere) {
-          this._tabCycle.index =
-            (this._tabCycle.index + 1) % matches.length;
+          this._tabCycle.index = (this._tabCycle.index + 1) % matches.length;
           this.applyTabMatch(input, wordStart, after, this._tabCycle);
           return;
         }
@@ -910,14 +963,12 @@ export default class ChatController extends Controller {
     // from a prior insert, strip the remainder of that insert first.
     let rest = after;
     if (cycle.insertedLen > 0) {
-      const already =
-        (input.selectionStart ?? wordStart) - wordStart;
+      const already = (input.selectionStart ?? wordStart) - wordStart;
       const leftover = cycle.insertedLen - already;
       if (leftover > 0) rest = rest.slice(leftover);
     }
 
-    input.value =
-      input.value.substring(0, wordStart) + replacement + rest;
+    input.value = input.value.substring(0, wordStart) + replacement + rest;
     cycle.insertedLen = replacement.length;
     cycle.inserted = replacement;
     const newCursor = wordStart + replacement.length;
@@ -981,7 +1032,7 @@ export default class ChatController extends Controller {
     }
     console.warn(
       "[dm] E2EE pre-key not published — IRC SASL may have failed or upstream is down. " +
-        "Check that freeq-server is reachable (FREEQ_UPSTREAM), then sign out and sign in again."
+        "Check that freeq-server is reachable (FREEQ_UPSTREAM), then sign out and sign in again.",
     );
   }
 
@@ -1015,73 +1066,85 @@ export default class ChatController extends Controller {
     // the server only relays ciphertext.
     const form = document.getElementById("send-form");
     if (form && form.dataset.isDm === "true") {
-      form.addEventListener("submit", async (e) => {
-        e.preventDefault();
-        e.stopPropagation();
+      form.addEventListener(
+        "submit",
+        async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
 
-        const input = document.getElementById("message-input");
-        if (!input) return;
-        const plaintext = input.value.trim();
-        if (!plaintext) return;
+          const input = document.getElementById("message-input");
+          if (!input) return;
+          const plaintext = input.value.trim();
+          if (!plaintext) return;
 
-        // Slash commands pass through to the reflex (e.g. /nick, /whois)
-        if (plaintext.startsWith("/")) {
-          input.dataset.skipDm = "true";
-          form.requestSubmit();
-          return;
-        }
-
-        const targetNick = form.dataset.channel;
-        const remoteDid = await dm.nickToDidAsync(targetNick);
-        if (!remoteDid) {
-          const banner = document.getElementById("reply-banner");
-          if (banner) {
-            banner.innerHTML =
-              '<span class="reply-banner-label" style="color:var(--nick-6)">Cannot encrypt — unknown recipient identity. Ask them to send a message first, or verify they are authenticated.</span>';
+          // Slash commands pass through to the reflex (e.g. /nick, /whois)
+          if (plaintext.startsWith("/")) {
+            input.dataset.skipDm = "true";
+            form.requestSubmit();
+            return;
           }
-          return;
-        }
 
-        const encResult = await dm.encryptDm(remoteDid, plaintext, dm.getServerOrigin());
-        if (!encResult.ok) {
-          const banner = document.getElementById("reply-banner");
-          if (banner) {
-            banner.innerHTML =
-              '<span class="reply-banner-label" style="color:var(--nick-6)">' +
-              escapeHtml(encResult.message || "Encryption failed") +
-              "</span>";
+          const targetNick = form.dataset.channel;
+          const remoteDid = await dm.nickToDidAsync(targetNick);
+          if (!remoteDid) {
+            const banner = document.getElementById("reply-banner");
+            if (banner) {
+              banner.innerHTML =
+                '<span class="reply-banner-label" style="color:var(--nick-6)">Cannot encrypt — unknown recipient identity. Ask them to send a message first, or verify they are authenticated.</span>';
+            }
+            return;
           }
-          return;
-        }
 
-        // Own echoes can't be Double-Ratchet-decrypted; stash plaintext.
-        dm.cacheEcho(encResult.ok, plaintext);
-
-        try {
-          const resp = await fetch("/api/dm/send", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-CSRF-Token": document.querySelector('meta[name="csrf-token"]')?.content || "",
-            },
-            body: JSON.stringify({ nick: targetNick, msg: encResult.ok }),
-          });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        } catch (err) {
-          const banner = document.getElementById("reply-banner");
-          if (banner) {
-            banner.innerHTML =
-              '<span class="reply-banner-label" style="color:var(--nick-6)">Send failed: ' + escapeHtml(err.message) + '</span>';
+          const encResult = await dm.encryptDm(
+            remoteDid,
+            plaintext,
+            dm.getServerOrigin(),
+          );
+          if (!encResult.ok) {
+            const banner = document.getElementById("reply-banner");
+            if (banner) {
+              banner.innerHTML =
+                '<span class="reply-banner-label" style="color:var(--nick-6)">' +
+                escapeHtml(encResult.message || "Encryption failed") +
+                "</span>";
+            }
+            return;
           }
-          return;
-        }
 
-        // Clear the input on success. The server will echo the PRIVMSG
-        // back via CableReady, and decryptDmRows() will restore plaintext.
-        input.value = "";
-        const banner = document.getElementById("reply-banner");
-        if (banner) banner.innerHTML = "";
-      }, true);
+          // Own echoes can't be Double-Ratchet-decrypted; stash plaintext.
+          dm.cacheEcho(encResult.ok, plaintext);
+
+          try {
+            const resp = await fetch("/api/dm/send", {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token":
+                  document.querySelector('meta[name="csrf-token"]')?.content ||
+                  "",
+              },
+              body: JSON.stringify({ nick: targetNick, msg: encResult.ok }),
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          } catch (err) {
+            const banner = document.getElementById("reply-banner");
+            if (banner) {
+              banner.innerHTML =
+                '<span class="reply-banner-label" style="color:var(--nick-6)">Send failed: ' +
+                escapeHtml(err.message) +
+                "</span>";
+            }
+            return;
+          }
+
+          // Clear the input on success. The server will echo the PRIVMSG
+          // back via CableReady, and decryptDmRows() will restore plaintext.
+          input.value = "";
+          const banner = document.getElementById("reply-banner");
+          if (banner) banner.innerHTML = "";
+        },
+        true,
+      );
     }
 
     // Decrypt any ENC3 rows already in the pane (CHATHISTORY / page load).
@@ -1183,28 +1246,39 @@ export default class ChatController extends Controller {
           ? fromDid
           : await dm.nickToDidAsync(fromNick || partnerNick);
       if (!remoteDid) {
-        this.applyDecryptedRow(row, "[encrypted DM — unknown sender identity]", {
-          placeholder: true,
-        });
+        this.applyDecryptedRow(
+          row,
+          "[encrypted DM — unknown sender identity]",
+          {
+            placeholder: true,
+          },
+        );
         continue;
       }
 
-      const plaintext = await dm.decryptDm(remoteDid, wire, dm.getServerOrigin());
+      const plaintext = await dm.decryptDm(
+        remoteDid,
+        wire,
+        dm.getServerOrigin(),
+      );
       if (plaintext) {
         this.applyDecryptedRow(row, plaintext);
       } else {
         // Soft placeholder; leave decryptable so a later pass can retry
         // after E2EE init / session re-establish.
-        this.applyDecryptedRow(
-          row,
-          "[could not decrypt]",
-          { placeholder: true, sticky: false },
-        );
+        this.applyDecryptedRow(row, "[could not decrypt]", {
+          placeholder: true,
+          sticky: false,
+        });
       }
     }
   }
 
-  applyDecryptedRow(row, plaintext, { placeholder = false, sticky = true } = {}) {
+  applyDecryptedRow(
+    row,
+    plaintext,
+    { placeholder = false, sticky = true } = {},
+  ) {
     if (!placeholder) {
       row.dataset.text = plaintext;
     }

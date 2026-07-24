@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
-import { useScrollStableExpand } from '../lib/scrollStableExpand';
+import { useState, useEffect } from 'react';
 
 interface BskyPost {
   text: string;
@@ -13,33 +12,8 @@ interface BskyPost {
 export function BlueskyEmbed({ handle, rkey }: { handle: string; rkey: string }) {
   const [post, setPost] = useState<BskyPost | null>(null);
   const [error, setError] = useState(false);
-  const [inView, setInView] = useState(false);
-  const sentinelRef = useRef<HTMLDivElement | null>(null);
-  const expanded = !!post && !error;
-  const rootRef = useScrollStableExpand(expanded);
 
   useEffect(() => {
-    const el = sentinelRef.current;
-    if (!el) return;
-    if (typeof IntersectionObserver === 'undefined') {
-      setInView(true);
-      return;
-    }
-    const io = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) {
-          setInView(true);
-          io.disconnect();
-        }
-      },
-      { root: null, rootMargin: '240px 0px', threshold: 0 }
-    );
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-
-  useEffect(() => {
-    if (!inView) return;
     let cancelled = false;
     (async () => {
       try {
@@ -78,76 +52,64 @@ export function BlueskyEmbed({ handle, rkey }: { handle: string; rkey: string })
       }
     })();
     return () => { cancelled = true; };
-  }, [handle, rkey, inView]);
+  }, [handle, rkey]);
 
-  const time = post?.createdAt
-    ? new Date(post.createdAt).toLocaleDateString(undefined, {
-        month: 'short', day: 'numeric', year: 'numeric',
-      })
-    : '';
+  if (error || !post) return null;
+
+  const time = post.createdAt ? new Date(post.createdAt).toLocaleDateString(undefined, {
+    month: 'short', day: 'numeric', year: 'numeric'
+  }) : '';
 
   return (
-    <div ref={rootRef} className="min-h-0">
-      <div ref={sentinelRef} className="h-px w-full opacity-0 pointer-events-none" aria-hidden />
-      {expanded && post && (
-        <a
-          href={`https://bsky.app/profile/${handle}/post/${rkey}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-2 block max-w-sm rounded-xl border border-border bg-bg-tertiary hover:border-accent/30 transition-colors overflow-hidden"
-        >
-          {/* Author */}
-          <div className="flex items-center gap-2 px-3 pt-3 pb-1">
-            {post.author.avatar ? (
-              <img src={post.author.avatar} alt="" className="w-5 h-5 rounded-full" />
-            ) : (
-              <div className="w-5 h-5 rounded-full bg-surface flex items-center justify-center text-[10px] text-fg-dim">
-                {(post.author.handle[0] || '?').toUpperCase()}
-              </div>
-            )}
-            <span className="text-xs font-semibold text-fg">{post.author.displayName || post.author.handle}</span>
-            <span className="text-[10px] text-fg-dim">@{post.author.handle}</span>
+    <a
+      href={`https://bsky.app/profile/${handle}/post/${rkey}`}
+      target="_blank"
+      rel="noopener"
+      className="mt-2 block max-w-sm rounded-xl border border-border bg-bg-tertiary hover:border-accent/30 transition-colors overflow-hidden"
+    >
+      {/* Author */}
+      <div className="flex items-center gap-2 px-3 pt-3 pb-1">
+        {post.author.avatar ? (
+          <img src={post.author.avatar} alt="" className="w-5 h-5 rounded-full" />
+        ) : (
+          <div className="w-5 h-5 rounded-full bg-surface flex items-center justify-center text-[10px] text-fg-dim">
+            {(post.author.handle[0] || '?').toUpperCase()}
           </div>
+        )}
+        <span className="text-xs font-semibold text-fg">{post.author.displayName || post.author.handle}</span>
+        <span className="text-[10px] text-fg-dim">@{post.author.handle}</span>
+      </div>
 
-          {/* Text */}
-          <div className="px-3 py-1 text-sm text-fg leading-relaxed line-clamp-4">
-            {post.text}
-          </div>
+      {/* Text */}
+      <div className="px-3 py-1 text-sm text-fg leading-relaxed line-clamp-4">
+        {post.text}
+      </div>
 
-          {/* Images — fixed max height so decode doesn't reflow the card */}
-          {post.images && post.images.length > 0 && (
-            <div className="px-3 pb-2 flex gap-1 min-h-0">
-              {post.images.slice(0, 4).map((img, i) => (
-                <div key={i} className="rounded-lg h-40 flex-1 min-w-0 overflow-hidden bg-bg-secondary">
-                  <img
-                    src={img.thumb}
-                    alt={img.alt || ''}
-                    className="w-full h-full object-cover"
-                    loading="lazy"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Footer */}
-          <div className="px-3 py-2 border-t border-border/50 flex items-center gap-3 text-[10px] text-fg-dim">
-            <span className="flex items-center gap-1">
-              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor" opacity="0.5">
-                <path d="M8 14s-5-3.5-5-7.5S5.5 1 8 4c2.5-3 5-2 5 2.5S8 14 8 14z"/>
-              </svg>
-              {post.likeCount || 0}
-            </span>
-            <span className="flex items-center gap-1">
-              <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor" opacity="0.5">
-                <path d="M2 5h3V2l5 5-5 5V9H2V5zm12 6h-3v3L6 9l5-5v3h3v4z"/>
-              </svg>
-              {post.repostCount || 0}
-            </span>
-            <span className="ml-auto">🦋 {time}</span>
-          </div>
-        </a>
+      {/* Images */}
+      {post.images && post.images.length > 0 && (
+        <div className="px-3 pb-2 flex gap-1">
+          {post.images.slice(0, 4).map((img, i) => (
+            <img key={i} src={img.thumb} alt={img.alt || ''} className="rounded-lg max-h-40 object-cover flex-1 min-w-0" />
+          ))}
+        </div>
       )}
-    </div>
+
+      {/* Footer */}
+      <div className="px-3 py-2 border-t border-border/50 flex items-center gap-3 text-[10px] text-fg-dim">
+        <span className="flex items-center gap-1">
+          <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor" opacity="0.5">
+            <path d="M8 14s-5-3.5-5-7.5S5.5 1 8 4c2.5-3 5-2 5 2.5S8 14 8 14z"/>
+          </svg>
+          {post.likeCount || 0}
+        </span>
+        <span className="flex items-center gap-1">
+          <svg className="w-3 h-3" viewBox="0 0 16 16" fill="currentColor" opacity="0.5">
+            <path d="M2 5h3V2l5 5-5 5V9H2V5zm12 6h-3v3L6 9l5-5v3h3v4z"/>
+          </svg>
+          {post.repostCount || 0}
+        </span>
+        <span className="ml-auto">🦋 {time}</span>
+      </div>
+    </a>
   );
 }
