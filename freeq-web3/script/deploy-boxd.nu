@@ -76,6 +76,7 @@ def main [
 
     print $"==> ($host): git fetch + reset to origin/main"
     # Deploy tree is disposable: hard-reset so prior rsync dirt doesn't block pull.
+    # Pipe to `bash -s` so the whole script is one stdin stream (avoids -c quoting bugs).
     let pull_script = (
       [
         "set -euo pipefail"
@@ -86,7 +87,7 @@ def main [
         "git log -1 --oneline"
       ] | str join "\n"
     )
-    ^ssh $host bash -lc $pull_script
+    $pull_script | ^ssh $host bash -s
   }
 
   # ── 3. Build + restart on VM ───────────────────────────────────────
@@ -101,8 +102,9 @@ def main [
     'export PATH="/nix/var/nix/profiles/default/bin:/usr/local/bin:/usr/bin:$PATH"'
     "export MIX_HOME=/home/boxd/freeq-web3/.mix"
     "export HEX_HOME=/home/boxd/freeq-web3/.hex"
+    # POSIX `.` (not bash-only `source`); load prod env for mix without printing it
     "set -a"
-    "source /home/boxd/freeq-web3.env"
+    ". /home/boxd/freeq-web3.env"
     "set +a"
   ]
 
@@ -130,7 +132,7 @@ def main [
 
   let remote = ($lines | str join "\n")
   print $"==> ($host): build/restart freeq-web3"
-  ^ssh $host bash -lc $remote
+  $remote | ^ssh $host bash -s
 
   print "==> done. https://freeq.boxd.sh/chat"
 }
