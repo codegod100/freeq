@@ -8,6 +8,18 @@ defmodule FreeqWeb3.Irc.RenderTest do
     assert Render.canonical_channel("#freeq") == "#freeq"
   end
 
+  test "ping_token parses freeq-server prefixed PING" do
+    # freeq-server: Message::from_server → `:name PING name`
+    assert Render.ping_token(":irc.freeq.at PING irc.freeq.at") == "irc.freeq.at"
+    assert Render.ping_token(":irc.freeq.at PING :liveness-probe") == "liveness-probe"
+    assert Render.ping_token("PING :token") == "token"
+    assert Render.ping_token("PING token") == "token"
+    assert Render.ping_token("@time=2024-01-01T00:00:00.000Z :irc.freeq.at PING irc.freeq.at") ==
+             "irc.freeq.at"
+    assert Render.ping_token(":nick!u@h PRIVMSG #c :hi") == nil
+    assert Render.ping_token("PONG irc.freeq.at") == nil
+  end
+
   test "parse_irc_tags" do
     {tags, rest} =
       Render.parse_irc_tags("@msgid=abc;time=2024-01-01T00:00:00.000Z :nick!u@h PRIVMSG #c :hi")

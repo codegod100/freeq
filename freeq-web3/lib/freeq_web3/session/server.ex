@@ -23,6 +23,12 @@ defmodule FreeqWeb3.Session.Server do
   alias FreeqWeb3.Session
   alias FreeqWeb3.SessionStore
 
+  # freeq-server drops idle IRC sockets after ~60s without PONG; also any
+  # transient network blip. Reconnect with exponential backoff so the browser
+  # keeps receiving channel messages without a full page reload.
+  @reconnect_base_ms 1_000
+  @reconnect_max_ms 30_000
+
   defstruct [
     :session_id,
     :upstream_pid,
@@ -43,7 +49,10 @@ defmodule FreeqWeb3.Session.Server do
     suppress_history_batches: MapSet.new(),
     last_upstream_error: nil,
     # callers waiting on ensure_authenticated / API-BEARER
-    auth_waiters: []
+    auth_waiters: [],
+    # auto-reconnect after unexpected upstream death
+    reconnect_timer: nil,
+    reconnect_attempt: 0
   ]
 
   def start_link(opts) do
@@ -428,11 +437,14 @@ defmodule FreeqWeb3.Session.Server do
       | upstream_pid: nil,
         ws_state: :disconnected,
         join_sent: MapSet.new(),
-        last_upstream_error: inspect(reason)
+        last_upstream_error: inspect(reason),
+        # API-BEARER is session-scoped on freeq-server; dead socket invalidates it.
+        api_bearer: nil,
+        sasl_status: if(has_credentials?(state), do: :pending, else: state.sasl_status)
     }
 
     Session.broadcast(state.session_id, {:ws_state, :disconnected, state.current_nick})
-    {:noreply, state}
+    {:noreply, schedule_reconnect(state)}
   end
 
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{upstream_pid: pid} = state) do
@@ -443,17 +455,58 @@ defmodule FreeqWeb3.Session.Server do
       | upstream_pid: nil,
         ws_state: :disconnected,
         join_sent: MapSet.new(),
-        last_upstream_error: inspect(reason)
+        last_upstream_error: inspect(reason),
+        api_bearer: nil,
+        sasl_status: if(has_credentials?(state), do: :pending, else: state.sasl_status)
     }
 
     Session.broadcast(state.session_id, {:ws_state, :disconnected, state.current_nick})
-    {:noreply, state}
+    {:noreply, schedule_reconnect(state)}
   end
 
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
 
+  def handle_info(:reconnect_upstream, state) do
+    state = %{state | reconnect_timer: nil}
+
+    cond do
+      alive_upstream?(state) and state.ws_state in [:ready, :connecting, :registering] ->
+        {:noreply, state}
+
+      true ->
+        Logger.info(
+          "session #{short(state.session_id)} reconnecting upstream " <>
+            "(attempt=#{state.reconnect_attempt})"
+        )
+
+        state =
+          start_upstream(
+            %{state | upstream_pid: nil, join_sent: MapSet.new()},
+            primary_channel(state)
+          )
+
+        # If start failed immediately, schedule another try.
+        state =
+          if state.ws_state == :disconnected do
+            schedule_reconnect(state)
+          else
+            state
+          end
+
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:upstream_ready, nick}, state) do
-    state = %{state | ws_state: :ready, current_nick: nick || state.current_nick}
+    state = cancel_reconnect(state)
+
+    state = %{
+      state
+      | ws_state: :ready,
+        current_nick: nick || state.current_nick,
+        reconnect_attempt: 0
+    }
+
     Session.broadcast(state.session_id, {:ws_state, :ready, state.current_nick})
     # Drain any queued outbound lines.
     state = flush_outbound(state)
@@ -666,7 +719,34 @@ defmodule FreeqWeb3.Session.Server do
   defp alive_upstream?(%{upstream_pid: pid}) when is_pid(pid), do: Process.alive?(pid)
   defp alive_upstream?(_), do: false
 
+  defp cancel_reconnect(%{reconnect_timer: ref} = state) when is_reference(ref) do
+    Process.cancel_timer(ref)
+    %{state | reconnect_timer: nil}
+  end
+
+  defp cancel_reconnect(state), do: %{state | reconnect_timer: nil}
+
+  defp schedule_reconnect(state) do
+    state = cancel_reconnect(state)
+    attempt = max(state.reconnect_attempt || 0, 0)
+    delay = min(@reconnect_base_ms * Integer.pow(2, attempt), @reconnect_max_ms)
+    # Small jitter so multi-tab reconnects don't thundering-herd freeq-server.
+    delay = delay + :rand.uniform(400)
+    ref = Process.send_after(self(), :reconnect_upstream, delay)
+
+    Logger.info(
+      "session #{short(state.session_id)} schedule reconnect in #{delay}ms " <>
+        "(attempt=#{attempt + 1})"
+    )
+
+    %{state | reconnect_timer: ref, reconnect_attempt: attempt + 1}
+  end
+
   defp disconnect_upstream(state, reason) do
+    # Intentional teardown (logout / SASL re-handshake) — do not auto-reconnect
+    # underneath the caller's subsequent start_upstream.
+    state = cancel_reconnect(state)
+
     if alive_upstream?(state) do
       if state.ws_state == :ready do
         send(state.upstream_pid, {:send_line, "QUIT :#{reason}\r\n"})
@@ -683,7 +763,8 @@ defmodule FreeqWeb3.Session.Server do
         ws_state: :disconnected,
         join_sent: MapSet.new(),
         api_bearer: nil,
-        sasl_status: if(has_credentials?(state), do: :pending, else: :none)
+        sasl_status: if(has_credentials?(state), do: :pending, else: :none),
+        reconnect_attempt: 0
     }
   end
 

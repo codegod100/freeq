@@ -130,8 +130,10 @@
 
 html,
 body {
-    height: 100dvh;
-    max-height: 100dvh;
+    /* --app-height is set from visualViewport so the soft keyboard does not
+       cover the compose bar on iOS/Android (100dvh alone stays full-screen). */
+    height: var(--app-height, 100dvh);
+    max-height: var(--app-height, 100dvh);
     overflow: hidden;
     margin: 0;
     padding: 0;
@@ -179,8 +181,14 @@ body {
 #freeq-chat {
     display: flex;
     flex-direction: column;
-    height: 100dvh;
-    max-height: 100dvh;
+    /* Fixed to the visual viewport so when the keyboard opens the whole shell
+       shrinks and the send bar stays above it. */
+    position: fixed;
+    top: var(--app-offset-top, 0px);
+    left: 0;
+    right: 0;
+    height: var(--app-height, 100dvh);
+    max-height: var(--app-height, 100dvh);
     overflow: hidden;
     font-size: 14px;
     line-height: 1.25;
@@ -325,7 +333,12 @@ body {
     gap: 0.3rem;
     border-top: 1px solid var(--border);
     padding: 0.3rem 0.4rem;
+    padding-bottom: max(0.3rem, env(safe-area-inset-bottom, 0px));
     align-items: center;
+    background: var(--bg);
+    /* Stay above keyboard/overlays when flex layout glitches. */
+    position: relative;
+    z-index: 5;
 }
 #send-form {
     flex: 1 1 auto;
@@ -1408,5 +1421,11 @@ body {
     }
     #channel-topic {
         display: none !important;
+    }
+    /* ≥16px avoids iOS focus-zoom which fights visualViewport sizing. */
+    #send-form input[type="text"],
+    #join-form input,
+    #index-join-form input {
+        font-size: 16px;
     }
 }

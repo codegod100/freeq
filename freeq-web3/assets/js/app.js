@@ -29,6 +29,50 @@ import TabComplete from "./tab_complete";
 
 // Link previews are rendered server-side with locally cached images
 // (`/preview-cache/:id`). No client-side OG/image fetch on page load.
+
+/**
+ * Keep the chat shell sized to the *visual* viewport so mobile soft keyboards
+ * do not cover #send-bar. iOS leaves layout viewport at full height; only
+ * visualViewport shrinks. Mirrors freeq-app App.tsx keyboard handling.
+ */
+function syncVisualViewport() {
+  const vv = window.visualViewport;
+  if (!vv) {
+    document.documentElement.style.setProperty(
+      "--app-height",
+      `${window.innerHeight}px`,
+    );
+    document.documentElement.style.setProperty("--app-offset-top", "0px");
+    return;
+  }
+  // Height of the visible area; offsetTop shifts when the browser pans to the
+  // focused input under the keyboard.
+  document.documentElement.style.setProperty("--app-height", `${vv.height}px`);
+  document.documentElement.style.setProperty(
+    "--app-offset-top",
+    `${vv.offsetTop}px`,
+  );
+}
+
+function installVisualViewportSync() {
+  if (window.__freeqVvInstalled) return;
+  window.__freeqVvInstalled = true;
+  syncVisualViewport();
+  const vv = window.visualViewport;
+  if (!vv) {
+    window.addEventListener("resize", syncVisualViewport);
+    return;
+  }
+  vv.addEventListener("resize", syncVisualViewport);
+  vv.addEventListener("scroll", syncVisualViewport);
+  window.addEventListener("orientationchange", () => {
+    // iOS fires orientationchange before the new viewport settles.
+    setTimeout(syncVisualViewport, 50);
+    setTimeout(syncVisualViewport, 250);
+  });
+}
+installVisualViewportSync();
+
 const ChatScroll = {
   mounted() {
     this._channel = this.el.dataset.channel || "";
@@ -40,6 +84,11 @@ const ChatScroll = {
       this.scrollToMessage(msgid),
     );
     this.hydrateReplyBadges();
+    this.localizeTimes();
+    this.bindComposeKeyboard();
+  },
+  destroyed() {
+    this.unbindComposeKeyboard();
   },
   updated() {
     const channel = this.el.dataset.channel || "";
@@ -58,6 +107,56 @@ const ChatScroll = {
       if (nearBottom) this.scrollToBottom();
     }
     this.hydrateReplyBadges();
+    this.localizeTimes();
+  },
+  bindComposeKeyboard() {
+    const input = this.el.querySelector("#message-input");
+    if (!input) return;
+    this._onComposeFocus = () => {
+      // Re-measure after keyboard animation starts/finishes.
+      syncVisualViewport();
+      setTimeout(() => {
+        syncVisualViewport();
+        this.scrollToBottom();
+        // Keep the focused field in the visual viewport (iOS pan fallback).
+        input.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }, 50);
+      setTimeout(() => {
+        syncVisualViewport();
+        this.scrollToBottom();
+      }, 300);
+    };
+    this._onComposeBlur = () => {
+      setTimeout(syncVisualViewport, 50);
+      setTimeout(syncVisualViewport, 300);
+    };
+    input.addEventListener("focus", this._onComposeFocus);
+    input.addEventListener("blur", this._onComposeBlur);
+  },
+  unbindComposeKeyboard() {
+    const input = this.el.querySelector("#message-input");
+    if (!input) return;
+    if (this._onComposeFocus)
+      input.removeEventListener("focus", this._onComposeFocus);
+    if (this._onComposeBlur)
+      input.removeEventListener("blur", this._onComposeBlur);
+  },
+  /**
+   * Rewrite .ts[data-ts] into the browser's local timezone.
+   * Server still emits UTC as a no-JS fallback.
+   */
+  localizeTimes() {
+    const root = this.el.querySelector("#messages") || this.el;
+    root.querySelectorAll(".ts[data-ts]").forEach((el) => {
+      const sec = parseInt(el.dataset.ts, 10);
+      if (!Number.isFinite(sec)) return;
+      const d = new Date(sec * 1000);
+      el.textContent = d.toLocaleTimeString(undefined, {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      });
+    });
   },
   scrollToBottom() {
     const el = this.el.querySelector("#messages");

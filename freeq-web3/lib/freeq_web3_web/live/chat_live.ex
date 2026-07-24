@@ -650,7 +650,24 @@ defmodule FreeqWeb3Web.ChatLive do
       |> Map.put(:ws_state, ws_state)
       |> Map.put(:current_nick, nick)
 
-    {:noreply, assign(socket, :snap, snap)}
+    socket = assign(socket, :snap, snap)
+
+    socket =
+      cond do
+        ws_state == :disconnected ->
+          assign(socket, :needs_history_backfill, true)
+
+        ws_state == :ready and socket.assigns[:needs_history_backfill] ->
+          socket
+          |> assign(:needs_history_backfill, false)
+          # Messages that arrived while the upstream was dead never hit PubSub.
+          |> backfill_history_gap()
+
+        true ->
+          socket
+      end
+
+    {:noreply, socket}
   end
 
   def handle_info({:channels_changed, channels}, socket) do
@@ -817,6 +834,54 @@ defmodule FreeqWeb3Web.ChatLive do
 
   defp rows_by_msgid_from(_), do: %{}
 
+  # After upstream reconnect, pull recent REST history and append any rows we
+  # do not already have (by msgid). Dedupes against the live stream.
+  defp backfill_history_gap(socket) do
+    ch = socket.assigns.channel
+    bearer = socket.assigns.snap[:api_bearer]
+
+    case Rest.fetch_history(ch, 50, bearer: bearer) do
+      rows when is_list(rows) and rows != [] ->
+        {socket, inserted} =
+          Enum.reduce(rows, {socket, 0}, fn row, {sock, n} ->
+            mid = row[:msgid]
+            known = sock.assigns.rows_by_msgid || %{}
+
+            if is_binary(mid) and mid != "" and Map.has_key?(known, mid) do
+              {sock, n}
+            else
+              lookup = remember_parent(sock.assigns.parent_lookup || %{}, row)
+
+              row =
+                row
+                |> LinkPreview.attach_cache_only()
+                |> attach_parent_info(lookup)
+                |> ensure_reactions()
+
+              sock =
+                sock
+                |> assign(:parent_lookup, lookup)
+                |> track_row(row)
+                |> stream_insert(:messages, row, at: -1)
+                |> assign(:message_count, sock.assigns.message_count + 1)
+
+              {sock, n + 1}
+            end
+          end)
+
+        if inserted > 0 do
+          push_event(socket, "scroll_bottom", %{})
+        else
+          socket
+        end
+
+      _ ->
+        socket
+    end
+  rescue
+    _ -> socket
+  end
+
   defp track_row(socket, %{msgid: mid} = row) when is_binary(mid) and mid != "" do
     update(socket, :rows_by_msgid, fn map -> Map.put(map || %{}, mid, row) end)
   end
@@ -939,8 +1004,12 @@ defmodule FreeqWeb3Web.ChatLive do
     _ -> socket
   end
 
+  # UTC clock as SSR/no-JS fallback; browser rewrites via data-ts → local time.
   defp format_ts(%DateTime{} = t), do: Calendar.strftime(t, "%H:%M")
   defp format_ts(_), do: ""
+
+  defp ts_unix(%DateTime{} = t), do: DateTime.to_unix(t)
+  defp ts_unix(_), do: nil
 
   # CSS class for a message row. Prefer web2 names (msg/join/part/notice).
   defp msg_row_class(:msg), do: "msg"
@@ -1252,7 +1321,7 @@ defmodule FreeqWeb3Web.ChatLive do
               data-nick={msg[:nick]}
               data-text={msg[:text]}
             >
-              <span class="ts">{format_ts(msg.time)}</span>
+              <span class="ts" data-ts={ts_unix(msg.time)}>{format_ts(msg.time)}</span>
               <.message_body msg={msg} my_aliases={my_reaction_aliases(@snap)} />
               <.link_embed :if={msg[:embed]} embed={msg.embed} />
             </div>

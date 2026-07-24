@@ -123,6 +123,13 @@ defmodule FreeqWeb3.Irc.Upstream do
     {:noreply, %{state | auth: auth}}
   end
 
+  # Soft-stop after fatal frames (close / decode / send failure). Must be
+  # before the Mint catch-all so it is not treated as a TCP message.
+  def handle_info(:stop_upstream, state) do
+    if state.conn, do: Mint.HTTP.close(state.conn)
+    {:stop, :normal, %{state | conn: nil}}
+  end
+
   def handle_info(message, state) do
     case state.conn do
       nil ->
@@ -194,6 +201,8 @@ defmodule FreeqWeb3.Irc.Upstream do
       {:error, websocket, reason} ->
         Logger.warning("WS decode error: #{inspect(reason)}")
         send(state.session_pid, {:upstream_down, reason})
+        # Fatal: leave process so Session can reconnect with a clean socket.
+        send(self(), :stop_upstream)
         %{state | websocket: websocket}
     end
   end
@@ -216,24 +225,43 @@ defmodule FreeqWeb3.Irc.Upstream do
   defp handle_frame({:ping, data}, state) do
     case encode_and_stream(state, {:pong, data}) do
       {:ok, state} -> state
-      {:error, state, _} -> state
+      {:error, state, reason} ->
+        send(state.session_pid, {:upstream_down, reason})
+        send(self(), :stop_upstream)
+        state
     end
   end
 
   defp handle_frame({:close, _, _}, state) do
     send(state.session_pid, {:upstream_down, :closed})
+    send(self(), :stop_upstream)
     state
   end
 
   defp handle_frame(_frame, state), do: state
 
   defp handle_line(state, line) do
-    # PING keepalive
+    # freeq-server idles with `:name PING name` every ~30s and drops after 60s
+    # without a PONG. Must parse the server-prefixed form and keep Mint state.
     case ping_token(line) do
-      nil -> :ok
-      token -> _ = send_text(state, "PONG :#{token}\r\n")
-    end
+      nil ->
+        handle_line_non_ping(state, line)
 
+      token ->
+        case send_text(state, "PONG :#{token}\r\n") do
+          {:ok, state} ->
+            state
+
+          {:error, state, reason} ->
+            Logger.warning("PONG send failed: #{inspect(reason)}")
+            send(state.session_pid, {:upstream_down, reason})
+            send(self(), :stop_upstream)
+            state
+        end
+    end
+  end
+
+  defp handle_line_non_ping(state, line) do
     # API-BEARER notice (after successful SASL)
     state =
       case parse_api_bearer_notice(line) do
@@ -269,9 +297,18 @@ defmodule FreeqWeb3.Irc.Upstream do
         if has_credentials?(state) and Enum.any?(caps, &(String.downcase(&1) == "sasl")) do
           state = refresh_oauth_before_sasl(state)
           send(state.session_pid, {:upstream_sasl, :pending})
-          _ = send_text(state, "AUTHENTICATE ATPROTO-CHALLENGE\r\n")
-          Logger.info("SASL ATPROTO-CHALLENGE for #{auth_handle(state)}")
-          {%{state | reg_phase: :sasl_challenge}, true}
+
+          case send_text(state, "AUTHENTICATE ATPROTO-CHALLENGE\r\n") do
+            {:ok, state} ->
+              Logger.info("SASL ATPROTO-CHALLENGE for #{auth_handle(state)}")
+              {%{state | reg_phase: :sasl_challenge}, true}
+
+            {:error, state, reason} ->
+              Logger.warning("AUTHENTICATE send failed: #{inspect(reason)}")
+              send(state.session_pid, {:upstream_down, reason})
+              send(self(), :stop_upstream)
+              {state, true}
+          end
         else
           if has_credentials?(state) do
             send(state.session_pid, {:upstream_sasl, :failed})
@@ -308,9 +345,18 @@ defmodule FreeqWeb3.Irc.Upstream do
         try do
           challenge = Sasl.parse_challenge(challenge_b64)
           response = Sasl.build_response(challenge.nonce, state.auth)
-          _ = send_text(state, "AUTHENTICATE #{response}\r\n")
-          Logger.info("SASL challenge response sent for #{auth_handle(state)}")
-          {%{state | reg_phase: :sasl_result}, true}
+
+          case send_text(state, "AUTHENTICATE #{response}\r\n") do
+            {:ok, state} ->
+              Logger.info("SASL challenge response sent for #{auth_handle(state)}")
+              {%{state | reg_phase: :sasl_result}, true}
+
+            {:error, state, reason} ->
+              Logger.warning("SASL response send failed: #{inspect(reason)}")
+              send(state.session_pid, {:upstream_down, reason})
+              send(self(), :stop_upstream)
+              {state, true}
+          end
         rescue
           e ->
             Logger.warning("SASL challenge response failed: #{Exception.message(e)}")
@@ -367,8 +413,17 @@ defmodule FreeqWeb3.Irc.Upstream do
         try do
           challenge = Sasl.parse_challenge(challenge_b64)
           response = Sasl.build_response(challenge.nonce, state.auth)
-          _ = send_text(state, "AUTHENTICATE #{response}\r\n")
-          {state, true}
+
+          case send_text(state, "AUTHENTICATE #{response}\r\n") do
+            {:ok, state} ->
+              {state, true}
+
+            {:error, state, reason} ->
+              Logger.warning("SASL retry send failed: #{inspect(reason)}")
+              send(state.session_pid, {:upstream_down, reason})
+              send(self(), :stop_upstream)
+              {state, true}
+          end
         rescue
           e ->
             Logger.warning("SASL retry failed: #{Exception.message(e)}")
@@ -396,15 +451,31 @@ defmodule FreeqWeb3.Irc.Upstream do
         base = state.desired_nick
         new_nick = base <> String.duplicate("_", min(tries, 3))
         state = %{state | nick: new_nick, nick_collision_tries: tries}
-        _ = send_text(state, "NICK #{new_nick}\r\n")
-        send(state.session_pid, {:upstream_line, "NICK collision — trying #{new_nick}"})
-        state
+
+        case send_text(state, "NICK #{new_nick}\r\n") do
+          {:ok, state} ->
+            send(state.session_pid, {:upstream_line, "NICK collision — trying #{new_nick}"})
+            state
+
+          {:error, state, reason} ->
+            send(state.session_pid, {:upstream_down, reason})
+            send(self(), :stop_upstream)
+            state
+        end
       end
     else
       nick = guest_nick()
       state = %{state | nick: nick}
-      _ = send_text(state, "NICK #{nick}\r\n")
-      state
+
+      case send_text(state, "NICK #{nick}\r\n") do
+        {:ok, state} ->
+          state
+
+        {:error, state, reason} ->
+          send(state.session_pid, {:upstream_down, reason})
+          send(self(), :stop_upstream)
+          state
+      end
     end
   end
 
@@ -510,8 +581,15 @@ defmodule FreeqWeb3.Irc.Upstream do
       temp = temporary_nick?(state.nick)
 
       if force or not same or temp do
-        _ = send_text(state, "NICK #{desired}\r\n")
-        if temp or state.nick in [nil, ""], do: %{state | nick: desired}, else: state
+        case send_text(state, "NICK #{desired}\r\n") do
+          {:ok, state} ->
+            if temp or state.nick in [nil, ""], do: %{state | nick: desired}, else: state
+
+          {:error, state, reason} ->
+            send(state.session_pid, {:upstream_down, reason})
+            send(self(), :stop_upstream)
+            state
+        end
       else
         state
       end
@@ -559,25 +637,10 @@ defmodule FreeqWeb3.Irc.Upstream do
     end
   end
 
-  defp ping_token(line) do
-    {_tags, after_line} = Render.parse_irc_tags(line)
-
-    rest =
-      if String.starts_with?(after_line, ":"),
-        do: String.slice(after_line, 1..-1//1),
-        else: after_line
-
-    cond do
-      String.starts_with?(rest, "PING ") ->
-        rest |> String.slice(5..-1//1) |> String.trim_leading(":")
-
-      String.starts_with?(line, "PING ") ->
-        line |> String.slice(5..-1//1) |> String.trim_leading(":")
-
-      true ->
-        nil
-    end
-  end
+  # freeq-server emits `:irc.freeq.at PING irc.freeq.at` (server prefix).
+  # Older code only matched unprefixed `PING …`, so PONGs never went out and
+  # the server dropped the socket after the 60s ping timeout.
+  defp ping_token(line), do: Render.ping_token(line)
 
   defp parse_cap_ack(line) do
     payload = irc_command_payload(line)

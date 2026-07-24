@@ -87,6 +87,31 @@ defmodule FreeqWeb3.Irc.Render do
     end)
   end
 
+  @doc """
+  Extract the token from an IRC `PING` line.
+
+  freeq-server sends server-prefixed pings like
+  `:irc.freeq.at PING irc.freeq.at`. Also accepts unprefixed `PING :token`
+  and tag-prefixed variants. Returns `nil` when the line is not a PING.
+  """
+  def ping_token(line) when is_binary(line) do
+    payload =
+      line
+      |> String.trim_trailing("\r")
+      |> String.trim_trailing("\n")
+      |> String.replace(~r/\A@\S+\s+/, "")
+      |> String.replace(~r/\A:[^\s]+\s+/, "")
+
+    if String.starts_with?(payload, "PING ") do
+      payload
+      |> String.slice(5..-1//1)
+      |> String.trim_leading(":")
+      |> String.trim()
+    end
+  end
+
+  def ping_token(_), do: nil
+
   @doc "IRCv3 server-time tag → DateTime (UTC), else now."
   def time_from_tags(tags) when is_map(tags) do
     raw = tags["time"] || tags["+time"] || ""
