@@ -1,0 +1,551 @@
+defmodule FreeqWeb3.Session.Server do
+  @moduledoc """
+  Per-browser-session GenServer.
+
+  Holds:
+  - client-authoritative channel list (`channels`)
+  - live IRC routing set (`joined`)
+  - member maps, nick, WS state
+  - outbound line queue (flushed by Upstream once registered)
+  - link to the Upstream WS process
+
+  Live updates go out via `FreeqWeb3.Session.broadcast/2` and
+  `broadcast_channel/3` (Phoenix.PubSub) — the LiveView equivalent of
+  freeq-web2's CableReady morph/append ops.
+  """
+
+  use GenServer
+  require Logger
+
+  alias FreeqWeb3.Irc.Render
+  alias FreeqWeb3.Irc.Upstream
+  alias FreeqWeb3.Session
+
+  defstruct [
+    :session_id,
+    :upstream_pid,
+    :current_nick,
+    ws_state: :disconnected,
+    auth: :guest,
+    api_bearer: nil,
+    sasl_status: :none,
+    channels: MapSet.new(),
+    joined: MapSet.new(),
+    join_sent: MapSet.new(),
+    channel_members: %{},
+    nick_to_did: %{},
+    outbound: :queue.new(),
+    known_nicks: MapSet.new(),
+    suppress_history_batches: MapSet.new(),
+    last_upstream_error: nil
+  ]
+
+  def start_link(opts) do
+    session_id = Keyword.fetch!(opts, :session_id)
+
+    GenServer.start_link(__MODULE__, opts,
+      name: {:via, Registry, {FreeqWeb3.Session.Registry, session_id}}
+    )
+  end
+
+  @impl true
+  def init(opts) do
+    session_id = Keyword.fetch!(opts, :session_id)
+    state = %__MODULE__{session_id: session_id, current_nick: guest_nick()}
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_call(:snapshot, _from, state) do
+    snap = %{
+      session_id: state.session_id,
+      current_nick: state.current_nick,
+      ws_state: state.ws_state,
+      channels: MapSet.to_list(state.channels),
+      joined: MapSet.to_list(state.joined),
+      api_bearer: state.api_bearer,
+      sasl_status: state.sasl_status,
+      auth: state.auth,
+      authenticated?: authenticated?(state),
+      channel_members: state.channel_members,
+      last_upstream_error: state.last_upstream_error
+    }
+
+    {:reply, snap, state}
+  end
+
+  def handle_call({:members, channel}, _from, state) do
+    ch = Render.canonical_channel(channel)
+    members = Map.get(state.channel_members, ch, %{})
+    {:reply, members, state}
+  end
+
+  def handle_call({:add_channel, channel}, _from, state) do
+    ch = Render.canonical_channel(channel)
+
+    state = %{
+      state
+      | channels: MapSet.put(state.channels, ch),
+        joined: MapSet.put(state.joined, ch)
+    }
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:remove_channel, channel}, _from, state) do
+    ch = Render.canonical_channel(channel)
+
+    state = %{
+      state
+      | channels: MapSet.delete(state.channels, ch),
+        joined: MapSet.delete(state.joined, ch),
+        channel_members: Map.delete(state.channel_members, ch),
+        join_sent: MapSet.delete(state.join_sent, ch)
+    }
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:join, channel}, _from, state) do
+    ch = Render.canonical_channel(channel)
+
+    state = %{
+      state
+      | channels: MapSet.put(state.channels, ch),
+        joined: MapSet.put(state.joined, ch)
+    }
+
+    state = ensure_upstream(state, ch)
+    state = maybe_enqueue_join(state, ch)
+    Session.broadcast(state.session_id, {:channels_changed, MapSet.to_list(state.channels)})
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:part, channel}, _from, state) do
+    ch = Render.canonical_channel(channel)
+
+    state = %{
+      state
+      | channels: MapSet.delete(state.channels, ch),
+        joined: MapSet.delete(state.joined, ch),
+        channel_members: Map.delete(state.channel_members, ch),
+        join_sent: MapSet.delete(state.join_sent, ch)
+    }
+
+    state = enqueue(state, "PART #{ch}\r\n")
+    Session.broadcast(state.session_id, {:channels_changed, MapSet.to_list(state.channels)})
+    {:reply, :ok, state}
+  end
+
+  def handle_call({:send_message, target, text, opts}, _from, state) do
+    text = String.trim(to_string(text))
+
+    if text == "" do
+      {:reply, :ok, state}
+    else
+      is_dm = Keyword.get(opts, :dm, false)
+      reply_to = Keyword.get(opts, :reply_to, "") |> to_string() |> String.trim()
+      edit_to = Keyword.get(opts, :edit_to, "") |> to_string() |> String.trim()
+
+      target =
+        if is_dm do
+          target
+        else
+          Render.canonical_channel(target)
+        end
+
+      state =
+        if is_dm do
+          ensure_upstream(state, MapSet.to_list(state.channels) |> List.first() || "#freeq")
+        else
+          state
+          |> then(fn s -> %{s | joined: MapSet.put(s.joined, target)} end)
+          |> ensure_upstream(target)
+          |> maybe_enqueue_join(target)
+        end
+
+      line =
+        cond do
+          String.match?(text, ~r{^/nick\s+\S}) ->
+            "NICK #{String.trim(String.slice(text, 6..-1//1))}\r\n"
+
+          String.match?(text, ~r{^/whois\s+\S}) ->
+            "WHOIS #{String.trim(String.slice(text, 7..-1//1))}\r\n"
+
+          String.starts_with?(text, "/") ->
+            "#{String.slice(text, 1..-1//1)}\r\n"
+
+          edit_to != "" ->
+            "@+draft/edit=#{Render.escape_tag_value(edit_to)} PRIVMSG #{target} :#{text}\r\n"
+
+          reply_to != "" ->
+            "@+reply=#{Render.escape_tag_value(reply_to)} PRIVMSG #{target} :#{text}\r\n"
+
+          true ->
+            "PRIVMSG #{target} :#{text}\r\n"
+        end
+
+      {:reply, :ok, enqueue(state, line)}
+    end
+  end
+
+  def handle_call({:set_topic, channel, topic}, _from, state) do
+    ch = Render.canonical_channel(channel)
+    state = ensure_upstream(state, ch)
+    state = enqueue(state, "TOPIC #{ch} :#{topic}\r\n")
+    {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_cast({:enqueue, line}, state) do
+    {:noreply, enqueue(state, line)}
+  end
+
+  def handle_cast({:ensure_upstream, channel}, state) do
+    ch = Render.canonical_channel(channel)
+    state = %{state | joined: MapSet.put(state.joined, ch)}
+    state = ensure_upstream(state, ch)
+    state = maybe_enqueue_join(state, ch)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({:upstream_line, line}, state) do
+    {:noreply, handle_line(state, line)}
+  end
+
+  def handle_info({:upstream_state, ws_state}, state) do
+    state = %{state | ws_state: ws_state}
+    Session.broadcast(state.session_id, {:ws_state, ws_state, state.current_nick})
+    {:noreply, state}
+  end
+
+  def handle_info({:upstream_down, reason}, state) do
+    Logger.info("session #{short(state.session_id)} upstream down: #{inspect(reason)}")
+
+    state = %{
+      state
+      | upstream_pid: nil,
+        ws_state: :disconnected,
+        join_sent: MapSet.new(),
+        last_upstream_error: inspect(reason)
+    }
+
+    Session.broadcast(state.session_id, {:ws_state, :disconnected, state.current_nick})
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, pid, reason}, %{upstream_pid: pid} = state) do
+    Logger.info("session #{short(state.session_id)} upstream EXIT: #{inspect(reason)}")
+
+    state = %{
+      state
+      | upstream_pid: nil,
+        ws_state: :disconnected,
+        join_sent: MapSet.new(),
+        last_upstream_error: inspect(reason)
+    }
+
+    Session.broadcast(state.session_id, {:ws_state, :disconnected, state.current_nick})
+    {:noreply, state}
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+
+  def handle_info({:upstream_ready, nick}, state) do
+    state = %{state | ws_state: :ready, current_nick: nick || state.current_nick}
+    Session.broadcast(state.session_id, {:ws_state, :ready, state.current_nick})
+    # Drain any queued outbound lines.
+    state = flush_outbound(state)
+    {:noreply, state}
+  end
+
+  def handle_info({:FLUSH_OUTBOUND}, state) do
+    {:noreply, flush_outbound(state)}
+  end
+
+  def handle_info(msg, state) do
+    Logger.debug("session #{short(state.session_id)} ignored: #{inspect(msg)}")
+    {:noreply, state}
+  end
+
+  # ── Internals ──────────────────────────────────────────────────────────
+
+  defp authenticated?(state) do
+    state.auth != :guest and state.api_bearer not in [nil, ""] and state.sasl_status == :ok
+  end
+
+  defp ensure_upstream(%{upstream_pid: pid} = state, primary) when is_pid(pid) do
+    if Process.alive?(pid) do
+      state
+    else
+      start_upstream(%{state | upstream_pid: nil, join_sent: MapSet.new()}, primary)
+    end
+  end
+
+  defp ensure_upstream(state, primary) do
+    start_upstream(state, primary)
+  end
+
+  defp start_upstream(state, primary) do
+    primary = Render.canonical_channel(primary)
+    extras = MapSet.to_list(state.channels) -- [primary]
+
+    case Upstream.start_link(
+           session_pid: self(),
+           session_id: state.session_id,
+           primary: primary,
+           nick: state.current_nick || guest_nick(),
+           extras: extras
+         ) do
+      {:ok, pid} ->
+        Process.monitor(pid)
+
+        state = %{
+          state
+          | upstream_pid: pid,
+            ws_state: :connecting,
+            join_sent: MapSet.put(MapSet.new([primary | extras]), primary),
+            joined: Enum.reduce([primary | extras], state.joined, &MapSet.put(&2, &1))
+        }
+
+        Session.broadcast(state.session_id, {:ws_state, :connecting, state.current_nick})
+        state
+
+      {:error, reason} ->
+        Logger.warning("upstream start failed: #{inspect(reason)}")
+        %{state | last_upstream_error: inspect(reason), ws_state: :disconnected}
+    end
+  end
+
+  defp maybe_enqueue_join(state, channel) do
+    ch = Render.canonical_channel(channel)
+
+    cond do
+      MapSet.member?(state.join_sent, ch) ->
+        state
+
+      state.ws_state == :ready ->
+        state
+        |> Map.update!(:join_sent, &MapSet.put(&1, ch))
+        |> enqueue("JOIN #{ch}\r\n")
+
+      true ->
+        # Will be JOINed on registration (primary) or re-asserted later.
+        %{state | join_sent: MapSet.put(state.join_sent, ch)}
+    end
+  end
+
+  defp enqueue(state, line) do
+    state = %{state | outbound: :queue.in(line, state.outbound)}
+    flush_outbound(state)
+  end
+
+  defp flush_outbound(%{upstream_pid: pid, ws_state: :ready} = state) when is_pid(pid) do
+    drain_queue(state, pid)
+  end
+
+  defp flush_outbound(state), do: state
+
+  defp drain_queue(state, pid) do
+    case :queue.out(state.outbound) do
+      {{:value, line}, rest} ->
+        send(pid, {:send_line, line})
+        drain_queue(%{state | outbound: rest}, pid)
+
+      {:empty, _} ->
+        state
+    end
+  end
+
+  defp handle_line(state, line) do
+    line = String.trim_trailing(line, "\r")
+
+    # Forced nick rename notice.
+    state =
+      case Render.parse_forced_nick_rename(line) do
+        nil ->
+          state
+
+        nick ->
+          state = %{state | current_nick: nick, known_nicks: MapSet.put(state.known_nicks, nick)}
+          Session.broadcast(state.session_id, {:nick, nick})
+          state
+      end
+
+    # BATCH tracking (suppress JOIN chathistory when REST already filled pane).
+    state =
+      case Render.parse_batch_line(line) do
+        {id, true, type, _ch} ->
+          if type && String.downcase(to_string(type)) == "chathistory" do
+            %{state | suppress_history_batches: MapSet.put(state.suppress_history_batches, id)}
+          else
+            state
+          end
+
+        {id, false, _, _} ->
+          %{state | suppress_history_batches: MapSet.delete(state.suppress_history_batches, id)}
+
+        nil ->
+          state
+      end
+
+    {tags, _} = Render.parse_irc_tags(line)
+    bid = tags["batch"] || ""
+
+    in_history_batch =
+      cond do
+        bid == "" -> MapSet.size(state.suppress_history_batches) > 0
+        MapSet.member?(state.suppress_history_batches, bid) -> true
+        String.starts_with?(bid, "hist") -> true
+        true -> false
+      end
+
+    # Reactions.
+    state =
+      case Render.parse_tagmsg_reaction(line) do
+        {msgid, emoji, nick, added, ch} ->
+          Session.broadcast_channel(state.session_id, ch, {:reaction, msgid, emoji, nick, added})
+          state
+
+        nil ->
+          state
+      end
+
+    # NAMES roster.
+    state =
+      if Render.is_353?(line) do
+        ch = Render.channel_from_353(line)
+
+        if ch do
+          ch = Render.canonical_channel(ch)
+          members = Render.parse_353_members(line)
+          map = Map.new(members, fn m -> {m.nick, m} end)
+          # Merge into existing (353 can be multi-line).
+          existing = Map.get(state.channel_members, ch, %{})
+          merged = Map.merge(existing, map)
+          state = %{state | channel_members: Map.put(state.channel_members, ch, merged)}
+          Session.broadcast_channel(state.session_id, ch, {:members, merged})
+          state
+        else
+          state
+        end
+      else
+        state
+      end
+
+    # Member join/part/quit/mode.
+    state =
+      case Render.parse_member_change(line) do
+        nil ->
+          state
+
+        change ->
+          apply_member_change(state, change)
+      end
+
+    # Topic.
+    for ch <- state.joined do
+      if topic = Render.parse_topic_change(line, ch) do
+        Session.broadcast_channel(state.session_id, ch, {:topic, topic})
+      end
+
+      if err = Render.parse_channel_error(line, ch) do
+        row = %{
+          id: Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false),
+          kind: :notice,
+          nick: nil,
+          text: err,
+          time: DateTime.utc_now(),
+          msgid: nil,
+          tags: %{},
+          own: false
+        }
+
+        Session.broadcast_channel(state.session_id, ch, {:message, row})
+      end
+    end
+
+    # Message pane rows.
+    unless in_history_batch do
+      for ch <- state.joined do
+        if Render.should_emit?(line, ch) do
+          row = Render.parse_message_line(line, own_nick: state.current_nick)
+
+          if row do
+            Session.broadcast_channel(state.session_id, ch, {:message, row})
+          end
+        end
+      end
+    end
+
+    state
+  end
+
+  defp apply_member_change(state, %{kind: :join, channel: ch, nick: nick} = change) do
+    ch = Render.canonical_channel(ch)
+    entry = %{nick: nick, op: false, halfop: false, voiced: false, account: change[:account]}
+    map = Map.get(state.channel_members, ch, %{}) |> Map.put(nick, entry)
+    state = %{state | channel_members: Map.put(state.channel_members, ch, map)}
+    Session.broadcast_channel(state.session_id, ch, {:members, map})
+    state
+  end
+
+  defp apply_member_change(state, %{kind: :part, channel: ch, nick: nick}) do
+    ch = Render.canonical_channel(ch)
+    map = Map.get(state.channel_members, ch, %{}) |> Map.delete(nick)
+    state = %{state | channel_members: Map.put(state.channel_members, ch, map)}
+    Session.broadcast_channel(state.session_id, ch, {:members, map})
+    state
+  end
+
+  defp apply_member_change(state, %{kind: :quit, nick: nick}) do
+    members =
+      Map.new(state.channel_members, fn {ch, map} ->
+        map = Map.delete(map, nick)
+        Session.broadcast_channel(state.session_id, ch, {:members, map})
+        {ch, map}
+      end)
+
+    %{state | channel_members: members}
+  end
+
+  defp apply_member_change(state, %{kind: :mode, channel: ch, ops: ops}) do
+    ch = Render.canonical_channel(ch)
+    map = Map.get(state.channel_members, ch, %{})
+
+    map =
+      Enum.reduce(ops, map, fn {mode, adding, target}, map ->
+        entry =
+          Map.get(map, target, %{
+            nick: target,
+            op: false,
+            halfop: false,
+            voiced: false,
+            account: nil
+          })
+
+        entry =
+          case mode do
+            "o" -> %{entry | op: adding}
+            "h" -> %{entry | halfop: adding}
+            "v" -> %{entry | voiced: adding}
+            _ -> entry
+          end
+
+        Map.put(map, target, entry)
+      end)
+
+    state = %{state | channel_members: Map.put(state.channel_members, ch, map)}
+    Session.broadcast_channel(state.session_id, ch, {:members, map})
+    state
+  end
+
+  defp apply_member_change(state, _), do: state
+
+  defp guest_nick do
+    "web" <> Integer.to_string(:rand.uniform(90_000) + 10_000)
+  end
+
+  defp short(sid), do: String.slice(sid, 0, 8)
+end
