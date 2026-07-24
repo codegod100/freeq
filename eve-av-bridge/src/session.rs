@@ -450,7 +450,7 @@ async fn run_manager(
                 if let Some(h) = l.radio.take() {
                     h.stop();
                 }
-                if let Some(h) = l.watch.take() {
+                if let Some(mut h) = l.watch.take() {
                     h.stop();
                 }
                 l.watch_url = None;
@@ -593,10 +593,21 @@ async fn run_manager(
                     h.stop();
                 }
                 l.radio_url = None;
-                if let Some(h) = l.watch.take() {
+                if let Some(mut h) = l.watch.take() {
                     h.stop();
                 }
                 l.speaker.clear();
+                // Let previous demux tasks die so we don't stack zombie ffmpegs.
+                drop(g);
+                tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+                let mut g = live.lock().await;
+                let Some(l) = g.as_mut() else {
+                    let msg = "no active AV session — connect first".to_string();
+                    if let Some(r) = reply {
+                        let _ = r.send(Err(msg));
+                    }
+                    continue;
+                };
                 let Some(tile) = l.watch_tile.clone() else {
                     let msg = "no watch tile (audio_only or wrong plane role)".to_string();
                     if let Some(r) = reply {
@@ -629,7 +640,7 @@ async fn run_manager(
             SessionCmd::StopWatch { reply } => {
                 let mut g = live.lock().await;
                 if let Some(l) = g.as_mut() {
-                    if let Some(h) = l.watch.take() {
+                    if let Some(mut h) = l.watch.take() {
                         h.stop();
                     }
                     l.watch_url = None;
@@ -789,7 +800,7 @@ async fn stop_live(
         if let Some(h) = prev.radio {
             h.stop();
         }
-        if let Some(h) = prev.watch {
+        if let Some(mut h) = prev.watch {
             h.stop();
         }
         if let Some(v) = prev.viz {

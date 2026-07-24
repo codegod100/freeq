@@ -23,9 +23,7 @@ let ogQueue = Promise.resolve();
 
 function isImageUrl(url) {
   return (
-    IMAGE_URL_RE.test(url) ||
-    FREEQ_MEDIA_RE.test(url) ||
-    BSKY_CDN_RE.test(url)
+    IMAGE_URL_RE.test(url) || FREEQ_MEDIA_RE.test(url) || BSKY_CDN_RE.test(url)
   );
 }
 
@@ -135,10 +133,10 @@ async function doFetchOG(url) {
   try {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 10_000);
-    const resp = await fetch(
-      `/api/v1/og?url=${encodeURIComponent(url)}`,
-      { signal: ctrl.signal, credentials: "same-origin" }
-    );
+    const resp = await fetch(`/api/v1/og?url=${encodeURIComponent(url)}`, {
+      signal: ctrl.signal,
+      credentials: "same-origin",
+    });
     clearTimeout(timer);
     if (!resp.ok) {
       console.warn("link embed OG", url, "HTTP", resp.status);
@@ -165,7 +163,10 @@ async function doFetchOG(url) {
   }
 }
 
-function makeCard(href, { image, siteName, title, description, domain, extraClass }) {
+function makeCard(
+  href,
+  { image, siteName, title, description, domain, extraClass },
+) {
   const a = document.createElement("a");
   a.href = href;
   a.target = "_blank";
@@ -224,7 +225,7 @@ async function blueskyCard(handle, rkey) {
     const timer = setTimeout(() => ctrl.abort(), 6000);
     const resp = await fetch(
       `https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread?uri=${encodeURIComponent(uri)}&depth=0`,
-      { signal: ctrl.signal }
+      { signal: ctrl.signal },
     );
     clearTimeout(timer);
     if (!resp.ok) return null;
@@ -266,7 +267,7 @@ async function blueskyCard(handle, rkey) {
           .slice(0, 4)
           .map(
             (src) =>
-              `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+              `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer">`,
           )
           .join("") +
         `</div>`;
@@ -275,7 +276,7 @@ async function blueskyCard(handle, rkey) {
     const avatar = author.avatar
       ? `<img class="bsky-avatar" src="${esc(author.avatar)}" alt="" loading="lazy">`
       : `<span class="bsky-avatar bsky-avatar-fallback">${esc(
-          (handleLabel[0] || "?").toUpperCase()
+          (handleLabel[0] || "?").toUpperCase(),
         )}</span>`;
 
     a.innerHTML =
@@ -290,12 +291,6 @@ async function blueskyCard(handle, rkey) {
   } catch {
     return null;
   }
-}
-
-function clearEmbeds(row) {
-  // Cards sit as siblings of .body (grid col 2) or legacy inside .body.
-  row.querySelectorAll(".link-embed").forEach((el) => el.remove());
-  delete row.dataset.embedsUrl;
 }
 
 function insertCard(row, card) {
@@ -314,9 +309,27 @@ function insertCard(row, card) {
   else host.appendChild(card);
 }
 
+/** Swap in a new card without an empty frame (avoids clear→await→insert flash). */
+function replaceCard(row, card) {
+  const old = Array.from(row.querySelectorAll(".link-embed"));
+  // Same URL already rendered — keep the live node (images may be decoded).
+  if (
+    old.length === 1 &&
+    old[0].dataset.embedUrl &&
+    card.dataset.embedUrl &&
+    old[0].dataset.embedUrl === card.dataset.embedUrl
+  ) {
+    return;
+  }
+  insertCard(row, card);
+  old.forEach((el) => el.remove());
+}
+
 /**
  * Scan message rows under root and inject link embeds (YouTube, Bluesky, OG).
- * Safe to call repeatedly — skips rows that already have the same URL embedded.
+ * Safe to call repeatedly — skips rows already claimed for the same URL
+ * (in-flight or finished) so concurrent CableReady/MutationObserver passes
+ * cannot clear→refetch and flash an already-visible card.
  */
 export async function hydrateLinkEmbeds(root) {
   if (!root) return;
@@ -325,10 +338,7 @@ export async function hydrateLinkEmbeds(root) {
 
   rows.forEach((row) => {
     // Skip ciphertext still waiting for DM decrypt.
-    if (
-      row.dataset.encrypted === "true" &&
-      row.dataset.decrypted !== "true"
-    ) {
+    if (row.dataset.encrypted === "true" && row.dataset.decrypted !== "true") {
       return;
     }
     const text = row.dataset.text || "";
@@ -351,11 +361,11 @@ export async function hydrateLinkEmbeds(root) {
       key = `og:${url}`;
     }
 
-    if (row.dataset.embedsUrl === key && row.querySelector(".link-embed")) {
-      return;
-    }
+    // Claimed for this key (pending fetch or already painted) — leave alone.
+    // Do NOT clear existing cards before the async work finishes; that was
+    // the visible flash when MutationObserver / CableReady re-entered.
+    if (row.dataset.embedsUrl === key) return;
 
-    clearEmbeds(row);
     row.dataset.embedsUrl = key;
 
     jobs.push(
@@ -395,9 +405,8 @@ export async function hydrateLinkEmbeds(root) {
         // Row may have been re-rendered / edited while we awaited.
         if (row.dataset.embedsUrl !== key) return;
         if (!row.isConnected) return;
-        row.querySelectorAll(".link-embed").forEach((el) => el.remove());
-        insertCard(row, card);
-      })()
+        replaceCard(row, card);
+      })(),
     );
   });
 

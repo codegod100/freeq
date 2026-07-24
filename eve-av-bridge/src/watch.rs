@@ -124,19 +124,26 @@ impl VideoSource for WatchVideoSource {
 
 pub struct WatchHandle {
     stop: Arc<AtomicBool>,
-    _task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
     run_dir: PathBuf,
 }
 
 impl WatchHandle {
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
     }
 }
 
 impl Drop for WatchHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.task.take() {
+            t.abort();
+        }
+        // Best-effort cleanup; demux tasks may still exit async.
         let _ = fs::remove_dir_all(&self.run_dir);
     }
 }
@@ -296,7 +303,7 @@ pub fn start_watch(
 
     Ok(WatchHandle {
         stop,
-        _task: task,
+        task: Some(task),
         run_dir,
     })
 }
@@ -330,10 +337,12 @@ fn run_audio_blocking(
 ) -> Result<()> {
     let ar = SPEAK_RATE.to_string();
     let mut args = hls_input_args(url);
+    // stream.place exposes Opus (0:a:0) + AAC (0:a:1). Opus demux often
+    // yields zero packets; AAC is DEFAULT=YES and produces real PCM.
     args.extend(
         [
             "-map",
-            "0:a:0?",
+            "0:a:1",
             "-vn",
             "-ac",
             "1",
@@ -356,6 +365,18 @@ fn run_audio_blocking(
         .with_context(|| format!("spawn {ffmpeg} watch audio"))?;
 
     let mut stdout = child.stdout.take().context("ffmpeg stdout")?;
+    // Non-blocking so we can honor `stop` every ~100ms instead of hanging forever
+    // on a stalled HLS demux (which looks like "watch never started").
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = stdout.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags >= 0 {
+            unsafe {
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+        }
+    }
     let mut buf = vec![0u8; CHUNK_BYTES];
     let mut carry: Vec<u8> = Vec::new();
     let mut stage: Vec<f32> = Vec::new();
@@ -376,6 +397,10 @@ fn run_audio_blocking(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             Err(e) => {
                 warn!(error = %e, "watch audio read");
                 break;
@@ -442,7 +467,14 @@ fn run_audio_blocking(
     }
 
     let _ = child.kill();
-    let _ = child.wait();
+    match child.wait() {
+        Ok(status) => {
+            if !status.success() {
+                info!(?status, "watch audio ffmpeg exited");
+            }
+        }
+        Err(e) => warn!(error = %e, "watch audio ffmpeg wait"),
+    }
     if let Some(mut err) = child.stderr.take() {
         let mut s = String::new();
         let _ = err.read_to_string(&mut s);
@@ -559,17 +591,20 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
         while filled < FRAME_BYTES {
             if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
                 let _ = child.kill().await;
+                let _ = child.wait().await;
                 return Ok(());
             }
             match v_reader.read(&mut buf[filled..]).await {
                 Ok(0) => {
                     let _ = child.kill().await;
+                    let _ = child.wait().await;
                     return Ok(());
                 }
                 Ok(n) => filled += n,
                 Err(e) => {
                     warn!(error = %e, "watch video read");
                     let _ = child.kill().await;
+                    let _ = child.wait().await;
                     return Ok(());
                 }
             }
@@ -584,5 +619,6 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
     }
 
     let _ = child.kill().await;
+    let _ = child.wait().await;
     Ok(())
 }

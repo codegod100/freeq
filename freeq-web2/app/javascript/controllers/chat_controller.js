@@ -628,13 +628,37 @@ export default class ChatController extends Controller {
     const root = document.getElementById("messages") || this.element;
     if (!root) return;
     // Fire-and-forget — OG/Bluesky fetches are async; don't block scroll.
-    hydrateLinkEmbeds(root).catch((e) =>
-      console.warn("hydrateLinkEmbeds", e)
-    );
+    hydrateLinkEmbeds(root).catch((e) => console.warn("hydrateLinkEmbeds", e));
     // Catch rows appended outside our CableReady path (or after a late
-    // morph). Cheap: hydrateLinkEmbeds no-ops rows that already have cards.
+    // morph). Ignore mutations that only add/remove our own .link-embed
+    // nodes — re-entering hydrate on those was a clear→refetch flash.
     if (!this._embedObserver && typeof MutationObserver !== "undefined") {
-      this._embedObserver = new MutationObserver(() => {
+      const isEmbedOnly = (node) =>
+        node?.nodeType === 1 &&
+        (node.classList?.contains("link-embed") ||
+          node.closest?.(".link-embed"));
+
+      this._embedObserver = new MutationObserver((mutations) => {
+        let relevant = false;
+        for (const m of mutations) {
+          for (const n of m.addedNodes) {
+            if (isEmbedOnly(n)) continue;
+            if (n.nodeType === 1) {
+              relevant = true;
+              break;
+            }
+          }
+          if (relevant) break;
+          for (const n of m.removedNodes) {
+            if (isEmbedOnly(n)) continue;
+            if (n.nodeType === 1) {
+              relevant = true;
+              break;
+            }
+          }
+          if (relevant) break;
+        }
+        if (!relevant) return;
         clearTimeout(this._embedObsTimer);
         this._embedObsTimer = setTimeout(() => {
           hydrateLinkEmbeds(root).catch(() => {});
