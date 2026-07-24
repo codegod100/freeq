@@ -90,6 +90,38 @@ defmodule FreeqWeb3.Rest do
   end
 
   @doc """
+  GET /api/v1/channels/:name/topic → topic text or nil.
+
+  The public `/api/v1/channels` list omits +i/+k/policy channels, so their
+  topics never appear there. This per-channel endpoint still returns the
+  topic (used when opening a private channel the user has already joined).
+  """
+  def fetch_channel_topic(channel) do
+    ch = Render.canonical_channel(channel)
+    encoded = URI.encode(ch, &(&1 != ?# and URI.char_unreserved?(&1)))
+    url = FreeqWeb3.upstream_rest() <> "/api/v1/channels/#{encoded}/topic"
+
+    case Req.get(url, receive_timeout: 5_000, connect_options: [timeout: 3_000]) do
+      {:ok, %{status: 200, body: body}} when is_map(body) ->
+        case body["topic"] || body[:topic] do
+          t when is_binary(t) and t != "" -> t
+          _ -> nil
+        end
+
+      {:ok, %{status: 404}} ->
+        nil
+
+      {:ok, %{status: status}} ->
+        Logger.debug("fetch_channel_topic #{ch}: HTTP #{status}")
+        nil
+
+      {:error, reason} ->
+        Logger.warning("fetch_channel_topic failed: #{inspect(reason)}")
+        nil
+    end
+  end
+
+  @doc """
   GET /api/v1/channels/:name/sessions
 
   freeq-server indexes sessions by the IRC channel name **with** `#`

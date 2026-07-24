@@ -671,6 +671,16 @@ defmodule FreeqWeb3Web.ChatLive do
     end)
   end
 
+  # Public channel list hides +i/+k/policy channels, so private rooms like
+  # #freeq never get a topic from that list. Fall back to the per-channel
+  # topic endpoint (and IRC 332 still updates live via PubSub).
+  defp resolve_topic(all, ch) do
+    case topic_for(all, ch) do
+      t when is_binary(t) and t != "" -> t
+      _ -> Rest.fetch_channel_topic(ch) || ""
+    end
+  end
+
   defp member_list(members) do
     members
     |> Map.values()
@@ -736,7 +746,7 @@ defmodule FreeqWeb3Web.ChatLive do
 
     snap = Session.snapshot(sid)
     all = socket.assigns[:all_channels] || Rest.fetch_channels()
-    topic = topic_for(all, ch)
+    topic = resolve_topic(all, ch)
 
     # Fast path: history + cache-only embeds. Network preview resolution
     # must NOT block navigation.
