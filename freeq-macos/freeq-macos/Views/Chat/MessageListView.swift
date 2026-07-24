@@ -722,6 +722,12 @@ struct MessageRow: View {
                 // Agent coordination event → structured card (parity with web).
                 CoordinationCardView(info: coord, text: message.text)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let jumbo = Jumbomoji.size(message.text) {
+                // Jumbomoji: a message of just 1–3 emoji renders large.
+                Text(message.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.system(size: jumbo))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 let imageURLs = extractImageURLs(from: message.text)
                 let videoURLs = extractVideoURLs(from: message.text)

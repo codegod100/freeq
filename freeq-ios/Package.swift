@@ -26,6 +26,7 @@ let package = Package(
             sources: [
                 "ChatMessage.swift",
                 "CoordinationCard.swift",
+                "Jumbomoji.swift",
                 "ChannelCrypto.swift",
                 "ChannelE2eeState.swift",
                 "ChannelAccessNotice.swift",

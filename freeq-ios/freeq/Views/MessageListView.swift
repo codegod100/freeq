@@ -877,6 +877,10 @@ struct MessageListView: View {
         } else if let coord = msg.coordination {
             // Agent coordination event → structured card (parity with web + macOS).
             CoordinationCardView(info: coord, text: msg.text)
+        } else if let jumbo = Jumbomoji.size(msg.text) {
+            // Jumbomoji: a message of just 1–3 emoji renders large.
+            Text(msg.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                .font(.system(size: jumbo))
         } else if let (url, durationLabel) = extractVoiceMessage(msg.text) {
             // Voice messages — must check before image/video to avoid CDN URL misdetection
             InlineAudioPlayer(url: url, label: durationLabel)

@@ -97,6 +97,7 @@
 		CE133BCB1C065B2B2EEEB0B2 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 88F30B75033F6333978D7F0E /* PeopleView.swift */; };
 		D0209F9328C9586D5B2849DE /* ConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5623F20307924888306278FF /* ConnectView.swift */; };
 		D0358591360DD63CE1830E92 /* MarkdownText.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE51C9015AF7D1E917C5BFC0 /* MarkdownText.swift */; };
+		D2420E065B9554030542DE6E /* Jumbomoji.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1553940F560E15659B1C240D /* Jumbomoji.swift */; };
 		D5642F5E361D42D539291B69 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FEC306B6E024D2BBF561BE /* SharedStore.swift */; };
 		D5CD91A1A07CD8436C37FC84 /* WatchPayloads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */; };
 		D9574E81D14BBFA1BF8A463D /* freeq.swift in Sources */ = {isa = PBXBuildFile; fileRef = B439EEC100CBED133D3260B2 /* freeq.swift */; };
@@ -166,6 +167,7 @@
 		0CFEA027394A64C46A1780F5 /* WatchConnectivity.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WatchConnectivity.framework; path = System/Library/Frameworks/WatchConnectivity.framework; sourceTree = SDKROOT; };
 		0F2B162069D9FEB43A008621 /* JoinChannelSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoinChannelSheet.swift; sourceTree = "<group>"; };
 		13E68B84D80561E2B74C5B48 /* WatchPayloads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchPayloads.swift; sourceTree = "<group>"; };
+		1553940F560E15659B1C240D /* Jumbomoji.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Jumbomoji.swift; sourceTree = "<group>"; };
 		1613B43E3F87D0A8567A57BB /* CallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallView.swift; sourceTree = "<group>"; };
 		17EDADA552C222EC7D8D3F34 /* CallMicCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallMicCapture.swift; sourceTree = "<group>"; };
 		1D97CC3F5A8E1F52F2C940FF /* BufferListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BufferListView.swift; sourceTree = "<group>"; };
@@ -441,6 +443,7 @@
 				DA678EF1B2762175E6668C55 /* DidDisplay.swift */,
 				87BB1081CEB9C7213E2A317E /* FreeqDirectory.swift */,
 				25A01703D21F0BCF9963E1B8 /* IntelligenceService.swift */,
+				1553940F560E15659B1C240D /* Jumbomoji.swift */,
 				B28D17294C06F964661A5E97 /* KeychainHelper.swift */,
 				C24850A65B3ED49F5C323EEA /* MessageActions.swift */,
 				5DDE25216F85C26CCEE21C66 /* NetworkMonitor.swift */,
@@ -755,6 +758,7 @@
 				74F15A4EE7F80408B8A358C7 /* ImageLightbox.swift in Sources */,
 				4D812AA5D08CF45A2F27BF72 /* IntelligenceService.swift in Sources */,
 				022C97385E4C6E436BF8FA82 /* JoinChannelSheet.swift in Sources */,
+				D2420E065B9554030542DE6E /* Jumbomoji.swift in Sources */,
 				DEFDB6EC3FA34DAA0295C7CA /* KeychainHelper.swift in Sources */,
 				6FCCCE776FF655CBB045B733 /* LinkPreview.swift in Sources */,
 				208776B8A3D2C2D1877AE9BA /* MainTabView.swift in Sources */,
