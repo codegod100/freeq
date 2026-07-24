@@ -1557,7 +1557,7 @@ defmodule FreeqWeb3Web.ChatLive do
             >
               <span class="ts" data-ts={ts_unix(msg.time)}>{format_ts(msg.time)}</span>
               <.message_body msg={msg} my_aliases={my_reaction_aliases(@snap)} />
-              <.link_embed :if={msg[:embed]} embed={msg.embed} />
+              <.link_embed :if={is_map(msg[:embed])} embed={msg.embed} />
             </div>
           </div>
 

@@ -74,8 +74,10 @@ defmodule FreeqWeb3.LinkPreview do
 
       key ->
         case read_meta(key) do
-          nil -> row
-          embed -> Map.put(row, :embed, embed)
+          # Failed OG lookups are cached as :fail — never put that on the row
+          # (LiveView would treat the atom as truthy and crash on embed.href).
+          embed when is_map(embed) -> Map.put(row, :embed, embed)
+          _ -> row
         end
     end
   end

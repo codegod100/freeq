@@ -42,6 +42,24 @@ defmodule FreeqWeb3.LinkPreviewTest do
     assert LinkPreview.read_image("not-a-hash.jpg") == nil
   end
 
+  test "attach_cache_only ignores fail-marked OG cache entries", %{dir: dir} do
+    url = "https://example.com/no-og-#{System.unique_integer([:positive])}"
+    text = "see #{url}"
+    key =
+      :crypto.hash(:sha256, "og:" <> url)
+      |> Base.encode16(case: :lower)
+      |> String.slice(0, 40)
+
+    path = Path.join(dir, "#{key}.json")
+    File.mkdir_p!(dir)
+    File.write!(path, Jason.encode!(%{kind: "og", href: url, fail: true}))
+
+    row = %{kind: :msg, text: text, id: "fail1"}
+    out = LinkPreview.attach_cache_only(row)
+    refute Map.has_key?(out, :embed)
+    assert out[:embed] == nil
+  end
+
   test "youtube attach caches a local image path", %{dir: dir} do
     row = %{
       kind: :msg,
