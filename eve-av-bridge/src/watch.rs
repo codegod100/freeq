@@ -369,35 +369,8 @@ fn run_audio_blocking(
             break;
         }
 
-        // Wall-clock pacing AFTER prime: don't enqueue faster than realtime + slack.
-        if let Some(origin) = play_origin {
-            let sent_secs = samples_sent as f32 / SPEAK_RATE as f32;
-            let elapsed = origin.elapsed().as_secs_f32();
-            let ahead = sent_secs - elapsed;
-            if ahead > MAX_AHEAD_SECS {
-                let sleep_ms = ((ahead - MAX_AHEAD_SECS) * 1000.0).clamp(5.0, 80.0) as u64;
-                std::thread::sleep(Duration::from_millis(sleep_ms));
-                continue; // re-check stop before next read
-            }
-        }
-
-        // Safety: if MoQ is badly behind, wait rather than grow forever.
-        // Still poll stop so we never hang a shutdown.
-        let mut spins = 0u32;
-        while speaker.queued_secs() > MAX_QUEUE_SECS {
-            if stop.load(Ordering::Relaxed) || !session_alive.load(Ordering::Relaxed) {
-                break;
-            }
-            spins += 1;
-            if spins % 50 == 0 {
-                warn!(
-                    queue_secs = speaker.queued_secs(),
-                    "watch audio: MoQ queue high — waiting (encoder drain?)"
-                );
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-
+        // ALWAYS read — never pause the demux for pacing. Pausing freezes HLS
+        // on the live edge and was the multi-second cutout loop.
         let n = match stdout.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
@@ -436,6 +409,19 @@ fn run_audio_blocking(
                     );
                 }
                 continue;
+            }
+
+            // Pace *enqueue* to wall-clock (drop excess), not the demux read.
+            let origin = play_origin.expect("primed");
+            let sent_secs = samples_sent as f32 / SPEAK_RATE as f32;
+            let elapsed = origin.elapsed().as_secs_f32();
+            if sent_secs - elapsed > MAX_AHEAD_SECS {
+                // Drop this chunk — keep demux live, keep MoQ queue stable.
+                continue;
+            }
+
+            if speaker.queued_secs() > MAX_QUEUE_SECS {
+                speaker.trim_to_secs(MAX_QUEUE_SECS * 0.5);
             }
 
             speaker.enqueue(&pcm, SPEAK_RATE);

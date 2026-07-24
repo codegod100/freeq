@@ -265,6 +265,19 @@ impl Speaker {
     pub fn queued_secs(&self) -> f32 {
         self.queue.lock().expect("speak queue poisoned").len() as f32 / SPEAK_RATE as f32
     }
+
+    /// Drop oldest samples until the queue is at most `max_secs` long.
+    ///
+    /// Used by continuous live sources (stream-watch) so demux never
+    /// pauses when MoQ is briefly behind — pausing freezes HLS and
+    /// causes multi-second cutouts.
+    pub fn trim_to_secs(&self, max_secs: f32) {
+        let max_samples = (max_secs.max(0.0) * SPEAK_RATE as f32) as usize;
+        let mut q = self.queue.lock().expect("speak queue poisoned");
+        while q.len() > max_samples {
+            q.pop_front();
+        }
+    }
 }
 
 /// Windowed-sinc mono resampler. The shared resampler for both the
