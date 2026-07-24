@@ -407,6 +407,7 @@ body {
     font-size: 0.65rem;
     text-align: right;
     user-select: none;
+    white-space: nowrap;
     padding: 0;
     line-height: 1.25;
     font-variant-numeric: tabular-nums;

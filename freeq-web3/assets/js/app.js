@@ -151,11 +151,14 @@ const ChatScroll = {
       const sec = parseInt(el.dataset.ts, 10);
       if (!Number.isFinite(sec)) return;
       const d = new Date(sec * 1000);
-      el.textContent = d.toLocaleTimeString(undefined, {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      });
+      // NBSP so "4 PM" does not wrap between the time and meridiem.
+      el.textContent = d
+        .toLocaleTimeString(undefined, {
+          hour: "numeric",
+          minute: "2-digit",
+          hour12: true,
+        })
+        .replace(/\s+/g, "\u00A0");
     });
   },
   scrollToBottom() {

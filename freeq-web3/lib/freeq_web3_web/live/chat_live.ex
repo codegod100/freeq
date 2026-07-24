@@ -1069,7 +1069,11 @@ defmodule FreeqWeb3Web.ChatLive do
   end
 
   # UTC clock as SSR/no-JS fallback; browser rewrites via data-ts → local 12h time.
-  defp format_ts(%DateTime{} = t), do: Calendar.strftime(t, "%-I:%M %p")
+  # NBSP between time and AM/PM so "4 PM" never wraps to "4\nPM".
+  defp format_ts(%DateTime{} = t) do
+    Calendar.strftime(t, "%-I:%M") <> "\u00A0" <> Calendar.strftime(t, "%p")
+  end
+
   defp format_ts(_), do: ""
 
   defp ts_unix(%DateTime{} = t), do: DateTime.to_unix(t)
