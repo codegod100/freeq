@@ -16,6 +16,8 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @AppStorage("freeq.onboardingComplete") private var onboardingComplete = false
+    @State private var showOnboarding = false
 
     var body: some View {
         Group {
@@ -55,6 +57,21 @@ struct ContentView: View {
         .sheet(isPresented: $appState.showNewDMSheet) { NewDMSheet() }
         .sheet(isPresented: $appState.showSearchSheet) { SearchSheet() }
         .sheet(isPresented: $appState.showShortcutsHelp) { ShortcutsHelpSheet() }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingSheet { onboardingComplete = true }
+        }
+        .onAppear { maybeShowOnboarding() }
+        .onChange(of: appState.connectionState) { maybeShowOnboarding() }
+        .onChange(of: appState.hasSavedSession) { maybeShowOnboarding() }
+    }
+
+    /// First run: greet once, as soon as the main experience is reachable
+    /// (saved session on cold launch, or a fresh registration).
+    private func maybeShowOnboarding() {
+        guard !onboardingComplete, !showOnboarding,
+              appState.hasSavedSession || appState.connectionState == .registered
+        else { return }
+        showOnboarding = true
     }
 }
 

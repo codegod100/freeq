@@ -60,6 +60,7 @@
 		73B0EF11CF92FDC4CFCACA72 /* ChannelE2eeState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6283782A8FA9C9B10BEE7C3E /* ChannelE2eeState.swift */; };
 		74F15A4EE7F80408B8A358C7 /* ImageLightbox.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DE07EAC6B16A20177585C57 /* ImageLightbox.swift */; };
 		74F43C40A1FAB663ECDA4B0A /* YouTubeThumb.swift in Sources */ = {isa = PBXBuildFile; fileRef = 471DB6E8285B3DE882A52E79 /* YouTubeThumb.swift */; };
+		77C739E6BD7590514092F72C /* OnboardingSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCDE5D7A00E6A7790E2960E /* OnboardingSheet.swift */; };
 		7CE09F1FC8607BC12D448A0D /* ServerConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A968D5C7244372A54881C91E /* ServerConfig.swift */; };
 		7DD2F0049B92D709EA8B4910 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 77A2F5FB32DA2A3EA346FB5C /* AVFAudio.framework */; };
 		7EDFB2CF1E3DC0E8E4861C4E /* AppState+Navigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6D03D34D14D46D454A451066 /* AppState+Navigation.swift */; };
@@ -236,6 +237,7 @@
 		A725C856D7878BE6382208F3 /* CallLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallLiveActivity.swift; sourceTree = "<group>"; };
 		A8B3ACAA832092748A58D823 /* freeq.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = freeq.entitlements; sourceTree = "<group>"; };
 		A968D5C7244372A54881C91E /* ServerConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerConfig.swift; sourceTree = "<group>"; };
+		ABCDE5D7A00E6A7790E2960E /* OnboardingSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingSheet.swift; sourceTree = "<group>"; };
 		B28D17294C06F964661A5E97 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		B3200A9C4EB97C507BCBA97D /* AvSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AvSessionTests.swift; sourceTree = "<group>"; };
 		B43788F5890429BF64CC12CC /* freeqLiveActivity.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = freeqLiveActivity.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -393,6 +395,7 @@
 				CA5BB884CBB62EBEF230A05D /* MessageListView.swift */,
 				A5770C0CB2F73315874C61C7 /* MotdSheet.swift */,
 				22B90ADE5391CABDCBEF6FF3 /* NewDMSheet.swift */,
+				ABCDE5D7A00E6A7790E2960E /* OnboardingSheet.swift */,
 				88F30B75033F6333978D7F0E /* PeopleView.swift */,
 				81C517F4469AC28926160BA7 /* PhotoPicker.swift */,
 				9DF1180A85E6505A55D9F225 /* PinnedMessagesView.swift */,
@@ -764,6 +767,7 @@
 				6B98C423EE9A7D82D1973063 /* NetworkMonitor.swift in Sources */,
 				02AB33740D36A2AA483B8980 /* NewDMSheet.swift in Sources */,
 				80DC207188B4EA44C3787CA2 /* Notifications.swift in Sources */,
+				77C739E6BD7590514092F72C /* OnboardingSheet.swift in Sources */,
 				CE133BCB1C065B2B2EEEB0B2 /* PeopleView.swift in Sources */,
 				5B1B81D53A3DE4767C2A498B /* PhoneWatchBridge.swift in Sources */,
 				DD3E3EE1D2C986B904CB5D82 /* PhotoPicker.swift in Sources */,
