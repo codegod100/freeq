@@ -7,7 +7,9 @@
 //! - **One ffmpeg** demuxes A+V (named-pipe outputs) so HLS isn't opened twice.
 //! - **30 fps** matches `VideoPreset::P360` encoder cadence.
 //! - **Hold-last-frame** with advancing PTS so encoder never starves mid-segment.
-//! - Live demux flags cut default buffering stalls on HTTP(S)/HLS.
+//! - **Always drain both FIFOs** — never backpressure ffmpeg by pausing audio
+//!   reads (dual-output pipe deadlock = multi-second freezes / cutouts).
+//! - HLS starts a few segments behind live edge (stream.place ~1s segments).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -214,12 +216,11 @@ fn live_input_args(url: &str) -> Vec<String> {
         "-hide_banner",
         "-loglevel",
         "error",
-        // Prefer low-latency demux over perfect A/V recovery. probesize must
-        // still be large enough for stream.place fMP4 init + first segment.
+        // stream.place uses ~1s fMP4 HLS segments. `nobuffer` + live-edge
+        // demux falls behind on dual A/V FIFOs and then skips expired
+        // segments ("cutting out"). Keep a couple segments of slack.
         "-fflags",
-        "nobuffer+genpts+discardcorrupt",
-        "-flags",
-        "low_delay",
+        "+genpts+discardcorrupt",
         "-probesize",
         "5000000",
         "-analyzeduration",
@@ -231,7 +232,11 @@ fn live_input_args(url: &str) -> Vec<String> {
         "-reconnect_on_network_error",
         "1",
         "-reconnect_delay_max",
-        "2",
+        "5",
+        // Start a few segments behind the live edge so brief stalls do not
+        // immediately expire the window.
+        "-live_start_index",
+        "-3",
         "-i",
         url,
     ]
@@ -324,8 +329,10 @@ async fn run_demux(
     video_fifo: &Path,
     audio_fifo: &Path,
 ) -> Result<()> {
+    // fast_bilinear: 1080p→360p software scale is the hot path on small VMs.
+    // Hold-last-frame in WatchVideoSource covers short decode gaps.
     let vf = format!(
-        "scale={WATCH_W}:{WATCH_H}:force_original_aspect_ratio=decrease,\
+        "scale={WATCH_W}:{WATCH_H}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
 pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
     );
     let ar = SPEAK_RATE.to_string();
@@ -477,17 +484,17 @@ async fn pump_audio(
 ) -> Result<()> {
     let mut buf = vec![0u8; CHUNK_BYTES];
     let mut carry = Vec::new();
+    let mut dropped_chunks: u64 = 0;
+    let mut last_drop_log = Instant::now();
 
     loop {
         if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
             break;
         }
-        while speaker.queued_secs() > MAX_QUEUE_SECS {
-            if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(40)).await;
-        }
+        // CRITICAL: always drain the audio FIFO. Pausing reads when the
+        // speaker queue is full deadlocks multi-output ffmpeg (audio pipe
+        // fills → ffmpeg blocks → video FIFO stalls → freeq tile freezes).
+        // Drop excess PCM in userspace instead of backpressuring the demux.
         let n = match stdout.read(&mut buf).await {
             Ok(0) => break,
             Ok(n) => n,
@@ -501,6 +508,21 @@ async fn pump_audio(
             let take = (carry.len() - (carry.len() % 4)).min(CHUNK_BYTES);
             if take < 4 {
                 break;
+            }
+            if speaker.queued_secs() > MAX_QUEUE_SECS {
+                // Keep draining; drop this chunk so the demux never blocks.
+                dropped_chunks = dropped_chunks.saturating_add(1);
+                if last_drop_log.elapsed().as_secs() >= 5 {
+                    warn!(
+                        dropped_chunks,
+                        queue_secs = speaker.queued_secs(),
+                        "watch audio drop (queue full — avoid FIFO deadlock)"
+                    );
+                    dropped_chunks = 0;
+                    last_drop_log = Instant::now();
+                }
+                carry.drain(..take);
+                continue;
             }
             let mut pcm = Vec::with_capacity(take / 4);
             for w in carry[..take].chunks_exact(4) {
