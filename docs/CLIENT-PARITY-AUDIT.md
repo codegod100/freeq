@@ -52,8 +52,8 @@ considered call.
 | Video / camera | ✅ | ✅ | ✅ | |
 | Screen share | ✅ | ✅ | ⚠️ | iOS can view a share; broadcasting from iOS is limited |
 | Camera effects / background blur | ❌ | ✅ | ❌ | **macOS-only** (`CameraEffectsProcessor`) |
-| Call grid auto-layout (1→~30) | ⚠️ | ✅ | ⚠️ | macOS `CallLayoutPolicies` is the reference; **P1 TODO** to port to web/iOS |
-| Click-to-focus a tile | ❌ | ❌ | ❌ | **P1 TODO everywhere** |
+| Call grid auto-layout (1→~30) | ✅ | ✅ | ✅ | ✅ **web + iOS shipped 2026-07-24** — shared `CallGridLayout` math (10 web + 14 iOS tests match the macOS reference) |
+| Click-to-focus a tile | ❌ | ❌ | ❌ | **P1 TODO everywhere** — do with a live call (interaction/visual, not pure math) |
 | CallKit (native call UI) | — | — | ✅ | **iOS-only**, appropriate |
 
 ### Agent & session observability — *the pitch surface*
@@ -176,9 +176,12 @@ arrives on every client).
    ✅ onboarding — all DONE 2026-07-24. Remaining: expand slash-command set
    (iOS already has join/part/nick/me/msg/topic; macOS has ~20 more), and
    the test-coverage push (iOS core 55→90 tests this pass; keep going).
-3. **AV parity (P1) — NOT STARTED.** grid auto-layout to web/iOS;
-   click-to-focus everywhere; camera effects to web/iOS. *Do these against a
-   live multi-participant call — high-gamma AV, verify don't guess.*
+3. **AV parity (P1) — PARTLY DONE (2026-07-24).** ✅ grid auto-layout ported
+   to web + iOS (pure `CallGridLayout` math, unit-tested against the macOS
+   reference). Remaining: click-to-focus a tile (all 3) and camera
+   effects/blur (web/iOS) — both are interaction / video-pipeline work whose
+   correctness needs a **live multi-participant call** to verify; not done
+   blind.
 4. **Delight pass (P2) — PARTLY DONE (2026-07-24).** ✅ jumbomoji (all 3),
    ✅ block-copy to web, ✅ distinct notification sounds on web. Remaining:
    reaction morphs; smart-replies/catch-up → macOS (needs the on-device
@@ -196,8 +199,15 @@ arrives on every client).
   verified iOS onboarding + cards render in the simulator.
 
 ### Still open (needs deliberate / live work)
-- **AV parity (P1):** grid auto-layout → web/iOS; click-to-focus → all;
-  camera effects → web/iOS. **Do against a live multi-participant call.**
+- **AV parity (P1):** ✅ grid auto-layout done (web+iOS). Remaining:
+  click-to-focus → all; camera effects/blur → web/iOS. **Do against a live
+  multi-participant call** — layout math is unit-verified but focus/blur are
+  visual/pipeline changes to eyeball live.
+- **Production server deploy:** `freeq-irc` is on the `club` Miren cluster,
+  which 403s the current `cloud` identity — needs an identity authorized on
+  `club` to run `deploy/irc/deploy.sh -C club` (code already on origin/main).
+  Gates coordination-card *replay* only; live coordination events already
+  render as cards.
 - **Smart-replies / catch-up → macOS:** requires porting the iOS on-device
   IntelligenceService; sizable, do deliberately.
 - **iOS scroll-to-message** (bookmarks/search jump lands on the channel, not
