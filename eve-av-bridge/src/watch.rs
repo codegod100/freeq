@@ -206,8 +206,10 @@ fn hls_input_args(url: &str) -> Vec<String> {
         "-hide_banner",
         "-loglevel",
         "error",
+        // Do NOT use discardcorrupt — on stream.place fMP4 it drops every
+        // audio packet ("Nothing was written into output file").
         "-fflags",
-        "+genpts+discardcorrupt+igndts",
+        "+genpts",
         "-probesize",
         "5000000",
         "-analyzeduration",
@@ -336,13 +338,17 @@ fn run_audio_blocking(
     session_alive: &AtomicBool,
 ) -> Result<()> {
     let ar = SPEAK_RATE.to_string();
-    let mut args = hls_input_args(url);
-    // stream.place exposes Opus (0:a:0) + AAC (0:a:1). Opus demux often
-    // yields zero packets; AAC is DEFAULT=YES and produces real PCM.
+    // Prefer the AAC media playlist — much more reliable than master multi-audio.
+    let audio_url = resolve_audio_hls_url(url);
+    if audio_url != url {
+        info!(%audio_url, "watch audio using AAC media playlist");
+    }
+    let mut args = hls_input_args(&audio_url);
+    // Single-rendition playlist: one audio stream at 0:a:0.
     args.extend(
         [
             "-map",
-            "0:a:1",
+            "0:a:0",
             "-vn",
             "-ac",
             "1",
