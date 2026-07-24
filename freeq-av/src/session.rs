@@ -51,11 +51,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 
-use iroh_live::media::codec::{AudioCodec, VideoCodec};
-use iroh_live::media::format::{AudioPreset, VideoFrame, VideoPreset};
-use iroh_live::media::publish::LocalBroadcast;
+use iroh_live::media::codec::{AudioCodec, H264Encoder};
+use iroh_live::media::format::{AudioPreset, VideoEncoderConfig, VideoFrame, VideoPreset};
+use iroh_live::media::publish::{LocalBroadcast, VideoInput, VideoRenditions};
 use iroh_live::media::subscribe::RemoteBroadcast;
-use iroh_live::media::traits::VideoSource;
+use iroh_live::media::traits::{VideoEncoderFactory, VideoSource};
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -310,9 +310,20 @@ where
     // Audio-only beings skip the video tile entirely — no H.264 encode, which
     // is what frees a 2-core host to hold a stable voice call.
     if !config.audio_only {
+        // P360 @ 30fps with 0.5s IDR so freeq clients recover quickly from MoQ loss
+        // (watch plane holds last frame; short GOPs avoid multi-second freezes).
+        let preset = VideoPreset::P360;
+        let enc_config = VideoEncoderConfig::from_preset(preset).keyframe_interval(15);
+        let catalog = H264Encoder::config_for(&enc_config).into();
+        let mut renditions = VideoRenditions::empty(video);
+        renditions.add_with_callback(
+            format!("video/{}-{}", H264Encoder::ID, preset),
+            catalog,
+            move || H264Encoder::with_config(enc_config.clone()),
+        );
         broadcast
             .video()
-            .set_source(video, VideoCodec::H264, [VideoPreset::P360])
+            .set(VideoInput::from(renditions))
             .context("setting agent broadcast video source")?;
     }
     let pub_origin = moq_lite::Origin::produce();
