@@ -538,7 +538,9 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,format=rgba"
 
     let open_timeout = Duration::from_secs(20);
     let v_std = match tokio::time::timeout(open_timeout, async {
-        open_v.await.context("join video fifo open")?
+        let joined = open_v.await.context("join video fifo open")?;
+        let f = joined.context("open video fifo")?;
+        Ok::<_, anyhow::Error>(f)
     })
     .await
     {
