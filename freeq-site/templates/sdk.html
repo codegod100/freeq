@@ -4,7 +4,23 @@
 
 {% block body %}
 <div class="container">
-<h1>freeq SDK</h1>
+<h1>SDKs</h1>
+<p>Everything — the six first-party clients, the bots, the agents — is built on the same
+two SDK stacks. Pick a language; the wire protocol (and the act-signing byte format,
+verified by shared test vectors) is identical.</p>
+
+<table>
+<tr><th>SDK</th><th>Language</th><th>Best for</th></tr>
+<tr><td><code>freeq-sdk</code></td><td>Rust</td><td>Clients, bots, anything embedded — this crate powers the macOS/iOS/Android/Windows apps via FFI. E2EE, P2P, OAuth, bot framework included.</td></tr>
+<tr><td><code>@freeq/bot-kit</code> + <code>@freeq/sdk</code></td><td>TypeScript</td><td>Agents and bots in Node 22+. did:key identity minted on first run, daemon CLI, delegation, act signing. <a href="/docs/bot-quickstart/">Quickstart →</a></td></tr>
+<tr><td><code>freeq-agent-kit</code></td><td>Rust</td><td>Agent-side helpers + a Claude MCP example — wire a coding agent into a channel. <a href="/docs/watch-your-agent/">Recipe →</a></td></tr>
+</table>
+
+<p>Agent-specific docs: <a href="/docs/agent-quickstart/">your first agent in 60 seconds</a> ·
+<a href="/docs/agents/">the full agent guide</a> · <a href="/docs/av-agents/">voice agents</a> ·
+<a href="/docs/typescript-sdk/">TypeScript SDK reference</a>.</p>
+
+<h2>Rust SDK</h2>
 <p>Rust crate for building IRC clients, bots, and integrations that
 authenticate with AT Protocol identities.</p>
 

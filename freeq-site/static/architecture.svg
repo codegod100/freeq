@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" font-family="SF Mono, Menlo, Consolas, monospace">
+  <defs>
+    <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect width="960" height="560" fill="#000000"/>
+
+  <!-- Clients row -->
+  <text x="480" y="30" fill="#555" font-size="11" text-anchor="middle" letter-spacing="2">CLIENTS — ONE WIRE PROTOCOL</text>
+  <g font-size="12" text-anchor="middle">
+    <rect x="40"  y="45" width="100" height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a"/><text x="90"  y="66" fill="#00e5ff">macOS</text>
+    <rect x="150" y="45" width="90"  height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a"/><text x="195" y="66" fill="#00e5ff">iOS</text>
+    <rect x="250" y="45" width="100" height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a"/><text x="300" y="66" fill="#00e5ff">Android</text>
+    <rect x="360" y="45" width="100" height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a"/><text x="410" y="66" fill="#00e5ff">Windows</text>
+    <rect x="470" y="45" width="80"  height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a"/><text x="510" y="66" fill="#00e5ff">Web</text>
+    <rect x="560" y="45" width="80"  height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a"/><text x="600" y="66" fill="#00e5ff">TUI</text>
+    <rect x="650" y="45" width="90"  height="34" rx="6" fill="#0d0d0f" stroke="#2a2a2a" stroke-dasharray="4 3"/><text x="695" y="66" fill="#999">irssi ’99</text>
+    <rect x="750" y="45" width="170" height="34" rx="6" fill="#16070f" stroke="#f472b6"/><text x="835" y="66" fill="#f472b6">agents (did:key)</text>
+  </g>
+
+  <!-- Transport arrows -->
+  <line x1="480" y1="90" x2="480" y2="150" stroke="#555" stroke-width="1.5" marker-end="url(#ar)"/>
+  <text x="480" y="122" fill="#666" font-size="10.5" text-anchor="middle">IRC :6667 · TLS :6697 · WebSocket · iroh P2P</text>
+  <text x="480" y="138" fill="#00e5a0" font-size="10.5" text-anchor="middle">SASL ATPROTO-CHALLENGE — humans and agents alike</text>
+
+  <!-- Server -->
+  <rect x="150" y="160" width="660" height="150" rx="10" fill="#0a0a0c" stroke="#00e5ff" stroke-opacity=".5"/>
+  <text x="480" y="184" fill="#e8e8e8" font-size="14" text-anchor="middle" font-weight="bold">freeq-server · single Rust binary</text>
+  <g font-size="11" text-anchor="middle">
+    <rect x="170" y="200" width="140" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="240" y="217" fill="#e8e8e8">identity + SASL</text><text x="240" y="231" fill="#555">DID resolution</text>
+    <rect x="320" y="200" width="140" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="390" y="217" fill="#e8e8e8">policy engine</text><text x="390" y="231" fill="#555">verifiable credentials</text>
+    <rect x="470" y="200" width="140" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="540" y="217" fill="#e8e8e8">session layer</text><text x="540" y="231" fill="#555">AV: TAGMSG + MoQ SFU</text>
+    <rect x="620" y="200" width="170" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="705" y="217" fill="#e8e8e8">agent governance</text><text x="705" y="231" fill="#555">tasks · pause · revoke · TTL</text>
+    <rect x="170" y="250" width="140" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="240" y="267" fill="#e8e8e8">persistence</text><text x="240" y="281" fill="#555">SQLite (+at-rest enc)</text>
+    <rect x="320" y="250" width="140" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="390" y="267" fill="#e8e8e8">msg signing</text><text x="390" y="281" fill="#555">+freeq.at/sig verify</text>
+    <rect x="470" y="250" width="140" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="540" y="267" fill="#e8e8e8">history + search</text><text x="540" y="281" fill="#555">CHATHISTORY · FTS5</text>
+    <rect x="620" y="250" width="170" height="40" rx="5" fill="#131316" stroke="#2a2a2a"/>
+    <text x="705" y="267" fill="#e8e8e8">REST + media</text><text x="705" y="281" fill="#555">/api/v1 · uploads</text>
+  </g>
+
+  <!-- Identity plane -->
+  <rect x="40" y="380" width="380" height="80" rx="8" fill="#02141a" stroke="#00e5ff" stroke-opacity=".35"/>
+  <text x="230" y="405" fill="#00e5ff" font-size="12" text-anchor="middle" font-weight="bold">identity plane — AT Protocol</text>
+  <text x="230" y="424" fill="#999" font-size="10.5" text-anchor="middle">humans: did:plc via Bluesky OAuth (keys stay on device)</text>
+  <text x="230" y="440" fill="#999" font-size="10.5" text-anchor="middle">agents: did:key ed25519 (minted locally)</text>
+  <line x1="230" y1="378" x2="330" y2="312" stroke="#555" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <!-- Federation -->
+  <rect x="540" y="380" width="380" height="80" rx="8" fill="#0a0a0c" stroke="#a855f7" stroke-opacity=".45"/>
+  <text x="730" y="405" fill="#a855f7" font-size="12" text-anchor="middle" font-weight="bold">federation — other freeq servers</text>
+  <text x="730" y="424" fill="#999" font-size="10.5" text-anchor="middle">iroh QUIC (NAT-traversing) · Automerge CRDT convergence</text>
+  <text x="730" y="440" fill="#999" font-size="10.5" text-anchor="middle">channels, messages, policies sync — no coordinator</text>
+  <line x1="730" y1="378" x2="640" y2="312" stroke="#555" stroke-width="1.5" marker-end="url(#ar)"/>
+
+  <text x="480" y="510" fill="#444" font-size="10.5" text-anchor="middle">every arrow is an open, documented protocol — nothing here forks IRC</text>
+</svg>

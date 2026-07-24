@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% set nav_active = 'blog' %}
+{% block title %}Blog{% endblock %}
+
+{% block body %}
+<div class="container">
+<h1>Blog</h1>
+<p>Engineering notes and essays from the freeq project. <a href="/blog/feed.xml">RSS</a></p>
+<table>
+{% for post in posts %}
+<tr>
+  <td style="white-space:nowrap;color:var(--fg3);width:120px">{{ post.date }}</td>
+  <td><a href="/blog/{{ post.slug }}/" style="font-weight:600">{{ post.title }}</a></td>
+</tr>
+{% endfor %}
+</table>
+</div>
+{% endblock %}

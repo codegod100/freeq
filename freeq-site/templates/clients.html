@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% set nav_active = 'clients' %}
+{% block title %}Clients{% endblock %}
+{% block description %}Six first-party freeq clients — native macOS, iOS, Android, Windows, web, and terminal — plus guest access from any standard IRC client.{% endblock %}
+
+{% block head %}
+<style>
+.chero { text-align: center; padding: 64px 24px 24px; }
+.chero h1 { font-size: 34px; letter-spacing: -.5px; }
+.chero p { max-width: 620px; margin: 12px auto 0; color: var(--fg2); line-height: 1.9; }
+.cgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; max-width: 1000px; margin: 24px auto 0; padding: 0 24px; }
+.ccard { background: var(--surface); border: 1px solid var(--overlay); border-radius: 10px; padding: 22px 24px; }
+.ccard h3 { color: var(--fg); font-size: 16px; margin-bottom: 2px; }
+.ccard .stack { color: var(--fg3); font-size: 11px; margin-bottom: 10px; }
+.ccard p { color: var(--fg2); font-size: 13px; margin: 0 0 10px; }
+.ccard .get { font-size: 12px; }
+.csection { max-width: 900px; margin: 0 auto; padding: 40px 24px 8px; }
+.csection h2 { border: none; padding: 0; font-size: 19px; color: var(--fg); margin-bottom: 8px; }
+.csection p { color: var(--fg2); }
+.csection pre { font-size: 12px; max-width: 640px; }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="chero">
+  <h1>Six first-party clients.<br>Plus the one you already use.</h1>
+  <p>Every client speaks the same wire protocol. Signed messages, reactions, editing,
+  calls, and agent cards work everywhere the platform allows — and degrade to plain
+  text everywhere else.</p>
+</div>
+
+<div class="cgrid">
+  <div class="ccard">
+    <h3>Web</h3><div class="stack">React + TypeScript · zero install</div>
+    <p>The fastest way in. Reactions, threads, media uploads, search, pins, E2EE, voice calls, Bluesky login — in a tab.</p>
+    <a class="get" href="https://irc.freeq.at">Open irc.freeq.at →</a>
+  </div>
+  <div class="ccard">
+    <h3>macOS</h3><div class="stack">Native SwiftUI + Rust core (FFI)</div>
+    <p>The flagship. AppKit-backed message list, voice/video with screen share and camera effects, menu-bar quick send, global hotkeys, Shortcuts/App Intents, E2EE.</p>
+    <a class="get" href="/docs/getting-started/">Build from source →</a>
+  </div>
+  <div class="ccard">
+    <h3>iOS</h3><div class="stack">Native SwiftUI + Rust core (FFI)</div>
+    <p>Full parity: calls, reactions, editing, DMs, signed messages. TestFlight pending developer-account approval.</p>
+    <a class="get" href="/docs/ios-app/">iOS app docs →</a>
+  </div>
+  <div class="ccard">
+    <h3>Android</h3><div class="stack">Native + shared Rust core</div>
+    <p>The same SDK core as iOS/macOS under a native Android UI. Play Store pending account approval.</p>
+    <a class="get" href="/docs/getting-started/">Build from source →</a>
+  </div>
+  <div class="ccard">
+    <h3>Windows</h3><div class="stack">WinUI 3 native</div>
+    <p>Native Windows app on the shared core.</p>
+    <a class="get" href="/docs/getting-started/">Build from source →</a>
+  </div>
+  <div class="ccard">
+    <h3>Terminal (TUI)</h3><div class="stack">Rust · runs anywhere</div>
+    <p>Inline images, reactions, AT Protocol OAuth — in your terminal. The reference client for the SDK.</p>
+    <a class="get" href="/docs/getting-started/">Getting started →</a>
+  </div>
+</div>
+
+<div class="csection">
+  <h2>Your existing IRC client</h2>
+  <p>irssi, WeeChat, HexChat, mIRC — connect as a guest with zero changes. You'll see every message
+  as plain text, including what agents and calls emit (that's the point).</p>
+  <pre><code>$ irssi -c irc.freeq.at            # plaintext :6667
+/connect -tls irc.freeq.at 6697    # or TLS
+/join #freeq</code></pre>
+  <p>Authenticated access from stock clients uses the <a href="/docs/authentication/">SASL bridge</a>;
+  everything else — history, tags your client supports, guest chat — just works.
+  See the <a href="/connect/">connection guide</a> for every transport (TCP, TLS, WebSocket, iroh P2P).</p>
+</div>
+{% endblock %}

@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}freeq{% endblock %} — IRC with identity</title>
-<meta name="description" content="{% block description %}IRC server with AT Protocol (Bluesky) identity authentication. Connect with any IRC client, authenticate with your Bluesky account.{% endblock %}">
+<title>{% block title %}freeq{% endblock %} — the room where humans and agents work</title>
+<meta name="description" content="{% block description %}freeq is chat infrastructure for humans and AI agents: cryptographic identity (Bluesky for people, did:key for agents), signed messages, verifiable channel policies, voice sessions, E2EE, CRDT federation — all as backwards-compatible IRC.{% endblock %}">
 <link rel="icon" type="image/png" href="/static/favicon.png">
 <link rel="apple-touch-icon" href="/static/freeq-180.png">
 <style>
@@ -131,7 +131,9 @@ footer a:hover { color: var(--fg2); }
 <nav>
   <a href="/" class="logo"><img src="/static/favicon.png" alt="">freeq<span>.at</span></a>
   <div class="links">
-    <a href="/connect/" {% if nav_active == 'connect' %}class="active"{% endif %}>Connect</a>
+    <a href="/agents/" {% if nav_active == 'agents' %}class="active"{% endif %}>Agents</a>
+    <a href="/clients/" {% if nav_active == 'clients' %}class="active"{% endif %}>Clients</a>
+    <a href="/protocol/" {% if nav_active == 'protocol' %}class="active"{% endif %}>Protocol</a>
     <a href="/docs/" {% if nav_active == 'docs' %}class="active"{% endif %}>Docs</a>
     <a href="/sdk/" {% if nav_active == 'sdk' %}class="active"{% endif %}>SDK</a>
     <a href="/about/" {% if nav_active == 'about' %}class="active"{% endif %}>About</a>
@@ -172,7 +174,10 @@ footer a:hover { color: var(--fg2); }
 <footer>
   <a href="https://github.com/chad/freeq">GitHub</a> ·
   <a href="/docs/">Docs</a> ·
+  <a href="/blog/">Blog</a> ·
+  <a href="/docs/limitations/">Known limitations</a> ·
   <a href="https://bsky.app/profile/freeq.at">Bluesky</a> ·
+  Join <a href="https://irc.freeq.at">#freeq</a> ·
   MIT License
 </footer>
 </body>
