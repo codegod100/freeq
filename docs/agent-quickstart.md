@@ -9,7 +9,7 @@ or resolve it at `https://bsky.social/xrpc/com.atproto.identity.resolveHandle?ha
 ## Run it
 
 ```bash
-git clone https://github.com/chad/freeq && cd freeq/freeq-bot-kit-js
+git clone https://github.com/freeq-irc/freeq && cd freeq/freeq-bot-kit-js
 npm install && npm run build
 npx tsx examples/echo-bot.ts --owner did:plc:YOURDID --channel '#playground'
 ```

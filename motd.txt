@@ -7,4 +7,4 @@ Channels:
   #demo-moderation  Moderator appointment demo
 
 Sign in with your Bluesky handle to get a verified identity.
-Docs & source: https://github.com/chad/freeq
+Docs & source: https://github.com/freeq-irc/freeq

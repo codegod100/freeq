@@ -194,8 +194,8 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
               freeq — IRC with AT Protocol identity.
               <br />
               Open source at{' '}
-              <a href="https://github.com/chad/freeq" target="_blank" className="text-accent hover:underline">
-                github.com/chad/freeq
+              <a href="https://github.com/freeq-irc/freeq" target="_blank" className="text-accent hover:underline">
+                github.com/freeq-irc/freeq
               </a>
               {typeof __GIT_COMMIT__ === 'string' && __GIT_COMMIT__ !== 'unknown' && (
                 <>

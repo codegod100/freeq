@@ -4,7 +4,7 @@ The freeq agent assistance interface is a structured diagnostic surface that let
 
 It's a small set of HTTP tools at `/agent/tools/*`, advertised at `/.well-known/agent.json`. Each tool returns a **conclusion** (a typed `diagnosis` code), a short summary a human can read, and machine-actionable fields a bot can branch on. No raw state, no leaks — answers are filtered by who's asking.
 
-This guide walks through a real session captured against `irc.freeq.at` on 2026-04-26, using the bot in [`examples/full-validation-bot/`](https://github.com/chad/freeq/tree/main/examples/full-validation-bot) as the canonical implementation.
+This guide walks through a real session captured against `irc.freeq.at` on 2026-04-26, using the bot in [`examples/full-validation-bot/`](https://github.com/freeq-irc/freeq/tree/main/examples/full-validation-bot) as the canonical implementation.
 
 ## What it's for
 
@@ -314,7 +314,7 @@ tail -f validation.log | jq -c '{stage, tool, code: .response.diagnosis.code}'
 
 ## Reference
 
-- **Canonical bot:** [`examples/full-validation-bot/index.ts`](https://github.com/chad/freeq/tree/main/examples/full-validation-bot) — exercises every tool and acts on the answers.
+- **Canonical bot:** [`examples/full-validation-bot/index.ts`](https://github.com/freeq-irc/freeq/tree/main/examples/full-validation-bot) — exercises every tool and acts on the answers.
 - **SDK helpers:** `generateDidKey`, `importDidKey`, `client.apiBearer` in [`@freeq/sdk`](/docs/typescript-sdk/).
 - **Discovery:** [`https://irc.freeq.at/.well-known/agent.json`](https://irc.freeq.at/.well-known/agent.json).
 - **Server tests proving the round-trip:** `freeq-server/tests/agent_assist_authenticated.rs::did_key_sasl_resolves_locally_without_pds`.

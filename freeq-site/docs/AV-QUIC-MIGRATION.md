@@ -50,7 +50,7 @@ gradual; if not, clients must cut over together.
 Copy the cert to a `chad`-readable directory and keep it fresh on renewal.
 
 - Copy `/etc/letsencrypt/live/tech.blueyard.com/{fullchain,privkey}.pem`
-  → `/home/chad/freeq-certs/` (owner `chad`, mode `600`).
+  → `/home/freeq-irc/freeq-certs/` (owner `chad`, mode `600`).
 - Install `/etc/letsencrypt/renewal-hooks/deploy/freeq-av-cert.sh` to re-copy
   the cert and restart `freeq-server` on each renewal.
 - **Verify:** the two `.pem` files exist, are `chad`-owned, mode `600`.
@@ -77,8 +77,8 @@ zipped pairwise (see moq-native `tls.rs::load_certs`).
 Add to `/home/chad/src/freeq/.env.secrets` (the systemd `EnvironmentFile`):
 
 ```
-FREEQ_AV_TLS_CERT=/home/chad/freeq-certs/fullchain.pem
-FREEQ_AV_TLS_KEY=/home/chad/freeq-certs/privkey.pem
+FREEQ_AV_TLS_CERT=/home/freeq-irc/freeq-certs/fullchain.pem
+FREEQ_AV_TLS_KEY=/home/freeq-irc/freeq-certs/privkey.pem
 ```
 
 Deploy + restart. **Verify:** a native client connects to

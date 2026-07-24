@@ -241,6 +241,6 @@ echo "  POLICY #channel INFO                            — view current policy"
 echo "  POLICY #channel ACCEPT                          — accept + present credentials"
 echo "  POLICY #channel CLEAR                           — remove policy (ops)"
 echo
-echo "${bold}Source: ${reset}https://github.com/chad/freeq"
+echo "${bold}Source: ${reset}https://github.com/freeq-irc/freeq"
 echo "${bold}Spec:   ${reset}https://gist.github.com/chad/9569f5265bfc3b6f5764d404118038b8"
 echo

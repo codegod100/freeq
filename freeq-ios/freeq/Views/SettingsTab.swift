@@ -204,7 +204,7 @@ struct SettingsTab: View {
                         }
                         .listRowBackground(Theme.bgSecondary)
 
-                        Link(destination: URL(string: "https://github.com/chad/freeq")!) {
+                        Link(destination: URL(string: "https://github.com/freeq-irc/freeq")!) {
                             HStack {
                                 Label("Source Code", systemImage: "chevron.left.forwardslash.chevron.right")
                                     .foregroundColor(Theme.textPrimary)

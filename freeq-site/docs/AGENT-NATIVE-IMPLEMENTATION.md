@@ -174,7 +174,7 @@ Extend the existing `PolicyDocument` with agent-specific capability rules.
 ```rust
 pub struct AgentCapability {
     pub capability: String,       // "post_message", "call_tool", "merge_pr", etc.
-    pub scope: Option<String>,    // resource scope, e.g. "repo:chad/freeq"
+    pub scope: Option<String>,    // resource scope, e.g. "repo:freeq-irc/freeq"
     pub ttl_seconds: Option<u64>, // auto-expires
     pub requires_approval: bool,  // must get human OK first
     pub rate_limit: Option<u32>,  // max invocations per hour
@@ -194,12 +194,12 @@ pub default_agent_capabilities: Vec<AgentCapability>,             // for any age
 
 **Capability negotiation command**:
 ```
-CAP_REQUEST #channel :post_message,call_tool:repo:chad/freeq
+CAP_REQUEST #channel :post_message,call_tool:repo:freeq-irc/freeq
 ```
 Server responds with granted subset:
 ```
 CAP_GRANT #channel :post_message;ttl=3600
-CAP_DENY #channel :call_tool:repo:chad/freeq;reason=requires_approval
+CAP_DENY #channel :call_tool:repo:freeq-irc/freeq;reason=requires_approval
 ```
 
 **REST API**:
@@ -238,9 +238,9 @@ AGENT NARROW <nick> <caps>   — reduce capability set
 
 For capabilities marked `requires_approval`:
 
-1. Agent sends: `APPROVAL_REQUEST #channel :merge_pr;resource=chad/freeq#42`
-2. Server broadcasts to channel ops: `NOTICE #channel :🔔 factory requests approval to merge_pr on chad/freeq#42`
-3. Op responds: `APPROVAL_GRANT factory :merge_pr;resource=chad/freeq#42`
+1. Agent sends: `APPROVAL_REQUEST #channel :merge_pr;resource=freeq-irc/freeq#42`
+2. Server broadcasts to channel ops: `NOTICE #channel :🔔 factory requests approval to merge_pr on freeq-irc/freeq#42`
+3. Op responds: `APPROVAL_GRANT factory :merge_pr;resource=freeq-irc/freeq#42`
 4. Server notifies agent: `@+freeq.at/approval=granted TAGMSG factory :merge_pr`
 5. Agent proceeds.
 
@@ -319,7 +319,7 @@ A declarative TOML/JSON manifest for introducing agents:
 [agent]
 display_name = "factory"
 actor_class = "agent"
-source_repo = "https://github.com/chad/freeq"
+source_repo = "https://github.com/freeq-irc/freeq"
 image_digest = "sha256:abc..."
 
 [provenance]
@@ -329,7 +329,7 @@ revocation_authority = "did:plc:4qsyxmnsblo4luuycm3572bq"
 
 [capabilities.default]
 post_message = true
-call_tool = ["repo:chad/freeq"]
+call_tool = ["repo:freeq-irc/freeq"]
 
 [presence]
 heartbeat_interval = 30

@@ -95,4 +95,4 @@ advertising the server's P2P endpoint.
 
 *This registry documents the wire as implemented in `freeq-server` and the
 SDKs; when in doubt, the source is authoritative. Corrections welcome —
-[file an issue](https://github.com/chad/freeq/issues).*
+[file an issue](https://github.com/freeq-irc/freeq/issues).*

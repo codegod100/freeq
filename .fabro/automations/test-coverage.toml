@@ -9,7 +9,7 @@ name = "test-coverage"
 description = "Add tests for one of freeq's high-risk, undertested files; open a ready-for-review PR."
 
 [target]
-repository = "chad/freeq"
+repository = "freeq-irc/freeq"
 ref = "main"
 workflow = "test-coverage"
 

@@ -20,7 +20,7 @@
 #   FREEQ_SERVER       ssh target              (default chad@tech.blueyard.com)
 #   FREEQ_REMOTE_REPO  repo path on server     (default /home/chad/src/freeq)
 #   FREEQ_CERT_DOMAIN  Let's Encrypt domain    (default tech.blueyard.com)
-#   FREEQ_CERT_DST     cert copy destination   (default /home/chad/freeq-certs)
+#   FREEQ_CERT_DST     cert copy destination   (default /home/freeq-irc/freeq-certs)
 #   FREEQ_QUIC_PORT    SFU QUIC/UDP port       (default 8080)
 set -euo pipefail
 
@@ -28,7 +28,7 @@ SERVER="${FREEQ_SERVER:-chad@tech.blueyard.com}"
 REMOTE_REPO="${FREEQ_REMOTE_REPO:-/home/chad/src/freeq}"
 DOMAIN="${FREEQ_CERT_DOMAIN:-tech.blueyard.com}"
 CERT_SRC="/etc/letsencrypt/live/${DOMAIN}"
-CERT_DST="${FREEQ_CERT_DST:-/home/chad/freeq-certs}"
+CERT_DST="${FREEQ_CERT_DST:-/home/freeq-irc/freeq-certs}"
 QUIC_PORT="${FREEQ_QUIC_PORT:-8080}"
 SERVICE="freeq-server"
 

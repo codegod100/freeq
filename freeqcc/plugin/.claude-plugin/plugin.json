@@ -4,9 +4,9 @@
   "description": "freeq + Claude Code: launch a freeq-DM-controllable Claude Code agent that's cryptographically yours.",
   "author": {
     "name": "Chad Fowler",
-    "url": "https://github.com/chad/freeq"
+    "url": "https://github.com/freeq-irc/freeq"
   },
-  "repository": "https://github.com/chad/freeq",
+  "repository": "https://github.com/freeq-irc/freeq",
   "license": "MIT",
   "keywords": [
     "freeq",

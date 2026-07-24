@@ -233,7 +233,7 @@
                     <HyperlinkButton Content="GitHub" FontSize="11"
                                      Foreground="{StaticResource FgDimBrush}"
                                      Padding="0" MinWidth="0" MinHeight="0"
-                                     NavigateUri="https://github.com/chad/freeq" />
+                                     NavigateUri="https://github.com/freeq-irc/freeq" />
                 </StackPanel>
             </StackPanel>
         </Border>

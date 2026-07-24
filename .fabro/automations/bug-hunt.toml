@@ -9,7 +9,7 @@ name = "bug-hunt"
 description = "Find one genuine correctness bug in freeq, pin it with a failing test, fix it, open a ready-for-review PR."
 
 [target]
-repository = "chad/freeq"
+repository = "freeq-irc/freeq"
 ref = "main"
 workflow = "bug-hunt"
 

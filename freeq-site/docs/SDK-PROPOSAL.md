@@ -508,11 +508,11 @@ Net: ~18 raw() calls → typed methods, plus ~50 LoC of DID-cache plumbing delet
 **Mandatory:** none. swarm keeps working unchanged when this SDK lands.
 
 **Recommended cleanup** — bigger win here than freeqcc because swarm has written entire local shim modules to fill the SDK gap:
-- Delete [`packages/shared/src/freeq.ts`](https://github.com/chad/freeq-swarm/blob/main/packages/shared/src/freeq.ts) (296 LoC) — `emitEvent` / `subscribeCoordinationEvents` / parse / build all become SDK calls.
-- Delete [`packages/shared/src/did_resolver.ts`](https://github.com/chad/freeq-swarm/blob/main/packages/shared/src/did_resolver.ts) (181 LoC) — `getDidForNick` / `getNickForDid` / `requestWhois` move to SDK.
-- Delete [`packages/shared/src/governance.ts`](https://github.com/chad/freeq-swarm/blob/main/packages/shared/src/governance.ts) (58 LoC parse logic) — `client.on('governance', ...)` covers it.
-- Refactor [`packages/shared/src/connect.ts`](https://github.com/chad/freeq-swarm/blob/main/packages/shared/src/connect.ts) (175 LoC) — collision policy moves to `ConnectConfig.onNickCollision`; rest collapses or moves to bot-kit.
-- Refactor [`packages/shared/src/announce.ts`](https://github.com/chad/freeq-swarm/blob/main/packages/shared/src/announce.ts) (94 LoC) — moves to bot-kit (still exists as orchestration; just lives elsewhere).
+- Delete [`packages/shared/src/freeq.ts`](https://github.com/freeq-irc/freeq-swarm/blob/main/packages/shared/src/freeq.ts) (296 LoC) — `emitEvent` / `subscribeCoordinationEvents` / parse / build all become SDK calls.
+- Delete [`packages/shared/src/did_resolver.ts`](https://github.com/freeq-irc/freeq-swarm/blob/main/packages/shared/src/did_resolver.ts) (181 LoC) — `getDidForNick` / `getNickForDid` / `requestWhois` move to SDK.
+- Delete [`packages/shared/src/governance.ts`](https://github.com/freeq-irc/freeq-swarm/blob/main/packages/shared/src/governance.ts) (58 LoC parse logic) — `client.on('governance', ...)` covers it.
+- Refactor [`packages/shared/src/connect.ts`](https://github.com/freeq-irc/freeq-swarm/blob/main/packages/shared/src/connect.ts) (175 LoC) — collision policy moves to `ConnectConfig.onNickCollision`; rest collapses or moves to bot-kit.
+- Refactor [`packages/shared/src/announce.ts`](https://github.com/freeq-irc/freeq-swarm/blob/main/packages/shared/src/announce.ts) (94 LoC) — moves to bot-kit (still exists as orchestration; just lives elsewhere).
 - All `client.raw('TAGMSG ...')` / `client.raw('PRIVMSG ...')` coordination calls in coordinator + worker → `emitEvent(...)`.
 
 Net: shared/ shrinks by ~700 LoC; coordinator + worker swap raw-string assembly for typed method calls.

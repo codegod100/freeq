@@ -274,7 +274,7 @@ provenance = {
     "origin_type": "external_import",
     "creator_did": "did:plc:4qsyxmnsblo4luuycm3572bq",  # chadfowler.com
     "implementation_ref": "freeq/demo-phase1.py@HEAD",
-    "source_repo": "https://github.com/chad/freeq",
+    "source_repo": "https://github.com/freeq-irc/freeq",
     "authority_basis": "Operated by server administrator (chadfowler.com)",
     "revocation_authority": "did:plc:4qsyxmnsblo4luuycm3572bq",
 }
@@ -285,7 +285,7 @@ time.sleep(0.5)
 
 bot.say(CHAN, "✅ Sent PROVENANCE command with:")
 bot.say(CHAN, f"   creator_did: did:plc:4qsyxmnsblo4luuycm3572bq (that's you, chadfowler.com)")
-bot.say(CHAN, f"   source_repo: https://github.com/chad/freeq")
+bot.say(CHAN, f"   source_repo: https://github.com/freeq-irc/freeq")
 bot.say(CHAN, f"   implementation: freeq/demo-phase1.py@HEAD")
 bot.say(CHAN, f"   revocation_authority: chadfowler.com")
 bot.say(CHAN, "Anyone can verify this at the REST endpoint. Try it:")
@@ -426,7 +426,7 @@ try:
                 elif "provenance" in text or "who made" in text or "creator" in text:
                     bot.say(CHAN, "chadfowler.com: My provenance declaration says:")
                     bot.say(CHAN, "   👤 Creator: chadfowler.com (did:plc:4qsyxmnsblo4luuycm3572bq)")
-                    bot.say(CHAN, "   📦 Source: https://github.com/chad/freeq")
+                    bot.say(CHAN, "   📦 Source: https://github.com/freeq-irc/freeq")
                     bot.say(CHAN, "   🔧 Implementation: freeq/demo-phase1.py@HEAD")
                     bot.say(CHAN, "   ⚖️ Revocation authority: chadfowler.com")
                     bot.say(CHAN, "   This is stored server-side and queryable via REST.")

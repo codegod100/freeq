@@ -1605,7 +1605,7 @@ where
                     "freeq - IRC with AT Protocol identity",
                     "",
                     "https://freeq.at",
-                    "https://github.com/chad/freeq",
+                    "https://github.com/freeq-irc/freeq",
                     "",
                     "SASL ATPROTO-CHALLENGE authentication",
                     "IRCv3 capabilities, E2EE channels, iroh QUIC transport",

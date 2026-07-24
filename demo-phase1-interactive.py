@@ -274,7 +274,7 @@ provenance = {
     "origin_type": "external_import",
     "creator_did": "did:plc:4qsyxmnsblo4luuycm3572bq",
     "implementation_ref": "freeq/demo-phase1.py@HEAD",
-    "source_repo": "https://github.com/chad/freeq",
+    "source_repo": "https://github.com/freeq-irc/freeq",
     "authority_basis": "Operated by server administrator (chadfowler.com)",
     "revocation_authority": "did:plc:4qsyxmnsblo4luuycm3572bq",
 }
@@ -286,7 +286,7 @@ time.sleep(0.5)
 bot.say(CHAN, "")
 bot.say(CHAN, "✅ Provenance registered:")
 bot.say(CHAN, f"   👤 Creator: chadfowler.com")
-bot.say(CHAN, f"   📦 Source: https://github.com/chad/freeq")
+bot.say(CHAN, f"   📦 Source: https://github.com/freeq-irc/freeq")
 bot.say(CHAN, f"   🔧 Code: demo-phase1.py")
 bot.say(CHAN, f"   ⚖️  Revocation authority: chadfowler.com")
 bot.say(CHAN, "")
@@ -417,7 +417,7 @@ while True:
         elif "status" in text:
             bot.say(CHAN, f"{OWNER}: 🤖 agent | 🔑 {did[:45]}... | 📊 active | 💓 heartbeat every 25s")
         elif "provenance" in text or "who made" in text or "creator" in text:
-            bot.say(CHAN, f"{OWNER}: Created by chadfowler.com | Source: github.com/chad/freeq | Code: demo-phase1.py")
+            bot.say(CHAN, f"{OWNER}: Created by chadfowler.com | Source: github.com/freeq-irc/freeq | Code: demo-phase1.py")
         elif "help" in text:
             bot.say(CHAN, f"{OWNER}: Try: hello, status, provenance, help")
         else:

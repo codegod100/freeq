@@ -11,7 +11,7 @@ routing for your domain:
 
 ```bash
 # Prerequisites: a Miren instance + the miren CLI installed and logged in
-git clone https://github.com/chad/freeq
+git clone https://github.com/freeq-irc/freeq
 cd freeq
 DOMAIN=irc.example.com ./deploy/miren/deploy.sh
 ```
@@ -37,7 +37,7 @@ If you don't run Miren, Docker Compose gives you the same stack (server +
 web client, with optional nginx TLS termination and OAuth broker):
 
 ```bash
-git clone https://github.com/chad/freeq
+git clone https://github.com/freeq-irc/freeq
 cd freeq
 cp .env.example .env    # edit with your values
 docker compose up -d
@@ -59,13 +59,13 @@ Plain Docker, without compose:
 docker run -d \
   -p 6667:6667 -p 8080:8080 \
   -v freeq-data:/data \
-  ghcr.io/chad/freeq:latest
+  ghcr.io/freeq-irc/freeq:latest
 ```
 
 ## From source
 
 ```bash
-git clone https://github.com/chad/freeq
+git clone https://github.com/freeq-irc/freeq
 cd freeq
 cargo build --release -p freeq-server
 

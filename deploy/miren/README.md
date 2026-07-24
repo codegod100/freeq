@@ -20,7 +20,7 @@ your domain), WebSocket IRC at `/irc`, and the REST API at `/api/v1/*`.
 **Deploy**
 
 ```bash
-git clone https://github.com/chad/freeq
+git clone https://github.com/freeq-irc/freeq
 cd freeq
 DOMAIN=irc.example.com ./deploy/miren/deploy.sh
 ```

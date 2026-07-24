@@ -190,7 +190,7 @@ function NoPolicySetup({ rulesText, setRulesText, saving, handleSetRules }: {
       {/* Docs link */}
       <div className="border-t border-border pt-3 mt-3">
         <a
-          href="https://github.com/chad/freeq/blob/main/docs/POLICY.md"
+          href="https://github.com/freeq-irc/freeq/blob/main/docs/POLICY.md"
           target="_blank"
           rel="noopener noreferrer"
           className="flex items-center gap-2 text-xs text-fg-dim hover:text-accent transition-colors group"

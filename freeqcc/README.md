@@ -38,7 +38,7 @@ You can DM your agent from any freeq client (web, iOS, mobile, TUI) — or from 
 Prerequisites: Node 22+, the [Claude Code CLI](https://claude.ai/code) on PATH, an AT Protocol handle (Bluesky works).
 
 ```sh
-git clone https://github.com/chad/freeq.git
+git clone https://github.com/freeq-irc/freeq.git
 cd freeq/freeqcc
 npm install
 npm link              # makes `freeqcc` available globally
@@ -93,7 +93,7 @@ If anyone *else* tries to DM `sourdough-bot`, they get:
 freeqcc is built on freeq's agent-native Phase 1 design ([docs](https://freeq.at/docs/agent-native/)) with two cryptographic layers:
 
 1. **Agent identity (verified today).** A fresh ed25519 keypair lives at `~/.freeqcc/agent.key` (mode 0600). The agent connects via SASL ATPROTO-CHALLENGE — freeq's server cryptographically verifies the agent owns its `did:key:z…` on every connection.
-2. **Creator binding (declarative today, verified soon).** A [`FreeqBotDelegation/v1`](https://github.com/chad/freeq/blob/main/freeq-server/src/connection/provenance.rs) cert at `~/.freeqcc/delegation.json` declares `bot_did = <agent>`, `creator_did = <your-DID>`, `revocation_authority = <your-DID>`. v1.0 ships **unsigned** — the freeq web client doesn't yet expose your MSGSIG signing key in a way the daemon can consume. Server stores the cert and surfaces it via `/api/v1/actors/{did}` with `_verified: false, _verification_reason: "Cert has no signature; declarative only"`. v1.1 adds an in-browser signing flow; this same daemon then auto-upgrades to verified provenance with no client-side change.
+2. **Creator binding (declarative today, verified soon).** A [`FreeqBotDelegation/v1`](https://github.com/freeq-irc/freeq/blob/main/freeq-server/src/connection/provenance.rs) cert at `~/.freeqcc/delegation.json` declares `bot_did = <agent>`, `creator_did = <your-DID>`, `revocation_authority = <your-DID>`. v1.0 ships **unsigned** — the freeq web client doesn't yet expose your MSGSIG signing key in a way the daemon can consume. Server stores the cert and surfaces it via `/api/v1/actors/{did}` with `_verified: false, _verification_reason: "Cert has no signature; declarative only"`. v1.1 adds an in-browser signing flow; this same daemon then auto-upgrades to verified provenance with no client-side change.
 
 The full server-side verification machinery is already deployed (see [freeq-server commit history](../freeq-server/src/connection/provenance.rs)) — it's the cert mint side that needs polish. The format matches the Rust struct in [`freeq-bot-id/src/main.rs`](../freeq-bot-id/src/main.rs) so signed certs from either source are interchangeable.
 

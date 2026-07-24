@@ -395,7 +395,7 @@ manifest_toml = """
 display_name = "factory-bot"
 actor_class = "agent"
 description = "Software factory — builds apps from natural language specs"
-source_repo = "https://github.com/chad/freeq"
+source_repo = "https://github.com/freeq-irc/freeq"
 version = "0.1.0"
 
 [provenance]

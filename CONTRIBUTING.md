@@ -6,7 +6,7 @@ infrastructure — contributions should be clear, auditable, and avoid clevernes
 ## Getting Started
 
 ```bash
-git clone https://github.com/chad/freeq
+git clone https://github.com/freeq-irc/freeq
 cd freeq
 cargo build
 cargo test

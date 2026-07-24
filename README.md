@@ -34,7 +34,7 @@ The web client at `irc.freeq.at` provides:
 | Channel | Policy | What it demonstrates |
 |---------|--------|---------------------|
 | `#demo-follow` | Must follow @chadfowler.com on Bluesky | Social graph verification (zero OAuth) |
-| `#demo-github` | Open join, `chad/freeq` collaborators get auto-op | Layered credentials + role escalation |
+| `#demo-github` | Open join, `freeq-irc/freeq` collaborators get auto-op | Layered credentials + role escalation |
 | `#demo-moderation` | Open join, moderators appointed via credentials | Credential-based moderation pipeline |
 
 ## Architecture

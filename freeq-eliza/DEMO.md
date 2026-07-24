@@ -4,9 +4,9 @@ A three-agent voice call where **Oblivion**, **Utopia**, and **Narrator** can co
 
 Built on:
 
-- [`freeq-eliza`](https://github.com/chad/freeq/tree/main/freeq-eliza) — the agent runtime
+- [`freeq-eliza`](https://github.com/freeq-irc/freeq/tree/main/freeq-eliza) — the agent runtime
 - [`ghostly`](https://github.com/chad/ghostly) — the particle-face renderer + voice DSP chain
-- [`freeq`](https://github.com/chad/freeq) — IRC + AV (MoQ) backbone
+- [`freeq`](https://github.com/freeq-irc/freeq) — IRC + AV (MoQ) backbone
 
 ## What's live in the demo channel
 
@@ -151,8 +151,8 @@ Each bot:
 6. Extracts commitments (`let's`, `I'll`, `we should`, with `by <when>` deadline parsing) into a per-session decision log that posts as bullets when the call ends
 
 Code lives in:
-- [`freeq-eliza/src/irc.rs`](https://github.com/chad/freeq/blob/main/freeq-eliza/src/irc.rs) — orchestrator
-- [`freeq-eliza/src/social.rs`](https://github.com/chad/freeq/blob/main/freeq-eliza/src/social.rs) — peer-aware behaviours
-- [`freeq-eliza/src/diagram.rs`](https://github.com/chad/freeq/blob/main/freeq-eliza/src/diagram.rs) — live whiteboard extractor
-- [`freeq-eliza/src/decisions.rs`](https://github.com/chad/freeq/blob/main/freeq-eliza/src/decisions.rs) — commitment capture
+- [`freeq-eliza/src/irc.rs`](https://github.com/freeq-irc/freeq/blob/main/freeq-eliza/src/irc.rs) — orchestrator
+- [`freeq-eliza/src/social.rs`](https://github.com/freeq-irc/freeq/blob/main/freeq-eliza/src/social.rs) — peer-aware behaviours
+- [`freeq-eliza/src/diagram.rs`](https://github.com/freeq-irc/freeq/blob/main/freeq-eliza/src/diagram.rs) — live whiteboard extractor
+- [`freeq-eliza/src/decisions.rs`](https://github.com/freeq-irc/freeq/blob/main/freeq-eliza/src/decisions.rs) — commitment capture
 - [`ghostly`](https://github.com/chad/ghostly) — the particle-face renderer + voice DSP chain
