@@ -11,6 +11,8 @@ import { LinkPreview } from './LinkPreview';
 import { MessageContextMenu } from './MessageContextMenu';
 import { MarkdownMessage } from './MarkdownRenderer';
 import { CoordinationEventCard, isCoordinationEvent } from './CoordinationCards';
+import { jumbomojiSize } from '../lib/jumbomoji';
+import { buildTranscript } from '../lib/transcript';
 
 // ── Colors ──
 
@@ -430,6 +432,17 @@ function MessageContentImpl({ msg, channel, onNickClick }: {
   if (isCoordinationEvent(msg)) {
     const card = <CoordinationEventCard msg={msg} />;
     if (card) return card;
+  }
+
+  // Jumbomoji: a message of just 1–3 emoji renders large.
+  const jumboSize = jumbomojiSize(msg.text);
+  if (jumboSize) {
+    return (
+      <div className="mt-0.5">
+        {msg.replyTo && <ReplyBadge msgId={msg.replyTo} />}
+        <div style={{ fontSize: jumboSize, lineHeight: 1.15 }}>{msg.text.trim()}</div>
+      </div>
+    );
   }
 
   // Markdown messages — render with full markdown support
@@ -1328,6 +1341,24 @@ export function MessageList() {
     }
   }, [activeChannel, messages, handleScroll]);
 
+  // Clean block-copy: when a selection spans ≥2 message rows, rewrite the
+  // clipboard to a tidy `Name: message` transcript instead of the raw DOM
+  // text (which drags in timestamps, badges, reaction pills). A partial
+  // selection inside a single message is left to the native copy.
+  const handleCleanCopy = useCallback((e: React.ClipboardEvent) => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !ref.current) return;
+    const rows = Array.from(ref.current.querySelectorAll<HTMLElement>('[id^="msg-"]'))
+      .filter((n) => sel.containsNode(n, true));
+    if (rows.length < 2) return; // single/partial selection → native copy
+    const ids = new Set(rows.map((n) => n.id.slice(4))); // strip "msg-"
+    const selected = messages.filter((m) => ids.has(m.id));
+    const transcript = buildTranscript(selected, (nick) => displayNameForKey(nick));
+    if (!transcript) return;
+    e.clipboardData.setData('text/plain', transcript);
+    e.preventDefault();
+  }, [messages]);
+
   // Scroll to a specific message (from search, reply click, etc.)
   const scrollToMsgId = useStore((s) => s.scrollToMsgId);
   const [highlightId, setHighlightId] = useState<string | null>(null);
@@ -1362,7 +1393,7 @@ export function MessageList() {
     <div key={activeChannel} ref={ref} data-testid="message-list" role="log" aria-label={`Messages in ${activeChannel}`} aria-live="polite" className={`flex-1 overflow-y-auto relative ${
       density === 'compact' ? 'text-[14px] [&_.msg-full]:pt-1.5 [&_.msg-full]:pb-0' :
       density === 'cozy' ? 'text-[16px] [&_.msg-full]:pt-4 [&_.msg-full]:pb-2' : ''
-    }`} onScroll={onScroll}>
+    }`} onScroll={onScroll} onCopy={handleCleanCopy}>
       {activeChannel.startsWith('#') && pins.length > 0 && (
         <div className="sticky top-0 z-10">
           <PinnedBar pins={pins} messages={messages} />
