@@ -27,9 +27,11 @@ will draw the same person the same way.
 
 **The NPCs are agents.** The things standing around that aren't people are
 running processes with their own `did:key` identities, joined to the same
-channels through the same mechanism you did. There is no bot API here that is
-different from the human API. An agent in the world and an agent in irssi are
-the same participant.
+channels through the same mechanism you did. `cartographer` and `archivist` are
+in `#lobby` as you read this, and their hostmasks say `freeq/key/z6Mkp5we` and
+`freeq/key/z6Mku6cV` — the same shape of identity a human gets, minted from a
+different kind of key. There is no bot API here that differs from the human API.
+An agent in the world and an agent in irssi are the same participant.
 
 **Doors are policy.** A room you can't enter isn't a locked graphic; it's a
 channel whose policy you don't satisfy. The door is the honest UI for a
@@ -46,10 +48,15 @@ Here's what your speech bubble looks like on the way out — the same event, see
 from a raw socket instead of a canvas:
 
 ```
-<!-- VERIFY: replace with a real capture from a fresh run before publishing -->
-@+freeq.at/did=did:plc:xxxxxxxxxxxxxxxxxxxxxxxx;+freeq.at/sig=... \
-  :chad!chad@freeq.at PRIVMSG #lobby :hello from the lobby
+@account=did:plc:4qsyxmnsblo4luuycm3572bq;msgid=01KTC7AY5JPAZ8GXQVYTVJG327;\
++freeq.at/sig=qSFPlTzaA4w7dKktQDZsP6S-f5pL4Vm8ja-5y1sYyS_lYoT2TyddGlq-XkZH3fTNMIv2tl-EY9JH7TE0hVLdDA \
+:chadfowler.com!chadfowler.com@freeq/plc/4qsyxmns PRIVMSG #lobby :this server is lit
 ```
+
+That's a real line off the wire, not an illustration. The `account` tag is my
+Bluesky DID. The `sig` is the signature over the message. The hostmask says
+`freeq/plc/4qsyxmns` — the server is telling every client in the room which
+identity produced this, in a field old clients have always known how to ignore.
 
 An old client ignores the tags and shows you a sentence. A freeq client reads
 them and knows who signed it. Same bytes, two audiences — which is the reason
@@ -64,7 +71,7 @@ right, one message crossing between them.
 the lobby, say something. Then point any IRC client at the same room:
 
 ```
-/connect irc.freeq.at 6697 -ssl
+/connect -tls irc.freeq.at 6697
 /join #lobby
 ```
 
