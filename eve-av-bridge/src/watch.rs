@@ -42,7 +42,7 @@ const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
 
 /// Prebuffer before MoQ starts hearing stream audio.
 /// Large enough to absorb multi-second HLS / MoQ jitter.
-const PRIME_SECS: f32 = 4.0;
+const PRIME_SECS: f32 = 2.0;
 /// How far ahead of wall-clock we allow enqueued playout to run.
 const MAX_AHEAD_SECS: f32 = 10.0;
 /// Absolute safety valve (seconds of PCM in Speaker ring).
@@ -222,7 +222,7 @@ fn hls_input_args(url: &str) -> Vec<String> {
         "5",
         // Stay further behind live edge so the big ring can fill smoothly.
         "-live_start_index",
-        "-8",
+        "-2",
         "-i",
         url,
     ]
