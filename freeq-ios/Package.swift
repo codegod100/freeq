@@ -28,6 +28,7 @@ let package = Package(
                 "CoordinationCard.swift",
                 "ChannelCrypto.swift",
                 "ChannelE2eeState.swift",
+                "ChannelAccessNotice.swift",
                 "ChannelState.swift",
                 "DidDisplay.swift",
                 "MessageActions.swift",

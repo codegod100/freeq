@@ -12,6 +12,10 @@ class ChannelState: ObservableObject, Identifiable {
     /// True when this channel has a local E2EE passphrase key set — drives
     /// the lock indicator in the header. Parity with macOS.
     @Published var isEncrypted: Bool = false
+    /// Set from a server access-denial NOTICE (invite-only, bad key, banned,
+    /// auth required, …) so the UI can explain why a join didn't happen.
+    /// Cleared on a successful join. Parity with macOS.
+    @Published var accessDeniedReason: String? = nil
     /// Tracks the most recent activity (message, join, topic change, etc.)
     var lastActivity: Date = Date()
 

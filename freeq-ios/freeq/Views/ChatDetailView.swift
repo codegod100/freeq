@@ -74,6 +74,22 @@ struct ChatDetailView: View {
                     .animation(.easeInOut(duration: 0.3), value: appState.connectionState)
                 }
 
+                // Access-denied banner — explains a gated join (invite-only,
+                // bad key, banned, auth required) instead of failing silently.
+                if let reason = channelState?.accessDeniedReason {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.slash.fill").font(.system(size: 12))
+                        Text(reason).font(.fqFootnote.weight(.medium))
+                        Spacer()
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Theme.warning)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
                 // Voice/video call panel — pinned above the message list
                 // when an AV session is active in this channel.
                 if isCallActiveHere {

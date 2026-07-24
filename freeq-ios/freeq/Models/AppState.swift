@@ -2471,6 +2471,7 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             let ch = state.getOrCreateChannel(channel)
             ch.lastActivity = Date()
             if nick.lowercased() == state.nick.lowercased() {
+                ch.accessDeniedReason = nil  // a real join clears any prior denial
                 // Rehydrate a saved channel E2EE key so encrypted history
                 // decrypts on rejoin (parity with macOS).
                 state.restoreChannelKeyIfSaved(channel)
@@ -2977,6 +2978,18 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
             } else if text.hasPrefix("MOTD:") {
                 if state.collectingMotd {
                     state.motdLines.append(String(text.dropFirst(5)))
+                }
+            } else if let denial = ChannelAccessNotice.parse(text) {
+                // Surface WHY a gated join failed instead of silently doing
+                // nothing (parity with macOS). Banner + system line + toast.
+                let ch = state.getOrCreateChannel(denial.channel)
+                ch.accessDeniedReason = denial.reason
+                ch.appendIfNew(ChatMessage(
+                    id: "access-denied-\(denial.channel)-\(denial.reason)",
+                    from: "", text: denial.reason,
+                    isAction: false, timestamp: Date(), replyTo: nil))
+                Task { @MainActor in
+                    ToastManager.shared.show(denial.reason, icon: "lock.slash")
                 }
             } else if !text.isEmpty {
                 print("Notice: \(text)")
