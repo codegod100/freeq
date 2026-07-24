@@ -152,9 +152,9 @@ const ChatScroll = {
       if (!Number.isFinite(sec)) return;
       const d = new Date(sec * 1000);
       el.textContent = d.toLocaleTimeString(undefined, {
-        hour: "2-digit",
+        hour: "numeric",
         minute: "2-digit",
-        hour12: false,
+        hour12: true,
       });
     });
   },

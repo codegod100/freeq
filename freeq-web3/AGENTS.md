@@ -16,6 +16,20 @@ mix phx.server       # http://127.0.0.1:4000
 
 Without the flake: Elixir 1.17+, OTP 26+, Node for assets.
 
+## Deploy to freeq.boxd
+
+https://freeq.boxd.sh runs freeq-web3. The VM cannot pull from your laptop
+(NAT); deploy goes **laptop → GitHub → boxd** (or direct rsync).
+
+```bash
+# commit (if dirty) + push main + git pull on VM + build + restart
+nu freeq-web3/script/deploy-boxd.nu -m "Your message"
+
+# direct copy, no GitHub (like the earlier rsync deploy)
+nu freeq-web3/script/deploy-boxd.nu --rsync -m "optional commit first"
+```
+
+
 ## Architecture
 
 | Path | Role |
