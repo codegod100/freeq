@@ -53,7 +53,7 @@ considered call.
 | Screen share | ✅ | ✅ | ⚠️ | iOS can view a share; broadcasting from iOS is limited |
 | Camera effects / background blur | ❌ | ✅ | ❌ | **macOS-only** (`CameraEffectsProcessor`) |
 | Call grid auto-layout (1→~30) | ✅ | ✅ | ✅ | ✅ **web + iOS shipped 2026-07-24** — shared `CallGridLayout` math (10 web + 14 iOS tests match the macOS reference) |
-| Click-to-focus a tile | ❌ | ❌ | ❌ | **P1 TODO everywhere** — do with a live call (interaction/visual, not pure math) |
+| Click-to-focus a tile | ✅ | ❌ | ❌ | ✅ **web shipped + live 2026-07-24** (focused tile fills, others to a strip, CSS order = no video dup). macOS/iOS: port next (needs native rebuild). |
 | CallKit (native call UI) | — | — | ✅ | **iOS-only**, appropriate |
 
 ### Agent & session observability — *the pitch surface*
