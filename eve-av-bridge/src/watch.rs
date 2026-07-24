@@ -201,6 +201,45 @@ fn mkfifo(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Prefer stream.place AAC media playlist (track=3) over the master.
+/// Master demux with multi-audio is fragile; the AAC rendition is reliable.
+fn resolve_audio_hls_url(master_url: &str) -> String {
+    let body = match std::process::Command::new("curl")
+        .args(["-fsS", "--max-time", "5", master_url])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return master_url.to_string(),
+    };
+    let mut aac_uri: Option<String> = None;
+    for line in body.lines() {
+        if !line.starts_with("#EXT-X-MEDIA:") || !line.contains("TYPE=AUDIO") {
+            continue;
+        }
+        let is_aac = line.contains("mp4a") || line.contains("AAC");
+        let uri = line.split("URI=\"").nth(1).and_then(|s| s.split('"').next());
+        if let (true, Some(u)) = (is_aac, uri) {
+            aac_uri = Some(u.to_string());
+            if line.contains("DEFAULT=YES") {
+                break;
+            }
+        }
+    }
+    let Some(uri) = aac_uri else {
+        return master_url.to_string();
+    };
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        return uri;
+    }
+    if let Ok(base) = url::Url::parse(master_url) {
+        if let Ok(joined) = base.join(&uri) {
+            return joined.to_string();
+        }
+    }
+    format!("https://stream.place{uri}")
+}
+
+
 fn hls_input_args(url: &str) -> Vec<String> {
     [
         "-hide_banner",
