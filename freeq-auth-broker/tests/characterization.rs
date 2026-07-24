@@ -383,6 +383,11 @@ fn return_to_allowlist() {
     assert!(is_valid_return_to("https://irc.freeq.at/some/path"));
     assert!(is_valid_return_to("https://staging.freeq.at"));
     assert!(is_valid_return_to("https://freeqworld.boxd.sh"));
+    // FreeqWorld's own domain (world.freeq.at). The OAuth allowlist is compiled
+    // in, so serving the world from a new host requires this entry or Bluesky
+    // sign-in fails with a raw "Invalid return_to URL".
+    assert!(is_valid_return_to("https://world.freeq.at"));
+    assert!(is_valid_return_to("https://world.freeq.at/id"));
     assert!(is_valid_return_to("https://pfp.freeq.at"));
     assert!(is_valid_return_to("http://localhost:5173"));
     assert!(is_valid_return_to("http://127.0.0.1:8000/x"));

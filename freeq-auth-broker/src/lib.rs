@@ -566,8 +566,10 @@ pub fn router(state: Arc<BrokerState>) -> Router {
                 .allow_origin(AllowOrigin::list([
                     "https://irc.freeq.at".parse().unwrap(),
                     "https://revenant-watch.boxd.sh".parse().unwrap(),
-                    // PFP microapp (freeqworld.boxd.sh/id and its vanity domain)
-                    // fetches /api/pfp/set-avatar from the browser — needs CORS.
+                    // PFP microapp (world.freeq.at/id, freeqworld.boxd.sh/id and
+                    // its vanity domain) fetches /api/pfp/set-avatar from the
+                    // browser — needs CORS.
+                    "https://world.freeq.at".parse().unwrap(),
                     "https://freeqworld.boxd.sh".parse().unwrap(),
                     "https://pfp.freeq.at".parse().unwrap(),
                     "http://localhost:5173".parse().unwrap(),
@@ -1023,6 +1025,7 @@ async fn auth_callback(
 
 const ALLOWED_ORIGINS: &[&str] = &[
     "https://irc.freeq.at",
+    "https://world.freeq.at",
     "https://freeqworld.boxd.sh",
     "https://pfp.freeq.at",
     "https://revenant-watch.boxd.sh",
@@ -1745,7 +1748,17 @@ pub fn is_valid_return_to(url: &str) -> bool {
         return false;
     };
     match (parsed.scheme(), parsed.host_str()) {
-        ("https", Some("irc.freeq.at" | "staging.freeq.at" | "freeqworld.boxd.sh" | "pfp.freeq.at" | "revenant-watch.boxd.sh")) => true,
+        (
+            "https",
+            Some(
+                "irc.freeq.at"
+                | "staging.freeq.at"
+                | "world.freeq.at"
+                | "freeqworld.boxd.sh"
+                | "pfp.freeq.at"
+                | "revenant-watch.boxd.sh",
+            ),
+        ) => true,
         // Loopback dev origins, any port.
         ("http", Some("localhost" | "127.0.0.1")) => true,
         _ => false,
