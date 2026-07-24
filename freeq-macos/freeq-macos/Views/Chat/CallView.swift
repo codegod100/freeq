@@ -13,6 +13,9 @@ import UniformTypeIdentifiers
 struct CallView: View {
     @Environment(AppState.self) private var appState
     let channel: String
+    /// Click-to-focus: the spotlighted tile's id (GridTile.id), or nil for the
+    /// auto-grid. Only interactive when the call is expanded.
+    @State private var focusedTileId: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -71,33 +74,60 @@ struct CallView: View {
             let tiles = gridTiles
             let spacing: CGFloat = 8
             let inset: CGFloat = 8
-            // Area the tiles actually get, after the outer inset.
-            let available = CGSize(
-                width: max(1, geo.size.width - inset * 2),
-                height: max(1, geo.size.height - inset * 2)
-            )
-            let cols = max(1, CallGridLayout.columns(for: tiles.count, in: available))
-            // Fixed tile size that fits BOTH axes — the whole point: no row
-            // ever overflows the height, so every participant stays visible.
-            let size = CallGridLayout.tileSize(for: tiles.count, in: available, spacing: spacing)
-            let rows = stride(from: 0, to: tiles.count, by: cols).map { start in
-                Array(tiles[start..<min(start + cols, tiles.count)])
-            }
-            VStack(spacing: spacing) {
-                Spacer(minLength: 0)  // center the block vertically
-                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(spacing: spacing) {
-                        ForEach(row) { entry in
-                            expandedTile(nick: entry.nick, isLocal: entry.isLocal)
-                                .frame(width: size.width, height: size.height)
+            // Click-to-focus (expanded only): one tile fills, others strip.
+            if appState.isCallExpanded,
+               let fid = focusedTileId,
+               let focused = tiles.first(where: { $0.id == fid }) {
+                let others = tiles.filter { $0.id != fid }
+                VStack(spacing: spacing) {
+                    expandedTile(nick: focused.nick, isLocal: focused.isLocal)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .onTapGesture { focusedTileId = nil }  // click again = back to grid
+                    if !others.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: spacing) {
+                                ForEach(others) { entry in
+                                    expandedTile(nick: entry.nick, isLocal: entry.isLocal)
+                                        .frame(width: 168, height: 94)
+                                        .onTapGesture { focusedTileId = entry.id }
+                                }
+                            }
                         }
+                        .frame(height: 100)
                     }
-                    .frame(maxWidth: .infinity)  // center a partial last row
                 }
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(inset)
+            } else {
+                // Auto-grid: unit-tested CallGridLayout picks columns + size.
+                let available = CGSize(
+                    width: max(1, geo.size.width - inset * 2),
+                    height: max(1, geo.size.height - inset * 2)
+                )
+                let cols = max(1, CallGridLayout.columns(for: tiles.count, in: available))
+                let size = CallGridLayout.tileSize(for: tiles.count, in: available, spacing: spacing)
+                let rows = stride(from: 0, to: tiles.count, by: cols).map { start in
+                    Array(tiles[start..<min(start + cols, tiles.count)])
+                }
+                VStack(spacing: spacing) {
+                    Spacer(minLength: 0)  // center the block vertically
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: spacing) {
+                            ForEach(row) { entry in
+                                expandedTile(nick: entry.nick, isLocal: entry.isLocal)
+                                    .frame(width: size.width, height: size.height)
+                                    .onTapGesture {
+                                        if appState.isCallExpanded { focusedTileId = entry.id }
+                                    }
+                            }
+                        }
+                        .frame(maxWidth: .infinity)  // center a partial last row
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(inset)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(inset)
         }
         // Low floor so the tiles can shrink on short windows; the parent caps
         // the overall panel height, keeping the controls visible.
