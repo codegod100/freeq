@@ -24,6 +24,9 @@ struct ChatMessage: Identifiable, Equatable {
     // edit's new msgid (used by server CHATHISTORY, which replays both rows).
     // Dedup keys off both so the two copies collapse to one.
     var editOf: String? = nil
+    // Agent coordination event (+freeq.at/event family). When set, the row
+    // renders as a structured task/evidence card (parity with web).
+    var coordination: CoordinationInfo? = nil
     var reactions: [String: Set<String>] = [:]  // emoji -> set of nicks
 
     static func == (lhs: ChatMessage, rhs: ChatMessage) -> Bool {
@@ -39,6 +42,7 @@ struct ChatMessage: Identifiable, Equatable {
             && lhs.isEncrypted == rhs.isEncrypted
             && lhs.origin == rhs.origin
             && lhs.editOf == rhs.editOf
+            && lhs.coordination == rhs.coordination
             && lhs.reactions == rhs.reactions
     }
 }

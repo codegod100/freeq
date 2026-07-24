@@ -63,6 +63,7 @@ let package = Package(
                 "ReconnectPolicy.swift",
                 "ConnectGate.swift",
                 "MessageTranscript.swift",
+                "CoordinationCard.swift",
                 "MenuBarModel.swift",
                 "MessageActions.swift",
                 "Safety.swift",

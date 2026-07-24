@@ -718,6 +718,10 @@ struct MessageRow: View {
                     .foregroundStyle(Theme.textSecondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let coord = message.coordination {
+                // Agent coordination event → structured card (parity with web).
+                CoordinationCardView(info: coord, text: message.text)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 let imageURLs = extractImageURLs(from: message.text)
                 let videoURLs = extractVideoURLs(from: message.text)

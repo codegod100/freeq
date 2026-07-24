@@ -1609,6 +1609,11 @@ extension AppState {
                 isEncrypted: wasEncrypted,
                 origin: msg.origin,
                 editOf: msg.editOf,
+                coordination: msg.coordination.map {
+                    CoordinationInfo(
+                        eventType: $0.eventType, taskId: $0.taskId, phase: $0.phase,
+                        evidenceType: $0.evidenceType, reference: $0.reference, payload: $0.payload)
+                },
                 reactions: initialReactions
             )
 

@@ -65,6 +65,21 @@ pub struct IrcMessage {
     /// else their nick. `None` for channel messages. Key DM threads by this,
     /// not by from/target (which flip with message direction).
     pub dm_key: Option<String>,
+    /// Present when this message carries an agent coordination event
+    /// (`+freeq.at/event` + friends). Clients render it as a structured
+    /// task/evidence card instead of plain text (parity with the web
+    /// `CoordinationCards`); a tag-unaware view still shows `text`.
+    pub coordination: Option<CoordinationEvent>,
+}
+
+/// A parsed agent coordination event (the `+freeq.at/*` task tag family).
+pub struct CoordinationEvent {
+    pub event_type: String,
+    pub task_id: Option<String>,
+    pub phase: Option<String>,
+    pub evidence_type: Option<String>,
+    pub reference: Option<String>,
+    pub payload: Option<String>,
 }
 
 pub struct ReactionTally {
@@ -521,6 +536,22 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
                 .get("+freeq.at/reactions")
                 .map(|raw| parse_reactions_tag(raw))
                 .unwrap_or_default();
+            // Agent coordination event: the `+freeq.at/event` tag (with the
+            // `freeq.at/` unprefixed fallback some senders use) turns this
+            // message into a structured card on every client.
+            let coord_tag = |name: &str| {
+                tags.get(&format!("+freeq.at/{name}"))
+                    .or_else(|| tags.get(&format!("freeq.at/{name}")))
+                    .cloned()
+            };
+            let coordination = coord_tag("event").map(|event_type| CoordinationEvent {
+                event_type,
+                task_id: coord_tag("task-id"),
+                phase: coord_tag("phase"),
+                evidence_type: coord_tag("evidence-type"),
+                reference: coord_tag("ref"),
+                payload: coord_tag("payload"),
+            });
             FreeqEvent::Message {
                 msg: IrcMessage {
                     from_nick: from.clone(),
@@ -540,6 +571,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
                     origin: tags.get("+freeq.at/origin").cloned(),
                     reactions,
                     dm_key: dm_key.clone(),
+                    coordination,
                 },
             }
         }
