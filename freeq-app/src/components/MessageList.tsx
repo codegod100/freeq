@@ -530,12 +530,15 @@ function MessageContentImpl({ msg, channel, onNickClick }: {
           rel="noopener noreferrer"
           className="mt-2 block max-w-sm rounded-lg overflow-hidden border border-border hover:border-accent/50 transition-colors"
         >
-          <img
-            src={`https://img.youtube.com/vi/${ytMatch[1]}/mqdefault.jpg`}
-            alt="YouTube video"
-            className="w-full"
-            loading="lazy"
-          />
+          {/* aspect-video reserves space before the thumbnail paints */}
+          <div className="w-full aspect-video bg-bg-tertiary">
+            <img
+              src={`https://img.youtube.com/vi/${ytMatch[1]}/mqdefault.jpg`}
+              alt="YouTube video"
+              className="w-full h-full object-cover"
+              loading="lazy"
+            />
+          </div>
           <div className="bg-bg-tertiary px-3 py-1.5 text-xs text-fg-muted flex items-center gap-1">
             <span className="text-red-500">▶</span> YouTube
           </div>
