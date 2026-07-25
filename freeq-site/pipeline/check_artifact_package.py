@@ -15,8 +15,8 @@ import re
 import sys
 
 CHECKS = [
-    ("date line (*YYYY-MM-DD*)",
-     lambda t: re.search(r"\*\d{4}-\d{2}-\d{2}\*", t)),
+    ("a 'What is rough' section (honest limitations)",
+     lambda t: re.search(r"what is rough|what.s rough", t, re.I)),
     ("hands-on ladder (See it / Run it / Extend it)",
      lambda t: re.search(r"see it|run it|extend it", t, re.I)),
     ("a runnable command or code block",
@@ -26,7 +26,7 @@ CHECKS = [
     ("a 'what this does NOT claim / protect' section",
      lambda t: re.search(r"does ?n.?t (claim|protect)|not claim|what this (is not|does not)|limitations", t, re.I)),
     ("builder-channel entry point",
-     lambda t: re.search(r"builder|irc\.freeq\.at/join|join/#", t, re.I)),
+     lambda t: re.search(r"#freeq-dev\b|builder|irc\.freeq\.at/join|join/#", t, re.I)),
 ]
 NEVER_OPTIONAL = {
     "a 'what this does NOT claim / protect' section",

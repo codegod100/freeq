@@ -296,37 +296,6 @@ pub(super) fn handle_join(
         }
     }
 
-    // Broadcast MODE +o/+h to existing channel members if the joiner was auto-opped/halfopped
-    {
-        let (is_op, is_halfop) = state
-            .channels
-            .lock()
-            .get(channel)
-            .map(|ch| (ch.ops.contains(session_id), ch.halfops.contains(session_id)))
-            .unwrap_or((false, false));
-        let auto_mode = if is_op {
-            Some("+o")
-        } else if is_halfop {
-            Some("+h")
-        } else {
-            None
-        };
-        if let Some(mode) = auto_mode {
-            let mode_msg = format!(":{server_name} MODE {channel} {mode} {nick}\r\n");
-            let channels = state.channels.lock();
-            if let Some(ch) = channels.get(channel) {
-                let members: Vec<String> = ch.members.iter().cloned().collect();
-                drop(channels);
-                let conns = state.connections.lock();
-                for member_session in &members {
-                    if let Some(tx) = conns.get(member_session) {
-                        let _ = tx.try_send(mode_msg.clone());
-                    }
-                }
-            }
-        }
-    }
-
     // Plugin on_join hook
     state.plugin_manager.on_join(&crate::plugin::JoinEvent {
         nick: nick.to_string(),
@@ -385,6 +354,46 @@ pub(super) fn handle_join(
     drop(conns);
     drop(tag_set);
     drop(ext_set);
+
+    // Announce an auto-op/-halfop AFTER the JOIN, never before.
+    //
+    // A DID in the channel's persistent `did_ops` is re-opped as part of joining.
+    // Sending that MODE before the JOIN meant members already in the channel got
+    // an op change for a nick they did not yet know was present, and clients
+    // rightly ignore modes for unknown members (otherwise a stray MODE invents
+    // phantom members). The op was therefore dropped by everyone already sitting
+    // in the channel, while anyone who connected later saw it correctly in their
+    // NAMES reply — two clients disagreeing about who is an op.
+    {
+        let (is_op, is_halfop) = state
+            .channels
+            .lock()
+            .get(channel)
+            .map(|ch| (ch.ops.contains(session_id), ch.halfops.contains(session_id)))
+            .unwrap_or((false, false));
+        let auto_mode = if is_op {
+            Some("+o")
+        } else if is_halfop {
+            Some("+h")
+        } else {
+            None
+        };
+        if let Some(mode) = auto_mode {
+            let mode_msg = format!(":{server_name} MODE {channel} {mode} {nick}\r\n");
+            let members: Vec<String> = state
+                .channels
+                .lock()
+                .get(channel)
+                .map(|ch| ch.members.iter().cloned().collect())
+                .unwrap_or_default();
+            let conns = state.connections.lock();
+            for member_session in &members {
+                if let Some(tx) = conns.get(member_session) {
+                    let _ = tx.try_send(mode_msg.clone());
+                }
+            }
+        }
+    }
 
     // Broadcast JOIN to S2S peers
     let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
