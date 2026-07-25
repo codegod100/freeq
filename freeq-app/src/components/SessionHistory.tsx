@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { apiFetch } from '../lib/api';
 
 interface SessionSummary {
   id: string;
@@ -30,7 +31,7 @@ export function SessionHistory({ channel }: { channel: string }) {
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`)
+    apiFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`)
       .then((r) => r.json())
       .then((data) => {
         if (!cancelled) {

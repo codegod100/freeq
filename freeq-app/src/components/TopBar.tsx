@@ -6,6 +6,7 @@ import { SpeakerIcon } from './SessionIndicator';
 import { fetchProfile, type ATProfile } from '../lib/profiles';
 import { isDid, resolveIdentityName } from '../lib/identity';
 import { UserPopover } from './UserPopover';
+import { apiFetch } from '../lib/api';
 
 interface TopBarProps {
   onToggleSidebar?: () => void;
@@ -272,7 +273,7 @@ function VoiceButton({ channel }: { channel: string }) {
     let cancelled = false;
     async function poll() {
       try {
-        const resp = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+        const resp = await apiFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
         if (!resp.ok || cancelled) return;
         const data = await resp.json();
         if (cancelled || !data.active) return;

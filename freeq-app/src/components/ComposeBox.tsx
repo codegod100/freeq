@@ -6,6 +6,7 @@ import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker, EMOJI_DATA } from './EmojiPicker';
 import { SlashCommands, getCommandCount } from './SlashCommands';
 import { FormatToolbar } from './FormatToolbar';
+import { apiFetch } from '../lib/api';
 
 // Max file size: 10MB
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -867,7 +868,7 @@ function handleCommand(text: string, activeChannel: string) {
     case 'pins': {
       if (!target) break;
       const chanName = target.startsWith('#') ? target.slice(1) : target;
-      fetch(`${window.location.origin}/api/v1/channels/${encodeURIComponent(chanName)}/pins`)
+      apiFetch(`${window.location.origin}/api/v1/channels/${encodeURIComponent(chanName)}/pins`)
         .then(r => r.ok ? r.json() : null)
         .then(data => {
           const pins = data?.pins || [];

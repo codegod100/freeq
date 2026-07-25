@@ -67,6 +67,16 @@ function saveJoinedChannels() {
 }
 
 /** Get the underlying SDK client (for advanced usage). */
+/** Local authed fetch. This module owns the singleton client, so it must not
+ *  import ../lib/api (that would be a cycle); components use apiFetch there. */
+function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const bearer = client?.apiBearer;
+  if (!bearer) return fetch(path, init);
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${bearer}`);
+  return fetch(path, { ...init, headers });
+}
+
 export function getClient(): FreeqClient | null {
   return client;
 }
@@ -385,7 +395,7 @@ export async function startAvSession(channel: string, title?: string) {
 
   try {
     try {
-      const resp = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+      const resp = await authedFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
       if (resp.ok) {
         const data = await resp.json();
         if (data.active && data.active.state === 'Active') {
@@ -427,7 +437,7 @@ export async function startAvSession(channel: string, title?: string) {
       if (useStore.getState().activeAvSession) { pendingAvStart = null; break; }
       await new Promise((r) => setTimeout(r, avStartPoll.intervalMs));
       try {
-        const r = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+        const r = await authedFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
         if (!r.ok) continue;
         const d = await r.json();
         const active = d.active;
