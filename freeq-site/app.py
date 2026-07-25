@@ -37,7 +37,12 @@ BLOG_DIR = Path(__file__).parent / "blog"
 # demonstration of the thing this site is about: the data is in the author's
 # repo, and this renderer is replaceable.
 #
-#   FREEQ_BLOG_DID          author DID (default: chadfowler.com's)
+#   FREEQ_BLOG_DID          contributing DIDs, comma-separated. A publication
+#                           can have collaborators, and in AT Protocol you only
+#                           write to your OWN repo — so a collaborator's post
+#                           lives in their repo with `site` pointing at the
+#                           owner's publication. Every contributing repo must be
+#                           listed here or its posts are invisible.
 #   FREEQ_BLOG_PUBLICATION  at:// of the publication to show. Unset shows every
 #                           document in the repo, which is wrong once there is
 #                           more than one publication — set it as soon as the
@@ -47,9 +52,18 @@ BLOG_DIR = Path(__file__).parent / "blog"
 # blog/*.md files, so the page is never empty or broken.
 import atproto_blog
 
-BLOG_DID = os.environ.get("FREEQ_BLOG_DID", "did:plc:4qsyxmnsblo4luuycm3572bq")
+BLOG_DIDS = [
+    d.strip()
+    for d in os.environ.get(
+        "FREEQ_BLOG_DID",
+        # publication owner (chadfowler.com), then contributors (freeq.at)
+        "did:plc:4qsyxmnsblo4luuycm3572bq,did:plc:3wbo7sapgihteh7h46773ru6",
+    ).split(",")
+    if d.strip()
+]
+BLOG_DID = BLOG_DIDS[0]
 BLOG_PUBLICATION = os.environ.get("FREEQ_BLOG_PUBLICATION") or None
-BLOG_SOURCE = atproto_blog.BlogSource(BLOG_DID, BLOG_PUBLICATION, ttl=300.0)
+BLOG_SOURCE = atproto_blog.BlogSource(BLOG_DIDS, BLOG_PUBLICATION, ttl=300.0)
 
 # Markdown renderer
 MD_EXTENSIONS = [

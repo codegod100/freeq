@@ -7,6 +7,13 @@ name = "freeq-site"
 # This MUST stay set. Without it the reader refuses to serve anything (the repo
 # also holds a different publication, and serving "every document" would put the
 # wrong posts on freeq.at), and /blog falls back to the local markdown files.
+# Contributing repos: the publication owner plus every collaborator. A
+# collaborator's posts live in their own repo (AT Protocol only lets you write to
+# your own), so omitting one makes its posts invisible rather than erroring.
+[[env]]
+key = "FREEQ_BLOG_DID"
+value = "did:plc:4qsyxmnsblo4luuycm3572bq,did:plc:3wbo7sapgihteh7h46773ru6"
+
 [[env]]
 key = "FREEQ_BLOG_PUBLICATION"
 value = "at://did:plc:4qsyxmnsblo4luuycm3572bq/site.standard.publication/3mri2ajri7c2w"

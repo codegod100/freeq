@@ -410,3 +410,77 @@ def test_source_with_a_publication_shows_only_that_one(monkeypatch):
     ])
     src = ab.BlogSource("did:plc:x", publication="at://pub/freeq", require_publication=True)
     assert [p.title for p in src.posts()] == ["freeq post"]
+
+
+# ── multiple authors: a publication can have collaborators ───────────────────
+#
+# In AT Protocol you can only write to your own repo, so a collaborator's post
+# lands in THEIR repo with `site` pointing at the owner's publication. A reader
+# that scans one repo silently misses every collaborator post, which looks
+# exactly like "publishing is broken".
+
+def test_source_reads_documents_from_several_repos(monkeypatch):
+    owner, collab = "did:plc:owner", "did:plc:collab"
+    monkeypatch.setattr(ab, "resolve_pds", lambda did, **kw: f"https://pds/{did}")
+
+    def records(pds, did, collection, **kw):
+        if did == owner:
+            return [doc("owner post", "2026-07-01T00:00:00Z", "a", site="at://pub/freeq")]
+        return [doc("collaborator post", "2026-07-02T00:00:00Z", "b", site="at://pub/freeq")]
+
+    monkeypatch.setattr(ab, "list_records", records)
+    src = ab.BlogSource([owner, collab], publication="at://pub/freeq")
+    assert [p.title for p in src.posts()] == ["collaborator post", "owner post"]
+
+
+def test_posts_carry_their_author_did(monkeypatch):
+    monkeypatch.setattr(ab, "resolve_pds", lambda did, **kw: "https://pds")
+    monkeypatch.setattr(ab, "list_records", lambda pds, did, c, **kw: [
+        doc("p", "2026-07-01T00:00:00Z", did[-1], site="at://pub/freeq")
+    ])
+    src = ab.BlogSource(["did:plc:a", "did:plc:b"], publication="at://pub/freeq")
+    assert {p.author_did for p in src.posts()} == {"did:plc:a", "did:plc:b"}
+
+
+def test_one_unreachable_repo_does_not_lose_the_others(monkeypatch):
+    monkeypatch.setattr(ab, "resolve_pds", lambda did, **kw: "https://pds")
+
+    def flaky(pds, did, collection, **kw):
+        if did == "did:plc:broken":
+            raise RuntimeError("PDS 500")
+        return [doc("good post", "2026-07-01T00:00:00Z", "a", site="at://pub/freeq")]
+
+    monkeypatch.setattr(ab, "list_records", flaky)
+    src = ab.BlogSource(["did:plc:broken", "did:plc:ok"], publication="at://pub/freeq")
+    assert [p.title for p in src.posts()] == ["good post"]
+    assert "did:plc:broken" in (src.last_error or "")
+
+
+def test_a_single_did_string_still_works(monkeypatch):
+    # Backwards compatible with the single-author config.
+    monkeypatch.setattr(ab, "resolve_pds", lambda did, **kw: "https://pds")
+    monkeypatch.setattr(ab, "list_records", lambda *a, **k: [
+        doc("solo", "2026-07-01T00:00:00Z", "a", site="at://pub/freeq")
+    ])
+    src = ab.BlogSource("did:plc:solo", publication="at://pub/freeq")
+    assert [p.title for p in src.posts()] == ["solo"]
+
+
+def test_collaborator_posts_for_another_publication_are_excluded(monkeypatch):
+    # A collaborator publishes to several publications; only ours may appear.
+    monkeypatch.setattr(ab, "resolve_pds", lambda did, **kw: "https://pds")
+    monkeypatch.setattr(ab, "list_records", lambda pds, did, c, **kw: [
+        doc("ours", "2026-07-02T00:00:00Z", "a", site="at://pub/freeq"),
+        doc("theirs", "2026-07-03T00:00:00Z", "b", site="at://pub/other"),
+    ])
+    src = ab.BlogSource(["did:plc:collab"], publication="at://pub/freeq")
+    assert [p.title for p in src.posts()] == ["ours"]
+
+
+def test_duplicate_slugs_across_authors_stay_distinct(monkeypatch):
+    monkeypatch.setattr(ab, "resolve_pds", lambda did, **kw: "https://pds")
+    monkeypatch.setattr(ab, "list_records", lambda pds, did, c, **kw: [
+        doc("Same Title", "2026-07-01T00:00:00Z", f"rkey-{did[-1]}", site="at://pub/freeq")
+    ])
+    src = ab.BlogSource(["did:plc:a", "did:plc:b"], publication="at://pub/freeq")
+    assert len({p.slug for p in src.posts()}) == 2

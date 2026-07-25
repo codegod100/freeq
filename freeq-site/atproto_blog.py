@@ -227,6 +227,7 @@ class Post:
     published_at: str    # raw ISO
     html: str
     rkey: str = ""       # record key; also accepted as a permalink
+    author_did: str = "" # whose repo the record lives in
     tags: list[str] = field(default_factory=list)
     uri: str = ""        # at:// of the record, so the page can cite its source
 
@@ -256,7 +257,9 @@ def _rkey_from(value: dict, uri: str) -> str:
     return uri.rsplit("/", 1)[-1]
 
 
-def build_posts(records: list[dict], *, pds: str, did: str, publication: str | None) -> list[Post]:
+def build_posts(
+    records: list[dict], *, pds: str, did: str, publication: str | None
+) -> list[Post]:
     """Records → Posts, newest first, optionally filtered to one publication."""
     posts: list[Post] = []
     for r in records:
@@ -274,6 +277,7 @@ def build_posts(records: list[dict], *, pds: str, did: str, publication: str | N
                 published_at=published,
                 html=render_document(v, pds=pds, did=did),
                 rkey=rkey,
+                author_did=did,
                 tags=[t for t in (v.get("tags") or []) if isinstance(t, str)],
                 uri=r.get("uri") or "",
             )
@@ -300,7 +304,7 @@ class BlogSource:
 
     def __init__(
         self,
-        did: str,
+        did: str | list[str],
         publication: str | None = None,
         ttl: float = 300.0,
         require_publication: bool = True,
@@ -309,7 +313,13 @@ class BlogSource:
         # publishes a book. Without a publication URI we would serve the wrong
         # posts, which is worse than serving none, so default to refusing and
         # let the caller fall back to local files.
-        self.did = did
+        #
+        # Several DIDs, because a publication can have collaborators: in AT
+        # Protocol you only write to your OWN repo, so a collaborator's post
+        # lands in theirs with `site` pointing at the owner's publication. Read
+        # every contributing repo and filter by publication.
+        self.dids = [did] if isinstance(did, str) else list(did)
+        self.did = self.dids[0] if self.dids else ""
         self.publication = publication
         self.require_publication = require_publication
         self.ttl = ttl
@@ -323,21 +333,38 @@ class BlogSource:
         return self._last_error
 
     def _refresh(self) -> None:
-        try:
-            pds = self._pds or resolve_pds(self.did)
-            if not pds:
-                raise RuntimeError(f"no PDS for {self.did}")
-            records = list_records(pds, self.did, DOC_COLLECTION)
-            self._posts = build_posts(
-                records, pds=pds, did=self.did, publication=self.publication
-            )
-            self._pds = pds
-            self._fetched_at = time.time()
-            self._last_error = None
-        except Exception as exc:  # network, JSON, PDS 5xx — all non-fatal
-            self._last_error = f"{type(exc).__name__}: {exc}"
+        collected: list[Post] = []
+        errors: list[str] = []
+        for did in self.dids:
+            try:
+                pds = resolve_pds(did)
+                if not pds:
+                    raise RuntimeError(f"no PDS for {did}")
+                records = list_records(pds, did, DOC_COLLECTION)
+                collected.extend(
+                    build_posts(records, pds=pds, did=did, publication=self.publication)
+                )
+            except Exception as exc:  # network, JSON, PDS 5xx — all non-fatal
+                # One unreachable contributor must not blank the whole blog.
+                errors.append(f"{did}: {type(exc).__name__}: {exc}")
+
+        if errors and not collected:
+            self._last_error = "; ".join(errors)
             # Back off so a dead PDS doesn't slow every request.
             self._fetched_at = time.time() - self.ttl / 2
+            return
+
+        collected.sort(key=lambda p: p.published_at, reverse=True)
+        # Re-disambiguate slugs across authors: two people can title a post the
+        # same thing, and one URL must not shadow the other.
+        seen: set[str] = set()
+        for p in collected:
+            if p.slug in seen:
+                p.slug = f"{p.slug}-{p.rkey}"
+            seen.add(p.slug)
+        self._posts = collected
+        self._fetched_at = time.time()
+        self._last_error = "; ".join(errors) if errors else None
 
     def posts(self) -> list[Post]:
         if self.require_publication and not self.publication:
