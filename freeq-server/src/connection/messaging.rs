@@ -192,6 +192,21 @@ pub(super) fn handle_tagmsg(
         return; // TAGMSG with no tags is meaningless
     }
 
+    // Channel names are case-insensitive, and `process_privmsg` normalizes its
+    // target before persisting — so messages, reactions and pins all live under
+    // the lowercased key. Normalize here too, or every TAGMSG-driven feature
+    // addresses a key that may not exist: a client that keeps the display case
+    // it joined with ("#Case") could not delete or edit its own messages
+    // (MESSAGE_NOT_FOUND), and its reactions persisted under the un-normalized
+    // name, orphaned from the message they annotate.
+    let normalized_target;
+    let target: &str = if target.starts_with('#') || target.starts_with('&') {
+        normalized_target = normalize_channel(target);
+        &normalized_target
+    } else {
+        target
+    };
+
     // Normalize IRCv3 draft tags to their canonical forms so all downstream
     // code (persistence, relay, fallback) only needs to check one name.
     let mut tags = tags.clone();

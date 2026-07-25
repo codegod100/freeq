@@ -62,3 +62,49 @@ Newest last. Each entry: what I predicted, what actually happened.
 (`declare -A` needs bash 4, macOS ships 3.2), so nobody has been able to run
 it locally. Rewrote portably. Not TDD — it's the instrument, and I need it
 working to choose targets honestly.
+
+**What it revealed:** `AGENTS.md`'s hotspot list is stale. Current top gamma is
+`freeq-eliza/src/irc.rs` (520), which isn't mentioned there at all; and the
+claims of "ZERO unit tests" on `freeq-sdk/src/client.rs` (now 70) and
+"UNDERTESTED" `irc/client.ts` (now 4 dedicated test files) are both out of
+date. So I stopped trusting the notes and went hunting for defects directly.
+
+### 1. RED→GREEN: a delete addressed to a DM could gut a channel message
+`d43db033`
+
+**Predicted:** `find_original_message`'s global msgid fallback has no target
+constraint, so a `+draft/delete` sent to a DM can resolve a row in a channel;
+`handle_delete` then writes the DB using the row's real channel but gates the
+in-memory purge on `is_channel` (from the *wire* target) → desync.
+
+**First run passed — my test was wrong, not the code.** The SDK negotiates
+`echo-message`, so alice's own PRIVMSG was sitting unconsumed in her queue and
+satisfied my "is it in history?" scan. Added `drain_events()` and anchored the
+scan on the `chathistory` BATCH opener. That false positive is exactly how this
+bug survived to production, so the helper is load-bearing.
+
+**Then RED:** `CHATHISTORY(db-backed)=false vs JOIN-replay(memory-backed)=true`
+— the row *was* soft-deleted in SQLite while the channel kept serving it from
+memory, and no channel member was told. Gone from SEARCH at once and from
+history after the next restart; still visible to everyone in the room.
+
+**Fix:** `dm_fallback_row_is_addressable()` — the fallback may only resolve a
+`dm:` row whose participant list contains the caller's DID. + 5 unit tests
+(incl. a substring-vs-participant case: `did:plc:alice` must not reach
+`did:plc:alice2`'s threads).
+
+**Also found:** message deletion had **zero** integration coverage.
+
+### 2. RED→GREEN: TAGMSG ignored channel-name case
+`(this commit)`
+
+**Predicted:** `process_privmsg` normalizes its target (messaging.rs:1336) but
+`handle_tagmsg` passes the raw wire target straight through, so every
+TAGMSG-driven feature keys off an un-normalized name.
+
+**RED:** a client that keeps the display case it joined with (`#Case`) cannot
+delete its own message — the msgid lookup misses and the server answers
+`MESSAGE_NOT_FOUND`. Same root cause orphans **reactions**: they persist under
+the un-normalized key, detached from the message they annotate.
+
+**Fix:** normalize the channel target once at the top of `handle_tagmsg`.

@@ -4918,3 +4918,131 @@ async fn cross_target_delete_does_not_desync_channel_views() {
     handle_carol.quit(None).await.unwrap();
     server_handle.abort();
 }
+
+// ── Test: TAGMSG must treat channel names case-insensitively ────────────
+//
+// IRC channel names are case-insensitive, and `process_privmsg` normalizes its
+// target (`normalize_channel`) before storing — so messages always land under
+// the lowercased key. `handle_tagmsg` does NOT normalize: it hands the raw wire
+// target to `handle_delete` / the reaction paths. A client that preserves the
+// display case it joined with (e.g. "#Case") therefore addresses a key that
+// doesn't exist, and:
+//
+//   - delete/edit fail with MESSAGE_NOT_FOUND — you cannot delete your own
+//     message, and
+//   - reactions persist under the un-normalized key, orphaned from the message
+//     they annotate.
+//
+// Asserted here on delete, because "the author asked to delete it and it is
+// still there" is the least ambiguous failure.
+#[tokio::test]
+async fn delete_honours_case_insensitive_channel_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("casedel.db");
+    let db_str = db_path.to_str().unwrap();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), db_str).await;
+
+    let mk = |nick: &str| ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: nick.to_string(),
+        user: nick.to_string(),
+        realname: nick.to_string(),
+        ..Default::default()
+    };
+
+    let (handle_alice, mut events_alice) = client::connect(mk("alice"), None);
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "alice registered",
+    )
+    .await;
+    let (handle_bob, mut events_bob) = client::connect(mk("bob"), None);
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "bob registered",
+    )
+    .await;
+
+    // Both join using mixed case; the server normalizes JOIN, so the channel
+    // itself lives under "#case".
+    handle_alice.join("#Case").await.unwrap();
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Joined { .. }),
+        "alice joined",
+    )
+    .await;
+    handle_bob.join("#Case").await.unwrap();
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Joined { .. }),
+        "bob joined",
+    )
+    .await;
+
+    handle_alice.privmsg("#Case", "delete me").await.unwrap();
+    let msg_evt = expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "delete me"),
+        "bob receives the message",
+    )
+    .await;
+    let msgid = if let Event::Message { tags, .. } = &msg_evt {
+        tags.get("msgid").cloned().expect("msgid")
+    } else {
+        unreachable!()
+    };
+
+    // The author deletes it, addressing the channel the way their client
+    // displays it.
+    let mut del_tags = HashMap::new();
+    del_tags.insert("+draft/delete".to_string(), msgid.clone());
+    handle_alice.send_tagmsg("#Case", del_tags).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // It must be gone from the DB…
+    let db_deleted = {
+        let db = freeq_server::db::Db::open(db_str).unwrap();
+        db.get_message_by_msgid("#case", &msgid)
+            .unwrap()
+            .and_then(|r| r.deleted_at)
+            .is_some()
+    };
+    // …and from the live view a new joiner is served.
+    let (handle_carol, mut events_carol) = client::connect(mk("carol"), None);
+    expect_event(
+        &mut events_carol,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "carol registered",
+    )
+    .await;
+    handle_carol.join("#case").await.unwrap();
+    let replayed_to_new_joiner = saw_event(&mut events_carol, 2000, |e| {
+        matches!(e, Event::Message { text, .. } if text == "delete me")
+    })
+    .await;
+
+    assert!(
+        db_deleted,
+        "author's delete addressed to \"#Case\" did not delete the row stored under \"#case\": \
+         handle_tagmsg passes the raw wire target through, so the msgid lookup misses and the \
+         server answers MESSAGE_NOT_FOUND. PRIVMSG normalizes its target; TAGMSG must too."
+    );
+    assert!(
+        !replayed_to_new_joiner,
+        "deleted message is still replayed from in-memory history to new joiners"
+    );
+
+    handle_alice.quit(None).await.unwrap();
+    handle_bob.quit(None).await.unwrap();
+    handle_carol.quit(None).await.unwrap();
+    server_handle.abort();
+}
