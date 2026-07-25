@@ -5046,3 +5046,146 @@ async fn delete_honours_case_insensitive_channel_names() {
     handle_carol.quit(None).await.unwrap();
     server_handle.abort();
 }
+
+// ── Test: deleting an edited message must remove the edit too ────────────
+//
+// An edit is stored as a NEW row carrying `replaces_msgid = <original>`
+// (db.rs INSERT ... replaces_msgid). `soft_delete_message` marks only the row
+// whose `msgid` matches exactly, and `get_messages` returns every row with
+// `deleted_at IS NULL` — including edit rows.
+//
+// Clients keep the ORIGINAL msgid as the message's identity (that is the whole
+// point of `+draft/edit=<original>`), so a delete names the original. If the
+// edit row isn't swept with it, the latest text — the version the user actually
+// wants gone — survives in history. That's a delete that reports success and
+// leaves the content readable.
+#[tokio::test]
+async fn deleting_an_edited_message_removes_the_edit_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("editdel.db");
+    let db_str = db_path.to_str().unwrap();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), db_str).await;
+
+    let mk = |nick: &str| ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: nick.to_string(),
+        user: nick.to_string(),
+        realname: nick.to_string(),
+        ..Default::default()
+    };
+
+    let (handle_alice, mut events_alice) = client::connect(mk("alice"), None);
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "alice registered",
+    )
+    .await;
+    let (handle_bob, mut events_bob) = client::connect(mk("bob"), None);
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "bob registered",
+    )
+    .await;
+    handle_alice.join("#editdel").await.unwrap();
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Joined { .. }),
+        "alice joined",
+    )
+    .await;
+    handle_bob.join("#editdel").await.unwrap();
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Joined { .. }),
+        "bob joined",
+    )
+    .await;
+
+    // v1 → capture the identity the client will keep using.
+    handle_alice
+        .privmsg("#editdel", "secret v1")
+        .await
+        .unwrap();
+    let first = expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "secret v1"),
+        "bob receives v1",
+    )
+    .await;
+    let original_msgid = if let Event::Message { tags, .. } = &first {
+        tags.get("msgid").cloned().expect("msgid")
+    } else {
+        unreachable!()
+    };
+
+    // v2 — an edit of that message.
+    handle_alice
+        .edit_message("#editdel", &original_msgid, "secret v2")
+        .await
+        .unwrap();
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Message { text, .. } if text == "secret v2"),
+        "bob receives the edit",
+    )
+    .await;
+
+    // The author deletes the message, naming it the only way a client can.
+    handle_alice
+        .delete_message("#editdel", &original_msgid)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Nothing about this message may survive in history.
+    drain_events(&mut events_alice).await;
+    handle_alice.history_latest("#editdel", 50).await.unwrap();
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::BatchStart { batch_type, .. } if batch_type == "chathistory"),
+        "chathistory batch start",
+    )
+    .await;
+    let v1_survives = saw_event(&mut events_alice, 1200, |e| {
+        matches!(e, Event::Message { text, .. } if text == "secret v1")
+    })
+    .await;
+    drain_events(&mut events_alice).await;
+    handle_alice.history_latest("#editdel", 50).await.unwrap();
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::BatchStart { batch_type, .. } if batch_type == "chathistory"),
+        "chathistory batch start (2)",
+    )
+    .await;
+    let v2_survives = saw_event(&mut events_alice, 1200, |e| {
+        matches!(e, Event::Message { text, .. } if text == "secret v2")
+    })
+    .await;
+
+    assert!(
+        !v1_survives,
+        "original revision still in history after delete"
+    );
+    assert!(
+        !v2_survives,
+        "the EDIT revision (\"secret v2\") survived a delete of its original msgid. \
+         soft_delete_message only marks the exact msgid, and edits are separate rows \
+         carrying replaces_msgid — so the latest text, the version the user most wants \
+         gone, stays readable in CHATHISTORY and in search."
+    );
+
+    handle_alice.quit(None).await.unwrap();
+    handle_bob.quit(None).await.unwrap();
+    server_handle.abort();
+}

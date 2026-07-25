@@ -1226,22 +1226,100 @@ impl Db {
     }
 
     /// Soft-delete a message by setting deleted_at timestamp.
+    /// Every msgid belonging to the same logical message as `msgid`.
+    ///
+    /// An edit is stored as a *new* row carrying `replaces_msgid`, so one
+    /// logical message can span several rows. This walks up to the root
+    /// revision and then collects everything that (transitively) replaces it,
+    /// so callers can act on the message rather than on one revision of it.
+    /// Both walks are bounded: a malformed `replaces_msgid` cycle must not spin.
+    fn revision_family(&self, channel: &str, msgid: &str) -> SqlResult<Vec<String>> {
+        let mut root = msgid.to_string();
+        for _ in 0..64 {
+            let mut stmt = self.conn.prepare(
+                "SELECT replaces_msgid FROM messages WHERE channel = ?1 AND msgid = ?2",
+            )?;
+            let parent: Option<String> = stmt
+                .query_map(params![channel, &root], |r| r.get::<_, Option<String>>(0))?
+                .next()
+                .transpose()?
+                .flatten();
+            match parent {
+                Some(p) if !p.is_empty() && p != root => root = p,
+                _ => break,
+            }
+        }
+
+        let mut family = vec![root.clone()];
+        let mut frontier = vec![root];
+        while let Some(current) = frontier.pop() {
+            let mut stmt = self.conn.prepare(
+                "SELECT msgid FROM messages
+                 WHERE channel = ?1 AND replaces_msgid = ?2 AND msgid IS NOT NULL",
+            )?;
+            let children: Vec<String> = stmt
+                .query_map(params![channel, &current], |r| r.get(0))?
+                .collect::<SqlResult<Vec<String>>>()?;
+            for child in children {
+                if !family.contains(&child) {
+                    family.push(child.clone());
+                    frontier.push(child);
+                }
+            }
+            if family.len() > 512 {
+                break; // safety valve; no legitimate message has 512 revisions
+            }
+        }
+        Ok(family)
+    }
+
+    /// Soft-delete a message *and every revision of it*.
+    ///
+    /// Clients keep the ORIGINAL msgid as a message's identity (that's the point
+    /// of `+draft/edit=<original>`), so a delete names the original while the
+    /// current text may live in a later edit row. Marking only the exact msgid
+    /// left the newest text — the version the author most wants gone — readable
+    /// in CHATHISTORY and in FTS search. Either end of the family may be named.
     pub fn soft_delete_message(&self, channel: &str, msgid: &str) -> SqlResult<usize> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        let family = self.revision_family(channel, msgid)?;
+
+        // Resolve to row ids first so the FTS delete and the UPDATE act on
+        // exactly the same set, with uniformly-typed bind parameters.
+        let ph = family.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let ids: Vec<i64> = {
+            let sql = format!(
+                "SELECT id FROM messages
+                 WHERE channel = ? AND deleted_at IS NULL AND msgid IN ({ph})"
+            );
+            let mut binds: Vec<String> = Vec::with_capacity(family.len() + 1);
+            binds.push(channel.to_string());
+            binds.extend(family.iter().cloned());
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(binds.iter()), |r| r.get(0))?
+                .collect::<SqlResult<Vec<i64>>>()?
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let id_ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         if self.fts_enabled() {
             self.conn.execute(
-                "DELETE FROM messages_fts WHERE rowid IN (
-                    SELECT id FROM messages WHERE channel = ?1 AND msgid = ?2 AND deleted_at IS NULL
-                )",
-                params![channel, msgid],
+                &format!("DELETE FROM messages_fts WHERE rowid IN ({id_ph})"),
+                rusqlite::params_from_iter(ids.iter()),
             )?;
         }
+        let mut binds: Vec<i64> = Vec::with_capacity(ids.len() + 1);
+        binds.push(now as i64);
+        binds.extend(ids.iter().copied());
         let changed = self.conn.execute(
-            "UPDATE messages SET deleted_at = ?1 WHERE channel = ?2 AND msgid = ?3 AND deleted_at IS NULL",
-            params![now as i64, channel, msgid],
+            &format!("UPDATE messages SET deleted_at = ? WHERE id IN ({id_ph})"),
+            rusqlite::params_from_iter(binds.iter()),
         )?;
         Ok(changed)
     }
@@ -1937,6 +2015,106 @@ mod tests {
             Some("did:plc:alice"),
         )
         .unwrap();
+    }
+
+    /// Deleting a message must remove every revision of it.
+    ///
+    /// An edit is a separate row carrying `replaces_msgid`, and clients keep the
+    /// ORIGINAL msgid as the message's identity — so a delete names the
+    /// original. If only that exact row is marked, the edit row survives and the
+    /// newest text (the version the author most wants gone) stays readable in
+    /// history and search.
+    #[test]
+    fn soft_delete_sweeps_the_whole_revision_family() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "secret v1", 100, "id-original");
+        db.insert_edit(
+            "#c",
+            "alice!a@host",
+            "secret v2",
+            110,
+            &HashMap::new(),
+            "id-edit1",
+            "id-original",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+
+        db.soft_delete_message("#c", "id-original").unwrap();
+
+        let live: Vec<String> = db
+            .get_messages("#c", 50, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert!(
+            live.is_empty(),
+            "delete of the original left revisions readable: {live:?}"
+        );
+    }
+
+    /// Same family, addressed from the other end: deleting by the *edit's*
+    /// msgid must also remove the original it replaced. Both ids denote one
+    /// logical message, so either name must delete the whole thing.
+    #[test]
+    fn soft_delete_by_edit_msgid_also_removes_the_original() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "secret v1", 100, "id-original");
+        db.insert_edit(
+            "#c",
+            "alice!a@host",
+            "secret v2",
+            110,
+            &HashMap::new(),
+            "id-edit1",
+            "id-original",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+
+        db.soft_delete_message("#c", "id-edit1").unwrap();
+
+        let live: Vec<String> = db
+            .get_messages("#c", 50, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert!(live.is_empty(), "revisions survived: {live:?}");
+    }
+
+    /// A chain of edits (edit of an edit) must collapse entirely, and the sweep
+    /// must not wander into unrelated messages.
+    #[test]
+    fn soft_delete_sweeps_chained_edits_only() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "v1", 100, "id-1");
+        db.insert_edit(
+            "#c", "alice!a@host", "v2", 110, &HashMap::new(), "id-2", "id-1",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        db.insert_edit(
+            "#c", "alice!a@host", "v3", 120, &HashMap::new(), "id-3", "id-2",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        msg(&db, "#c", "unrelated", 130, "id-other");
+
+        db.soft_delete_message("#c", "id-1").unwrap();
+
+        let live: Vec<String> = db
+            .get_messages("#c", 50, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert_eq!(
+            live,
+            vec!["unrelated".to_string()],
+            "chained edits must all go, unrelated messages must stay"
+        );
     }
 
     #[test]
