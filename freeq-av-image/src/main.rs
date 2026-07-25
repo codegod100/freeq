@@ -142,6 +142,9 @@ async fn main() -> anyhow::Result<()> {
         session_id: args.session.clone(),
         our_broadcast: our_broadcast.clone(),
         my_nick: args.nick.clone(),
+        // Never audio-only: publishing the video tile is this tool's entire
+        // purpose (the audio source below is deliberately silence).
+        audio_only: false,
     };
 
     // Silent audio — we publish video only; the queue stays empty so the
