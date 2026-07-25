@@ -81,7 +81,9 @@ def xrpc(url: str, body: dict | None = None, token: str | None = None) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("draft", help="markdown file")
+    ap.add_argument("draft", nargs="?", help="markdown file")
+    ap.add_argument("--delete", metavar="RKEY",
+                    help="delete a document record instead of publishing")
     ap.add_argument("--write", action="store_true", help="actually create the record")
     ap.add_argument("--publication", default=PUBLICATION)
     ap.add_argument("--identifier", default=DEFAULT_IDENTIFIER)
@@ -90,6 +92,26 @@ def main() -> int:
     ap.add_argument("--pds", default="https://bsky.social")
     args = ap.parse_args()
 
+    if args.delete:
+        pw = op_password(args.op_item)
+        session = xrpc(
+            f"{args.pds}/xrpc/com.atproto.server.createSession",
+            {"identifier": args.identifier, "password": pw},
+        )
+        did, token = session["did"], session["accessJwt"]
+        if not args.write:
+            print(f"DRY RUN — would delete {lp.DOC_TYPE}/{args.delete} from {did}")
+            return 0
+        xrpc(
+            f"{args.pds}/xrpc/com.atproto.repo.deleteRecord",
+            {"repo": did, "collection": lp.DOC_TYPE, "rkey": args.delete},
+            token=token,
+        )
+        print(f"deleted at://{did}/{lp.DOC_TYPE}/{args.delete}")
+        return 0
+
+    if not args.draft:
+        raise SystemExit("need a draft file (or --delete RKEY)")
     md = pathlib.Path(args.draft).read_text()
     rkey = make_tid()
     tags = [t.strip() for t in args.tags.split(",") if t.strip()]

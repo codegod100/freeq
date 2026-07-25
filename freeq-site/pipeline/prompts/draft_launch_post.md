@@ -5,7 +5,8 @@ You are drafting one post in the **"freeq in twelve proofs"** launch series for 
 ## Inputs — read all before writing
 - **The issue** (the brief): the `chad/freeq-launch` GitHub issue for this proof — its *claim*, *job in the arc*, suggested titles, framing warnings, the *Try-it* ladder, and the artifact package. The issue is authoritative; where it disagrees with BLOG-PLAN.md (especially titles), **the issue wins** (the plan's draft titles predate the anti-audit-bait discipline).
 - **`BLOG-PLAN.md`**: the campaign spine — the category statement, the six-week arc, the editorial rules, and the freeq↔Phoenix (provenance-layer) endgame.
-- **`blog/the-room-where-humans-and-agents-work.md`**: the voice/format template. Match it — `# Title`, then `*YYYY-MM-DD*`, then body. Short (field-notes ~500–900 words; experiments can be shorter). Problem-first opening, bold lead-ins for key claims, concrete nouns (`ed25519`, `did:key`, IRCv3 tags, `/msg deploy-agent pause`).
+- **`drafts/what-is-freeq.md`**: the voice/format template. Match it — `# Title`, then body, no date line (`publishedAt` lives in the record). Short (field-notes ~500–1000 words; experiments can be shorter). Problem-first opening, concrete nouns (`ed25519`, `did:key`, IRCv3 tags, `/msg deploy-agent pause`), and a plain "what is rough" section. Run `scripts/prose-lint.py <draft>` before submitting: keep em dashes near zero and avoid verbless brags.
+- **Publishing**: posts are AT Protocol records, not files. Author in Leaflet (its AppView only indexes what it writes), or `publish.py <draft> --write` for freeq.at only. `/blog` merges every contributing repo in the publication.
 - **`../freeq`**: the source of truth for what is real. Never describe a capability that isn't in the code and deployed.
 
 ## Hard rules (the gates enforce the first three mechanically)
