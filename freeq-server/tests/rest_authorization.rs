@@ -13,7 +13,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use std::sync::Arc;
+
+use freeq_sdk::auth::{ChallengeSigner, KeySigner};
 use freeq_sdk::client::{self, ConnectConfig};
+use freeq_sdk::crypto::PrivateKey;
 use freeq_sdk::event::Event;
 use freeq_sdk::did::DidResolver;
 use tokio::sync::mpsc;
@@ -289,5 +293,188 @@ async fn channel_list_hides_private_channels() {
         body.contains("townsquare"),
         "public channel missing from the list: {body}"
     );
+    server.abort();
+}
+
+/// `POST /api/v1/sessions/{id}/artifacts` took no auth at all. Three problems,
+/// all reachable by anyone who knows a session id (which channel members see in
+/// av-* TAGMSGs, and which the sessions endpoint hands out for public channels):
+///
+///   1. unauthenticated write into the AV/provenance store;
+///   2. `created_by` is read straight from the request body, so the caller
+///      chooses whose DID the artifact is attributed to — attribution forgery in
+///      the layer whose entire value proposition is verifiable authorship; and
+///   3. it broadcasts a NOTICE into the session's channel with caller-controlled
+///      text, i.e. unauthenticated message injection into a room.
+#[tokio::test]
+async fn creating_a_session_artifact_requires_auth() {
+    let (irc_addr, web, server) = start_test_server_with_web(empty_resolver()).await;
+
+    // AV sessions require an authenticated DID — guests cannot start calls.
+    let private_key = PrivateKey::generate_ed25519();
+    let did = format!("did:key:{}", private_key.public_key_multibase());
+    let signer: Arc<dyn ChallengeSigner> = Arc::new(KeySigner::new(did, private_key));
+    let config = ConnectConfig {
+        server_addr: irc_addr.to_string(),
+        nick: "alice".to_string(),
+        user: "alice".to_string(),
+        realname: "Alice".to_string(),
+        ..Default::default()
+    };
+    let (h, mut events) = client::connect(config, Some(signer));
+    expect_event(
+        &mut events,
+        3000,
+        |e| matches!(e, Event::Authenticated { .. }),
+        "authenticated",
+    )
+    .await;
+    expect_event(
+        &mut events,
+        3000,
+        |e| matches!(e, Event::Registered { .. }),
+        "registered",
+    )
+    .await;
+    h.join("#callroom").await.unwrap();
+    expect_event(
+        &mut events,
+        3000,
+        |e| matches!(e, Event::Joined { .. }),
+        "joined",
+    )
+    .await;
+
+    // Start a real AV session so the handler can't refuse with a plain 404.
+    let mut tags = HashMap::new();
+    tags.insert("+freeq.at/av-start".to_string(), String::new());
+    tags.insert("+freeq.at/av-instance".to_string(), "aaaa1111".to_string());
+    h.send_tagmsg("#callroom", tags).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let (status, body) = get(web, "/api/v1/channels/callroom/sessions").await;
+    assert_eq!(status, 200, "sessions list for a public channel: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let session_id = v["active"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no active session in {body}"))
+        .to_string();
+
+    // Anonymous caller forges an artifact attributed to someone else, with text
+    // it controls, into a channel it is not even a member of.
+    let resp = reqwest::Client::new()
+        .post(format!("http://{web}/api/v1/sessions/{session_id}/artifacts"))
+        .json(&serde_json::json!({
+            "kind": "summary",
+            "content_ref": "https://evil.example/payload",
+            "title": "URGENT: verify your account at evil.example",
+            "created_by": "did:plc:chadfowler-impersonated",
+        }))
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+
+    assert!(
+        status == 401 || status == 403,
+        "anonymous POST of a session artifact returned {status}: {body}\n\
+         No authentication, and created_by comes from the request body."
+    );
+
+    // …and nothing may have been injected into the channel.
+    let injected = {
+        let deadline = Duration::from_millis(800);
+        let start = tokio::time::Instant::now();
+        let mut seen = false;
+        loop {
+            let left = deadline.saturating_sub(start.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match timeout(left, events.recv()).await {
+                Ok(Some(Event::ServerNotice { text, .. })) if text.contains("evil.example") => {
+                    seen = true;
+                    break;
+                }
+                Ok(Some(Event::Message { text, .. })) if text.contains("evil.example") => {
+                    seen = true;
+                    break;
+                }
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+        seen
+    };
+    assert!(
+        !injected,
+        "an unauthenticated HTTP caller injected text into #callroom via the \
+         artifact NOTICE broadcast"
+    );
+
+    h.quit(None).await.ok();
+    server.abort();
+}
+
+/// Every other channel endpoint takes a bare name and prefixes `#` itself.
+/// `api_channel_sessions` passed the raw path segment straight to
+/// `active_session_for_channel` / `list_channel_av_sessions`, while sessions are
+/// stored under the `#`-prefixed channel — so it reported "no calls" for every
+/// channel unless the caller URL-encoded the `#`.
+#[tokio::test]
+async fn channel_sessions_endpoint_accepts_a_bare_channel_name() {
+    let (irc_addr, web, server) = start_test_server_with_web(empty_resolver()).await;
+
+    let private_key = PrivateKey::generate_ed25519();
+    let did = format!("did:key:{}", private_key.public_key_multibase());
+    let signer: Arc<dyn ChallengeSigner> = Arc::new(KeySigner::new(did, private_key));
+    let config = ConnectConfig {
+        server_addr: irc_addr.to_string(),
+        nick: "alice".to_string(),
+        user: "alice".to_string(),
+        realname: "Alice".to_string(),
+        ..Default::default()
+    };
+    let (h, mut events) = client::connect(config, Some(signer));
+    expect_event(
+        &mut events,
+        3000,
+        |e| matches!(e, Event::Authenticated { .. }),
+        "authenticated",
+    )
+    .await;
+    expect_event(
+        &mut events,
+        3000,
+        |e| matches!(e, Event::Registered { .. }),
+        "registered",
+    )
+    .await;
+    h.join("#callroom").await.unwrap();
+    expect_event(
+        &mut events,
+        3000,
+        |e| matches!(e, Event::Joined { .. }),
+        "joined",
+    )
+    .await;
+    let mut tags = HashMap::new();
+    tags.insert("+freeq.at/av-start".to_string(), String::new());
+    tags.insert("+freeq.at/av-instance".to_string(), "aaaa1111".to_string());
+    h.send_tagmsg("#callroom", tags).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let (status, body) = get(web, "/api/v1/channels/callroom/sessions").await;
+    assert_eq!(status, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v["active"].get("id").and_then(|i| i.as_str()).is_some(),
+        "bare channel name found no active session, but one is running: {body}\n\
+         (the same request with %23callroom does return it)"
+    );
+
+    h.quit(None).await.ok();
     server.abort();
 }

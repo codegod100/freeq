@@ -108,3 +108,61 @@ delete its own message — the msgid lookup misses and the server answers
 the un-normalized key, detached from the message they annotate.
 
 **Fix:** normalize the channel target once at the top of `handle_tagmsg`.
+
+### 3. RED→GREEN: deleting an edited message left the edited text readable
+`c8c131b2` — **worst find of the night**
+
+**RED:** `delete of the original left revisions readable: ["secret v2"]`
+
+An edit is a *new row* with `replaces_msgid`; clients keep the **original**
+msgid as the message identity, so a delete names the original while the current
+text lives in the edit row. `soft_delete_message` matched one exact msgid. So:
+edit a message to redact something → delete it → server says OK, your client
+removes it → **the newest text stays readable in CHATHISTORY and FTS search,
+forever.** Fails in the worst possible direction.
+
+**Fix:** `revision_family()` walks up to the root revision and collects every
+revision that transitively replaces it; `soft_delete_message` sweeps all of it
+(DB + FTS) from either end. Both walks bounded against `replaces_msgid` cycles.
+
+### 4. RED→GREEN: deleting a pinned message left a dangling pin
+`ed74fd94`
+
+**RED:** `left: ["id-other", "id-pinned"]  right: ["id-other"]`
+
+`handle_delete` purged only the in-memory `ch.pins`; the `pins` row outlived the
+message and pins reload from the DB on boot, so after a restart the channel
+advertised a pin resolving to nothing. Fix: sweep the family's pins in
+`soft_delete_message`, which already owns "make this message gone".
+
+### 5. RED→GREEN: private-channel data was world-readable over REST
+`fb7c299f` — **release blocker**
+
+**RED (5 tests):**
+```
+anonymous GET of a +k channel's topic returned 200:
+  {"topic":"acquisition of Initech — do not leak", ...}
+```
+
+`/history`, `/export`, `/evidence`, `/messages/{msgid}` all funnel through
+`authorize_channel_read`. Five siblings never did — and `topic`, `audit`,
+`events` didn't even take a `HeaderMap`, so they *could not* authorize. No
+bearer, no membership check, no mode check, for any channel on the instance:
+topic, governance/audit timeline (actor DIDs + signatures + payloads), signed
+coordination events, pinned text, and call membership.
+
+**Fix:** all five through the one guard. Included two **control** tests so the
+fix can't over-lock (already-guarded endpoints stay refused; a public channel
+stays 200) — those passed before and after, which is what proves the harness
+was detecting protection rather than just returning errors.
+
+### 6. RED→GREEN: same hole in the governance endpoints
+`3b8c10d7`
+
+`/approvals`, `/budget`, `/spend`, `/agent-capabilities` also took no
+`HeaderMap`: a private channel's spend, limits, agent permissions and pending
+human decisions were public. Also pinned two properties that were already
+correct so they can't regress (the channel *list* hides private channels; the
+governance endpoints stay 200 for public channels).
+
+Every channel-scoped read endpoint in `web.rs` now funnels through one guard.

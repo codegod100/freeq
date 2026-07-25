@@ -4531,16 +4531,48 @@ async fn api_session_artifacts(
 async fn api_create_artifact(
     State(state): State<Arc<SharedState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    // Verify session exists
-    {
+    // This endpoint writes to the provenance store AND broadcasts a NOTICE into
+    // the session's channel, so it must be authenticated. Previously it took no
+    // headers at all: anyone who knew a session id could forge an artifact
+    // attributed to someone else (`created_by` came from the request body) and
+    // inject caller-controlled text into the channel.
+    let caller = caller_did_from_bearer(&state, &headers).ok_or((
+        axum::http::StatusCode::UNAUTHORIZED,
+        "authentication required".to_string(),
+    ))?;
+
+    // Verify session exists, and capture what we need to authorize.
+    let (session_channel, is_participant) = {
         let mgr = state.av_sessions.lock();
-        if mgr.get(&id).is_none() {
-            return Err((
-                axum::http::StatusCode::NOT_FOUND,
-                "Session not found".to_string(),
-            ));
+        let session = mgr.get(&id).ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            "Session not found".to_string(),
+        ))?;
+        (
+            session.channel.clone(),
+            session.participants.contains_key(&caller),
+        )
+    };
+
+    // Participants may always attach an artifact. Otherwise fall back to the
+    // bound channel's read rule, so an op or member can attach a summary after
+    // leaving the call. Ad-hoc sessions with no channel: participants only.
+    if !is_participant {
+        match session_channel.as_deref() {
+            Some(channel) => {
+                authorize_channel_read(&state, channel, &headers).map_err(|status| {
+                    (status, "not authorized for this session".to_string())
+                })?;
+            }
+            None => {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "not a participant in this session".to_string(),
+                ));
+            }
         }
     }
 
@@ -4557,7 +4589,9 @@ async fn api_create_artifact(
         serde_json::from_str(&format!("\"{visibility_str}\""))
             .unwrap_or(crate::av::ArtifactVisibility::Participants);
     let title = body["title"].as_str();
-    let created_by = body["created_by"].as_str();
+    // Attribution comes from the authenticated caller, never from the body:
+    // a provenance record whose author is self-asserted is worthless.
+    let created_by = Some(caller.as_str());
 
     let artifact = crate::av::AvArtifact {
         id: ulid::Ulid::new().to_string(),
@@ -4603,17 +4637,21 @@ async fn api_channel_sessions(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // Who is (or was) in a private channel's calls is itself sensitive.
-    authorize_channel_read(&state, &name, &headers)?;
+    // Use the *normalized* channel the guard returns: sessions are stored under
+    // the `#`-prefixed name, so looking up the raw path segment found nothing
+    // and this endpoint reported "no calls" for every channel unless the caller
+    // happened to URL-encode the `#`.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let mgr = state.av_sessions.lock();
 
     // Active session (if any)
     let active = mgr
-        .active_session_for_channel(&name)
+        .active_session_for_channel(&channel)
         .map(|s| session_to_json(s, &mgr));
 
     // Recent ended sessions from DB
     let recent = state
-        .with_db(|db| db.list_channel_av_sessions(&name, 20))
+        .with_db(|db| db.list_channel_av_sessions(&channel, 20))
         .unwrap_or_default();
     let recent_json: Vec<serde_json::Value> = recent
         .iter()
