@@ -24,6 +24,21 @@ final class CoreModelTests: XCTestCase {
         XCTAssertEqual(ch.messages[0].text, "hi")
     }
 
+    func testAppendIfNewFoldsReactionsIntoCachedCopy() {
+        // Local cache loads a message WITHOUT reactions; a CHATHISTORY replay
+        // then delivers the same message WITH server-persisted reactions.
+        // Dedup must fold the reactions in (not drop them) so they survive
+        // logout/login.
+        let ch = ChannelState(name: "#t")
+        ch.appendIfNew(msg("m1"))                        // cached, no reactions
+        var replay = msg("m1")
+        replay.reactions = ["🎉": ["alice", "bob"], "🔥": ["carol"]]
+        ch.appendIfNew(replay)                            // CHATHISTORY copy
+        XCTAssertEqual(ch.messages.count, 1)              // still one message
+        XCTAssertEqual(ch.messages[0].reactions["🎉"], ["alice", "bob"])
+        XCTAssertEqual(ch.messages[0].reactions["🔥"], ["carol"])
+    }
+
     func testAppendOutOfOrderInsertsByTimestamp() {
         let ch = ChannelState(name: "#t")
         ch.appendIfNew(msg("m1", at: 100))
@@ -50,6 +65,43 @@ final class CoreModelTests: XCTestCase {
         // The replacement id is now known — its echo must not re-append.
         ch.appendIfNew(msg("edit-1", "echo"))
         XCTAssertEqual(ch.messages.count, 1)
+    }
+
+    // Regression: the local cache keeps an edited message under its ORIGINAL
+    // msgid (it edits the row in place), while server CHATHISTORY replays the
+    // edit under a fresh msgid carrying editOf=<original>. Both must collapse
+    // to a single row instead of rendering the edited text twice.
+    func testCachedOriginalAndHistoryEditDoNotDuplicate() {
+        let ch = ChannelState(name: "#t")
+        // Cache load: edited text, still keyed under the original id.
+        ch.appendIfNew(msg("A", "new text"))
+        // History batch resolves the edit to the new msgid B (editOf=A).
+        var edit = msg("B", "new text")
+        edit.editOf = "A"
+        ch.appendIfNew(edit)
+        XCTAssertEqual(ch.messages.count, 1)
+    }
+
+    // Symmetric: the history edit copy may arrive before the cache load.
+    func testHistoryEditThenCachedOriginalDoNotDuplicate() {
+        let ch = ChannelState(name: "#t")
+        var edit = msg("B", "new text")
+        edit.editOf = "A"
+        ch.appendIfNew(edit)
+        ch.appendIfNew(msg("A", "new text"))
+        XCTAssertEqual(ch.messages.count, 1)
+    }
+
+    // Chained edits keep referencing the original msgid even after the first
+    // edit rewrote the in-memory id.
+    func testChainedEditMatchesOnOriginalId() {
+        let ch = ChannelState(name: "#t")
+        ch.appendIfNew(msg("orig"))
+        ch.applyEdit(originalId: "orig", newId: "edit-1", newText: "first")
+        ch.applyEdit(originalId: "orig", newId: "edit-2", newText: "second")
+        XCTAssertEqual(ch.messages.count, 1)
+        XCTAssertEqual(ch.messages[0].text, "second")
+        XCTAssertEqual(ch.messages[0].id, "edit-2")
     }
 
     func testApplyEditOnUnknownIdIsNoop() {

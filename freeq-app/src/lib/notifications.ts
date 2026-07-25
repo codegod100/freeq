@@ -8,17 +8,18 @@ let soundEnabled = true;
 let totalUnread = 0;
 const originalTitle = document.title;
 
-// Notification sound — tiny inline beep
+// Notification sound — tiny inline synthesized chime, distinct per event.
+import { soundRecipe, type NotifyKind } from './notification-sound';
+export type { NotifyKind };
 let audioCtx: AudioContext | null = null;
 
-function playSound() {
+function playSound(kind: NotifyKind = 'message') {
   if (!soundEnabled) return;
   try {
     if (!audioCtx) audioCtx = new AudioContext();
     const t = audioCtx.currentTime;
 
-    // Two-tone chime (C5 → E5)
-    const notes = [523.25, 659.25];
+    const notes = soundRecipe(kind);
     notes.forEach((freq, i) => {
       const osc = audioCtx!.createOscillator();
       const gain = audioCtx!.createGain();
@@ -48,11 +49,11 @@ export async function requestPermission(): Promise<boolean> {
 
 let permissionRequested = false;
 
-export function notify(title: string, body: string, onClick?: () => void) {
+export function notify(title: string, body: string, onClick?: () => void, kind: NotifyKind = 'message') {
   if (!enabled) return;
 
-  // Play sound
-  playSound();
+  // Play sound (distinct per kind)
+  playSound(kind);
 
   // Update title badge
   totalUnread++;

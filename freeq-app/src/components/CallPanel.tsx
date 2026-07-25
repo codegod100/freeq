@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '../store';
-import { getAvInstanceId, getClient, leaveAvSession } from '../irc/client';
+import { gridTileSize } from '../lib/call-grid';
+import { getAvInstanceId, getClient, joinAvSession, leaveAvSession } from '../irc/client';
 import { loadMoqComponents } from '../lib/moq-loader';
 import { broadcastName, computeParticipantSlots } from '../lib/av-mesh';
 import { getCachedProfile } from '../lib/profiles';
@@ -33,10 +34,58 @@ type MoqDeviceSource = {
   device?: { preferred: { set(id: string): void } };
   source?: MoqSignal<MediaStreamTrack | undefined>;
 };
+// The publish element exposes its underlying hang `Broadcast` at `.broadcast`.
+// Each video rendition (hd/sd) is an `Encoder` whose `config` is a public
+// @moq/signals Signal accepting `EncoderConfig` — the library's documented
+// knob for pinning the published codec. See @moq/publish video/encoder.d.ts.
+type MoqEncoderConfigSignal = { set(c: { codec?: string; maxPixels?: number; keyframeInterval?: number }): void };
+
+// Cap the encode to ~1080p worth of pixels. moq's top H.264 profile is
+// avc1.640028 (High @ Level 4.0), which maxes out around 1080p of macroblocks.
+// Screens are routinely 4K / ultrawide, which NO offered avc1 profile can
+// encode — VideoEncoder.isConfigSupported rejects every candidate and the
+// encoder throws "no supported codec", so the broadcast publishes no video
+// track at all (the sharer still sees their local preview — raw capture — so
+// the failure is invisible on the sending side). Capping keeps H.264 always
+// encodable, cuts bandwidth, and lightens native decode. moq scales down
+// proportionally and 16-aligns; a 720p camera is under the cap so it's
+// untouched.
+const MAX_PUBLISH_PIXELS = 1920 * 1080;
 type MoqPublishEl = HTMLElement & {
   audio?: MoqSignal<MoqDeviceSource | undefined>;
   video?: MoqSignal<MoqDeviceSource | undefined>;
+  broadcast?: {
+    video?: {
+      hd?: { config?: MoqEncoderConfigSignal };
+      sd?: { config?: MoqEncoderConfigSignal };
+    };
+  };
 };
+
+// Pin the *published* video codec to H.264 (avc1).
+//
+// Left to its own heuristic the browser probes hardware encoders and, on
+// machines without H.264 hardware *encode* (common on Windows Chrome), lands
+// on hardware AV1. That's great browser↔browser, but the native macOS/iOS/
+// Windows clients have no hardware AV1 *decode* path — they software-decode
+// AV1, fall behind, back up, and the tile stalls to black. H.264 is the one
+// codec every freeq client hardware-decodes (browsers, and native via
+// VideoToolbox), so it's our interop baseline (the same reason WebRTC makes
+// H.264 mandatory-to-implement). `codec: "avc1"` filters the encoder's
+// candidate list to H.264 variants (hardware first, then Chrome's bundled
+// OpenH264 software encoder), guaranteeing an H.264 broadcast.
+//
+// Idempotent and defensive: a bundle predating the `config` signal simply
+// keeps its default heuristic.
+function pinPublishCodecH264(pub: MoqPublishEl): void {
+  const cfg = { codec: 'avc1', maxPixels: MAX_PUBLISH_PIXELS };
+  try {
+    pub.broadcast?.video?.hd?.config?.set(cfg);
+    pub.broadcast?.video?.sd?.config?.set(cfg);
+  } catch {
+    /* older component bundle without EncoderConfig.codec — leave default */
+  }
+}
 // moq-watch exposes a `broadcast` object whose `status` Signal transitions
 // offline → loading → live as a broadcast announces and its catalog
 // arrives. We use it to reveal a screen-share tile only once the
@@ -165,7 +214,13 @@ export function CallPanel() {
   const [moqUrl, setMoqUrl] = useState(moqOrigin);
   useEffect(() => {
     const applyToken = (token: string | null) => {
-      const url = token ? `${moqOrigin}?jwt=${encodeURIComponent(token)}` : moqOrigin;
+      // Always self-declare our per-call instance (`inst=`) — it keys
+      // server-side media revocation when our roster slot is torn down
+      // (audit F6). Token folds in as `jwt=` when minted.
+      const inst = encodeURIComponent(getAvInstanceId() || '');
+      const url = token
+        ? `${moqOrigin}?inst=${inst}&jwt=${encodeURIComponent(token)}`
+        : `${moqOrigin}?inst=${inst}`;
       moqUrlRef.current = url;
       setMoqUrl(url);
     };
@@ -232,6 +287,9 @@ export function CallPanel() {
     const myBroadcast = broadcastName(sessionId, myNick, myInstance);
     pub.setAttribute('url', moqUrlRef.current);
     pub.setAttribute('name', myBroadcast);
+    // Pin H.264 before `source` starts the encoder, so the codec is chosen
+    // once (no AV1 that native clients can't hardware-decode).
+    pinPublishCodecH264(pub);
     // `invisible` BEFORE `source`: moq-publish reacts to `source` by opening a
     // single getUserMedia. With `invisible` set first it grabs audio only, so a
     // busy/denied camera can't fail the whole (audio) call. When withVideo, we
@@ -356,6 +414,13 @@ export function CallPanel() {
     if (pub.getAttribute('name') === expected) return;
     stopPublishEl();
     buildPublishEl(useStore.getState().avCameraOn);
+    // The publish path changed — the ROSTER must follow, or every
+    // roster-driven subscriber keeps watching the old path and loses our
+    // media (the "renamed mid-call goes silent for web peers" split).
+    // Re-sending av-join with the SAME instance rejoins our slot in place
+    // and updates its nick, so the roster's computed path matches the new
+    // broadcast within one poll.
+    if (channel) joinAvSession(channel, sessionId);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [myNick, pubEl, sessionId]);
 
@@ -483,6 +548,10 @@ export function CallPanel() {
     screenPubElRef.current = pub;
     pub.setAttribute('url', moqUrlRef.current);
     pub.setAttribute('name', screenName);
+    // Pin H.264 before `source` starts the screen encoder — screen share is
+    // where AV1 hurt most (static, high-res content the browser loves to send
+    // as hardware AV1, which native can only software-decode → stall → black).
+    pinPublishCodecH264(pub);
     // Video only — mute before `source` so no audio rendition is ever
     // published even if the browser hands us a display-audio track.
     pub.setAttribute('muted', '');
@@ -670,11 +739,54 @@ export function CallPanel() {
     if (channel && sessionId) leaveAvSession(channel, sessionId);
   };
 
+  // Meet/Zoom-style auto-layout: measure the grid and size every tile so the
+  // whole gallery fits with no scrolling (fullscreen, no screen-share). The
+  // math is the shared CallGridLayout policy (parity with macOS/iOS). Hooks
+  // must precede the early return below (rules of hooks).
+  const gridRef = useRef<HTMLDivElement>(null);
+  const [gridSize, setGridSize] = useState({ w: 0, h: 0 });
+  // Click-to-focus: 'local' | remote broadcastKey | null. Clicking a tile
+  // spotlights it (fills the grid); others drop to a strip. Click again to
+  // return to the auto-grid.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
+  useEffect(() => {
+    const el = gridRef.current;
+    if (!el || !fullscreen) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r) setGridSize({ w: r.width, h: r.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [fullscreen]);
+
   if (!avAudioActive || !sessionId) return null;
 
   const participantCount = (session?.participants.size || 0);
   const showVideoGrid = avCameraOn || participantSlots.length > 0;
   const anyScreen = avScreenShareOn || liveScreens.size > 0;
+  const gridTotal = 1 + participantSlots.length; // local + remotes
+  const autoTile = fullscreen && !anyScreen && gridSize.w > 0
+    ? gridTileSize(gridTotal, gridSize.w, gridSize.h, 16)
+    : null;
+  const autoTileStyle = autoTile
+    ? { width: autoTile.width, height: autoTile.height }
+    : undefined;
+
+  // Per-tile style under click-to-focus: the focused tile fills the row, the
+  // rest shrink to a strip (CSS `order` moves the focused one first, so no
+  // video element is duplicated). Falls back to the auto-grid style.
+  const focusActive = fullscreen && focusedKey != null && gridSize.w > 0;
+  const tileStyleFor = (key: string): React.CSSProperties | undefined => {
+    if (focusActive) {
+      return key === focusedKey
+        ? { width: '100%', height: Math.max(120, gridSize.h - 150), order: -1 }
+        : { width: 168, height: 94, order: 0, flex: '0 0 auto' };
+    }
+    return autoTileStyle;
+  };
+  const toggleFocus = (key: string) =>
+    setFocusedKey((cur) => (cur === key ? null : key));
   const authDid = useStore.getState().authDid;
   const myAvatar = authDid ? getCachedProfile(authDid)?.avatar : null;
 
@@ -726,14 +838,19 @@ export function CallPanel() {
       {/* Video grid — shown when camera is on or participants exist */}
       {showVideoGrid && (
         <div
+          ref={gridRef}
           className={
             fullscreen
-              ? 'flex-1 flex flex-wrap gap-4 p-4 justify-center items-center content-center overflow-y-auto'
+              ? `flex-1 flex flex-wrap gap-4 p-4 justify-center items-center content-center ${autoTile ? 'overflow-hidden' : 'overflow-y-auto'}`
               : 'flex flex-wrap gap-2 p-2 justify-center max-h-64 overflow-y-auto'
           }
         >
           {/* Local tile */}
-          <div className={tileClasses(fullscreen)}>
+          <div
+            className={(focusActive || autoTileStyle) ? AUTO_TILE_CLASS + ' cursor-pointer' : tileClasses(fullscreen) + (fullscreen ? ' cursor-pointer' : '')}
+            style={tileStyleFor('local')}
+            onClick={fullscreen ? () => toggleFocus('local') : undefined}
+          >
             {avCameraOn ? (
               <video
                 ref={localVideoRef}
@@ -761,6 +878,8 @@ export function CallPanel() {
               slot={slot}
               moqOrigin={moqUrl}
               fullscreen={fullscreen}
+              tileStyle={tileStyleFor(slot.broadcastKey)}
+              onClick={fullscreen ? () => toggleFocus(slot.broadcastKey) : undefined}
             />
           ))}
         </div>
@@ -898,6 +1017,11 @@ type Slot = { nick: string; broadcastKey: string; broadcastName: string };
 /// as a fallback when the participant hasn't enabled their camera.
 /// Tile sizing — tiny thumbnails inline, large 16:9 tiles in full
 /// screen (16:9 so eliza's video isn't cropped).
+// Tile chrome with no fixed size — used when the auto-layout supplies an
+// explicit width/height via style (Meet/Zoom-style gallery).
+const AUTO_TILE_CLASS =
+  'relative aspect-video rounded-xl overflow-hidden bg-bg-tertiary flex-shrink-0';
+
 function tileClasses(fullscreen: boolean): string {
   return fullscreen
     ? 'relative w-[42vw] max-w-[820px] min-w-[280px] aspect-video rounded-xl overflow-hidden bg-bg-tertiary flex-shrink-0'
@@ -1008,10 +1132,14 @@ function RemoteTile({
   slot,
   moqOrigin,
   fullscreen,
+  tileStyle,
+  onClick,
 }: {
   slot: Slot;
   moqOrigin: string;
   fullscreen: boolean;
+  tileStyle?: React.CSSProperties;
+  onClick?: () => void;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const profile = getCachedProfile(slot.nick);
@@ -1056,7 +1184,11 @@ function RemoteTile({
   }, [slot.broadcastName, moqOrigin]);
 
   return (
-    <div className={tileClasses(fullscreen)}>
+    <div
+      className={(tileStyle ? AUTO_TILE_CLASS : tileClasses(fullscreen)) + (onClick ? ' cursor-pointer' : '')}
+      style={tileStyle}
+      onClick={onClick}
+    >
       <AvatarTile name={slot.nick} avatarUrl={profile?.avatar} />
       <div ref={mountRef} className="absolute inset-0" />
       <span className="absolute bottom-1 left-1 text-[10px] bg-black/60 text-white px-1 rounded z-10">

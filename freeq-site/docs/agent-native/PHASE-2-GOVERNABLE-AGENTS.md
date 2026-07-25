@@ -30,7 +30,7 @@ pub struct AgentCapability {
     /// Capability name: "post_message", "deploy", "call_tool", "merge_pr", etc.
     pub capability: String,
 
-    /// Resource scope, e.g. "repo:chad/freeq", "*".
+    /// Resource scope, e.g. "repo:freeq-irc/freeq", "*".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 

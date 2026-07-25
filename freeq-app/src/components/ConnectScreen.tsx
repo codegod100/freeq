@@ -614,7 +614,7 @@ export function ConnectScreen() {
         <div className="text-center mt-5 flex items-center justify-center gap-3 text-[10px]">
           <a href="https://freeq.at" target="_blank" className="text-fg-dim hover:text-fg-muted">freeq.at</a>
           <span className="text-border">·</span>
-          <a href="https://github.com/chad/freeq" target="_blank" className="text-fg-dim hover:text-fg-muted">GitHub</a>
+          <a href="https://github.com/freeq-irc/freeq" target="_blank" className="text-fg-dim hover:text-fg-muted">GitHub</a>
           <span className="text-border">·</span>
           <a href="https://www.freeq.at/docs/" target="_blank" rel="noopener noreferrer" className="text-fg-dim hover:text-fg-muted">Docs</a>
         </div>

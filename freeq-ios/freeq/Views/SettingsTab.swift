@@ -95,6 +95,22 @@ struct SettingsTab: View {
 
                     // Connection
                     Section {
+                        NavigationLink {
+                            BookmarksView()
+                        } label: {
+                            HStack {
+                                Label("Saved Messages", systemImage: "bookmark.fill")
+                                    .foregroundColor(Theme.textPrimary)
+                                Spacer()
+                                Text("\(appState.bookmarks.count)")
+                                    .font(.fqFootnote)
+                                    .foregroundColor(Theme.textSecondary)
+                            }
+                        }
+                        .listRowBackground(Theme.bgSecondary)
+                    }
+
+                    Section {
                         HStack {
                             Label("Server", systemImage: "server.rack")
                                 .foregroundColor(Theme.textPrimary)
@@ -188,7 +204,7 @@ struct SettingsTab: View {
                         }
                         .listRowBackground(Theme.bgSecondary)
 
-                        Link(destination: URL(string: "https://github.com/chad/freeq")!) {
+                        Link(destination: URL(string: "https://github.com/freeq-irc/freeq")!) {
                             HStack {
                                 Label("Source Code", systemImage: "chevron.left.forwardslash.chevron.right")
                                     .foregroundColor(Theme.textPrimary)

@@ -694,6 +694,11 @@ pub struct SharedState {
     /// Used on disconnect to clean only this connection's slots (per-instance)
     /// and on av-join to reap orphan slots whose IRC connection is gone.
     pub av_instances_per_conn: Mutex<HashMap<String, HashSet<String>>>,
+    /// AV instances whose owning connection dropped and whose teardown is
+    /// deferred behind the disconnect grace window. While an instance is in
+    /// here its roster slot must NOT be reaped as an orphan — the owner's
+    /// media is typically still flowing and they'll rejoin in place.
+    pub av_grace_pending: Mutex<HashSet<String>>,
     /// Pending OAuth sessions: state → OAuthPending.
     pub oauth_pending: Mutex<HashMap<String, OAuthPending>>,
     /// Completed OAuth sessions: state → OAuthResult.
@@ -1573,6 +1578,7 @@ impl Server {
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
             av_instances_per_conn: Mutex::new(HashMap::new()),
+            av_grace_pending: Mutex::new(HashSet::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),
@@ -2216,29 +2222,55 @@ impl Server {
                     // Prune ended AV sessions from memory (keep for 1 hour)
                     // and auto-end sessions idle for >2 hours with no active participants
                     {
+                        // Live-instance set: which AV instances are claimed by a
+                        // connection that's alive right now. Used so the age-based
+                        // arm of the policy only ever reaps resurrected ghosts —
+                        // NEVER a long-running call with live people on it.
+                        let live_instances: std::collections::HashSet<String> = cleanup_state
+                            .av_instances_per_conn
+                            .lock()
+                            .values()
+                            .flat_map(|set| set.iter().cloned())
+                            .collect();
+                        // Taken before av_sessions (single lock-order rule).
+                        #[cfg(feature = "av-native")]
+                        let sfu_for_revoke = cleanup_state.sfu_state.lock().clone();
                         let mut mgr = cleanup_state.av_sessions.lock();
-                        // Auto-end sessions where all participants have left but session wasn't formally ended
+                        // Auto-end policy lives in av::should_auto_end (unit-tested).
                         let stale_ids: Vec<String> = mgr
                             .active_sessions()
                             .iter()
                             .filter(|s| {
-                                let active_count = s
+                                let active: Vec<_> = s
                                     .participants
                                     .values()
                                     .filter(|p| p.left_at.is_none())
-                                    .count();
-                                if active_count == 0 {
-                                    return true; // No active participants — end it
-                                }
-                                // Also end sessions older than 2 hours (safety net)
+                                    .collect();
+                                // Instance-less legacy slots can't be liveness-checked;
+                                // treat them as claimed (never end a call we can't verify).
+                                let any_claimed = active.iter().any(|p| {
+                                    p.instance_id
+                                        .as_ref()
+                                        .is_none_or(|inst| live_instances.contains(inst))
+                                });
                                 let age = chrono::Utc::now().timestamp() - s.created_at;
-                                age > 7200
+                                crate::av::should_auto_end(active.len(), age, any_claimed)
                             })
                             .map(|s| s.id.clone())
                             .collect();
                         for id in &stale_ids {
+                            // Any lingering media conns die with the session
+                            // (F6). Snapshot before end_session marks them left.
+                            #[cfg(feature = "av-native")]
+                            let stale_instances = mgr.active_instances(id);
                             if let Ok(session) = mgr.end_session(id, None) {
                                 cleanup_state.with_db(|db| db.save_av_session(&session));
+                                #[cfg(feature = "av-native")]
+                                if let Some(sfu) = sfu_for_revoke.as_ref() {
+                                    for inst in &stale_instances {
+                                        sfu.revoke_media(inst);
+                                    }
+                                }
                                 if let Some(ch) = &session.channel {
                                     let ch = ch.clone();
                                     drop(mgr);
@@ -3439,6 +3471,22 @@ pub(crate) async fn process_s2s_message(
                 let channel = target.clone();
                 state.with_db(|db| {
                     db.store_reaction(&target_msgid, &channel, &nick, did.as_deref(), &emoji, ts)
+                });
+            }
+
+            // Persist reaction REMOVALS too. Without this, a federated
+            // unreact relayed to live clients but the peer's DB kept the row —
+            // the removed reaction resurrected for every fresh join and after
+            // every restart on this side of the federation.
+            if let (Some(emoji), Some(target_msgid)) =
+                (tags.get("+freeq.at/unreact"), tags.get("+reply"))
+            {
+                let nick = from.split('!').next().unwrap_or(&from).to_string();
+                let did = state.nick_owners.lock().get(&nick.to_lowercase()).cloned();
+                let emoji = emoji.clone();
+                let target_msgid = target_msgid.clone();
+                state.with_db(|db| {
+                    db.remove_reaction(&target_msgid, &nick, did.as_deref(), &emoji)
                 });
             }
 
@@ -4977,6 +5025,7 @@ mod s2s_adversarial_tests {
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
             av_instances_per_conn: Mutex::new(HashMap::new()),
+            av_grace_pending: Mutex::new(HashSet::new()),
             oauth_pending: Mutex::new(HashMap::new()),
             oauth_complete: Mutex::new(HashMap::new()),
             web_auth_tokens: Mutex::new(HashMap::new()),
@@ -6404,6 +6453,62 @@ mod s2s_adversarial_tests {
         assert!(
             msg.contains("+react="),
             "Should contain reaction, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn s2s_unreact_removes_persisted_reaction() {
+        // A federated reaction followed by a federated UNREACT: the removal
+        // must reach the DB, or the reaction resurrects for fresh joins and
+        // after restarts (it did — the unreact path only relayed live).
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        setup_channel(&state, "#s2s-unreact");
+
+        let mut react = HashMap::new();
+        react.insert("+react".to_string(), "🎉".to_string());
+        react.insert("+reply".to_string(), "01MSGID".to_string());
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:r1"),
+                from: "alice!a@remote".to_string(),
+                target: "#s2s-unreact".to_string(),
+                tags: react,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+        let stored = state
+            .with_db(|db| db.get_reactions_for_messages(&["01MSGID"]))
+            .expect("db present");
+        assert_eq!(stored.get("01MSGID").map(|v| v.len()), Some(1), "react persisted");
+
+        let mut unreact = HashMap::new();
+        unreact.insert("+freeq.at/unreact".to_string(), "🎉".to_string());
+        unreact.insert("+reply".to_string(), "01MSGID".to_string());
+        process_s2s_message(
+            &state,
+            &mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:r2"),
+                from: "alice!a@remote".to_string(),
+                target: "#s2s-unreact".to_string(),
+                tags: unreact,
+                origin: PEER.to_string(),
+            },
+        )
+        .await;
+        let after = state
+            .with_db(|db| db.get_reactions_for_messages(&["01MSGID"]))
+            .expect("db present");
+        assert!(
+            after.get("01MSGID").is_none_or(|v| v.is_empty()),
+            "federated unreact must remove the persisted reaction: {after:?}"
         );
     }
 

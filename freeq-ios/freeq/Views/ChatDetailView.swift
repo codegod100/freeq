@@ -5,15 +5,26 @@ struct ChatDetailView: View {
     @EnvironmentObject var appState: AppState
     let channelName: String
     @State private var showingSearch = false
+    @State private var showingPins = false
     // On-device "catch me up" summary.
     @State private var showingSummary = false
     @State private var summaryText: String? = nil
     @State private var summarizing = false
     @Environment(\.dismiss) var dismiss
 
+    /// Canonical buffer key: a DM opened by nick follows its DID binding, so
+    /// the view survives the thread merging under the DID mid-session.
+    private var bufferKey: String {
+        if channelName.hasPrefix("#") || channelName.hasPrefix("&") { return channelName }
+        return appState.didForNick(channelName) ?? channelName
+    }
+
+    /// Human name for the toolbar — never a raw DID.
+    private var displayName: String { appState.displayNameForKey(bufferKey) }
+
     private var channelState: ChannelState? {
-        appState.channels.first { $0.name == channelName }
-            ?? appState.dmBuffers.first { $0.name == channelName }
+        appState.channels.first { $0.name.lowercased() == bufferKey.lowercased() }
+            ?? appState.dmBuffers.first { $0.name.lowercased() == bufferKey.lowercased() }
     }
 
     private var isChannel: Bool { channelName.hasPrefix("#") }
@@ -63,6 +74,22 @@ struct ChatDetailView: View {
                     .animation(.easeInOut(duration: 0.3), value: appState.connectionState)
                 }
 
+                // Access-denied banner — explains a gated join (invite-only,
+                // bad key, banned, auth required) instead of failing silently.
+                if let reason = channelState?.accessDeniedReason {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.slash.fill").font(.system(size: 12))
+                        Text(reason).font(.fqFootnote.weight(.medium))
+                        Spacer()
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Theme.warning)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
                 // Voice/video call panel — pinned above the message list
                 // when an AV session is active in this channel.
                 if isCallActiveHere {
@@ -108,19 +135,27 @@ struct ChatDetailView: View {
         // Handoff: advertise the open conversation so it can resume on the
         // user's Mac/iPad. Routed by freeqApp's onContinueUserActivity.
         .userActivity(FreeqActivity.channel, isActive: !channelName.isEmpty) { activity in
-            activity.title = channelName
-            activity.userInfo = ["channel": channelName]
+            activity.title = displayName
+            activity.userInfo = ["channel": bufferKey]
             activity.isEligibleForHandoff = true
-            activity.targetContentIdentifier = channelName
+            activity.targetContentIdentifier = bufferKey
         }
         .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         .toolbarBackground(.visible, for: .navigationBar)
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
-                    Text(channelName)
-                        .font(.fqCallout.weight(.semibold))
-                        .foregroundColor(Theme.textPrimary)
+                    HStack(spacing: 4) {
+                        if channelState?.isEncrypted == true {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(Theme.verify)
+                                .accessibilityLabel("End-to-end encrypted")
+                        }
+                        Text(displayName)
+                            .font(.fqCallout.weight(.semibold))
+                            .foregroundColor(Theme.textPrimary)
+                    }
 
                     if let channel = channelState {
                         if !channel.activeTypers.isEmpty {
@@ -144,12 +179,12 @@ struct ChatDetailView: View {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 // Favorite toggle — pins this conversation to the top of the
                 // list. Available for channels and DMs.
-                Button(action: { appState.toggleFavorite(channelName) }) {
-                    Image(systemName: appState.isFavorite(channelName) ? "star.fill" : "star")
+                Button(action: { appState.toggleFavorite(bufferKey) }) {
+                    Image(systemName: appState.isFavorite(bufferKey) ? "star.fill" : "star")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(appState.isFavorite(channelName) ? .yellow : Theme.textSecondary)
+                        .foregroundColor(appState.isFavorite(bufferKey) ? .yellow : Theme.textSecondary)
                 }
-                .accessibilityLabel(appState.isFavorite(channelName) ? "Remove from favorites" : "Add to favorites")
+                .accessibilityLabel(appState.isFavorite(bufferKey) ? "Remove from favorites" : "Add to favorites")
 
                 if isChannel {
                     // Voice call — green when in this call, accent when a
@@ -172,20 +207,26 @@ struct ChatDetailView: View {
                             .foregroundColor(Theme.textSecondary)
                     }
 
-                    Button(action: { appState.showMemberList.toggle() }) {
-                        Image(systemName: "person.2")
+                    // Overflow menu — explicit, because one more inline item
+                    // makes UIKit auto-collapse the tail into a dead system
+                    // ellipsis. Members, pins (PinnedMessagesView previously
+                    // had no entry point at all), and catch-me-up live here.
+                    Menu {
+                        Button(action: { appState.showMemberList.toggle() }) {
+                            Label("Members", systemImage: "person.2")
+                        }
+                        Button(action: { showingPins = true }) {
+                            Label("Pinned Messages", systemImage: "pin")
+                        }
+                        if IntelligenceService.shared.isAvailable {
+                            Button(action: generateSummary) {
+                                Label("Catch Me Up", systemImage: "sparkles")
+                            }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
                             .font(.system(size: 14))
                             .foregroundColor(Theme.textSecondary)
-                    }
-
-                    // Catch me up — on-device summary of the recent conversation.
-                    if IntelligenceService.shared.isAvailable {
-                        Button(action: generateSummary) {
-                            Image(systemName: "sparkles")
-                                .font(.system(size: 15, weight: .semibold))
-                                .foregroundStyle(Theme.signalGradient)
-                        }
-                        .accessibilityLabel("Catch me up")
                     }
                 }
             }
@@ -196,21 +237,27 @@ struct ChatDetailView: View {
                 .presentationBackground(.ultraThinMaterial)
         }
         .onAppear {
-            appState.activeChannel = channelName
+            appState.activeChannel = bufferKey
             // Snapshot how much you missed BEFORE markRead clears it, so the
             // "while you were away" card knows there's a backlog to summarize.
-            appState.awayCardCounts[channelName] = appState.unreadCounts[channelName] ?? 0
-            appState.markRead(channelName)
+            appState.awayCardCounts[bufferKey] = appState.unreadCounts[bufferKey] ?? 0
+            appState.markRead(bufferKey)
         }
         .onDisappear {
             // Clear activeChannel so unread counting works for this channel
-            if appState.activeChannel == channelName {
+            if appState.activeChannel == bufferKey || appState.activeChannel == channelName {
                 appState.activeChannel = nil
             }
         }
         .sheet(isPresented: $showingSearch) {
             SearchSheet()
                 .presentationDetents([.large])
+        }
+        .sheet(isPresented: $showingPins) {
+            NavigationStack {
+                PinnedMessagesView(channelName: bufferKey)
+            }
+            .presentationDetents([.large])
         }
     }
 

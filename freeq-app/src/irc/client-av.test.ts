@@ -50,7 +50,13 @@ const {
   __resetAvInstanceForTests,
   __wireEventsForTests,
   __getPendingCallRejoinForTests,
+  __setAvStartPollForTests,
 } = await import('./client');
+
+// Fast convergence poll: the production 16×500 ms schedule outlives the test
+// timeout, and a still-running poll's in-flight guard then suppresses every
+// later startAvSession call in this file (order-dependent failures).
+__setAvStartPollForTests(1, 2);
 
 // Stub FreeqClient that records `.on` registrations and exposes an
 // `emit(event, ...args)` helper so tests can fire synthetic events.
@@ -615,5 +621,77 @@ describe('auto-rejoin after reconnect (wireEvents integration)', () => {
       .map((c: any[]) => c[0] as string)
       .some((l) => l.includes('av-join'));
     expect(rejoined).toBe(false);
+  });
+});
+
+describe('avError handling (wireEvents integration — audit F3)', () => {
+  // The ghost-caller regression: a rejected av-join used to arrive only as a
+  // human NOTICE while the panel + publisher were already up — the client
+  // kept publishing into a session the server never admitted it to.
+  it('join-failed for the active session tears the call panel down', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    useStore.setState({
+      activeAvSession: 'sess-1',
+      avAudioActive: true,
+      avCameraOn: true,
+      activeChannel: '#room',
+      avSessions: new Map(),
+    });
+
+    stub.emit('avError', 'join-failed', 'sess-1', 'Session has ended');
+
+    expect(useStore.getState().avAudioActive).toBe(false);
+    expect(useStore.getState().avCameraOn).toBe(false);
+    expect(useStore.getState().activeAvSession).toBeNull();
+  });
+
+  it('join-failed for a DIFFERENT session leaves the active call alone', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    useStore.setState({
+      activeAvSession: 'sess-1',
+      avAudioActive: true,
+      avSessions: new Map(),
+    });
+
+    stub.emit('avError', 'join-failed', 'sess-OTHER', 'Session is full');
+
+    expect(useStore.getState().avAudioActive).toBe(true);
+    expect(useStore.getState().activeAvSession).toBe('sess-1');
+  });
+
+  it('start-collision converges onto the winning session (av-join sent)', () => {
+    const stub = makeEventStub('me');
+    __wireEventsForTests(stub as any);
+    __setClientForTests(stub as any);
+
+    // The winner's av-state broadcast already registered the session.
+    useStore.setState({
+      activeAvSession: null,
+      avAudioActive: true,
+      avSessions: new Map([['sess-winner', {
+        id: 'sess-winner',
+        channel: '#room',
+        createdBy: 'did:plc:them',
+        createdByNick: 'them',
+        participants: new Map(),
+        state: 'active',
+        startedAt: new Date(),
+      }]]),
+    });
+
+    stub.raw.mockClear();
+    stub.emit('avError', 'start-collision', 'sess-winner', 'already has an active session');
+
+    const joined = stub.raw.mock.calls
+      .map((c: any[]) => c[0] as string)
+      .find((l) => l.includes('av-join') && l.includes('sess-winner'));
+    expect(joined, 'loser must converge by joining the winning session').toBeTruthy();
+    expect(useStore.getState().activeAvSession).toBe('sess-winner');
   });
 });

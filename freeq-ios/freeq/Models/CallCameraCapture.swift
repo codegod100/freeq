@@ -52,6 +52,14 @@ final class CallCameraCapture: NSObject {
     /// apply it via affine transform as a fallback. Tests read this to pin
     /// the connection-less path.
     private(set) var pendingPreviewAngle: CGFloat = 90
+    /// iOS 17+ rotation coordinator: computes the exact preview rotation angle
+    /// for the CURRENT physical orientation AND this (front) camera. Replaces a
+    /// hand-derived angle table that rendered the preview 90° off in portrait
+    /// and upside-down in landscape (it couldn't even distinguish landscapeLeft
+    /// from landscapeRight). The OUTGOING frames keep their own (correct)
+    /// software rotation; this only drives the local self-view connection.
+    private var rotationCoordinator: AVCaptureDevice.RotationCoordinator?
+    private var previewRotationObservation: NSKeyValueObservation?
     /// Provider for the "current device orientation" — overridable in tests
     /// so we don't depend on `UIDevice.current.orientation`, which returns
     /// `.unknown` in the simulator/unit-test environment.
@@ -167,36 +175,32 @@ final class CallCameraCapture: NSObject {
         }
     }
 
+    /// Set the preview connection's rotation from the RotationCoordinator's
+    /// horizon-level angle (front-camera- and orientation-correct). No-op until
+    /// the connection exists (built by startRunning) — re-called there.
+    private func applyPreviewRotation() {
+        guard let coordinator = rotationCoordinator else { return }
+        let angle = coordinator.videoRotationAngleForHorizonLevelPreview
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.pendingPreviewAngle = angle
+            guard let conn = self.previewLayer.connection,
+                  conn.isVideoRotationAngleSupported(angle) else { return }
+            conn.videoRotationAngle = angle
+            self.previewLayer.setAffineTransform(.identity)
+        }
+    }
+
+    /// Track the last meaningful device orientation for the OUTGOING software
+    /// rotation (`rotatedFrame`). The PREVIEW connection is driven separately
+    /// by `RotationCoordinator` (see `configureIfNeeded`) — we no longer set
+    /// the preview angle from this hand table, which was wrong for the preview.
     fileprivate func applyOrientation(_ orientation: UIDeviceOrientation) {
-        let angle: CGFloat? = previewAngleOrNil(for: orientation)
-        guard let angle else {
+        guard previewAngleOrNil(for: orientation) != nil else {
             print("[camera] orientation: \(orientation.rawValue) — skipped (faceUp/faceDown/unknown)")
             return
         }
         lastValidOrientation = orientation
-        pendingPreviewAngle = angle
-        let conn = previewLayer.connection
-        let supported = conn?.isVideoRotationAngleSupported(angle) ?? false
-        print("[camera] orientation: raw=\(orientation.rawValue) angle=\(angle) connection=\(conn != nil) supported=\(supported)")
-        if let conn, supported {
-            conn.videoRotationAngle = angle
-            // Clear any leftover affine transform from a pre-connection
-            // fallback — without this, when the connection appears mid-call
-            // the affine rotation would compound with the connection's
-            // rotation, double-rotating the preview.
-            previewLayer.setAffineTransform(.identity)
-        } else {
-            // Fallback: if AVCaptureVideoPreviewLayer's connection isn't
-            // ready yet (it isn't until startRunning has connected the
-            // session), apply the rotation as a CALayer affine transform.
-            //
-            // `videoRotationAngle` is documented as a CLOCKWISE rotation,
-            // but iOS's `CGAffineTransform(rotationAngle:)` interprets a
-            // positive angle as COUNTER-clockwise. Negate so the fallback
-            // matches the connection-driven path visually.
-            let radians = -angle * .pi / 180.0
-            previewLayer.setAffineTransform(CGAffineTransform(rotationAngle: radians))
-        }
     }
 
     /// Request camera permission and start delivering frames.
@@ -212,6 +216,9 @@ final class CallCameraCapture: NSObject {
                 if !self.session.isRunning {
                     self.session.startRunning()
                 }
+                // The preview connection only exists after startRunning; apply
+                // the coordinator's current angle now (KVO only fires on change).
+                self.applyPreviewRotation()
             }
         }
     }
@@ -244,6 +251,19 @@ final class CallCameraCapture: NSObject {
         }
         if session.canAddInput(input) {
             session.addInput(input)
+        }
+
+        // Drive the preview rotation from AVCaptureDevice.RotationCoordinator:
+        // it returns the exact angle to keep the preview horizon-level for THIS
+        // camera + the live physical orientation, correctly handling the front
+        // camera and all four device orientations. Re-applied on every change
+        // and again after startRunning (the connection is nil until then).
+        let coordinator = AVCaptureDevice.RotationCoordinator(device: device, previewLayer: previewLayer)
+        rotationCoordinator = coordinator
+        previewRotationObservation = coordinator.observe(
+            \.videoRotationAngleForHorizonLevelPreview, options: [.initial, .new]
+        ) { [weak self] _, _ in
+            self?.applyPreviewRotation()
         }
 
         videoOutput.videoSettings = [

@@ -735,6 +735,12 @@ async fn run_app(
             }
         }
 
+        // Backfill: when a DM buffer is the active one and we haven't yet
+        // pulled its history this session, request it once. Channels get
+        // history pushed on JOIN; DMs have no JOIN, so opening one would
+        // otherwise show only messages that arrive live.
+        maybe_fetch_history(app, handle).await;
+
         // Drain background task results
         if let Some(mut bg_rx) = app.bg_result_rx.take() {
             while let Ok(result) = bg_rx.try_recv() {
@@ -930,6 +936,21 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             text,
             tags,
             dm_key, .. } => {
+            // DID is the identity. Render our own messages under our current
+            // nick no matter which client alias sent them — a TUI as `-n nap`,
+            // a web session as the handle nick `zapnap` — so one DID reads as
+            // one person, and /edit and /delete (which select own messages by
+            // nick) then find them all. Guarded by the `account` tag equalling
+            // our DID so a peer with no account tag is never mistaken for us.
+            let from = if app
+                .authenticated_did
+                .as_deref()
+                .is_some_and(|my| tags.get("account").map(String::as_str) == Some(my))
+            {
+                app.nick.clone()
+            } else {
+                from
+            };
             // One conversation, one buffer: channels key by name; DMs key
             // by the SDK's dm_key (peer DID when known, else nick) so an
             // echo and the peer's reply land in the same thread.
@@ -1047,6 +1068,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                             is_edited: false,
                             is_deleted: false,
                             reply_to: reply_to.clone(),
+                            edit_of: None,
                         },
                     );
                 }
@@ -1077,6 +1099,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                         is_edited: false,
                         is_deleted: false,
                         reply_to: reply_to.clone(),
+                        edit_of: None,
                     },
                 );
             } else {
@@ -1099,6 +1122,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                             is_edited: false,
                             is_deleted: false,
                             reply_to: reply_to.clone(),
+                            edit_of: None,
                         },
                     );
                 } else {
@@ -1117,6 +1141,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                             is_edited: false,
                             is_deleted: false,
                             reply_to: reply_to.clone(),
+                            edit_of: None,
                         },
                     );
 
@@ -1184,6 +1209,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                     is_edited: false,
                     is_deleted: false,
                     reply_to: None,
+                    edit_of: None,
                 });
             }
         }
@@ -1317,7 +1343,26 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
             }
         }
         Event::ServerNotice { text } => {
-            app.status_msg(&text);
+            // Swallow the failure of a speculative "fetch history on view"
+            // (maybe_fetch_history): a DM with a guest peer, or a not-yet-
+            // persisted conversation, answers CHATHISTORY with INVALID_TARGET/
+            // ACCOUNT_REQUIRED naming that same target. The user didn't ask
+            // for history, so surfacing it as an error is just noise. A
+            // user-initiated /msgs targets `*`, so its failure still shows.
+            let is_speculative_history_fail = {
+                let mut t = text.split_whitespace();
+                t.next() == Some("CHATHISTORY")
+                    && t.next().is_some() // error code
+                    && t.next() == Some(app.active_buffer.as_str())
+            };
+            if is_speculative_history_fail {
+                return;
+            }
+            // Show in the buffer the user is actually looking at — a FAIL (or
+            // any server notice) responding to a command run from a channel/DM
+            // was invisible when it only ever landed in the status buffer.
+            let active = app.active_buffer.clone();
+            app.buffer_mut(&active).push_system(&text);
             // Detect URLs in server notices and offer to open them
             if let Some(url) = extract_url(&text) {
                 app.pending_url = Some(url.to_string());
@@ -1483,7 +1528,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     let needle = arg.trim().to_lowercase();
                     let matches: Vec<(String, String, String)> = app
                         .buffers
-                        .get(&target.to_lowercase())
+                        .get(&crate::app::buffer_key(&target))
                         .map(|buf| {
                             buf.messages
                                 .iter()
@@ -1526,7 +1571,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     app.status_msg("/pin only works in channels");
                 } else {
                     let target_msgid = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let trimmed = arg.trim();
                         if !trimmed.is_empty()
                             && buf.is_some_and(|b| b.find_by_msgid(trimmed).is_some())
@@ -1578,7 +1623,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     // Disambiguate "<msgid> <text>" vs "<text>" by checking
                     // whether the first token matches a known msgid.
                     let (target_msgid, reply_text) = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
                         let first = parts[0];
                         let rest = parts.get(1).copied().unwrap_or("");
@@ -1612,7 +1657,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     // a known msgid in the active buffer; if not, treat the
                     // whole arg as the new text targeting our most recent.
                     let (target_msgid, new_text) = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let parts: Vec<&str> = arg.splitn(2, ' ').collect();
                         let first = parts[0];
                         let rest = parts.get(1).copied().unwrap_or("");
@@ -1644,7 +1689,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     app.status_msg("Not in a channel or DM");
                 } else {
                     let target_msgid = {
-                        let buf = app.buffers.get(&target.to_lowercase());
+                        let buf = app.buffers.get(&crate::app::buffer_key(&target));
                         let trimmed = arg.trim();
                         if !trimmed.is_empty()
                             && buf.is_some_and(|b| b.find_by_msgid(trimmed).is_some())
@@ -1679,7 +1724,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     if target != "status" {
                         let target_msgid = app
                             .buffers
-                            .get(&target.to_lowercase())
+                            .get(&crate::app::buffer_key(&target))
                             .and_then(|b| b.recent_msgid())
                             .map(|s| s.to_string());
                         if target_msgid.is_none() {
@@ -1962,16 +2007,39 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                         app.status_msg("  Messages are encrypted client-side — the server only sees ciphertext.");
                     }
                 } else {
-                    let key = freeq_sdk::e2ee::derive_key(arg, &channel);
-                    app.channel_keys.insert(channel.clone(), key);
-                    app.buffer_mut(&channel).push_system(
-                        "🔒 End-to-end encryption enabled. Messages in this channel are now encrypted."
-                    );
-                    app.buffer_mut(&channel).push_system(
-                        "   All members must use the same passphrase to read messages.",
-                    );
-                    app.buffer_mut(&channel)
-                        .push_system("   The server cannot read encrypted messages.");
+                    let is_channel = channel.starts_with('#') || channel.starts_with('&');
+                    // Channels salt by the shared channel name; DMs need a
+                    // symmetric salt (canonical conversation key) so both
+                    // peers derive the same key. Refuse a DM we can't key
+                    // symmetrically rather than store a one-sided key that
+                    // silently produces unreadable messages.
+                    let salt = if is_channel {
+                        Some(channel.clone())
+                    } else {
+                        app.dm_e2ee_salt(&channel)
+                    };
+                    match salt {
+                        Some(salt) => {
+                            let key = freeq_sdk::e2ee::derive_key(arg, &salt);
+                            app.channel_keys.insert(channel.clone(), key);
+                            app.buffer_mut(&channel).push_system(
+                                "🔒 End-to-end encryption enabled. Messages here are now encrypted."
+                            );
+                            app.buffer_mut(&channel).push_system(
+                                "   The other side must /encrypt with the same passphrase to read them.",
+                            );
+                            app.buffer_mut(&channel)
+                                .push_system("   The server cannot read encrypted messages.");
+                        }
+                        None => {
+                            app.buffer_mut(&channel).push_system(
+                                "Can't enable E2EE here: this DM needs both sides DID-authenticated.",
+                            );
+                            app.buffer_mut(&channel).push_system(
+                                "   Exchange a message first so the peer's identity is known, then retry.",
+                            );
+                        }
+                    }
                 }
             }
             "/decrypt" | "/noencrypt" => {
@@ -2288,14 +2356,46 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     // contains the arg (DID-keyed DMs match by nick).
                     let target = arg.to_lowercase();
                     let names = app.buffer_names();
-                    if let Some(name) = names.iter().find(|n| {
-                        n.to_lowercase().contains(&target)
-                            || app.display_name(n).to_lowercase().contains(&target)
-                    }) {
-                        let name = name.clone();
+                    // Rank matches so an intent-revealing hit wins over
+                    // BTreeMap order: a display-name/key that *starts with*
+                    // the fragment beats one that merely contains it. Fixes
+                    // `/sw didtest` landing on `#didtest` instead of the
+                    // didtestbot DM.
+                    let best = names
+                        .iter()
+                        .filter_map(|n| {
+                            let key = n.to_lowercase();
+                            let disp = app.display_name(n).to_lowercase();
+                            let rank = if disp.starts_with(&target) || key.starts_with(&target) {
+                                0
+                            } else if disp.contains(&target) || key.contains(&target) {
+                                1
+                            } else {
+                                return None;
+                            };
+                            Some((rank, n.clone()))
+                        })
+                        .min_by_key(|(rank, _)| *rank)
+                        .map(|(_, n)| n);
+                    if let Some(name) = best {
                         app.switch_to(&name);
+                    } else if arg.starts_with('#') || arg.starts_with('&') {
+                        // Channels have a distinct open step — /join. Don't
+                        // conjure one from /switch.
+                        app.status_msg(&format!("Not in {arg} — use /join to enter it"));
                     } else {
-                        app.status_msg(&format!("No buffer matching '{arg}'"));
+                        // A DM has no join: switching to it IS opening it.
+                        // Key by the peer's DID when known so it lands on the
+                        // persisted (DID-keyed) thread; history backfills via
+                        // maybe_fetch_history once it's active.
+                        let raw = arg.trim();
+                        let key = if freeq_sdk::address::is_did(raw) {
+                            raw.to_string()
+                        } else {
+                            app.did_for_nick(raw).unwrap_or_else(|| raw.to_string())
+                        };
+                        app.buffer_mut(&key);
+                        app.switch_to(&key);
                     }
                 }
             }
@@ -2636,6 +2736,32 @@ fn parse_timestamp_ms(tags: &std::collections::HashMap<String, String>) -> i64 {
         return dt.timestamp_millis();
     }
     chrono::Local::now().timestamp_millis()
+}
+
+/// When a channel or DM buffer becomes active, request `CHATHISTORY LATEST`
+/// once — the same "fetch history on view" the web client does. Channels
+/// only receive a server-side history push on a *fresh* JOIN; a multi-device
+/// attach (a second session of a DID already in the channel) gets JOIN/NAMES
+/// but no history push, so without this an attaching device is blank. The
+/// batch flush dedups by msgid, so overlap with a fresh-join push is
+/// harmless. No-op for status/P2P buffers and anything already requested.
+///
+/// Guests skip *DM* history: guest DMs aren't persisted (both sides need a
+/// DID), so the request has nothing to return and the server rejects it with
+/// ACCOUNT_REQUIRED — which would then surface as an error in the DM window.
+/// Channel history is fine for guests.
+async fn maybe_fetch_history(app: &mut crate::app::App, handle: &client::ClientHandle) {
+    let key = app.active_buffer.clone();
+    let is_channel = key.starts_with('#') || key.starts_with('&');
+    let eligible = key != "status"
+        && !key.starts_with("p2p:")
+        && app.buffers.contains_key(&key)
+        && (is_channel || app.authenticated_did.is_some());
+    if !eligible || app.history_requested.contains(&key) {
+        return;
+    }
+    app.history_requested.insert(key.clone());
+    let _ = handle.raw(&format!("CHATHISTORY LATEST {key} * 50")).await;
 }
 
 fn push_line_to_buffer(

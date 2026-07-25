@@ -682,3 +682,162 @@ describe('whoisCache vs nick reassignment (stale identity bug)', () => {
     ).toBe(false);
   });
 });
+
+// ── DM edit stacking (replayed edits vs live/collapsed rows) ──
+//
+// A replayed history row and a live row can be the SAME message under
+// different msgids (edits re-key). Blind append rendered the original
+// plus stacked "- edited" copies. mergeHistory reconciles via the edit
+// anchor (editOf, root of the chain).
+describe('mergeHistory edit reconciliation', () => {
+  const s = () => useStore.getState();
+  const ch = 'did:key:z6mktestpeer';
+  const at = (iso: string, id: string, text: string, editOf?: string) => ({
+    id, from: 'zapnap', text, timestamp: new Date(iso), tags: {},
+    ...(editOf ? { editOf } : {}),
+  });
+
+  beforeEach(() => {
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+  });
+
+  it('replayed collapsed edit updates the held original in place', () => {
+    s().addMessage(ch, at('2026-07-20T14:35:00Z', 'm0', 'original'));
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:36:00Z', 'e1', 'original - edited', 'm0'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('e1');
+    expect(msgs[0].text).toBe('original - edited');
+    expect(msgs[0].editOf).toBe('m0');
+  });
+
+  it('replayed stale base row is skipped when a collapsed edit is held', () => {
+    s().addMessage(ch, at('2026-07-20T14:35:00Z', 'm0', 'original'));
+    (s() as any).editMessage(ch, 'm0', 'original - edited', 'e1');
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:35:00Z', 'm0', 'original'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('e1');
+    expect(msgs[0].text).toBe('original - edited');
+  });
+
+  it('chained live edits still match a root-anchored replayed row', () => {
+    s().addMessage(ch, at('2026-07-20T14:35:00Z', 'm0', 'original'));
+    // Two live edits, chained references (iOS behavior): e2 edits e1.
+    (s() as any).editMessage(ch, 'm0', 'edited once', 'e1');
+    (s() as any).editMessage(ch, 'e1', 'edited twice', 'e2');
+    // Replay delivers the final collapsed row root-anchored to m0.
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:37:00Z', 'e2', 'edited twice', 'm0'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('e2');
+    expect(msgs[0].text).toBe('edited twice');
+  });
+
+  it('edit row with no held original still lands as a single row', () => {
+    (s() as any).mergeHistory(ch, [
+      at('2026-07-20T14:36:00Z', 'e1', 'edited orphan', 'm0'),
+    ]);
+    const msgs = s().channels.get(ch)!.messages;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].text).toBe('edited orphan');
+  });
+});
+
+// ── Edit/delete authorship gate (forged events ignored) ──
+describe('edit/delete authorship gate', () => {
+  const s = () => useStore.getState();
+  const ch = 'did:key:z6mkgatepeer';
+  const at = (id: string, from: string, text: string) => ({
+    id, from, text, timestamp: new Date('2026-07-21T00:00:00Z'), tags: {},
+  });
+
+  beforeEach(() => {
+    ensureChannel(ch);
+    s().channels.get(ch)!.messages = [];
+  });
+
+  it('ignores an edit whose actor is not the original sender', () => {
+    s().addMessage(ch, at('m1', 'alice', 'mine'));
+    (s() as any).editMessage(ch, 'm1', 'forged', 'e1', false, 'mallory', undefined);
+    const m = s().channels.get(ch)!.messages[0];
+    expect(m.text).toBe('mine');
+    expect(m.id).toBe('m1');
+  });
+
+  it('ignores a delete whose actor is not the original sender', () => {
+    s().addMessage(ch, at('m2', 'alice', 'keep me'));
+    (s() as any).deleteMessage(ch, 'm2', 'mallory', undefined);
+    expect(s().channels.get(ch)!.messages[0].deleted).toBeUndefined();
+  });
+
+  it('applies edit and delete from the matching author', () => {
+    s().addMessage(ch, at('m3', 'alice', 'v1'));
+    (s() as any).editMessage(ch, 'm3', 'v2', 'e3', false, 'alice', undefined);
+    expect(s().channels.get(ch)!.messages[0].text).toBe('v2');
+    (s() as any).deleteMessage(ch, 'e3', 'ALICE', undefined);
+    expect(s().channels.get(ch)!.messages[0].deleted).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════
+// BUG: deleting an EDITED message leaves it on screen
+// ═══════════════════════════════════════════════════════════════
+
+describe('delete after edit', () => {
+  it('marks an edited message deleted when the delete names the ORIGINAL msgid', () => {
+    // editMessage re-keys the message to the edit's msgid (`id: newMsgId`) and
+    // keeps the chain root in `editOf`. Deletes always name the ORIGINAL msgid —
+    // that is the identity clients hold and what the server relays in
+    // +draft/delete. deleteMessage matched only `m.id === msgId`, so after an
+    // edit the delete found nothing and the message stayed visible, even though
+    // the server had removed it. editMessage already matches id OR editOf;
+    // deleteMessage must too.
+    ensureChannel('#test');
+    useStore.getState().addMessage('#test', mkMsg({ id: 'orig', text: 'secret v1' }));
+    useStore.getState().editMessage('#test', 'orig', 'secret v2', 'edit1');
+
+    // Sanity: the edit re-keyed the row and recorded the chain root.
+    const afterEdit = useStore.getState().channels.get('#test')!
+      .messages.find((m) => m.editOf === 'orig');
+    expect(afterEdit?.id).toBe('edit1');
+    expect(afterEdit?.text).toBe('secret v2');
+
+    useStore.getState().deleteMessage('#test', 'orig');
+
+    const m = useStore.getState().channels.get('#test')!
+      .messages.find((x) => x.id === 'edit1' || x.editOf === 'orig');
+    expect(m?.deleted).toBe(true);
+    expect(m?.text).toBe('');
+  });
+
+  it('still deletes when the delete names the edit revision', () => {
+    // The other end of the same chain: whichever id the caller holds must work.
+    ensureChannel('#test');
+    useStore.getState().addMessage('#test', mkMsg({ id: 'orig', text: 'v1' }));
+    useStore.getState().editMessage('#test', 'orig', 'v2', 'edit1');
+    useStore.getState().deleteMessage('#test', 'edit1');
+    const m = useStore.getState().channels.get('#test')!
+      .messages.find((x) => x.id === 'edit1' || x.editOf === 'orig');
+    expect(m?.deleted).toBe(true);
+  });
+
+  it('does not delete unrelated messages', () => {
+    ensureChannel('#test');
+    useStore.getState().addMessage('#test', mkMsg({ id: 'orig', text: 'v1' }));
+    useStore.getState().addMessage('#test', mkMsg({ id: 'other', text: 'keep me' }));
+    useStore.getState().editMessage('#test', 'orig', 'v2', 'edit1');
+    useStore.getState().deleteMessage('#test', 'orig');
+    const other = useStore.getState().channels.get('#test')!
+      .messages.find((x) => x.id === 'other');
+    expect(other?.deleted).toBeFalsy();
+    expect(other?.text).toBe('keep me');
+  });
+});

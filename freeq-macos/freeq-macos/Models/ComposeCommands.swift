@@ -67,7 +67,12 @@ extension AppState {
             if mp.count == 2 {
                 let dmTarget = String(mp[0])
                 sendMessage(to: dmTarget, text: String(mp[1]))
-                let dm = getOrCreateDM(dmTarget)
+                // Buffer under the canonical key (peer DID when known) so
+                // the echo lands in the thread on screen; the wire keeps the
+                // typed target (the SDK resolves it).
+                let key = DidDisplay.isDid(dmTarget)
+                    ? dmTarget : (didForNick(dmTarget) ?? dmTarget)
+                let dm = getOrCreateDM(key)
                 activeChannel = dm.name
             }
         case "kick", "k":
@@ -132,7 +137,13 @@ extension AppState {
         case "list":
             sendRaw(arg.isEmpty ? "LIST" : "LIST \(arg)")
         case "names":
-            sendRaw("NAMES \(arg.isEmpty ? target : arg)")
+            // NAMES is channel-only; in a DM the server would echo the bare
+            // nick back as a 353/366 pair (which used to mint a phantom
+            // channel buffer). Just no-op outside channels.
+            let namesTarget = arg.isEmpty ? target : arg
+            if namesTarget.hasPrefix("#") || namesTarget.hasPrefix("&") {
+                sendRaw("NAMES \(namesTarget)")
+            }
         case "who":
             sendRaw("WHO \(arg.isEmpty ? target : arg)")
         case "media", "img", "upload", "crosspost":

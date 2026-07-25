@@ -12,7 +12,7 @@ staging.freeq.at. `setup.sh` / `deploy.sh` are the **bare-VPS systemd path**
 ## Initial Setup (Ubuntu VPS)
 
 ```sh
-git clone https://github.com/chad/freeq.git
+git clone https://github.com/freeq-irc/freeq.git
 cd freeq
 ./deploy/setup.sh yourdomain.com [--nginx] [--iroh]
 ```

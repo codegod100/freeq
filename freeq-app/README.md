@@ -1,6 +1,6 @@
 # freeq web client
 
-The browser-based client for [freeq](https://github.com/chad/freeq) — IRC with
+The browser-based client for [freeq](https://github.com/freeq-irc/freeq) — IRC with
 AT Protocol identity.
 
 **Live at [irc.freeq.at](https://irc.freeq.at)**

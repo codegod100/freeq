@@ -117,6 +117,22 @@ actor MessageStore {
         return messages.reversed()  // Oldest first
     }
 
+    /// Re-key a conversation's cached messages (nick-keyed DM folded into its
+    /// DID-keyed thread). Without this, cached history stays under the old
+    /// nick key and vanishes from the thread on the next launch.
+    func renameChannel(from oldName: String, to newName: String) {
+        let sql = "UPDATE OR IGNORE messages SET channel = ? WHERE channel = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (newName.lowercased() as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 2, (oldName.lowercased() as NSString).utf8String, -1, nil)
+        let rc = sqlite3_step(stmt)
+        if rc != SQLITE_DONE {
+            Log.ui.error("MessageStore.renameChannel sqlite3_step rc=\(rc, privacy: .public)")
+        }
+    }
+
     /// Mark a message as deleted.
     func markDeleted(msgId: String) {
         let sql = "UPDATE messages SET is_deleted = 1 WHERE id = ?"

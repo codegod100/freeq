@@ -424,7 +424,7 @@ fun SettingsTab(appState: AppState) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { uriHandler.openUri("https://github.com/chad/freeq") },
+                            .clickable { uriHandler.openUri("https://github.com/freeq-irc/freeq") },
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {

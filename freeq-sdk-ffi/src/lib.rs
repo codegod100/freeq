@@ -65,6 +65,21 @@ pub struct IrcMessage {
     /// else their nick. `None` for channel messages. Key DM threads by this,
     /// not by from/target (which flip with message direction).
     pub dm_key: Option<String>,
+    /// Present when this message carries an agent coordination event
+    /// (`+freeq.at/event` + friends). Clients render it as a structured
+    /// task/evidence card instead of plain text (parity with the web
+    /// `CoordinationCards`); a tag-unaware view still shows `text`.
+    pub coordination: Option<CoordinationEvent>,
+}
+
+/// A parsed agent coordination event (the `+freeq.at/*` task tag family).
+pub struct CoordinationEvent {
+    pub event_type: String,
+    pub task_id: Option<String>,
+    pub phase: Option<String>,
+    pub evidence_type: Option<String>,
+    pub reference: Option<String>,
+    pub payload: Option<String>,
 }
 
 pub struct ReactionTally {
@@ -521,6 +536,22 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
                 .get("+freeq.at/reactions")
                 .map(|raw| parse_reactions_tag(raw))
                 .unwrap_or_default();
+            // Agent coordination event: the `+freeq.at/event` tag (with the
+            // `freeq.at/` unprefixed fallback some senders use) turns this
+            // message into a structured card on every client.
+            let coord_tag = |name: &str| {
+                tags.get(&format!("+freeq.at/{name}"))
+                    .or_else(|| tags.get(&format!("freeq.at/{name}")))
+                    .cloned()
+            };
+            let coordination = coord_tag("event").map(|event_type| CoordinationEvent {
+                event_type,
+                task_id: coord_tag("task-id"),
+                phase: coord_tag("phase"),
+                evidence_type: coord_tag("evidence-type"),
+                reference: coord_tag("ref"),
+                payload: coord_tag("payload"),
+            });
             FreeqEvent::Message {
                 msg: IrcMessage {
                     from_nick: from.clone(),
@@ -540,6 +571,7 @@ fn convert_event(event: &freeq_sdk::event::Event) -> Option<FreeqEvent> {
                     origin: tags.get("+freeq.at/origin").cloned(),
                     reactions,
                     dm_key: dm_key.clone(),
+                    coordination,
                 },
             }
         }
@@ -1379,9 +1411,17 @@ mod av_impl {
                     format: video_format.clone(),
                     enabled: camera_enabled_flag.clone(),
                 };
+                // iOS encodes with SOFTWARE openh264 (the media stack's
+                // VideoToolbox H.264 *encoder* is compiled macOS-only), so
+                // 720p@30 overloads the phone and the outgoing video lags for
+                // receivers. Cap the camera to 360p on iOS; desktop keeps 720p.
+                #[cfg(target_os = "ios")]
+                let camera_preset = VideoPreset::P360;
+                #[cfg(not(target_os = "ios"))]
+                let camera_preset = VideoPreset::P720;
                 broadcast
                     .video()
-                    .set_source(push_source, VideoCodec::H264, [VideoPreset::P720])
+                    .set_source(push_source, VideoCodec::H264, [camera_preset])
                     .map_err(|e| {
                         tracing::warn!("AV: initial video set_source failed: {e}");
                         FreeqError::ConnectionFailed
@@ -2440,6 +2480,60 @@ mod tests {
             .reactions
             .iter()
             .any(|r| r.emoji == "🎉" && r.nicks == vec!["carol".to_string()]));
+    }
+
+    #[test]
+    fn convert_event_message_parses_coordination_tags() {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "01ABC".to_string());
+        tags.insert("+freeq.at/event".to_string(), "task_update".to_string());
+        tags.insert("+freeq.at/task-id".to_string(), "T4821".to_string());
+        tags.insert("+freeq.at/phase".to_string(), "testing".to_string());
+        tags.insert("+freeq.at/payload".to_string(), "{\"step\":3}".to_string());
+        let ev = freeq_sdk::event::Event::Message {
+            from: "relay-agent".to_string(),
+            target: "#ship-it".to_string(),
+            text: "cart ok".to_string(),
+            tags,
+            dm_key: None,
+        };
+        let FreeqEvent::Message { msg } = convert_event(&ev).expect("event") else {
+            panic!("expected Message");
+        };
+        let coord = msg.coordination.expect("coordination populated");
+        assert_eq!(coord.event_type, "task_update");
+        assert_eq!(coord.task_id.as_deref(), Some("T4821"));
+        assert_eq!(coord.phase.as_deref(), Some("testing"));
+        assert_eq!(coord.payload.as_deref(), Some("{\"step\":3}"));
+    }
+
+    #[test]
+    fn convert_event_message_unprefixed_coordination_fallback() {
+        // Some senders emit `freeq.at/event` without the leading `+`.
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("freeq.at/event".to_string(), "task_complete".to_string());
+        let ev = freeq_sdk::event::Event::Message {
+            from: "a".to_string(), target: "#c".to_string(), text: "done".to_string(),
+            tags, dm_key: None,
+        };
+        let FreeqEvent::Message { msg } = convert_event(&ev).expect("event") else {
+            panic!("expected Message");
+        };
+        assert_eq!(msg.coordination.expect("coord").event_type, "task_complete");
+    }
+
+    #[test]
+    fn convert_event_message_no_event_tag_yields_no_coordination() {
+        let mut tags = std::collections::HashMap::new();
+        tags.insert("msgid".to_string(), "01Q".to_string());
+        let ev = freeq_sdk::event::Event::Message {
+            from: "a".to_string(), target: "#c".to_string(), text: "plain".to_string(),
+            tags, dm_key: None,
+        };
+        let FreeqEvent::Message { msg } = convert_event(&ev).expect("event") else {
+            panic!("expected Message");
+        };
+        assert!(msg.coordination.is_none());
     }
 
     #[test]

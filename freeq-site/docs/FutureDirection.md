@@ -140,6 +140,8 @@ Use iroh + CRDTs to create channels without any server. The server becomes optio
 
 **Challenges:** Message ordering, offline delivery, discovery, Sybil resistance.
 
+**Verifiable identity is the hard tradeoff.** Message-signature verification today depends on the server's durable `(did, kid)` signing-key store and DID-keyed history — a persistence-less/serverless deployment can't provide it: signatures are verifiable only at their point of origin, never independently or after the fact. A pure-P2P mode would need signing keys anchored in the DID document itself (the endgame) instead of served from a server. Until then, "serverless" and "verifiable identity" are in tension.
+
 ### 3.5 Bridge to AT Protocol Conversations
 
 Bridge IRC channels to AT Protocol DMs/conversations. Messages in either context appear in both. Identity unified via DID.

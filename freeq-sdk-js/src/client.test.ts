@@ -291,6 +291,9 @@ describe('messaging methods', () => {
     // target, fetch history by it (the reply batch then arrives DID-keyed),
     // and learn the display binding so the DID renders as a name at once.
     const { client, ws } = await makeRegistered();
+    // TARGETS only ever arrive on an authenticated session; the client now
+    // skips DM-history fetches as a guest, so simulate the authed state.
+    (client as any)._authDid = 'did:plc:alice';
     const targets: string[] = [];
     client.on('historyTarget', (t) => targets.push(t));
     ws.recv(
@@ -388,6 +391,8 @@ describe('messaging methods', () => {
 
   it('TARGETS without the tag (old server) keeps nick behavior unchanged', async () => {
     const { client, ws } = await makeRegistered();
+    // TARGETS only ever arrive on an authenticated session (see above).
+    (client as any)._authDid = 'did:plc:alice';
     const targets: string[] = [];
     client.on('historyTarget', (t) => targets.push(t));
     ws.recv(':srv CHATHISTORY TARGETS bob');
@@ -1306,6 +1311,39 @@ describe('inbound: spawned agents', () => {
   });
 });
 
+describe('inbound: AV error signal', () => {
+  // `+freeq.at/av-error` is the server's machine-readable AV failure. Before
+  // it existed a rejected av-join was only a human NOTICE — client call state
+  // was set up optimistically and never torn down, leaving a ghost publisher
+  // in a session the server never admitted us to (in-call UI, silent to all).
+  it('emits avError with code, session id, and reason', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('avError', (code, sessionId, reason) => seen.push({ code, sessionId, reason }));
+    ws.recv('@+freeq.at/av-error=join-failed;+freeq.at/av-id=S1;+freeq.at/av-reason=Session\\shas\\sended :srv TAGMSG alice');
+    await flushAsync();
+    expect(seen).toContainEqual({ code: 'join-failed', sessionId: 'S1', reason: 'Session has ended' });
+  });
+
+  it('emits avError for a start-collision naming the winning session', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('avError', (code, sessionId) => seen.push({ code, sessionId }));
+    ws.recv('@+freeq.at/av-error=start-collision;+freeq.at/av-id=WINNER;+freeq.at/av-reason=busy :srv TAGMSG alice');
+    await flushAsync();
+    expect(seen).toContainEqual({ code: 'start-collision', sessionId: 'WINNER' });
+  });
+
+  it('emits avError with empty session id when the tag is absent', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: unknown[] = [];
+    client.on('avError', (code, sessionId) => seen.push({ code, sessionId }));
+    ws.recv('@+freeq.at/av-error=join-failed :srv TAGMSG alice');
+    await flushAsync();
+    expect(seen).toContainEqual({ code: 'join-failed', sessionId: '' });
+  });
+});
+
 describe('inbound: connection lifecycle', () => {
   it("emits 'connected' on transport open", async () => {
     const { FreeqClient } = await import('./client.js');
@@ -1380,3 +1418,26 @@ describe('onNickCollision policy', () => {
     expect(retryLines[0]).toMatch(/^NICK alice-\d{4}$/);
   });
 });
+
+  it('a replayed edit row carries its reactions into the collapsed message', async () => {
+    // Reactions attach to the msgid the user reacted to — the latest edit
+    // id — so they arrive on the EDIT row in replay. The collapse must
+    // carry them onto the collapsed message; dropping them made reactions
+    // on edited messages vanish on every reload.
+    const { client, ws } = await makeRegistered();
+    const batches: Array<[string, any[]]> = [];
+    client.on('historyBatch', (buf, msgs) => batches.push([buf, msgs]));
+    ws.recv(':srv BATCH +h1 chathistory did:plc:peer');
+    ws.recv('@batch=h1;msgid=M0;time=2026-07-21T00:00:00.000Z :zapnap!u@h PRIVMSG did:plc:peer :original');
+    ws.recv('@batch=h1;msgid=E1;+draft/edit=M0;+freeq.at/reactions=🔥:alice,bob;time=2026-07-21T00:01:00.000Z :zapnap!u@h PRIVMSG did:plc:peer :original - edited');
+    ws.recv(':srv BATCH -h1');
+    // Batched messages suspend across more microtasks than plain PRIVMSGs.
+    for (let i = 0; i < 4; i++) await flushAsync();
+    expect(batches).toHaveLength(1);
+    const msgs = batches[0][1];
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('E1');
+    expect(msgs[0].text).toBe('original - edited');
+    const nicks = msgs[0].reactions?.get('🔥');
+    expect(nicks && [...nicks].sort()).toEqual(['alice', 'bob']);
+  });

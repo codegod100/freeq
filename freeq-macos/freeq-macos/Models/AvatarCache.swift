@@ -20,6 +20,7 @@ class ProfileCache {
 
     private var cache: [String: Profile] = [:]  // lowercase nick → profile
     private var fetching: Set<String> = []
+    private var fetchingDids: Set<String> = []  // DIDs with a resolveByDid in flight
     private var didMap: [String: String] = [:]  // lowercase nick → DID
     private var nickForDid: [String: String] = [:]  // DID → nick
 
@@ -31,6 +32,12 @@ class ProfileCache {
     /// Get DID for a nick.
     func did(for nick: String) -> String? {
         didMap[nick.lowercased()]
+    }
+
+    /// Reverse lookup: the display nick last seen for a DID (from WHOIS,
+    /// account tags, or profile fetches). Used by DID-keyed DM display.
+    func nick(for did: String) -> String? {
+        nickForDid[did]
     }
 
     /// Set DID for a nick (from WHOIS 330 or account-notify).
@@ -125,6 +132,54 @@ class ProfileCache {
         guard cache[lower] == nil, !fetching.contains(lower) else { return }
         guard let actor = BlueskyProfileBootstrap.actor(nick: nick, did: didMap[lower]) else { return }
         fetchProfile(nick: nick, actor: actor)
+    }
+
+    /// Resolve a bare DID → its profile via the Bluesky actor API (which accepts
+    /// a DID as `actor`), so a DM thread keyed purely by DID — e.g. a
+    /// conversation created on another client, with an OFFLINE peer who never
+    /// emits a WHOIS/join binding — renders a human name instead of the raw DID.
+    /// `completion` runs on the main actor with the resolved handle (nick) on
+    /// success, so the caller can fold/relabel the thread. Best-effort, deduped.
+    func resolveByDid(_ did: String, completion: @escaping (String?) -> Void) {
+        if let known = nickForDid[did] { completion(known); return }
+        guard did.hasPrefix("did:"), !fetchingDids.contains(did) else { completion(nil); return }
+        fetchingDids.insert(did)
+        Task { [did] in
+            defer { DispatchQueue.main.async { ProfileCache.shared.fetchingDids.remove(did) } }
+            var components = URLComponents(string: "https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
+            components?.queryItems = [URLQueryItem(name: "actor", value: did)]
+            guard let url = components?.url else {
+                await MainActor.run { completion(nil) }; return
+            }
+            do {
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let handle = json["handle"] as? String else {
+                    await MainActor.run { completion(nil) }; return
+                }
+                let profile = Profile(
+                    did: json["did"] as? String ?? did,
+                    handle: handle,
+                    displayName: json["displayName"] as? String,
+                    avatarURL: (json["avatar"] as? String).flatMap(URL.init(string:)),
+                    bannerURL: (json["banner"] as? String).flatMap(URL.init(string:)),
+                    description: json["description"] as? String,
+                    followersCount: json["followersCount"] as? Int,
+                    followsCount: json["followsCount"] as? Int,
+                    postsCount: json["postsCount"] as? Int
+                )
+                await MainActor.run {
+                    let key = handle.lowercased()
+                    ProfileCache.shared.cache[key] = profile
+                    ProfileCache.shared.didMap[key] = did
+                    ProfileCache.shared.nickForDid[did] = handle
+                    completion(handle)
+                }
+            } catch {
+                await MainActor.run { completion(nil) }
+            }
+        }
     }
 }
 

@@ -46,7 +46,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/chad/freeq",
+    "url": "https://github.com/freeq-irc/freeq",
     "directory": "freeqcc"
   }
 }

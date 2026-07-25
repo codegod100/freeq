@@ -711,4 +711,4 @@ import { fetchProfile } from '@freeq/sdk/profiles';
 
 ## Source
 
-The SDK source is at [`freeq-sdk-js/`](https://github.com/chad/freeq/tree/main/freeq-sdk-js) in the freeq repository.
+The SDK source is at [`freeq-sdk-js/`](https://github.com/freeq-irc/freeq/tree/main/freeq-sdk-js) in the freeq repository.

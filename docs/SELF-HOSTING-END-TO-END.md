@@ -112,7 +112,7 @@ sudo chown freeq:freeq /var/lib/freeq
 ```bash
 cd /opt
 sudo chown "$USER" /opt/freeq
-git clone https://github.com/chad/freeq /opt/freeq
+git clone https://github.com/freeq-irc/freeq /opt/freeq
 cd /opt/freeq
 cargo build --release -p freeq-server
 # Binary lands at /opt/freeq/target/release/freeq-server

@@ -18,7 +18,7 @@ extension AppState {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
             .map(\.name)
         let sortedDms = dmBuffers
-            .filter { !isBlocked(nick: $0.name) }
+            .filter { !isBufferBlocked($0.name) }
             .sorted { $0.lastActivity > $1.lastActivity }
             .map(\.name)
         return BufferNavigation.sidebarOrder(

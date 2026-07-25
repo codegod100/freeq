@@ -119,3 +119,20 @@ class DidDisplayTest {
         assertEquals("#zapnap", bufs[0].name)
     }
 }
+
+class DmEchoTest {
+    @org.junit.Test
+    fun `self echo with nick target and did dmKey yields the binding`() {
+        val b = DmEcho.recipientBinding(true, "coldbot", "did:key:z6MkPeer")
+        org.junit.Assert.assertEquals("coldbot" to "did:key:z6MkPeer", b)
+    }
+
+    @org.junit.Test
+    fun `no binding for incoming, channels, did targets, or nick==did`() {
+        org.junit.Assert.assertNull(DmEcho.recipientBinding(false, "coldbot", "did:key:z6MkPeer"))
+        org.junit.Assert.assertNull(DmEcho.recipientBinding(true, "#chan", "did:key:z6MkPeer"))
+        org.junit.Assert.assertNull(DmEcho.recipientBinding(true, "did:key:z6MkPeer", "did:key:z6MkPeer"))
+        org.junit.Assert.assertNull(DmEcho.recipientBinding(true, "coldbot", null))
+        org.junit.Assert.assertNull(DmEcho.recipientBinding(true, "coldbot", "not-a-did"))
+    }
+}

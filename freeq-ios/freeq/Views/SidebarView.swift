@@ -208,6 +208,8 @@ struct SidebarView: View {
 
     private func dmRow(_ dm: ChannelState) -> some View {
         let isActive = appState.activeChannel == dm.name
+        // Buffer key may be a DID — render the peer's nick.
+        let displayNick = appState.displayNameForKey(dm.name)
 
         return Button(action: {
             appState.activeChannel = dm.name
@@ -216,14 +218,14 @@ struct SidebarView: View {
             HStack(spacing: 10) {
                 ZStack {
                     Circle()
-                        .fill(Theme.nickColor(for: dm.name).opacity(0.2))
+                        .fill(Theme.nickColor(for: displayNick).opacity(0.2))
                         .frame(width: 28, height: 28)
-                    Text(String(dm.name.prefix(1)).uppercased())
+                    Text(String(displayNick.prefix(1)).uppercased())
                         .font(.fqCaption2.weight(.bold))
-                        .foregroundColor(Theme.nickColor(for: dm.name))
+                        .foregroundColor(Theme.nickColor(for: displayNick))
                 }
 
-                Text(dm.name)
+                Text(displayNick)
                     .font(.fqSubheadline.weight(isActive ? .semibold : .regular))
                     .foregroundColor(isActive ? Theme.textPrimary : Theme.textSecondary)
                     .lineLimit(1)

@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
                 handle.submit_provenance(&serde_json::json!({
                     "name": "demo-bot",
                     "version": "0.1.0",
-                    "source": "https://github.com/chad/freeq",
+                    "source": "https://github.com/freeq-irc/freeq",
                     "runtime": "freeq-sdk/rust",
                     "capabilities": ["chat", "heartbeat"],
                     "created_by": "did:plc:4qsyxmnsblo4luuycm3572bq"

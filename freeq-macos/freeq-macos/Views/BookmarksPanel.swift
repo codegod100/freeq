@@ -41,7 +41,7 @@ struct BookmarksPanel: View {
                                     Text(bookmark.from)
                                         .font(.caption.weight(.bold))
                                         .foregroundStyle(Theme.nickColor(for: bookmark.from))
-                                    Text("in \(bookmark.channel)")
+                                    Text("in \(appState.displayNameForKey(bookmark.channel))")
                                         .font(.caption2)
                                         .foregroundStyle(.tertiary)
                                     Spacer()

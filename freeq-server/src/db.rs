@@ -393,6 +393,17 @@ impl Db {
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (did, target)
             );
+
+            -- Per-DID favorite channels, so a user's favorites roam across
+            -- their devices (synced via the REST /api/v1/favorites endpoint).
+            -- `ord` preserves the user's ordering (Favorites section + ⌃⌘1-9).
+            CREATE TABLE IF NOT EXISTS user_favorites (
+                did        TEXT NOT NULL,
+                channel    TEXT NOT NULL,
+                ord        INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (did, channel)
+            );
             ",
         )?;
 
@@ -1215,23 +1226,131 @@ impl Db {
     }
 
     /// Soft-delete a message by setting deleted_at timestamp.
+    /// Every msgid belonging to the same logical message as `msgid`.
+    ///
+    /// An edit is stored as a *new* row carrying `replaces_msgid`, so one
+    /// logical message can span several rows. This walks up to the root
+    /// revision and then collects everything that (transitively) replaces it,
+    /// so callers can act on the message rather than on one revision of it.
+    /// Both walks are bounded: a malformed `replaces_msgid` cycle must not spin.
+    fn revision_family(&self, channel: &str, msgid: &str) -> SqlResult<Vec<String>> {
+        let mut root = msgid.to_string();
+        for _ in 0..64 {
+            let mut stmt = self.conn.prepare(
+                "SELECT replaces_msgid FROM messages WHERE channel = ?1 AND msgid = ?2",
+            )?;
+            let parent: Option<String> = stmt
+                .query_map(params![channel, &root], |r| r.get::<_, Option<String>>(0))?
+                .next()
+                .transpose()?
+                .flatten();
+            match parent {
+                Some(p) if !p.is_empty() && p != root => root = p,
+                _ => break,
+            }
+        }
+
+        let mut family = vec![root.clone()];
+        let mut frontier = vec![root];
+        while let Some(current) = frontier.pop() {
+            let mut stmt = self.conn.prepare(
+                "SELECT msgid FROM messages
+                 WHERE channel = ?1 AND replaces_msgid = ?2 AND msgid IS NOT NULL",
+            )?;
+            let children: Vec<String> = stmt
+                .query_map(params![channel, &current], |r| r.get(0))?
+                .collect::<SqlResult<Vec<String>>>()?;
+            for child in children {
+                if !family.contains(&child) {
+                    family.push(child.clone());
+                    frontier.push(child);
+                }
+            }
+            if family.len() > 512 {
+                break; // safety valve; no legitimate message has 512 revisions
+            }
+        }
+        Ok(family)
+    }
+
+    /// Soft-delete a message *and every revision of it*.
+    ///
+    /// Clients keep the ORIGINAL msgid as a message's identity (that's the point
+    /// of `+draft/edit=<original>`), so a delete names the original while the
+    /// current text may live in a later edit row. Marking only the exact msgid
+    /// left the newest text — the version the author most wants gone — readable
+    /// in CHATHISTORY and in FTS search. Either end of the family may be named.
     pub fn soft_delete_message(&self, channel: &str, msgid: &str) -> SqlResult<usize> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+
+        let family = self.revision_family(channel, msgid)?;
+
+        // Resolve to row ids first so the FTS delete and the UPDATE act on
+        // exactly the same set, with uniformly-typed bind parameters.
+        let ph = family.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let ids: Vec<i64> = {
+            let sql = format!(
+                "SELECT id FROM messages
+                 WHERE channel = ? AND deleted_at IS NULL AND msgid IN ({ph})"
+            );
+            let mut binds: Vec<String> = Vec::with_capacity(family.len() + 1);
+            binds.push(channel.to_string());
+            binds.extend(family.iter().cloned());
+            let mut stmt = self.conn.prepare(&sql)?;
+            stmt.query_map(rusqlite::params_from_iter(binds.iter()), |r| r.get(0))?
+                .collect::<SqlResult<Vec<i64>>>()?
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let id_ph = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         if self.fts_enabled() {
             self.conn.execute(
-                "DELETE FROM messages_fts WHERE rowid IN (
-                    SELECT id FROM messages WHERE channel = ?1 AND msgid = ?2 AND deleted_at IS NULL
-                )",
-                params![channel, msgid],
+                &format!("DELETE FROM messages_fts WHERE rowid IN ({id_ph})"),
+                rusqlite::params_from_iter(ids.iter()),
             )?;
         }
+        let mut binds: Vec<i64> = Vec::with_capacity(ids.len() + 1);
+        binds.push(now as i64);
+        binds.extend(ids.iter().copied());
         let changed = self.conn.execute(
-            "UPDATE messages SET deleted_at = ?1 WHERE channel = ?2 AND msgid = ?3 AND deleted_at IS NULL",
-            params![now as i64, channel, msgid],
+            &format!("UPDATE messages SET deleted_at = ? WHERE id IN ({id_ph})"),
+            rusqlite::params_from_iter(binds.iter()),
         )?;
+
+        // A deleted message must not stay pinned. `handle_delete` only purges
+        // the in-memory `ch.pins`, and pins are reloaded from this table on
+        // startup — so without this the channel advertises a pin whose message
+        // no longer exists after the next restart. Covers the whole family,
+        // since the pin may name a different revision than the delete did.
+        {
+            let mut pin_binds: Vec<String> = Vec::with_capacity(family.len() + 1);
+            pin_binds.push(channel.to_string());
+            pin_binds.extend(family.iter().cloned());
+            self.conn.execute(
+                &format!("DELETE FROM pins WHERE channel = ? AND msgid IN ({ph})"),
+                rusqlite::params_from_iter(pin_binds.iter()),
+            )?;
+        }
+
+        // Reactions annotate a message that no longer exists. Nothing surfaces
+        // them today, but they are orphaned rows that any future "reactions in
+        // this channel" read would resurrect — and they retain a record of who
+        // reacted to content the author asked to have deleted.
+        {
+            let mut reaction_binds: Vec<String> = Vec::with_capacity(family.len() + 1);
+            reaction_binds.push(channel.to_string());
+            reaction_binds.extend(family.iter().cloned());
+            self.conn.execute(
+                &format!("DELETE FROM reactions WHERE channel = ? AND target_msgid IN ({ph})"),
+                rusqlite::params_from_iter(reaction_binds.iter()),
+            )?;
+        }
+
         Ok(changed)
     }
 
@@ -1351,17 +1470,34 @@ impl Db {
         Ok(())
     }
 
-    /// Remove a reaction.
+    /// Remove a reaction. Identity-keyed, not just nick-keyed:
+    ///
+    /// - An **authenticated** remover (did = Some) deletes rows stored under
+    ///   their DID — regardless of what nick they reacted under (nick changes
+    ///   must not make a reaction irremovable) — plus any DID-less row under
+    ///   their current nick (their own pre-auth reaction; they own the nick).
+    /// - A **guest** remover (did = None) deletes only DID-less rows under
+    ///   their nick. A guest squatting a previously-authenticated user's nick
+    ///   must not be able to strip that user's reactions.
     pub fn remove_reaction(
         &self,
         target_msgid: &str,
         reactor_nick: &str,
+        reactor_did: Option<&str>,
         emoji: &str,
     ) -> SqlResult<usize> {
-        let changed = self.conn.execute(
-            "DELETE FROM reactions WHERE target_msgid = ?1 AND reactor_nick = ?2 AND emoji = ?3",
-            params![target_msgid, reactor_nick, emoji],
-        )?;
+        let changed = match reactor_did {
+            Some(did) => self.conn.execute(
+                "DELETE FROM reactions WHERE target_msgid = ?1 AND emoji = ?2
+                   AND (reactor_did = ?3 OR (reactor_did IS NULL AND reactor_nick = ?4))",
+                params![target_msgid, emoji, did, reactor_nick],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM reactions WHERE target_msgid = ?1 AND emoji = ?2
+                   AND reactor_nick = ?3 AND reactor_did IS NULL",
+                params![target_msgid, emoji, reactor_nick],
+            )?,
+        };
         Ok(changed)
     }
 
@@ -1750,6 +1886,32 @@ impl Db {
         Ok(())
     }
 
+    // ── Roaming favorites (per-DID) ────────────────────────────────────
+
+    /// The user's favorite channels in saved order.
+    pub fn get_user_favorites(&self, did: &str) -> SqlResult<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT channel FROM user_favorites WHERE did = ?1 ORDER BY ord ASC")?;
+        let rows = stmt.query_map(params![did], |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Replace the user's favorites with `channels` (order = slice order).
+    /// Atomic replace-all so a device's PUT is the authority for its DID.
+    pub fn set_user_favorites(&self, did: &str, channels: &[String], updated_at: u64) -> SqlResult<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM user_favorites WHERE did = ?1", params![did])?;
+        for (i, ch) in channels.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO user_favorites (did, channel, ord, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params![did, ch, i as i64, updated_at as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     // ── Identities (DID-nick bindings) ─────────────────────────────────
 
     /// Bind a DID to a nick. Overwrites any previous binding for that DID.
@@ -1883,6 +2045,196 @@ mod tests {
             Some("did:plc:alice"),
         )
         .unwrap();
+    }
+
+    /// Deleting a message must remove every revision of it.
+    ///
+    /// An edit is a separate row carrying `replaces_msgid`, and clients keep the
+    /// ORIGINAL msgid as the message's identity — so a delete names the
+    /// original. If only that exact row is marked, the edit row survives and the
+    /// newest text (the version the author most wants gone) stays readable in
+    /// history and search.
+    #[test]
+    fn soft_delete_sweeps_the_whole_revision_family() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "secret v1", 100, "id-original");
+        db.insert_edit(
+            "#c",
+            "alice!a@host",
+            "secret v2",
+            110,
+            &HashMap::new(),
+            "id-edit1",
+            "id-original",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+
+        db.soft_delete_message("#c", "id-original").unwrap();
+
+        let live: Vec<String> = db
+            .get_messages("#c", 50, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert!(
+            live.is_empty(),
+            "delete of the original left revisions readable: {live:?}"
+        );
+    }
+
+    /// Deleting a message must not leave its reactions behind.
+    ///
+    /// `soft_delete_message` sweeps messages, FTS rows and pins; reaction rows
+    /// keyed by the deleted msgids outlived them. Nothing surfaces them today
+    /// (the message they annotate is gone), but they are orphaned state that any
+    /// future "reactions in this channel" read would resurrect, and they keep a
+    /// record of who reacted to content the author deleted.
+    #[test]
+    fn soft_delete_removes_reactions_for_the_revision_family() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "v1", 100, "id-1");
+        db.insert_edit(
+            "#c", "alice!a@host", "v2", 110, &HashMap::new(), "id-2", "id-1",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        msg(&db, "#c", "unrelated", 120, "id-other");
+        db.store_reaction("id-1", "#c", "bob", Some("did:plc:bob"), "🔥", 111)
+            .unwrap();
+        db.store_reaction("id-2", "#c", "bob", Some("did:plc:bob"), "👍", 112)
+            .unwrap();
+        db.store_reaction("id-other", "#c", "bob", Some("did:plc:bob"), "🎉", 121)
+            .unwrap();
+
+        db.soft_delete_message("#c", "id-1").unwrap();
+
+        let left = db
+            .get_reactions_for_messages(&["id-1", "id-2", "id-other"])
+            .unwrap();
+        assert!(
+            !left.contains_key("id-1") && !left.contains_key("id-2"),
+            "reactions survived deletion of the message they annotate: {:?}",
+            left.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            left.contains_key("id-other"),
+            "unrelated reactions must be untouched"
+        );
+    }
+
+    /// Deleting a pinned message must drop the pin.
+    ///
+    /// `handle_delete` only purges the in-memory `ch.pins`; the `pins` row
+    /// outlives the message. Pins are reloaded from the DB on startup, so after
+    /// a restart the channel advertises a pin whose message no longer exists.
+    #[test]
+    fn soft_delete_drops_pins_for_the_deleted_message() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "pin me", 100, "id-pinned");
+        msg(&db, "#c", "other", 101, "id-other");
+        db.store_pin("#c", "id-pinned", "alice", 100).unwrap();
+        db.store_pin("#c", "id-other", "alice", 101).unwrap();
+
+        db.soft_delete_message("#c", "id-pinned").unwrap();
+
+        let pinned: Vec<String> = db
+            .get_pins("#c")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.msgid)
+            .collect();
+        assert_eq!(
+            pinned,
+            vec!["id-other".to_string()],
+            "a deleted message must not stay pinned (dangling pin survives restart)"
+        );
+    }
+
+    /// …including when the pin names a different revision than the delete.
+    #[test]
+    fn soft_delete_drops_pins_across_the_revision_family() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "v1", 100, "id-1");
+        db.insert_edit(
+            "#c", "alice!a@host", "v2", 110, &HashMap::new(), "id-2", "id-1",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        // Pinned after editing, so the pin names the edit revision.
+        db.store_pin("#c", "id-2", "alice", 110).unwrap();
+
+        // The client deletes using the identity it holds: the original.
+        db.soft_delete_message("#c", "id-1").unwrap();
+
+        assert!(
+            db.get_pins("#c").unwrap().is_empty(),
+            "pin on an edit revision survived deletion of the message"
+        );
+    }
+
+    /// Same family, addressed from the other end: deleting by the *edit's*
+    /// msgid must also remove the original it replaced. Both ids denote one
+    /// logical message, so either name must delete the whole thing.
+    #[test]
+    fn soft_delete_by_edit_msgid_also_removes_the_original() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "secret v1", 100, "id-original");
+        db.insert_edit(
+            "#c",
+            "alice!a@host",
+            "secret v2",
+            110,
+            &HashMap::new(),
+            "id-edit1",
+            "id-original",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+
+        db.soft_delete_message("#c", "id-edit1").unwrap();
+
+        let live: Vec<String> = db
+            .get_messages("#c", 50, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert!(live.is_empty(), "revisions survived: {live:?}");
+    }
+
+    /// A chain of edits (edit of an edit) must collapse entirely, and the sweep
+    /// must not wander into unrelated messages.
+    #[test]
+    fn soft_delete_sweeps_chained_edits_only() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "v1", 100, "id-1");
+        db.insert_edit(
+            "#c", "alice!a@host", "v2", 110, &HashMap::new(), "id-2", "id-1",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        db.insert_edit(
+            "#c", "alice!a@host", "v3", 120, &HashMap::new(), "id-3", "id-2",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        msg(&db, "#c", "unrelated", 130, "id-other");
+
+        db.soft_delete_message("#c", "id-1").unwrap();
+
+        let live: Vec<String> = db
+            .get_messages("#c", 50, None)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.text)
+            .collect();
+        assert_eq!(
+            live,
+            vec!["unrelated".to_string()],
+            "chained edits must all go, unrelated messages must stay"
+        );
     }
 
     #[test]
@@ -2520,6 +2872,33 @@ mod tests {
     }
 
     #[test]
+    fn user_favorites_roundtrip_preserves_order() {
+        let db = Db::open_memory().unwrap();
+        assert!(db.get_user_favorites("did:plc:a").unwrap().is_empty());
+        db.set_user_favorites("did:plc:a", &["#z".into(), "#a".into(), "#m".into()], 100).unwrap();
+        assert_eq!(db.get_user_favorites("did:plc:a").unwrap(), vec!["#z", "#a", "#m"]);
+    }
+
+    #[test]
+    fn user_favorites_replace_is_atomic_and_scoped_per_did() {
+        let db = Db::open_memory().unwrap();
+        db.set_user_favorites("did:plc:a", &["#a".into(), "#b".into()], 100).unwrap();
+        db.set_user_favorites("did:plc:b", &["#x".into()], 100).unwrap();
+        // Replace a's list entirely; b is untouched.
+        db.set_user_favorites("did:plc:a", &["#c".into()], 200).unwrap();
+        assert_eq!(db.get_user_favorites("did:plc:a").unwrap(), vec!["#c"]);
+        assert_eq!(db.get_user_favorites("did:plc:b").unwrap(), vec!["#x"]);
+    }
+
+    #[test]
+    fn user_favorites_empty_clears() {
+        let db = Db::open_memory().unwrap();
+        db.set_user_favorites("did:plc:a", &["#a".into()], 100).unwrap();
+        db.set_user_favorites("did:plc:a", &[], 200).unwrap();
+        assert!(db.get_user_favorites("did:plc:a").unwrap().is_empty());
+    }
+
+    #[test]
     fn duplicate_reaction_ignored() {
         let db = Db::open_memory().unwrap();
         db.store_reaction("msg001", "#test", "alice", None, "👍", 1000)
@@ -2539,13 +2918,61 @@ mod tests {
         db.store_reaction("msg001", "#test", "alice", None, "❤️", 1001)
             .unwrap();
 
-        let removed = db.remove_reaction("msg001", "alice", "👍").unwrap();
+        let removed = db.remove_reaction("msg001", "alice", None, "👍").unwrap();
         assert_eq!(removed, 1);
 
         let reactions = db.get_reactions_for_messages(&["msg001"]).unwrap();
         let msg_reactions = reactions.get("msg001").unwrap();
         assert_eq!(msg_reactions.len(), 1);
         assert_eq!(msg_reactions[0].emoji, "❤️");
+    }
+
+    #[test]
+    fn remove_reaction_by_did_survives_nick_change() {
+        // A DID user reacted under nick "alice", then changed nick to "alia".
+        // Removal must key on the DID — otherwise their reaction is
+        // accidentally immortal (the durability bug's evil twin).
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#t", "alice", Some("did:plc:aaa"), "👍", 1000)
+            .unwrap();
+
+        let removed = db
+            .remove_reaction("msg001", "alia", Some("did:plc:aaa"), "👍")
+            .unwrap();
+        assert_eq!(removed, 1, "DID match must remove regardless of nick");
+        assert!(db.get_reactions_for_messages(&["msg001"]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn guest_cannot_remove_did_users_reaction_by_squatting_nick() {
+        // alice (authenticated) reacted; later an unauthenticated guest holds
+        // the nick "alice". The guest's unreact must NOT delete the DID
+        // user's persisted reaction.
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#t", "alice", Some("did:plc:aaa"), "👍", 1000)
+            .unwrap();
+
+        let removed = db.remove_reaction("msg001", "alice", None, "👍").unwrap();
+        assert_eq!(removed, 0, "guest must not remove a DID-keyed reaction");
+        assert_eq!(
+            db.get_reactions_for_messages(&["msg001"]).unwrap()["msg001"].len(),
+            1
+        );
+    }
+
+    #[test]
+    fn did_user_can_remove_own_guest_era_reaction_under_owned_nick() {
+        // A reaction stored before the user authenticated (no DID) under the
+        // nick they now own: the authenticated remover with that nick may
+        // clear it — it's their row.
+        let db = Db::open_memory().unwrap();
+        db.store_reaction("msg001", "#t", "alice", None, "👍", 1000)
+            .unwrap();
+
+        let removed = db
+            .remove_reaction("msg001", "alice", Some("did:plc:aaa"), "👍")
+            .unwrap();
+        assert_eq!(removed, 1);
     }
 
     #[test]

@@ -13,9 +13,11 @@ cp -r ../docs ./docs
 git -C .. rev-parse --short HEAD 2>/dev/null > .git_commit || echo "unknown" > .git_commit
 
 echo "Deploying freeq-site (commit: $(cat .git_commit))..."
-# Pin the target cluster: the freeq-site app lives on BlueYard. Without this the
-# deploy targets whatever cluster is currently active (`miren cluster`), which
-# 403s if that's a cluster this identity has no deploy rights on.
-miren deploy -f -C BlueYard
+# Pin the target cluster. PRODUCTION is the `freeq` cluster (87.99.152.98) —
+# that's where freeq.at / www.freeq.at DNS points and where the freeq-site
+# app with the www.freeq.at route lives (`miren app list -C freeq`). A copy
+# also exists on BlueYard, but deploying there does NOT update the live site
+# (discovered 2026-07-23: a BlueYard-pinned deploy left freeq.at stale).
+miren deploy -f -C freeq
 
 echo "Deployed! Docs will be at https://www.freeq.at/docs/"

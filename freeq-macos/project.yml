@@ -109,3 +109,22 @@ targets:
         # Extensions must be sandboxed. The URL-scheme handoff needs no
         # network or file access — it just opens freeq://share.
         com.apple.security.app-sandbox: true
+
+# Schemes are generated: hand-edited scheme config (env vars, selection) is
+# wiped by every `xcodegen generate`, so per-deployment schemes live HERE.
+schemes:
+  freeq-macos:
+    build:
+      targets:
+        freeq-macos: all
+    run:
+      config: Debug
+  freeq-macos-zerosum:
+    build:
+      targets:
+        freeq-macos: all
+    run:
+      config: Debug
+      environmentVariables:
+        IRC_SERVER: "irc.zerosum.org:6697"
+        AUTH_BROKER_BASE: "https://irc.zerosum.org"

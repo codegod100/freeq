@@ -707,7 +707,14 @@ async fn chathistory_targets_carry_partner_did() {
     )
     .await;
     if let Event::Message { from, target, dm_key, .. } = echo {
-        assert_eq!(from, "hista2");
+        // A and A2 are two live sessions of the SAME DID; which session's
+        // nick the echo carries is legitimately ambiguous (both are DID_A)
+        // and not the subject here. Accept either — the split under test is
+        // target-vs-dm_key below.
+        assert!(
+            from == "hista2" || from == "hista",
+            "echo from a DID_A session, got {from}"
+        );
         assert_eq!(target, "histc", "display binding must not become a wire target");
         assert_eq!(
             dm_key.as_deref(),
@@ -715,4 +722,349 @@ async fn chathistory_targets_carry_partner_did() {
             "thread keys by the DID via the display binding"
         );
     }
+}
+
+/// A DM delete must survive reconnect: messages live under the canonical
+/// `dm:<didA>,<didB>` storage key, so a delete addressed to the wire
+/// target (nick or DID) has to resolve to that key — otherwise the server
+/// reports MESSAGE_NOT_FOUND, nothing is soft-deleted, and history replays
+/// the "deleted" message.
+#[tokio::test]
+async fn dm_delete_persists_across_history_replay() {
+    let key_a = PrivateKey::generate_ed25519();
+    let key_c = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a), (DID_C, &key_c)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "dela"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    let (_hc, mut rxc) = client::connect(
+        cfg(addr, "delc"),
+        Some(signer_for(DID_C, PrivateKey::ed25519_from_bytes(&key_c.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxc, |e| matches!(e, Event::Registered { .. }), "reg C").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ha.privmsg("delc", "delete me").await.unwrap();
+    // The sender's echo carries the server-assigned msgid.
+    let echo = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "delete me"),
+        "A echo",
+    )
+    .await;
+    let msgid = match &echo {
+        Event::Message { tags, .. } => tags.get("msgid").cloned().expect("echo has msgid"),
+        _ => unreachable!(),
+    };
+    ha.privmsg("delc", "keep me").await.unwrap();
+    wait(
+        &mut rxc,
+        |e| matches!(e, Event::Message { text, .. } if text == "keep me"),
+        "C got both",
+    )
+    .await;
+
+    let mut del_tags = std::collections::HashMap::new();
+    del_tags.insert("+draft/delete".to_string(), msgid.clone());
+    ha.send_tagmsg("delc", del_tags).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Fresh session replays the conversation: the deleted message must be
+    // gone, the other one present.
+    let (ha2, mut rxa2) = client::connect(
+        cfg(addr, "dela2"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa2, |e| matches!(e, Event::Registered { .. }), "reg A2").await;
+    ha2.raw("CHATHISTORY LATEST delc * 50").await.unwrap();
+    let mut saw_keep = false;
+    let mut saw_deleted = false;
+    while let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(800), rxa2.recv()).await {
+        match &e {
+            Event::Message { text, .. } if text == "keep me" => saw_keep = true,
+            Event::Message { text, .. } if text == "delete me" => saw_deleted = true,
+            _ => {}
+        }
+    }
+    assert!(saw_keep, "undeleted message replays");
+    assert!(!saw_deleted, "deleted DM message must not replay");
+}
+
+/// A DM edit must persist across reconnect. Like the message body, an edit
+/// row lives under the canonical `dm:<didA>,<didB>` key — but the wire
+/// target is the peer's DID, so the server has to resolve that to the
+/// canonical key. Storing the edit under the raw DID orphans it: history
+/// replays the ORIGINAL text and the edit is lost.
+#[tokio::test]
+async fn dm_edit_persists_across_history_replay() {
+    let key_a = PrivateKey::generate_ed25519();
+    let key_c = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a), (DID_C, &key_c)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "edia"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    let (_hc, mut rxc) = client::connect(
+        cfg(addr, "edic"),
+        Some(signer_for(DID_C, PrivateKey::ed25519_from_bytes(&key_c.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxc, |e| matches!(e, Event::Registered { .. }), "reg C").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A addresses the DM by C's DID (the DID-DM client behaviour).
+    ha.privmsg(DID_C, "original text").await.unwrap();
+    let echo = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "original text"),
+        "A echo",
+    )
+    .await;
+    let msgid = match &echo {
+        Event::Message { tags, .. } => tags.get("msgid").cloned().expect("echo has msgid"),
+        _ => unreachable!(),
+    };
+    ha.edit_message(DID_C, &msgid, "corrected text").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    // Fresh session replays the conversation: the edited text must be there.
+    let (ha2, mut rxa2) = client::connect(
+        cfg(addr, "edia2"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa2, |e| matches!(e, Event::Registered { .. }), "reg A2").await;
+    ha2.raw(&format!("CHATHISTORY LATEST {DID_C} * 50")).await.unwrap();
+    let mut saw_corrected = false;
+    while let Ok(Some(e)) = tokio::time::timeout(Duration::from_millis(800), rxa2.recv()).await {
+        if matches!(&e, Event::Message { text, .. } if text == "corrected text") {
+            saw_corrected = true;
+        }
+    }
+    assert!(saw_corrected, "edited DM text must replay after reconnect");
+}
+
+// ── DM event delivery: unpersisted threads + sender's other sessions ──
+//
+// Edits/deletes/reactions in a DM must behave like plain messages:
+// deliver to the peer AND to every session of the sender's own DID,
+// and work even when the thread has no DB rows (guest DMs are never
+// persisted — the old behavior was a FAIL that no client renders).
+
+/// Guest DMs have no DB rows; an edit must still relay to the guest and
+/// echo to the sender instead of failing MESSAGE_NOT_FOUND.
+#[tokio::test]
+async fn guest_dm_edit_relays_without_persistence() {
+    let key_a = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "geda"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    let (_hg, mut rxg) = client::connect(cfg(addr, "gedguest"), None);
+    wait(&mut rxg, |e| matches!(e, Event::Registered { .. }), "reg guest").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ha.privmsg("gedguest", "hello guest").await.unwrap();
+    let echo = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "hello guest"),
+        "A echo",
+    )
+    .await;
+    let msgid = match &echo {
+        Event::Message { tags, .. } => tags.get("msgid").cloned().expect("echo has msgid"),
+        _ => unreachable!(),
+    };
+    wait(
+        &mut rxg,
+        |e| matches!(e, Event::Message { text, .. } if text == "hello guest"),
+        "guest got original",
+    )
+    .await;
+
+    ha.edit_message("gedguest", &msgid, "hello guest - edited").await.unwrap();
+
+    // Guest sees the edit…
+    wait(
+        &mut rxg,
+        |e| matches!(e, Event::Message { text, tags, .. }
+            if text == "hello guest - edited" && tags.get("+draft/edit").is_some()),
+        "guest got edit",
+    )
+    .await;
+    // …and the sender gets the echo (not a silent FAIL).
+    wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, tags, .. }
+            if text == "hello guest - edited" && tags.get("+draft/edit").is_some()),
+        "A got edit echo",
+    )
+    .await;
+}
+
+/// Same for delete: relays as a +draft/delete TAGMSG to the guest.
+#[tokio::test]
+async fn guest_dm_delete_relays_without_persistence() {
+    let key_a = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "gdda"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    let (_hg, mut rxg) = client::connect(cfg(addr, "gddguest"), None);
+    wait(&mut rxg, |e| matches!(e, Event::Registered { .. }), "reg guest").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ha.privmsg("gddguest", "delete me").await.unwrap();
+    let echo = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "delete me"),
+        "A echo",
+    )
+    .await;
+    let msgid = match &echo {
+        Event::Message { tags, .. } => tags.get("msgid").cloned().expect("echo has msgid"),
+        _ => unreachable!(),
+    };
+    wait(
+        &mut rxg,
+        |e| matches!(e, Event::Message { text, .. } if text == "delete me"),
+        "guest got original",
+    )
+    .await;
+
+    ha.delete_message("gddguest", &msgid).await.unwrap();
+    wait(
+        &mut rxg,
+        |e| matches!(e, Event::TagMsg { tags, .. }
+            if tags.get("+draft/delete").map(|v| v == &msgid).unwrap_or(false)),
+        "guest got delete",
+    )
+    .await;
+}
+
+/// An edit in a persisted DM must reach the sender's OTHER sessions live,
+/// not just the peer and the editing session.
+#[tokio::test]
+async fn dm_edit_reaches_sender_other_session() {
+    let key_a = PrivateKey::generate_ed25519();
+    let key_c = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a), (DID_C, &key_c)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "fo1"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A1").await;
+    let (_ha2, mut rxa2) = client::connect(
+        cfg(addr, "fo2"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa2, |e| matches!(e, Event::Registered { .. }), "reg A2").await;
+    let (_hc, mut rxc) = client::connect(
+        cfg(addr, "foc"),
+        Some(signer_for(DID_C, PrivateKey::ed25519_from_bytes(&key_c.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxc, |e| matches!(e, Event::Registered { .. }), "reg C").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ha.privmsg(DID_C, "fan out").await.unwrap();
+    let echo = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "fan out"),
+        "A1 echo",
+    )
+    .await;
+    let msgid = match &echo {
+        Event::Message { tags, .. } => tags.get("msgid").cloned().expect("echo has msgid"),
+        _ => unreachable!(),
+    };
+
+    ha.edit_message(DID_C, &msgid, "fan out - edited").await.unwrap();
+    wait(
+        &mut rxa2,
+        |e| matches!(e, Event::Message { text, tags, .. }
+            if text == "fan out - edited" && tags.get("+draft/edit").is_some()),
+        "A2 (sender's other session) got the edit",
+    )
+    .await;
+}
+
+/// A reaction in a DM must reach the sender's OTHER sessions live.
+#[tokio::test]
+async fn dm_reaction_reaches_sender_other_session() {
+    let key_a = PrivateKey::generate_ed25519();
+    let key_c = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a), (DID_C, &key_c)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "rf1"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A1").await;
+    let (_ha2, mut rxa2) = client::connect(
+        cfg(addr, "rf2"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa2, |e| matches!(e, Event::Registered { .. }), "reg A2").await;
+    let (hc, mut rxc) = client::connect(
+        cfg(addr, "rfc"),
+        Some(signer_for(DID_C, PrivateKey::ed25519_from_bytes(&key_c.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxc, |e| matches!(e, Event::Registered { .. }), "reg C").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    hc.privmsg(DID_A, "react to me").await.unwrap();
+    let msg = wait(
+        &mut rxa,
+        |e| matches!(e, Event::Message { text, .. } if text == "react to me"),
+        "A1 got C's message",
+    )
+    .await;
+    let msgid = match &msg {
+        Event::Message { tags, .. } => tags.get("msgid").cloned().expect("msg has msgid"),
+        _ => unreachable!(),
+    };
+
+    ha.react(DID_C, "🔥", &msgid).await.unwrap();
+    wait(
+        &mut rxa2,
+        |e| matches!(e, Event::TagMsg { tags, .. }
+            if tags.get("+react").map(|v| v == "🔥").unwrap_or(false)),
+        "A2 (sender's other session) got the reaction",
+    )
+    .await;
+}
+
+/// Channels keep strict behavior: editing an unknown msgid still fails
+/// (a missing row there is a genuinely unknown message, not an
+/// unpersisted-thread artifact).
+#[tokio::test]
+async fn channel_edit_unknown_msgid_still_fails() {
+    let key_a = PrivateKey::generate_ed25519();
+    let (addr, _h) = start_with_dids(&[(DID_A, &key_a)], true).await;
+
+    let (ha, mut rxa) = client::connect(
+        cfg(addr, "cefa"),
+        Some(signer_for(DID_A, PrivateKey::ed25519_from_bytes(&key_a.secret_bytes()).unwrap())),
+    );
+    wait(&mut rxa, |e| matches!(e, Event::Registered { .. }), "reg A").await;
+    ha.join("#editfail").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    ha.edit_message("#editfail", "01BOGUSMSGID0000000000000", "nope").await.unwrap();
+    wait(
+        &mut rxa,
+        |e| matches!(e, Event::ServerNotice { text, .. } if text.contains("MESSAGE_NOT_FOUND") || text.contains("not found")),
+        "A got FAIL for unknown channel msgid",
+    )
+    .await;
 }

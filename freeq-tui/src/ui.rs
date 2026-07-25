@@ -860,6 +860,7 @@ mod tests {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         });
         buf.apply_delete("alice", "01PARENT");
 
@@ -902,6 +903,7 @@ mod tests {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         });
         let label = super::reply_indicator_label(&buf, "01P");
         assert!(
@@ -928,6 +930,7 @@ mod tests {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         });
         let label = super::reply_indicator_label(&buf, "01P");
         assert!(label.contains("alice"), "got {label:?}");
@@ -1019,6 +1022,7 @@ mod tests {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         }
     }
 

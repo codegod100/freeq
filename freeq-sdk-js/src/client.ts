@@ -649,6 +649,18 @@ export class FreeqClient extends EventEmitter {
   requestHistory(channel: string, before?: string): void;
   requestHistory(channelOrOpts: string | HistoryOptions, before?: string): void {
     const count = 50;
+    // Guests can never fetch DM history (the server always answers
+    // ACCOUNT_REQUIRED, which the app now renders — so an unauthenticated
+    // session opening a DM spammed a red error line per request). Skip the
+    // structurally-impossible request; channels stay untouched, and
+    // authenticated sessions keep full behavior incl. nick targets on
+    // older servers.
+    const targetOf = (x: string | HistoryOptions) =>
+      typeof x === 'string' ? x : x.target;
+    const t = targetOf(channelOrOpts);
+    if (t && !t.startsWith('#') && !t.startsWith('&') && !this._authDid) {
+      return;
+    }
     let opts: HistoryOptions;
     if (typeof channelOrOpts === 'string') {
       // Legacy positional form: (channel, before?). `before` is treated
@@ -1202,6 +1214,8 @@ export class FreeqClient extends EventEmitter {
         displayText,
         openerTags['msgid'],
         isStreaming,
+        from,
+        openerTags['account'],
       );
       return;
     }
@@ -1657,8 +1671,66 @@ export class FreeqClient extends EventEmitter {
         // saw `ENC1:…` in place of the edited body.)
         const editOf = msg.tags['+draft/edit'];
         if (editOf) {
+          // A replayed edit inside a CHATHISTORY batch collapses into the
+          // batch itself, so `historyBatch` hands the app a final
+          // transcript. Emitting mid-batch raced the batch delivery: the
+          // app's store had nothing to apply the edit to yet (fresh
+          // session) and dropped it — or, in older builds, rendered the
+          // edit as a stacked duplicate row. `editOf` is anchored to the
+          // ROOT of an edit chain so chained edits keep matching.
+          const editBatchId = msg.tags['batch'];
+          const editBatch = editBatchId ? this.batches.get(editBatchId) : undefined;
+          if (editBatch && editBatch.type !== 'draft/multiline') {
+            // Reactions attach to the msgid the user reacted to — usually
+            // the latest edit id — so replay delivers them ON the edit row.
+            // The collapse must carry them, or reactions on edited messages
+            // vanish every reload.
+            let editReactions: Map<string, Set<string>> | undefined;
+            const reactionsTag = msg.tags['+freeq.at/reactions'];
+            if (reactionsTag) {
+              editReactions = new Map();
+              for (const part of reactionsTag.split(';')) {
+                const [emoji, nicks] = part.split(':');
+                if (emoji && nicks) {
+                  const set = editReactions.get(emoji) ?? new Set<string>();
+                  for (const n of nicks.split(',')) if (n) set.add(n);
+                  editReactions.set(emoji, set);
+                }
+              }
+            }
+            const idx = editBatch.messages.findIndex(
+              (m) => m.id === editOf || m.editOf === editOf,
+            );
+            if (idx >= 0) {
+              const prev = editBatch.messages[idx];
+              const mergedReactions = editReactions
+                ? new Map([...(prev.reactions ?? new Map()), ...editReactions])
+                : prev.reactions;
+              editBatch.messages[idx] = {
+                ...prev,
+                text: displayText,
+                id: msg.tags['msgid'] || prev.id,
+                editOf: prev.editOf ?? editOf,
+                ...(mergedReactions ? { reactions: mergedReactions } : {}),
+              };
+              break;
+            }
+            // Original row absent from this batch window — deliver the
+            // edit as its own row rather than losing the content.
+            editBatch.messages.push({
+              id: msg.tags['msgid'] || crypto.randomUUID(),
+              from,
+              text: displayText,
+              timestamp: msg.tags['time'] ? new Date(msg.tags['time']) : new Date(),
+              tags: msg.tags,
+              isSelf,
+              editOf,
+              ...(editReactions ? { reactions: editReactions } : {}),
+            });
+            break;
+          }
           const isStreaming = msg.tags['+freeq.at/streaming'] === '1';
-          this.emit('messageEdited', bufName, editOf, displayText, msg.tags['msgid'], isStreaming);
+          this.emit('messageEdited', bufName, editOf, displayText, msg.tags['msgid'], isStreaming, from, msg.tags['account']);
           break;
         }
 
@@ -1715,6 +1787,14 @@ export class FreeqClient extends EventEmitter {
           // Emitted so the app can show notifications / increment badges
           this.emit('systemMessage', '__mention__', JSON.stringify({ channel: bufName, from, text, isDM, isMention }));
         }
+        break;
+      }
+
+      case 'FAIL': {
+        // IRCv3 FAIL — surface to the app. A silent server rejection is
+        // indistinguishable from a client bug at the UI (and has cost
+        // real debugging time); the app renders these as system messages.
+        this.emit('serverFail', msg.params.join(' '));
         break;
       }
 
@@ -1788,7 +1868,7 @@ export class FreeqClient extends EventEmitter {
         const bufName = isChannel ? target : this.dmKey(isSelf ? target : from);
 
         const deleteOf = msg.tags['+draft/delete'];
-        if (deleteOf) { this.emit('messageDeleted', bufName, deleteOf); break; }
+        if (deleteOf) { this.emit('messageDeleted', bufName, deleteOf, from, msg.tags['account']); break; }
 
         const reaction = msg.tags['+react'];
         if (reaction) {
@@ -1849,6 +1929,16 @@ export class FreeqClient extends EventEmitter {
         if (avToken && avId) {
           this._avTokens.set(avId, avToken);
           this.emit('avToken', avId, avToken);
+        }
+
+        // Machine-readable AV failure (join rejected / start lost a race).
+        // Without this, a failed av-join was only a human NOTICE — client
+        // call state got set up optimistically and never torn down, leaving
+        // a ghost publisher in a session the server never admitted us to.
+        const avError = msg.tags['+freeq.at/av-error'];
+        if (avError) {
+          this.emit('avError', avError, avId || '',
+            msg.tags['+freeq.at/av-reason'] || '');
         }
         break;
       }

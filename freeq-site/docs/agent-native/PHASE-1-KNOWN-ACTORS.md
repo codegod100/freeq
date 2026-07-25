@@ -2,7 +2,7 @@
 
 **Goal**: Every serious participant is inspectable — identity, provenance, actor class, and rich presence.
 
-**Demo**: Start the factory bot and a human user in `#factory`. The bot shows up with a 🤖 badge. Click its name in the web client to see an identity card: "Created by did:plc:xxx, running freeq-bots v0.1, source github.com/chad/freeq, current state: idle." Say `factory: build a landing page` — the identity card live-updates to "executing: specifying." If you kill the bot process, it transitions to "degraded" within 60 seconds and then disappears. A user on irssi sees the bot join and chat normally with no disruption.
+**Demo**: Start the factory bot and a human user in `#factory`. The bot shows up with a 🤖 badge. Click its name in the web client to see an identity card: "Created by did:plc:xxx, running freeq-bots v0.1, source github.com/freeq-irc/freeq, current state: idle." Say `factory: build a landing page` — the identity card live-updates to "executing: specifying." If you kill the bot process, it transitions to "degraded" within 60 seconds and then disappears. A user on irssi sees the bot join and chat normally with no disruption.
 
 ---
 
@@ -433,7 +433,7 @@ pub struct ProvenanceDeclaration {
     pub creator_did: Option<String>,
     pub sponsor_did: Option<String>,
     pub authority_basis: Option<String>,
-    pub implementation_ref: Option<String>,  // e.g. "github.com/chad/freeq/freeq-bots@v0.1"
+    pub implementation_ref: Option<String>,  // e.g. "github.com/freeq-irc/freeq/freeq-bots@v0.1"
     pub source_repo: Option<String>,
     pub image_digest: Option<String>,
     pub revocation_authority: Option<String>,
@@ -507,7 +507,7 @@ let provenance = ProvenanceDeclaration {
     sponsor_did: Some("did:plc:4qsyxmnsblo4luuycm3572bq".into()),
     authority_basis: Some("Operated by server administrator".into()),
     implementation_ref: Some("freeq-bots@0.1.0".into()),
-    source_repo: Some("https://github.com/chad/freeq".into()),
+    source_repo: Some("https://github.com/freeq-irc/freeq".into()),
     revocation_authority: Some("did:plc:4qsyxmnsblo4luuycm3572bq".into()),
     ..Default::default()
 };
@@ -742,7 +742,7 @@ Response:
     "origin_type": "external_import",
     "creator_did": "did:plc:4qsyxmnsblo4luuycm3572bq",
     "creator_name": "chad",
-    "source_repo": "https://github.com/chad/freeq",
+    "source_repo": "https://github.com/freeq-irc/freeq",
     "implementation_ref": "freeq-bots@0.1.0",
     "revocation_authority": "did:plc:4qsyxmnsblo4luuycm3572bq"
   },

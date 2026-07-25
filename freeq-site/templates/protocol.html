@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% set nav_active = 'protocol' %}
+{% block title %}Protocol{% endblock %}
+{% block description %}freeq's entire modernization is an IRCv3 extension, not a fork: one new SASL mechanism, a documented tag namespace, CRDT federation over iroh QUIC, MoQ voice, ed25519-signed messages, E2EE.{% endblock %}
+
+{% block head %}
+<style>
+.phero { text-align: center; padding: 64px 24px 24px; }
+.phero h1 { font-size: 34px; letter-spacing: -.5px; }
+.phero h1 em { color: var(--cyan); font-style: normal; }
+.phero p { max-width: 640px; margin: 12px auto 0; color: var(--fg2); line-height: 1.9; }
+.psection { max-width: 900px; margin: 0 auto; padding: 28px 24px 4px; }
+.psection h2 { border: none; padding: 0; font-size: 19px; color: var(--fg); margin-bottom: 8px; }
+.psection p { color: var(--fg2); }
+.psection pre { font-size: 12px; }
+.caps { font-size: 12px; line-height: 2.1; }
+.caps code { margin-right: 6px; }
+.arch { margin: 20px auto; text-align: center; }
+.arch img { max-width: 100%; border: 1px solid var(--overlay); border-radius: 8px; }
+.spec-table td:first-child { white-space: nowrap; color: var(--fg) !important; font-weight: 600; }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="phero">
+  <h1>Everything is an extension.<br><em>Nothing is a fork.</em></h1>
+  <p>
+    freeq modernizes a 36-year-old protocol without breaking a single existing client:
+    IRCv3 capabilities, a documented tag namespace, and exactly one new SASL mechanism.
+    irssi from 1999 connects to the same server your agents authenticate to with ed25519 keys.
+  </p>
+</div>
+
+<div class="psection">
+  <h2>The live capability list</h2>
+  <p>What <code>CAP LS</code> returns from irc.freeq.at today — not a roadmap:</p>
+  <pre><code>sasl message-tags multi-prefix echo-message server-time batch
+draft/chathistory account-notify account-tag extended-join away-notify
+draft/read-marker draft/multiline=max-bytes=40000,max-lines=100
+iroh=&lt;server endpoint id&gt;</code></pre>
+  <p>On top of the standard caps, modern features are tag extensions: editing (<code>+draft/edit</code>),
+  deletion (<code>+draft/delete</code>), reactions (<code>+draft/react</code>/<code>+react</code>),
+  replies/threads (<code>+draft/reply</code>), typing (<code>+typing</code>), pins, search,
+  and the <a href="/docs/tag-registry/"><code>+freeq.at/*</code> namespace</a> for signatures,
+  AV signaling, and agent coordination.</p>
+</div>
+
+<div class="psection">
+  <h2>Architecture</h2>
+  <div class="arch"><img src="/static/architecture.svg" alt="freeq architecture: clients over IRC/WebSocket/iroh to a Rust server (policy, sessions, persistence), federating over iroh QUIC with Automerge CRDT convergence, identity anchored in AT Protocol DIDs"></div>
+</div>
+
+<div class="psection">
+  <h2>The specs</h2>
+  <table class="spec-table">
+    <tr><td><a href="/docs/authentication/">ATPROTO-CHALLENGE</a></td><td>The one new SASL mechanism: server issues a nonce challenge, the device signs it with the DID's key. Works for humans (did:plc via Bluesky OAuth) and agents (did:key) identically. Keys never leave the device.</td></tr>
+    <tr><td><a href="/docs/tag-registry/">Tag registry</a></td><td>Every <code>+freeq.at/*</code> tag with semantics: <code>sig</code>, <code>event</code>/<code>payload</code>/<code>task-id</code>, <code>av-*</code>, <code>act-*</code>, <code>origin</code>, <code>reactions</code>, pins, streaming.</td></tr>
+    <tr><td><a href="/docs/encryption/">Signed messages</a></td><td>Per-session ed25519 signing (<code>+freeq.at/sig</code>) with public keys at <code>/api/v1/signing-keys/&lt;did&gt;</code>. Server verifies client signatures and relays them unchanged — non-repudiation end to end.</td></tr>
+    <tr><td><a href="/docs/encryption/">E2EE</a></td><td>DMs: X3DH key agreement + Double Ratchet (forward secrecy). Channels: passphrase or <a href="/docs/vc-e2e-channels/">credential-bootstrapped</a> group keys with epoch rotation. Honest threat-model doc, including what's <em>not</em> encrypted.</td></tr>
+    <tr><td><a href="/docs/av-protocol/">AV sessions</a></td><td>Control plane: <code>TAGMSG</code> signaling any client can see. Data plane: Opus/H.264 over MoQ (Media over QUIC) through an SFU. A call is channel metadata — which is why agents can join it.</td></tr>
+    <tr><td><a href="/docs/federation/">Federation</a></td><td>Server-to-server over <a href="https://iroh.computer">iroh</a> QUIC (NAT-traversing, no port forwarding), with <a href="https://automerge.org">Automerge</a> CRDT convergence for channel state. Event dedup, per-peer rate limits, authorization checks on relayed ops.</td></tr>
+    <tr><td><a href="/docs/policy-framework/">Policy</a></td><td>Channel access as verifiable credentials: GitHub org, Bluesky follows, company SSO, or your own verifier — the verifier architecture is decoupled, so third parties issue credentials with zero server changes. Every decision signed and auditable.</td></tr>
+    <tr><td><a href="/docs/agents/">Agent coordination</a></td><td>Typed task/evidence/delegation events, governance verbs (pause/resume/revoke), TTL capabilities, provenance manifests, signed heartbeats. Five documented phases, shipped.</td></tr>
+    <tr><td><a href="/docs/protocol/">PROTOCOL.md</a></td><td>The full wire-protocol reference.</td></tr>
+  </table>
+</div>
+
+<div class="psection">
+  <h2>Engineering posture</h2>
+  <p>
+    Single Rust binary. SQLite (optionally encrypted at rest). 400+ server tests plus acceptance
+    suites for S2S sync, search, uploads, and the SDK. Security audits are
+    <a href="/docs/encryption/">published in the repo</a>, and so are the
+    <a href="/docs/limitations/">known limitations</a> — read those before you trust us with anything.
+    MIT licensed. <a href="/docs/self-hosting/">Self-host it</a>, federate it, or just point irssi at it.
+  </p>
+</div>
+{% endblock %}

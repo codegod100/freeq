@@ -4,6 +4,7 @@
  */
 import { useEffect, useState } from 'react';
 import { displayNameForKey } from '../lib/display-name';
+import { apiFetch } from '../lib/api';
 
 interface AuditEvent {
   timestamp: string;
@@ -54,7 +55,7 @@ export function AuditTimeline({ channel, onClose }: AuditTimelineProps) {
     if (actorFilter) params.set('actor', actorFilter);
     if (categoryFilter) params.set('type', categoryFilter);
 
-    fetch(`/api/v1/channels/${encodeURIComponent(channel.replace(/^#/, ''))}/audit?${params}`)
+    apiFetch(`/api/v1/channels/${encodeURIComponent(channel.replace(/^#/, ''))}/audit?${params}`)
       .then(r => r.ok ? r.json() : { events: [] })
       .then(data => {
         setEvents(data.timeline || data.events || []);

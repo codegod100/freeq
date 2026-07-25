@@ -6,9 +6,8 @@ infrastructure — contributions should be clear, auditable, and avoid clevernes
 ## Getting Started
 
 ```bash
-git clone https://github.com/chad/freeq   # or: jj git clone …
+git clone https://github.com/freeq-irc/freeq
 cd freeq
-# Maintainers: colocated jj is preferred for day-to-day work (see AGENTS.md).
 cargo build
 cargo test
 ```

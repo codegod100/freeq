@@ -44,6 +44,7 @@ export const EMOJI_DATA: [string, ...string[]][] = [
   ['💻','laptop','computer','code'],['⌨️','keyboard','type'],['🖥️','desktop','monitor'],
   ['📱','phone','mobile'],['🎮','game','controller','play'],['🎵','music','note'],
   ['🎶','music','notes'],['🎸','guitar','rock'],['🎤','mic','karaoke','sing'],
+  ['🕺','man dancing','dance','dancer'],['💃','woman dancing','dance','dancer'],['🎷','saxophone','sax','jazz'],
   ['📷','camera','photo'],['🎬','movie','film','action'],['📚','books','read','study'],
   ['☕','coffee','cafe'],['🍺','beer','drink','cheers'],['🍕','pizza','food'],
   ['🌮','taco','food','mexican'],['🍜','noodle','ramen','soup'],['🍣','sushi'],
@@ -82,10 +83,15 @@ const CATEGORIES = [
 
 const FREQUENT_KEY = 'freeq-emoji-frequent';
 
+// freeq's music/dance brand up front, alongside the usual reactions — shown as
+// the default "frequent" row until the user builds their own.
+const BRAND_DEFAULT_FREQUENT = ['🕺','💃','🎶','🎷','👍','❤️','😂','🎉','👀','🔥'];
+
 function getFrequent(): string[] {
   try {
-    return JSON.parse(localStorage.getItem(FREQUENT_KEY) || '[]').slice(0, 24);
-  } catch { return []; }
+    const stored = JSON.parse(localStorage.getItem(FREQUENT_KEY) || '[]');
+    return (Array.isArray(stored) && stored.length ? stored : BRAND_DEFAULT_FREQUENT).slice(0, 24);
+  } catch { return BRAND_DEFAULT_FREQUENT; }
 }
 
 function recordUsage(emoji: string) {

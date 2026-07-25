@@ -29,6 +29,7 @@ else:
 # Docs directory — site docs/ and repo docs/
 SITE_DOCS_DIR = Path(__file__).parent / "docs"
 REPO_DOCS_DIR = Path(__file__).parent.parent / "docs"
+BLOG_DIR = Path(__file__).parent / "blog"
 
 # Markdown renderer
 MD_EXTENSIONS = [
@@ -86,6 +87,10 @@ SLUG_MAP = {
     "bot-quickstart": ("site", "BOT-QUICKSTART.md"),
     "policy-system": ("site", "POLICY.md"),
     "agents": ("site", "agents.md"),
+    "agent-quickstart": ("site", "agent-quickstart.md"),
+    "watch-your-agent": ("site", "watch-your-agent.md"),
+    "tag-registry": ("site", "tag-registry.md"),
+    "teams": ("site", "teams.md"),
     "security": ("site", "SECURITY.md"),
     "typescript-sdk": ("site", "typescript-sdk.md"),
     "agent-assistance": ("site", "agent-assistance.md"),
@@ -116,6 +121,67 @@ def connect():
 @app.route("/sdk/")
 def sdk():
     return render_template("sdk.html")
+
+
+@app.route("/agents/")
+def agents():
+    return render_template("agents.html")
+
+
+@app.route("/protocol/")
+def protocol():
+    return render_template("protocol.html")
+
+
+@app.route("/clients/")
+def clients():
+    return render_template("clients.html")
+
+
+def _blog_posts():
+    """All posts, newest first: [{slug, title, date}]. Date = first *YYYY-MM-DD* line."""
+    import re
+    posts = []
+    if not BLOG_DIR.exists():
+        return posts
+    for f in BLOG_DIR.glob("*.md"):
+        text = f.read_text()
+        title = next((l[2:].strip() for l in text.splitlines() if l.startswith("# ")), f.stem)
+        m = re.search(r"\*(\d{4}-\d{2}-\d{2})\*", text)
+        posts.append({"slug": f.stem, "title": title, "date": m.group(1) if m else ""})
+    posts.sort(key=lambda p: p["date"], reverse=True)
+    return posts
+
+
+@app.route("/blog/")
+def blog_index():
+    return render_template("blog_index.html", posts=_blog_posts())
+
+
+@app.route("/blog/<slug>/")
+def blog_post(slug):
+    filepath = BLOG_DIR / f"{slug}.md"
+    if not filepath.exists() or ".." in slug or "/" in slug:
+        abort(404)
+    return render_template("blog_post.html", doc=render_md(filepath))
+
+
+@app.route("/blog/feed.xml")
+def blog_feed():
+    items = "".join(
+        f"<item><title>{p['title']}</title>"
+        f"<link>https://freeq.at/blog/{p['slug']}/</link>"
+        f"<guid>https://freeq.at/blog/{p['slug']}/</guid>"
+        f"<pubDate>{p['date']}</pubDate></item>"
+        for p in _blog_posts()
+    )
+    rss = (
+        '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
+        "<title>freeq blog</title><link>https://freeq.at/blog/</link>"
+        "<description>Engineering notes from the freeq project</description>"
+        f"{items}</channel></rss>"
+    )
+    return rss, 200, {"Content-Type": "application/rss+xml"}
 
 
 @app.route("/about/")

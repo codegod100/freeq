@@ -227,7 +227,7 @@ final class AvSessionTests: XCTestCase {
                 TagEntry(key: "+freeq.at/av-state", value: "started"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
                 TagEntry(key: "+freeq.at/av-actor", value: "carol"),
-            ])))
+            ], dmKey: nil)))
 
         XCTAssertEqual(state.activeAvSessions["#freeq"], "sess-1")
         XCTAssertFalse(state.isInCall, "merely learning of a session doesn't put us in it")
@@ -246,7 +246,7 @@ final class AvSessionTests: XCTestCase {
                 TagEntry(key: "+freeq.at/av-state", value: "joined"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
                 TagEntry(key: "+freeq.at/av-actor", value: "bob"),
-            ])))
+            ], dmKey: nil)))
 
         XCTAssertEqual(state.callParticipants, ["bob"])
 
@@ -257,7 +257,7 @@ final class AvSessionTests: XCTestCase {
                 TagEntry(key: "+freeq.at/av-state", value: "joined"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
                 TagEntry(key: "+freeq.at/av-actor", value: "BOB"),
-            ])))
+            ], dmKey: nil)))
         XCTAssertEqual(state.callParticipants.count, 1, "case-insensitive dedup")
     }
 
@@ -273,7 +273,7 @@ final class AvSessionTests: XCTestCase {
             TagEntry(key: "+freeq.at/av-state", value: "joined"),
             TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
             TagEntry(key: "+freeq.at/av-actor", value: "bob"),
-        ])))
+        ], dmKey: nil)))
         state.deliverAvEventForTest(.videoFrame(nick: "bob",
             bgra: [UInt8](repeating: 0, count: 4), width: 1, height: 1))
         XCTAssertTrue(state.participantsWithVideo.contains("bob"))
@@ -283,7 +283,7 @@ final class AvSessionTests: XCTestCase {
             TagEntry(key: "+freeq.at/av-state", value: "left"),
             TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
             TagEntry(key: "+freeq.at/av-actor", value: "bob"),
-        ])))
+        ], dmKey: nil)))
 
         XCTAssertFalse(state.callParticipants.contains("bob"))
         XCTAssertFalse(state.participantsWithVideo.contains("bob"),
@@ -303,7 +303,7 @@ final class AvSessionTests: XCTestCase {
             tags: [
                 TagEntry(key: "+freeq.at/av-state", value: "ended"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
-            ])))
+            ], dmKey: nil)))
 
         XCTAssertFalse(state.isInCall)
         XCTAssertNil(state.currentCallChannel)
@@ -328,7 +328,7 @@ final class AvSessionTests: XCTestCase {
         h.handleEvent(.tagMsg(msg: TagMessage(from: "server", target: "#other", tags: [
             TagEntry(key: "+freeq.at/av-state", value: "ended"),
             TagEntry(key: "+freeq.at/av-id", value: "sess-2"),
-        ])))
+        ], dmKey: nil)))
         XCTAssertTrue(state.isInCall, "#other ending must not end #freeq")
         XCTAssertEqual(state.currentCallChannel, "#freeq")
 
@@ -337,7 +337,7 @@ final class AvSessionTests: XCTestCase {
             TagEntry(key: "+freeq.at/av-state", value: "joined"),
             TagEntry(key: "+freeq.at/av-id", value: "sess-2"),
             TagEntry(key: "+freeq.at/av-actor", value: "dave"),
-        ])))
+        ], dmKey: nil)))
         XCTAssertFalse(state.callParticipants.contains("dave"))
     }
 
@@ -373,7 +373,7 @@ final class AvSessionTests: XCTestCase {
                 TagEntry(key: "+freeq.at/av-state", value: "joined"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
                 TagEntry(key: "+freeq.at/av-actor", value: "ALICE"),
-            ])))
+            ], dmKey: nil)))
         XCTAssertFalse(state.callParticipants.contains(where: { $0.lowercased() == "alice" }),
                        "own nick must not appear via TAGMSG joined (server self-echo)")
     }
@@ -701,7 +701,7 @@ final class AvSessionTests: XCTestCase {
                 TagEntry(key: "+freeq.at/av-state", value: "joined"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
                 TagEntry(key: "+freeq.at/av-actor", value: "alice"),
-            ])))
+            ], dmKey: nil)))
 
         XCTAssertFalse(state.callParticipants.contains(where: { $0.lowercased() == "alice" }),
                        "TAGMSG self-echo must not add the local user as a remote tile")
@@ -717,40 +717,40 @@ final class AvSessionTests: XCTestCase {
             TagEntry(key: "+freeq.at/av-state", value: "joined"),
             TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
             TagEntry(key: "+freeq.at/av-actor", value: "bob"),
-        ])))
+        ], dmKey: nil)))
         h.handleEvent(.tagMsg(msg: TagMessage(from: "server", target: "#freeq", tags: [
             TagEntry(key: "+freeq.at/av-state", value: "joined"),
             TagEntry(key: "+freeq.at/av-id", value: "sess-1"),
             TagEntry(key: "+freeq.at/av-actor", value: "carol"),
-        ])))
+        ], dmKey: nil)))
 
         XCTAssertEqual(Set(state.callParticipants), Set(["bob", "carol"]))
     }
 
-    func testPendingAvStartOnlyConsumedBySelfActor() {
+    func testConcurrentStartLoserConvergesOnWinnersSession() {
+        // Two people hit "join" at the same instant; both send av-start; the
+        // server allows one session per channel, so one wins. The loser (us,
+        // still pendingStart, seeing CAROL as the actor) must converge on the
+        // winning session — the old "only join when actor == self" logic left
+        // the loser wedged outside the call forever ("we could never
+        // see/hear each other; rejoining sometimes fixed it").
         let (state, _, _) = makeHarness(myNick: "alice")
         state.activeSessionProbeForTest = { _ in .none }
         state.startOrJoinVoice(channel: "#freeq")
         XCTAssertTrue(waitFor { state.pendingAvStart.contains("#freeq") })
-        XCTAssertTrue(state.pendingAvStart.contains("#freeq"))
 
-        // av-actor=carol — someone else's start raced ours. Must NOT cause
-        // us to auto-join their session (that would either fail with
-        // "channel busy" or produce two competing calls).
         SwiftEventHandler(appState: state).handleEvent(.tagMsg(msg: TagMessage(
             from: "server", target: "#freeq",
             tags: [
                 TagEntry(key: "+freeq.at/av-state", value: "started"),
                 TagEntry(key: "+freeq.at/av-id", value: "sess-carol"),
                 TagEntry(key: "+freeq.at/av-actor", value: "carol"),
-            ])))
+            ], dmKey: nil)))
 
         XCTAssertEqual(state.activeAvSessions["#freeq"], "sess-carol",
-                       "we still record the session id for future joiners")
-        XCTAssertFalse(state.isInCall,
-                       "we don't auto-join someone else's session just because we had a pending start")
-        XCTAssertTrue(state.pendingAvStart.contains("#freeq"),
-                      "pendingAvStart stays set until our OWN av-start echoes back")
+                       "we record the winning session id")
+        XCTAssertFalse(state.pendingAvStart.contains("#freeq"),
+                       "pending start is consumed by converging on the winner (join is idempotent for the actual creator)")
     }
 }
 
@@ -774,68 +774,16 @@ final class AvSessionTests: XCTestCase {
 /// on `CallCameraCapture.applyOrientation` for the derivation.
 final class CallCameraCaptureOrientationTests: XCTestCase {
 
-    func testPortraitOrientationKeepsUserUpright() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.portrait)
-
-        XCTAssertEqual(cap.previewRotationAngleForTest, 90,
-                       "portrait → preview rotates 90° CW so the user's head appears at the top of the portrait rect")
-    }
-
-    func testLandscapeLeftOrientationKeepsUserUprightInPortraitLockedRect() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.landscapeLeft)
-
-        // User-reported bug: Apple's standard mapping (0°) leaves the
-        // preview upside-down in landscape because our UI is
-        // portrait-locked, not rotating. The correct angle is 270° CW.
-        XCTAssertEqual(cap.previewRotationAngleForTest, 270,
-                       "landscapeLeft + portrait-locked UI → 270° CW keeps the user's head at vision-up")
-    }
-
-    func testLandscapeRightOrientationKeepsUserUprightInPortraitLockedRect() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.landscapeRight)
-
-        XCTAssertEqual(cap.previewRotationAngleForTest, 270,
-                       "landscapeRight + portrait-locked UI → 270° CW keeps the user's head at vision-up")
-    }
-
-    func testPortraitUpsideDownKeepsUserUpright() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-
-        cap.applyOrientationForTest(.portraitUpsideDown)
-
-        // The rect rotates with the device (it's drawn in device-portrait
-        // coords), so what's at rect-top in pixels is at vision-bottom for
-        // an upside-down device — and the buffer's head-position also
-        // flipped to compensate. Net rotation: 90° CW, same as portrait.
-        XCTAssertEqual(cap.previewRotationAngleForTest, 90,
-                       "portraitUpsideDown + portrait-locked UI → 90° CW (same as portrait); rect & buffer rotations cancel")
-    }
-
-    func testFaceUpFaceDownAndUnknownLeavePreviewAlone() {
-        let cap = CallCameraCapture()
-        cap.configureForTest()
-        cap.applyOrientationForTest(.portrait)
-        let before = cap.previewRotationAngleForTest
-
-        cap.applyOrientationForTest(.faceUp)
-        XCTAssertEqual(cap.previewRotationAngleForTest, before,
-                       "face-up is not a meaningful UI rotation; keep the prior preview angle")
-        cap.applyOrientationForTest(.faceDown)
-        XCTAssertEqual(cap.previewRotationAngleForTest, before,
-                       "face-down is not a meaningful UI rotation; keep the prior preview angle")
-        cap.applyOrientationForTest(.unknown)
-        XCTAssertEqual(cap.previewRotationAngleForTest, before)
-    }
+    // NOTE: the local PREVIEW rotation is now driven by
+    // AVCaptureDevice.RotationCoordinator (front-camera- and
+    // orientation-correct, computed by the OS from the live physical
+    // orientation), not by a hand-derived angle table. The old unit tests
+    // here asserted that table — which was exactly the bug (portrait 90° off,
+    // landscape upside-down, landscapeLeft indistinguishable from Right).
+    // The coordinator needs a real device/preview connection, so it isn't
+    // unit-testable; it's verified on-device. The OUTGOING software rotation
+    // (`rotatedFrame`, unchanged) is still covered below, as is the
+    // `lastValidOrientation` tracking it depends on.
 
     /// `lastValidOrientation` must remember the most recent UI-meaningful
     /// orientation so the resume-from-faceUp path (e.g., user sets phone on
@@ -895,14 +843,18 @@ final class CallCameraCaptureOrientationTests: XCTestCase {
     /// initial-orientation read via `simulateInitialConfigure` and assert
     /// the resulting preview angle.
     func testInitialOrientationReadAppliesBeforeFirstFrame() {
+        // Preview rotation is now owned by AVCaptureDevice.RotationCoordinator
+        // (OS-driven, not unit-testable without hardware). What OUR code still
+        // owns — and what this pins — is `lastValidOrientation`, which drives
+        // the OUTGOING software rotation for the very first captured frame.
         let cap = CallCameraCapture()
         cap.configureForTest()
         cap.setOrientationProviderForTest { .landscapeLeft }
 
         cap.simulateInitialConfigure()
 
-        XCTAssertEqual(cap.previewRotationAngleForTest, 270,
-                       "call started in landscapeLeft must seed the preview at 270°, not the 90° default")
+        XCTAssertEqual(cap.lastValidOrientationForTest, .landscapeLeft,
+                       "call started in landscapeLeft must seed the outgoing rotation, not the portrait default")
     }
 
     func testInitialOrientationFallsBackToPortraitForFaceUpOrUnknown() {
@@ -912,53 +864,46 @@ final class CallCameraCaptureOrientationTests: XCTestCase {
 
         cap.simulateInitialConfigure()
 
-        XCTAssertEqual(cap.previewRotationAngleForTest, 90,
-                       "if the device starts faceUp, fall back to portrait (90°) so we don't render a black tile")
+        XCTAssertEqual(cap.lastValidOrientationForTest, .portrait,
+                       "if the device starts faceUp, fall back to portrait so outgoing frames aren't unrotated")
     }
 
-    /// `pendingPreviewAngle` is the angle we'd apply if the preview
-    /// connection were ready. It must update even when no connection
-    /// exists (the simulator/unit-test case). That guarantees the
-    /// affine-transform fallback knows the right angle the moment the
-    /// connection appears.
-    func testPendingPreviewAngleTracksOrientationWithNoConnection() {
+    /// The orientation tracker feeds the OUTGOING software rotation
+    /// (`rotatedFrame`). It must track every meaningful flip and ignore
+    /// faceUp/faceDown/unknown — even with no preview connection (the
+    /// simulator/unit-test case). Preview rotation itself is owned by
+    /// RotationCoordinator and is not exercised here.
+    func testOrientationTrackingWithNoConnection() {
         let cap = CallCameraCapture()
         cap.configureForTest()
 
         cap.applyOrientationForTest(.landscapeRight)
-        XCTAssertEqual(cap.pendingPreviewAngle, 270)
+        XCTAssertEqual(cap.lastValidOrientationForTest, .landscapeRight)
 
         cap.applyOrientationForTest(.portrait)
-        XCTAssertEqual(cap.pendingPreviewAngle, 90)
+        XCTAssertEqual(cap.lastValidOrientationForTest, .portrait)
 
-        cap.applyOrientationForTest(.portraitUpsideDown)
-        XCTAssertEqual(cap.pendingPreviewAngle, 90)
+        // faceUp is not a meaningful orientation — keep the last valid one.
+        cap.applyOrientationForTest(.faceUp)
+        XCTAssertEqual(cap.lastValidOrientationForTest, .portrait)
     }
 
-    /// When the `AVCaptureVideoPreviewLayer.connection` is nil (the
-    /// session hasn't started yet, or we're in the simulator with no
-    /// real camera), the orientation handler falls back to a CALayer
-    /// affine transform. The CW rotation angle in
-    /// `AVCaptureConnection.videoRotationAngle` is the OPPOSITE sign to
-    /// `CGAffineTransform(rotationAngle:)` (which is CCW for positive
-    /// angles on iOS). We must negate the angle in the fallback or the
-    /// preview spins the wrong way around the layer.
-    ///
-    /// This test pins the math so a future "clean up the fallback" PR
-    /// can't silently reverse the rotation again.
-    func testAffineTransformFallbackUsesClockwiseConvention() {
+    /// The preview layer must NOT carry a hand-rolled affine rotation:
+    /// rotation is applied via the connection's `videoRotationAngle`
+    /// (RotationCoordinator), and the transform stays identity. A
+    /// reintroduced manual transform would double-rotate the preview.
+    func testPreviewLayerTransformStaysIdentity() {
         let cap = CallCameraCapture()
         cap.configureForTest()
 
-        cap.applyOrientationForTest(.portrait)  // angle = 90° CW
+        cap.applyOrientationForTest(.portrait)
+        cap.applyOrientationForTest(.landscapeLeft)
 
         let t = cap.previewLayer.affineTransform()
-        // CGAffineTransform(rotationAngle: θ) has a = cos(θ), b = sin(θ).
-        // For 90° CW we want θ_radians = -π/2 (because iOS treats
-        // positive as CCW). cos(-π/2) = 0, sin(-π/2) = -1.
-        XCTAssertEqual(t.a, 0, accuracy: 1e-6, "cos(-π/2) should be 0")
-        XCTAssertEqual(t.b, -1, accuracy: 1e-6,
-                       "sin(-π/2) should be -1; +1 would mean we rotated CCW (wrong direction)")
+        XCTAssertEqual(t.a, 1, accuracy: 1e-6)
+        XCTAssertEqual(t.b, 0, accuracy: 1e-6)
+        XCTAssertEqual(t.c, 0, accuracy: 1e-6)
+        XCTAssertEqual(t.d, 1, accuracy: 1e-6)
     }
 
     /// Camera toggle off → flip device to landscape → toggle on. The new
@@ -974,9 +919,8 @@ final class CallCameraCaptureOrientationTests: XCTestCase {
         // orientationProvider, applies orientation.
         cap.simulateInitialConfigure()
 
-        XCTAssertEqual(cap.previewRotationAngleForTest, 270,
-                       "starting a fresh capture while in landscape must seed at 270°, matching gravity-up")
-        XCTAssertEqual(cap.lastValidOrientationForTest, .landscapeRight)
+        XCTAssertEqual(cap.lastValidOrientationForTest, .landscapeRight,
+                       "a fresh capture started in landscape must seed the outgoing rotation from the provider, not default to portrait")
     }
 }
 

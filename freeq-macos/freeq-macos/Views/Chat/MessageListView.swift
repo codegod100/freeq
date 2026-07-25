@@ -61,14 +61,66 @@ struct MessageListView: View {
             if shouldShowWelcome {
                 ChannelWelcomeView()
             }
+
+            if appState.hasMessageSelection {
+                SelectionHintBar()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
         .background(Theme.chatBackground)
+        .animation(.easeInOut(duration: 0.15), value: appState.hasMessageSelection)
     }
 
     private func loadOlderHistory() {
         guard let target = appState.activeChannel,
               let oldest = messages.first else { return }
         appState.requestHistory(channel: target, before: oldest.timestamp)
+    }
+}
+
+// MARK: - Selection hint bar
+
+/// Floating pill shown while a block of messages is selected. Gives the copy
+/// action a visible target (not just ⌘C) plus Select-all / Clear, and quietly
+/// teaches the shortcuts. Selection lives in `AppState`; the AppKit list drives
+/// it from shift/cmd-clicks.
+private struct SelectionHintBar: View {
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        let count = appState.selectedMessageIds.count
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Theme.accent)
+            Text("\(count) selected")
+                .font(.system(.callout, weight: .medium))
+                .monospacedDigit()
+
+            Divider().frame(height: 14)
+
+            Button {
+                let n = appState.copySelectedMessages()
+                if n > 0 { appState.clearMessageSelection() }
+            } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+            .help("Copy the selected messages as clean text (⌘C)")
+
+            Button("Select all") { appState.selectAllMessages() }
+                .help("Select every message in this conversation")
+
+            Button("Clear") { appState.clearMessageSelection() }
+                .help("Clear the selection (Esc)")
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.border, lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 8, y: 2)
     }
 }
 
@@ -666,6 +718,16 @@ struct MessageRow: View {
                     .foregroundStyle(Theme.textSecondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let coord = message.coordination {
+                // Agent coordination event → structured card (parity with web).
+                CoordinationCardView(info: coord, text: message.text)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let jumbo = Jumbomoji.size(message.text) {
+                // Jumbomoji: a message of just 1–3 emoji renders large.
+                Text(message.text.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.system(size: jumbo))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 let imageURLs = extractImageURLs(from: message.text)
                 let videoURLs = extractVideoURLs(from: message.text)
@@ -684,6 +746,10 @@ struct MessageRow: View {
                     // Same inline renderer feeds both, so styling is identical.
                     if MessageBlockParser.containsBlockSyntax(cleanText) {
                         MessageBlocksView(text: cleanText, inlineRenderer: parseMessageText)
+                            // Claim full height like the plain-text path, so a
+                            // multi-line block message doesn't under-measure and
+                            // let a reaction badge overlap it.
+                            .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Text(parseMessageText(cleanText))
                             .textSelection(.enabled)
@@ -742,6 +808,7 @@ struct MessageRow: View {
                                 emoji: emoji,
                                 count: nicks.count,
                                 isSelfReacted: nicks.contains(appState.nick),
+                                reactors: Array(nicks),
                                 action: {
                                     if let target = appState.activeChannel {
                                         appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
@@ -858,7 +925,7 @@ struct MessageRow: View {
         // React
         if !isSystem {
             Menu("React") {
-                ForEach(["👍", "❤️", "😂", "🎉", "👀", "🔥"], id: \.self) { emoji in
+                ForEach(["👍", "❤️", "😂", "🎉", "👀", "🔥", "🕺", "💃", "🎶", "🎷"], id: \.self) { emoji in
                     Button(emoji) {
                         if let target = appState.activeChannel {
                             appState.sendReaction(target: target, msgId: message.id, emoji: emoji)
@@ -1048,7 +1115,9 @@ struct HoverActionBar: View {
     let message: ChatMessage
     @State private var showEmojiPicker = false
 
-    private let quickEmoji = ["👍", "❤️", "😂", "🎉", "👀", "🔥"]
+    // The trailing four (dancers, notes, sax) are freeq's music/dance brand —
+    // present by default everywhere alongside the usual reactions.
+    private let quickEmoji = ["👍", "❤️", "😂", "🎉", "👀", "🔥", "🕺", "💃", "🎶", "🎷"]
 
     var body: some View {
         HStack(spacing: 2) {
@@ -1118,7 +1187,20 @@ struct ReactionBadge: View {
     let emoji: String
     let count: Int
     let isSelfReacted: Bool
+    /// Nicks who reacted with this emoji — surfaced as a hover tooltip
+    /// (the macOS equivalent of a long-press "who reacted" sheet).
+    var reactors: [String] = []
     let action: () -> Void
+
+    /// "🎉 alice, bob and you" — capped so a popular reaction stays readable.
+    private var reactorTooltip: String {
+        guard !reactors.isEmpty else { return "" }
+        let sorted = reactors.sorted { $0.lowercased() < $1.lowercased() }
+        let shown = sorted.prefix(12)
+        var list = shown.joined(separator: ", ")
+        if sorted.count > shown.count { list += " +\(sorted.count - shown.count) more" }
+        return "reacted with \(emoji): \(list)"
+    }
 
     var body: some View {
         Button(action: action) {
@@ -1143,6 +1225,7 @@ struct ReactionBadge: View {
             )
         }
         .buttonStyle(.plain)
+        .help(reactorTooltip)
     }
 }
 

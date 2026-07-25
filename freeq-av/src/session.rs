@@ -33,6 +33,9 @@
 //!     session_id: "abc123".into(),
 //!     our_broadcast: broadcast_path("abc123", "eliza", "0a1b2c3d"),
 //!     my_nick: "eliza".into(),
+//!     // Set true on a CPU-constrained host to skip the H.264 encode and keep
+//!     // the audio encoder real-time; `make_video` is then unused.
+//!     audio_only: false,
 //! };
 //! let mut session = AvSession::connect(config, audio_source, make_video);
 //!

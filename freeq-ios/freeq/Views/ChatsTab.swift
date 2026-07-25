@@ -23,6 +23,21 @@ struct ChatsTab: View {
         appState.channels.filter { (appState.unreadCounts[$0.name] ?? 0) > 0 }
     }
 
+    /// Only the DMs pane consumes pending-DM navigations; the channels pane
+    /// ignores them so we don't push a DM into the channels nav stack.
+    private func consumePendingDM() {
+        guard mode == .dms, let nick = appState.pendingDMNick else { return }
+        appState.pendingDMNick = nil
+        // Canonicalize (nick → DID key when known) and make sure the
+        // buffer exists so the pushed detail view has something to show.
+        let key = appState.getOrCreateDM(nick).name
+        navigationPath = NavigationPath()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            appState.activeChannel = key
+            navigationPath.append(key)
+        }
+    }
+
     var body: some View {
         NavigationStack(path: $navigationPath) {
             ZStack {
@@ -108,18 +123,11 @@ struct ChatsTab: View {
                     navigationPath.append(ch)
                 }
             }
-            .onChange(of: appState.pendingDMNick) {
-                // Only the DMs pane consumes pending-DM navigations; the
-                // channels pane ignores them so we don't push a DM into
-                // the channels nav stack.
-                guard mode == .dms, let nick = appState.pendingDMNick else { return }
-                appState.pendingDMNick = nil
-                navigationPath = NavigationPath()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    appState.activeChannel = nick
-                    navigationPath.append(nick)
-                }
-            }
+            .onChange(of: appState.pendingDMNick) { consumePendingDM() }
+            // TabView mounts this pane lazily: a pending DM set before the
+            // first visit (⌘N from another tab) predates the onChange
+            // observer, so also consume on appear.
+            .onAppear { consumePendingDM() }
         }
     }
 
@@ -212,8 +220,8 @@ struct ChatsTab: View {
         }
         let filtered = source.filter {
             !$0.name.trimmingCharacters(in: .whitespaces).isEmpty
-            // Hide DMs from people you've blocked.
-            && !(mode == .dms && appState.isBlocked(nick: $0.name))
+            // Hide DMs from people you've blocked (buffer key may be a DID).
+            && !(mode == .dms && appState.isBufferBlocked($0.name))
         }
         switch mode {
         case .channels:
@@ -234,7 +242,12 @@ struct ChatsTab: View {
     private var filteredConversations: [ChannelState] {
         let convos = conversations
         if searchText.isEmpty { return convos }
-        return convos.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        // Match the rendered name too — a DID-keyed DM should be findable
+        // by the peer's nick, not their raw DID.
+        return convos.filter {
+            $0.name.localizedCaseInsensitiveContains(searchText)
+                || appState.displayNameForKey($0.name).localizedCaseInsensitiveContains(searchText)
+        }
     }
 
     private var navTitle: String {
@@ -281,10 +294,16 @@ struct ChatRow: View {
 
     private var isChannel: Bool { conversation.name.hasPrefix("#") }
 
+    /// The human name for this thread — a DID-keyed DM buffer resolves to
+    /// the peer's nick (a raw did:… never renders).
+    private var displayNick: String {
+        appState.displayNameForKey(conversation.name)
+    }
+
     /// Check if this DM contact is online in any shared channel
     private var presence: (online: Bool, away: Bool) {
         guard !isChannel else { return (false, false) }
-        let nick = conversation.name.lowercased()
+        let nick = displayNick.lowercased()
         var found = false
         var away = false
         for ch in appState.channels {
@@ -343,7 +362,7 @@ struct ChatRow: View {
                             .foregroundColor(Theme.accent)
                     }
                 } else {
-                    UserAvatar(nick: conversation.name, size: 50)
+                    UserAvatar(nick: isChannel ? conversation.name : displayNick, size: 50)
                 }
 
                 // Online/away dot for DMs
@@ -360,7 +379,7 @@ struct ChatRow: View {
             // Content
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(isChannel ? conversation.name : "@" + conversation.name)
+                    Text(isChannel ? conversation.name : "@" + displayNick)
                         .font(.fqCallout.weight(unreadCount > 0 ? .bold : .regular))
                         .foregroundColor(Theme.textPrimary)
                         .lineLimit(1)

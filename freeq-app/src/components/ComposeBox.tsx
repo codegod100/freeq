@@ -6,6 +6,7 @@ import { displayNameForKey } from '../lib/display-name';
 import { EmojiPicker, EMOJI_DATA } from './EmojiPicker';
 import { SlashCommands, getCommandCount } from './SlashCommands';
 import { FormatToolbar } from './FormatToolbar';
+import { apiFetch } from '../lib/api';
 
 // Max file size: 10MB
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -75,11 +76,6 @@ export function ComposeBox() {
       inputRef.current?.focus();
     }
   }, [replyTo]);
-
-  // Typing members
-  const typingMembers = ch
-    ? [...ch.members.values()].filter((m) => m.typing).map((m) => m.nick)
-    : [];
 
   // Members for autocomplete - use size as dependency since Map reference doesn't change
   const memberNicks = useMemo(() => {
@@ -547,20 +543,6 @@ export function ComposeBox() {
         </div>
       )}
 
-      {/* Typing indicator */}
-      {typingMembers.length > 0 && (
-        <div className="px-4 py-1 text-xs text-fg-dim animate-fadeIn">
-          <span className="inline-flex gap-0.5 mr-1">
-            <span className="w-1 h-1 bg-fg-dim rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-            <span className="w-1 h-1 bg-fg-dim rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-            <span className="w-1 h-1 bg-fg-dim rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-          </span>
-          {typingMembers.length === 1
-            ? `${typingMembers[0]} is typing`
-            : `${typingMembers.slice(0, 3).join(', ')} are typing`}
-        </div>
-      )}
-
       {/* Reply context */}
       {replyTo && replyTo.channel.toLowerCase() === activeChannel.toLowerCase() && (
         <div className="px-3 py-2 border-b border-border flex items-center gap-2 animate-fadeIn bg-accent/[0.03]">
@@ -886,7 +868,7 @@ function handleCommand(text: string, activeChannel: string) {
     case 'pins': {
       if (!target) break;
       const chanName = target.startsWith('#') ? target.slice(1) : target;
-      fetch(`${window.location.origin}/api/v1/channels/${encodeURIComponent(chanName)}/pins`)
+      apiFetch(`${window.location.origin}/api/v1/channels/${encodeURIComponent(chanName)}/pins`)
         .then(r => r.ok ? r.json() : null)
         .then(data => {
           const pins = data?.pins || [];

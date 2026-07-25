@@ -108,7 +108,9 @@ struct PinnedMessagesView: View {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(from: url)
+            // Private channels refuse an unauthenticated pins read.
+            let req = ApiAuth.request(url, bearer: appState.apiBearerSessionId)
+            let (data, response) = try await URLSession.shared.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
                 error = "Failed to load pins"
                 return

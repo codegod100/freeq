@@ -90,7 +90,23 @@ struct AppKitMessageListView: NSViewRepresentable {
 
         private let cellIdentifier = NSUserInterfaceItemIdentifier("freeq.msgcell")
 
-        deinit { NotificationCenter.default.removeObserver(self) }
+        // ── Block selection (multi-message copy) ──
+        // Shift/cmd-click selects a range/toggles a row; ⌘C copies the clean
+        // transcript; Esc clears. Handled via local event monitors because the
+        // rows are SwiftUI NSHostingViews that consume plain clicks (so the
+        // table itself never sees a mouseDown to drive selection from) — we only
+        // intercept MODIFIER clicks, leaving plain clicks (links, buttons,
+        // in-message text selection, context menus) completely untouched.
+        private var mouseMonitor: Any?
+        private var keyMonitor: Any?
+        /// Row index that anchors a shift-click range.
+        private var selectionAnchorRow: Int?
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+            if let m = mouseMonitor { NSEvent.removeMonitor(m) }
+            if let m = keyMonitor { NSEvent.removeMonitor(m) }
+        }
 
         func makeScrollView() -> NSScrollView {
             let table = ChatTableView()
@@ -144,7 +160,111 @@ struct AppKitMessageListView: NSViewRepresentable {
 
             self.scrollView = scroll
             self.tableView = table
+            installSelectionMonitors()
             return scroll
+        }
+
+        // MARK: Block selection
+
+        private func installSelectionMonitors() {
+            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) {
+                [weak self] event in
+                self?.handleMouseDown(event) ?? event
+            }
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+                [weak self] event in
+                self?.handleKeyDown(event) ?? event
+            }
+        }
+
+        /// Only MODIFIER clicks inside this list's viewport are intercepted; a
+        /// plain click is returned untouched (and clears any block selection).
+        private func handleMouseDown(_ event: NSEvent) -> NSEvent? {
+            guard let scroll = scrollView, let table = tableView,
+                  let win = scroll.window, event.window === win else { return event }
+            let p = table.convert(event.locationInWindow, from: nil)
+            guard table.visibleRect.contains(p) else { return event }
+
+            let mods = event.modifierFlags.intersection([.shift, .command])
+            if mods.isEmpty {
+                // Click-away inside the list clears a block selection so the next
+                // plain interaction feels normal. Event still flows to SwiftUI.
+                if appState?.hasMessageSelection == true {
+                    appState?.clearMessageSelection()
+                    refreshSelectionTint()
+                }
+                return event
+            }
+
+            let row = table.row(at: p)
+            guard row >= 0, row < items.count, case .entry = items[row] else { return event }
+            if mods.contains(.shift) {
+                extendSelection(to: row)
+            } else if mods.contains(.command) {
+                toggleSelection(at: row)
+            }
+            return nil  // swallow — don't also hand a modifier-click to SwiftUI
+        }
+
+        /// ⌘C copies the selection, Esc clears it — but only when the user isn't
+        /// editing text (so the composer's own copy/cancel keep working) and a
+        /// selection actually exists (so normal ⌘C is never hijacked).
+        private func handleKeyDown(_ event: NSEvent) -> NSEvent? {
+            guard let scroll = scrollView, scroll.window?.isKeyWindow == true,
+                  appState?.hasMessageSelection == true else { return event }
+            if scroll.window?.firstResponder is NSTextView { return event }
+
+            // ⌘C
+            if event.modifierFlags.contains(.command),
+               event.charactersIgnoringModifiers?.lowercased() == "c" {
+                appState?.copySelectedMessages()
+                return nil
+            }
+            // Esc
+            if event.keyCode == 53 {
+                appState?.clearMessageSelection()
+                refreshSelectionTint()
+                return nil
+            }
+            return event
+        }
+
+        private func extendSelection(to row: Int) {
+            let anchor = selectionAnchorRow ?? row
+            selectionAnchorRow = anchor
+            let lo = min(anchor, row), hi = max(anchor, row)
+            var ids = Set<String>()
+            for i in lo...hi where i >= 0 && i < items.count {
+                if case let .entry(r) = items[i] { ids.insert(r.id) }
+            }
+            appState?.selectedMessageIds = ids
+            refreshSelectionTint()
+        }
+
+        private func toggleSelection(at row: Int) {
+            guard case let .entry(r) = items[row] else { return }
+            if appState?.selectedMessageIds.contains(r.id) == true {
+                appState?.selectedMessageIds.remove(r.id)
+            } else {
+                appState?.selectedMessageIds.insert(r.id)
+                selectionAnchorRow = row
+            }
+            refreshSelectionTint()
+        }
+
+        /// Repaint the tint of every visible row to match the current selection.
+        /// Off-screen rows pick it up from `viewFor` when they scroll in.
+        private func refreshSelectionTint() {
+            guard let table = tableView else { return }
+            let sel = appState?.selectedMessageIds ?? []
+            let range = table.rows(in: table.visibleRect)
+            guard range.length > 0 else { return }
+            for r in range.location..<(range.location + range.length) {
+                guard r >= 0, r < items.count,
+                      let cell = table.view(atColumn: 0, row: r, makeIfNecessary: false)
+                        as? HostingCellView else { continue }
+                cell.setSelected(sel.contains(items[r].id))
+            }
         }
 
         // MARK: Apply an update from SwiftUI
@@ -167,6 +287,13 @@ struct AppKitMessageListView: NSViewRepresentable {
                 // New channel (or first/last paint): reload wholesale and snap
                 // to the bottom with no animation — never a visible top→bottom
                 // sweep, never a diff against an unrelated channel's messages.
+                // A block selection is per-buffer, so a channel switch drops it.
+                if channelChanged {
+                    selectionAnchorRow = nil
+                    DispatchQueue.main.async { [weak self] in
+                        self?.appState?.clearMessageSelection()
+                    }
+                }
                 items = newItems
                 tableView.reloadData()
                 tableView.layoutSubtreeIfNeeded()
@@ -197,6 +324,9 @@ struct AppKitMessageListView: NSViewRepresentable {
                 restore(anchor)
             }
             handleScrollTarget(parent)
+            // External selection changes (hint-bar buttons, Select All) re-run
+            // the SwiftUI body → updateNSView → here; keep row tints in sync.
+            refreshSelectionTint()
         }
 
         /// Diff `items → newItems` by id and mutate the table minimally.
@@ -250,6 +380,25 @@ struct AppKitMessageListView: NSViewRepresentable {
                 tableView.reloadData(forRowIndexes: changed,
                                      columnIndexes: IndexSet(integer: 0))
                 tableView.noteHeightOfRows(withIndexesChanged: changed)
+                // The reloaded SwiftUI content lays out asynchronously, so the
+                // synchronous noteHeightOfRows above measures the PRE-change
+                // height. A row that just gained a reaction badge would keep
+                // its old (shorter) height and the pill would overflow into the
+                // row below (the reaction-overlaps-next-message bug). The
+                // per-cell intrinsic-size backstop can't cover this either — a
+                // reload resets the cell's height baseline, so its first
+                // post-layout measure is intentionally skipped. Re-measure the
+                // changed rows once SwiftUI has laid the new content out.
+                let changedIds = changed.map { newItems[$0].id }
+                DispatchQueue.main.async { [weak self, weak tableView] in
+                    guard let self, let tableView else { return }
+                    let rows = IndexSet(changedIds.compactMap { id in
+                        self.items.firstIndex(where: { $0.id == id })
+                    })
+                    if !rows.isEmpty {
+                        tableView.noteHeightOfRows(withIndexesChanged: rows)
+                    }
+                }
             }
         }
 
@@ -333,6 +482,7 @@ struct AppKitMessageListView: NSViewRepresentable {
             }()
             cell.host(content(for: items[row]))
             cell.clamp.overscroll = overscroll(forRow: row)
+            cell.setSelected(appState?.selectedMessageIds.contains(items[row].id) == true)
             return cell
         }
 
@@ -375,6 +525,13 @@ struct AppKitMessageListView: NSViewRepresentable {
                 let action = onLoadOlder
                 return AnyView(LoadMoreRowContent(action: action).frame(width: width))
             case .entry(let row):
+                // Pin ONLY the width to the column. Height stays intrinsic —
+                // each text element claims its full wrapped height via its own
+                // `.fixedSize(horizontal:false, vertical:true)` (message text
+                // AND block renderer). A row-level fixedSize was tried here but
+                // measured the wrapped text at an UNBOUNDED width (→ one line →
+                // the line collapsed to ~0 height and overlapped its neighbours),
+                // so it's the per-element claim that's correct.
                 let view = MessageTimelineRowContent(row: row)
                     .frame(width: width, alignment: .leading)
                 if let appState {
@@ -416,15 +573,22 @@ private final class HostingCellView: NSTableCellView {
     /// action bar stays inside the viewport. Injected into the hosted content.
     let clamp = RowClamp()
     private var hosting: ReportingHostingView?
-    /// Last intrinsic height we synced to the table, so we only re-measure on a
-    /// real change (not every layout pass) and never loop.
-    private var lastIntrinsicHeight: CGFloat = -1
     private var heightSyncScheduled = false
+    private var isSelectedRow = false
+
+    /// Tint the row when it's part of a block selection. The hosted SwiftUI
+    /// content draws on a clear background, so a subtle accent fill on the
+    /// cell's own layer shows through behind it.
+    func setSelected(_ selected: Bool) {
+        guard selected != isSelectedRow else { return }
+        isSelectedRow = selected
+        wantsLayer = true
+        layer?.backgroundColor = selected
+            ? NSColor.controlAccentColor.withAlphaComponent(0.20).cgColor
+            : NSColor.clear.cgColor
+    }
 
     func host(_ view: AnyView) {
-        // New content → new baseline height; don't treat its first measure as a
-        // change (which would fire a spurious re-measure during reuse/paint).
-        lastIntrinsicHeight = -1
         let rooted = AnyView(view.environment(clamp))
         // On hover: stop clipping the (taller-than-row) action bar and lift this
         // row's z above its neighbours so the overflow draws on top of them.
@@ -479,16 +643,28 @@ private final class HostingCellView: NSTableCellView {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.heightSyncScheduled = false
-            guard let h = self.hosting else { return }
-            let newHeight = h.intrinsicContentSize.height
-            guard newHeight >= 0, abs(newHeight - self.lastIntrinsicHeight) > 0.5 else { return }
-            let hadBaseline = self.lastIntrinsicHeight >= 0
-            self.lastIntrinsicHeight = newHeight
-            // Skip the first measure (baseline set on host()); only real
-            // subsequent changes trigger a re-measure.
-            guard hadBaseline, let table = self.enclosingTableView() else { return }
+            guard let h = self.hosting, let table = self.enclosingTableView() else { return }
             let row = table.row(for: self)
             guard row >= 0 else { return }
+            // Compare the SwiftUI content's settled intrinsic height to the
+            // height the table currently gives this row. They diverge exactly
+            // when the hosted content changed in place (a reaction badge added,
+            // an edit, a coalesced pill expanding) but the row hasn't been
+            // re-measured yet — so the taller content overflows into the next
+            // row. Note the row so the table re-measures it. Keying off the
+            // ACTUAL row height (not a stored baseline) makes this both cell-
+            // identity-independent (reloadData may hand us a recycled cell) and
+            // timing-independent (fires on whatever layout pass SwiftUI finally
+            // settles on, so it covers a neighbour that's a taller reply row).
+            // It converges: after the re-measure the heights match, so no loop
+            // and no spurious note during scroll reuse (heights already agree).
+            let intrinsic = h.intrinsicContentSize.height
+            let current = table.rect(ofRow: row).height
+            // Only re-measure on a real, sane change. Guard against latching a
+            // transient/degenerate height (0 or noIntrinsicMetric) that a
+            // mid-layout invalidation can briefly report — that would collapse
+            // the row and overlap its neighbours.
+            guard intrinsic > 1, abs(intrinsic - current) > 0.5 else { return }
             table.noteHeightOfRows(withIndexesChanged: IndexSet(integer: row))
         }
     }

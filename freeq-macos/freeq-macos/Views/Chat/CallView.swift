@@ -13,6 +13,9 @@ import UniformTypeIdentifiers
 struct CallView: View {
     @Environment(AppState.self) private var appState
     let channel: String
+    /// Click-to-focus: the spotlighted tile's id (GridTile.id), or nil for the
+    /// auto-grid. Only interactive when the call is expanded.
+    @State private var focusedTileId: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -20,7 +23,10 @@ struct CallView: View {
                 if !appState.participantsWithScreen.isEmpty {
                     screenSpotlight
                 }
-                if appState.isCallExpanded { expandedGrid } else { participantStrip }
+                // Same fit-to-space grid in both modes; collapsed just gets
+                // less height (it shares the pane with the message list),
+                // expanded fills the window. Either way every tile is visible.
+                videoGrid
                 if appState.isMuted && appState.isLocalSpeaking {
                     mutedHint
                 }
@@ -61,90 +67,70 @@ struct CallView: View {
         .frame(maxHeight: appState.isCallExpanded ? .infinity : 260)
     }
 
-    // MARK: - Collapsed strip
+    // MARK: - Video grid (auto-fits every participant into the space)
 
-    private var participantStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                tile(nick: appState.nick.isEmpty ? "You" : appState.nick, label: "You", isLocal: true)
-                ForEach(appState.callParticipants, id: \.self) { nick in
-                    tile(nick: nick, label: nick, isLocal: false)
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-        }
-    }
-
-    @ViewBuilder
-    private func tile(nick: String, label: String, isLocal: Bool) -> some View {
-        let hasVideo = isLocal
-            ? ((appState.isCameraOn && appState.localPreviewCapture != nil) || appState.isScreenSharing)
-            : appState.participantsWithVideo.contains(nick.lowercased())
-        VStack(spacing: 4) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-                    .frame(width: 110, height: 80)
-                if isLocal, appState.isCameraOn, let cap = appState.localPreviewCapture {
-                    LocalSelfView(capture: cap, effectActive: appState.cameraBackgroundEffect.isActive)
-                        .frame(width: 110, height: 80)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .scaleEffect(x: -1)  // mirror self-view, like every meeting app
-                } else if isLocal, appState.isScreenSharing {
-                    VStack(spacing: 6) {
-                        Image(systemName: "rectangle.on.rectangle")
-                            .font(.title2.weight(.semibold))
-                        Text("Sharing screen")
-                            .font(.caption2.weight(.medium))
-                    }
-                    .foregroundStyle(Theme.accent)
-                } else if !isLocal {
-                    RemoteVideoTile(appState: appState, nick: nick)
-                        .frame(width: 110, height: 80)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .opacity(hasVideo ? 1 : 0)
-                }
-                if !hasVideo && !(isLocal && appState.isScreenSharing) {
-                    Text(String(nick.prefix(2).uppercased()))
-                        .font(.title2.weight(.bold))
-                        .foregroundStyle(Color.accentColor)
-                }
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(
-                        isSpeaking(nick: nick, isLocal: isLocal) ? Theme.success : Color.clear,
-                        lineWidth: 2
-                    )
-            )
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-        }
-    }
-
-    // MARK: - Expanded grid
-
-    private var expandedGrid: some View {
+    private var videoGrid: some View {
         GeometryReader { geo in
             let tiles = gridTiles
-            let cols = CallGridLayout.columns(for: tiles.count, in: geo.size)
-            LazyVGrid(
-                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: cols),
-                spacing: 8
-            ) {
-                ForEach(tiles) { entry in
-                    expandedTile(nick: entry.nick, isLocal: entry.isLocal)
-                        .aspectRatio(CallGridLayout.tileAspect, contentMode: .fit)
+            let spacing: CGFloat = 8
+            let inset: CGFloat = 8
+            // Click-to-focus (expanded only): one tile fills, others strip.
+            if appState.isCallExpanded,
+               let fid = focusedTileId,
+               let focused = tiles.first(where: { $0.id == fid }) {
+                let others = tiles.filter { $0.id != fid }
+                VStack(spacing: spacing) {
+                    expandedTile(nick: focused.nick, isLocal: focused.isLocal)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .onTapGesture { focusedTileId = nil }  // click again = back to grid
+                    if !others.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: spacing) {
+                                ForEach(others) { entry in
+                                    expandedTile(nick: entry.nick, isLocal: entry.isLocal)
+                                        .frame(width: 168, height: 94)
+                                        .onTapGesture { focusedTileId = entry.id }
+                                }
+                            }
+                        }
+                        .frame(height: 100)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(inset)
+            } else {
+                // Auto-grid: unit-tested CallGridLayout picks columns + size.
+                let available = CGSize(
+                    width: max(1, geo.size.width - inset * 2),
+                    height: max(1, geo.size.height - inset * 2)
+                )
+                let cols = max(1, CallGridLayout.columns(for: tiles.count, in: available))
+                let size = CallGridLayout.tileSize(for: tiles.count, in: available, spacing: spacing)
+                let rows = stride(from: 0, to: tiles.count, by: cols).map { start in
+                    Array(tiles[start..<min(start + cols, tiles.count)])
+                }
+                VStack(spacing: spacing) {
+                    Spacer(minLength: 0)  // center the block vertically
+                    ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                        HStack(spacing: spacing) {
+                            ForEach(row) { entry in
+                                expandedTile(nick: entry.nick, isLocal: entry.isLocal)
+                                    .frame(width: size.width, height: size.height)
+                                    .onTapGesture {
+                                        if appState.isCallExpanded { focusedTileId = entry.id }
+                                    }
+                            }
+                        }
+                        .frame(maxWidth: .infinity)  // center a partial last row
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(inset)
             }
-            .padding(8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        // Low floor so the aspect-fit tiles can shrink on short windows; the
-        // parent caps the overall panel height, keeping the controls visible.
+        // Low floor so the tiles can shrink on short windows; the parent caps
+        // the overall panel height, keeping the controls visible.
         .frame(minHeight: 120, maxHeight: .infinity)
     }
 
@@ -305,15 +291,18 @@ struct CallView: View {
                 CameraPickerMenu()
             }
 
-            // Screen share + source picker
-            splitControl(
+            // Screen share — one button that opens the native macOS picker
+            // (SCContentSharingPicker), the same basic experience as the web
+            // client's system getDisplayMedia picker: pick a whole display or
+            // a window there, with live thumbnails. No app-specific window
+            // list (a bare menu of window titles was confusing and couldn't
+            // show what you were about to share).
+            controlButton(
                 systemName: appState.isScreenSharing ? "rectangle.on.rectangle.fill" : "rectangle.on.rectangle",
                 active: appState.isScreenSharing, activeColor: Theme.accent,
-                help: "Share screen (⇧⌘S)",
+                help: appState.isScreenSharing ? "Stop sharing (⇧⌘S)" : "Share screen (⇧⌘S)",
                 action: { appState.toggleScreenShare() }
-            ) {
-                ScreenSourcePickerMenu()
-            }
+            )
 
             controlButton(systemName: "phone.down.fill", active: true, activeColor: .red,
                           help: "Leave call") {
@@ -478,39 +467,6 @@ struct CameraPickerMenu: View {
         panel.message = "Choose a background image for your camera"
         if panel.runModal() == .OK, let url = panel.url {
             appState.cameraBackgroundEffect = .image(url)
-        }
-    }
-}
-
-struct ScreenSourcePickerMenu: View {
-    @Environment(AppState.self) private var appState
-    @State private var targets: [ScreenShareTarget] = []
-
-    var body: some View {
-        Group {
-            if targets.isEmpty {
-                Text("Loading sources…")
-            } else {
-                let displays = targets.filter { if case .display = $0.kind { return true }; return false }
-                let windows = targets.filter { if case .window = $0.kind { return true }; return false }
-                Section("Share a Display") {
-                    ForEach(displays) { target in
-                        Button(target.title) { appState.startScreenShare(target: target) }
-                    }
-                }
-                Section("Share a Window") {
-                    ForEach(windows) { target in
-                        Button(target.title) { appState.startScreenShare(target: target) }
-                    }
-                }
-                if appState.isScreenSharing {
-                    Divider()
-                    Button("Stop Sharing") { appState.toggleScreenShare() }
-                }
-            }
-        }
-        .task {
-            targets = await CallScreenCapture.availableTargets()
         }
     }
 }

@@ -686,7 +686,7 @@ mod tests {
             "github_repo".to_string(),
             CredentialEndpoint {
                 issuer: "did:web:irc.freeq.at:verify".into(),
-                url: "/verify/github/start?repo=chad/freeq".into(),
+                url: "/verify/github/start?repo=freeq-irc/freeq".into(),
                 label: "GitHub Repo Collaborator".into(),
                 description: None,
             },

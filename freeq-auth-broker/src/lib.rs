@@ -308,6 +308,11 @@ struct AuthLoginQuery {
     mobile: Option<String>,
     return_to: Option<String>,
     popup: Option<String>,
+    /// Optional flow selector. `intent=pfp` requests the wider grant the PFP
+    /// microapp needs (blob upload + profile/post writes) instead of the
+    /// identity-only default. Every other caller (irc.freeq.at sign-in) is
+    /// untouched, so its consent screen stays identity-only.
+    intent: Option<String>,
 }
 
 fn is_truthy(value: Option<&str>) -> bool {
@@ -538,6 +543,7 @@ fn session_routes() -> Router<Arc<BrokerState>> {
         .route("/session", post(session))
         .route("/api/graph/follow", post(graph_follow))
         .route("/api/graph/unfollow", post(graph_unfollow))
+        .route("/api/pfp/set-avatar", post(pfp_set_avatar))
 }
 
 /// Ready-to-mount `/session` + `/api/graph/*` router for an embedding server.
@@ -560,6 +566,12 @@ pub fn router(state: Arc<BrokerState>) -> Router {
                 .allow_origin(AllowOrigin::list([
                     "https://irc.freeq.at".parse().unwrap(),
                     "https://revenant-watch.boxd.sh".parse().unwrap(),
+                    // PFP microapp (world.freeq.at/id, freeqworld.boxd.sh/id and
+                    // its vanity domain) fetches /api/pfp/set-avatar from the
+                    // browser — needs CORS.
+                    "https://world.freeq.at".parse().unwrap(),
+                    "https://freeqworld.boxd.sh".parse().unwrap(),
+                    "https://pfp.freeq.at".parse().unwrap(),
                     "http://localhost:5173".parse().unwrap(),
                     "http://localhost:8000".parse().unwrap(),
                     "http://127.0.0.1:5173".parse().unwrap(),
@@ -624,7 +636,7 @@ async fn client_metadata(State(state): State<Arc<BrokerState>>) -> Json<serde_js
         // issued before this change. We never request it at /authorize
         // — the broker only asks for `atproto`. Remove transition:generic
         // once the PDS grace period closes.
-        "scope": "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic",
+        "scope": "atproto blob:image/* repo:app.bsky.actor.profile repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
@@ -678,11 +690,18 @@ async fn auth_login(
         "{}/auth/callback",
         state.config.public_url.trim_end_matches('/')
     );
-    // Identity-only scope. The broker's job is to mint a session token
-    // for SASL — that needs nothing more than `atproto`. PDS-touching
-    // features (image upload, Bluesky cross-post) are step-ups served
-    // by the freeq-server's `/auth/step-up`, never the broker.
-    let scope = "atproto";
+    // Identity-only scope by default. The broker's job is to mint a session
+    // token for SASL — that needs nothing more than `atproto`. The PFP microapp
+    // opts into a *narrow* grant (`intent=pfp`) — exactly what setting an avatar
+    // touches, nothing more: upload image blobs, write the profile record, and
+    // create a post. No `transition:generic` (that's full-account access). Only
+    // this opt-in flow gets that consent screen; every other sign-in stays
+    // identity-only. Each scope here must be within the client-metadata union.
+    let scope = if q.intent.as_deref() == Some("pfp") {
+        "atproto blob:image/* repo:app.bsky.actor.profile repo:app.bsky.feed.post"
+    } else {
+        "atproto"
+    };
     let client_id = build_client_id(&state.config.public_url, &redirect_uri);
 
     let dpop_key = DpopKey::generate();
@@ -1006,6 +1025,9 @@ async fn auth_callback(
 
 const ALLOWED_ORIGINS: &[&str] = &[
     "https://irc.freeq.at",
+    "https://world.freeq.at",
+    "https://freeqworld.boxd.sh",
+    "https://pfp.freeq.at",
     "https://revenant-watch.boxd.sh",
     "http://localhost:5173",
     "http://localhost:8000",
@@ -1319,6 +1341,223 @@ async fn graph_unfollow(
     }
 }
 
+// ── PFP avatar delegation ──────────────────────────────────────────────────
+//
+// A dedicated, narrow write path for the FreeqWorld ID / PFP microapp
+// (freeqworld.boxd.sh/id, pfp.freeq.at). Same delegation model as graph_*:
+// the browser never holds the AT token; the broker performs the writes on the
+// user's own PDS, authenticated by the same broker_token as /session. Scoped
+// to exactly three actions on the caller's OWN repo — uploadBlob, set the
+// app.bsky.actor.profile avatar (preserving other fields), and (optional) one
+// app.bsky.feed.post — so the blast radius is minimal.
+
+#[derive(Deserialize)]
+struct PfpSetAvatarRequest {
+    broker_token: String,
+    /// Standard-base64 PNG of the generated character.
+    image_b64: String,
+    /// Also create a feed post with the image + a link back to pfp.freeq.at.
+    #[serde(default)]
+    post: bool,
+}
+
+/// DPoP-authenticated POST of a raw byte body (e.g. uploadBlob) to the user's
+/// PDS, with the same `use_dpop_nonce` retry dance as [`pds_dpop_post`].
+async fn pds_dpop_post_bytes(
+    record: &BrokerSessionRecord,
+    access_token: &str,
+    nonce: Option<String>,
+    url: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> Result<(reqwest::StatusCode, String), anyhow::Error> {
+    let dpop_key = DpopKey::from_base64url(&record.dpop_key_b64)?;
+    let client = upstream_client()?;
+
+    let proof = dpop_key.proof("POST", url, nonce.as_deref(), Some(access_token))?;
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("DPoP {access_token}"))
+        .header("DPoP", &proof)
+        .header("Content-Type", content_type)
+        .body(body.clone())
+        .send()
+        .await?;
+
+    let fresh_nonce = resp
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+
+    if (status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::BAD_REQUEST)
+        && text.contains("use_dpop_nonce")
+        && fresh_nonce.is_some()
+    {
+        let proof2 = dpop_key.proof("POST", url, fresh_nonce.as_deref(), Some(access_token))?;
+        let resp2 = client
+            .post(url)
+            .header("Authorization", format!("DPoP {access_token}"))
+            .header("DPoP", &proof2)
+            .header("Content-Type", content_type)
+            .body(body)
+            .send()
+            .await?;
+        let status2 = resp2.status();
+        let text2 = resp2.text().await.unwrap_or_default();
+        return Ok((status2, text2));
+    }
+
+    Ok((status, text))
+}
+
+/// Read the caller's existing app.bsky.actor.profile record (public,
+/// unauthenticated read). Returns the record `value`, or `None` if absent.
+async fn fetch_profile_record(pds_url: &str, did: &str) -> Option<serde_json::Value> {
+    let client = upstream_client().ok()?;
+    let url = format!(
+        "{pds_url}/xrpc/com.atproto.repo.getRecord?repo={}&collection=app.bsky.actor.profile&rkey=self",
+        urlencod(did)
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None; // RecordNotFound (400/404) — first profile
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    body.get("value").cloned()
+}
+
+/// POST /api/pfp/set-avatar {broker_token, image_b64, post?} — upload the PFP
+/// as a blob, set it as the caller's avatar (preserving displayName /
+/// description / banner / etc.), and optionally publish one post about it.
+async fn pfp_set_avatar(
+    State(state): State<Arc<BrokerState>>,
+    headers: HeaderMap,
+    Json(req): Json<PfpSetAvatarRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if !origin_allowed(&headers) {
+        return Err((StatusCode::FORBIDDEN, "Origin not allowed".to_string()));
+    }
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(req.image_b64.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "image_b64 is not valid base64".to_string()))?;
+    if bytes.len() < 8 || &bytes[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return Err((StatusCode::BAD_REQUEST, "image must be a PNG".to_string()));
+    }
+    if bytes.len() > 1_000_000 {
+        return Err((StatusCode::BAD_REQUEST, "image too large (max 1MB)".to_string()));
+    }
+
+    let (record, access_token, nonce) = authed_access_token(&state, &req.broker_token).await?;
+
+    // 1. uploadBlob (avatar)
+    let upload_url = format!("{}/xrpc/com.atproto.repo.uploadBlob", record.pds_url);
+    let (status, text) = pds_dpop_post_bytes(
+        &record, &access_token, nonce.clone(), &upload_url, "image/png", bytes.clone(),
+    )
+    .await
+    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("uploadBlob failed: {e}")))?;
+    if !status.is_success() {
+        return Err((StatusCode::BAD_GATEWAY, format!("PDS rejected uploadBlob: {text}")));
+    }
+    let avatar_blob = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("blob").cloned())
+        .ok_or((StatusCode::BAD_GATEWAY, "uploadBlob returned no blob".to_string()))?;
+
+    // 2. read-merge-write the profile (swap avatar only)
+    let mut profile = fetch_profile_record(&record.pds_url, &record.did)
+        .await
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !profile.is_object() {
+        profile = serde_json::json!({});
+    }
+    if let Some(obj) = profile.as_object_mut() {
+        obj.insert("$type".to_string(), serde_json::json!("app.bsky.actor.profile"));
+        obj.insert("avatar".to_string(), avatar_blob.clone());
+    }
+    let put_url = format!("{}/xrpc/com.atproto.repo.putRecord", record.pds_url);
+    let put_body = serde_json::json!({
+        "repo": record.did,
+        "collection": "app.bsky.actor.profile",
+        "rkey": "self",
+        "record": profile,
+    });
+    let (status, text) = pds_dpop_post(&record, &access_token, nonce.clone(), &put_url, put_body)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("putRecord failed: {e}")))?;
+    if !status.is_success() {
+        tracing::warn!(did = %record.did, status = %status, "pfp putRecord failed");
+        return Err((StatusCode::BAD_GATEWAY, format!("PDS rejected profile: {text}")));
+    }
+
+    // 3. optional post (fresh blob — blobs are referenced per-record)
+    let mut post_uri = serde_json::Value::Null;
+    if req.post {
+        let (status, text) = pds_dpop_post_bytes(
+            &record, &access_token, nonce.clone(), &upload_url, "image/png", bytes,
+        )
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("post uploadBlob failed: {e}")))?;
+        let post_blob = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v.get("blob").cloned());
+        if status.is_success() && post_blob.is_some() {
+            let url = "pfp.freeq.at";
+            let post_text = format!(
+                "I'm now my FreeqWorld self \u{2726}\n\nYour identity has a face \u{2014} mine's derived from my DID: {url}"
+            );
+            let byte_start = post_text.find(url).unwrap_or(0);
+            let byte_end = byte_start + url.len();
+            let create_url = format!("{}/xrpc/com.atproto.repo.createRecord", record.pds_url);
+            let post_body = serde_json::json!({
+                "repo": record.did,
+                "collection": "app.bsky.feed.post",
+                "record": {
+                    "$type": "app.bsky.feed.post",
+                    "text": post_text,
+                    "createdAt": chrono::Utc::now().to_rfc3339(),
+                    "embed": {
+                        "$type": "app.bsky.embed.images",
+                        "images": [{
+                            "image": post_blob,
+                            "alt": "My FreeqWorld pixel character \u{2014} derived from my DID.",
+                            "aspectRatio": { "width": 1, "height": 1 }
+                        }]
+                    },
+                    "facets": [{
+                        "index": { "byteStart": byte_start, "byteEnd": byte_end },
+                        "features": [{ "$type": "app.bsky.richtext.facet#link", "uri": format!("https://{url}") }]
+                    }]
+                }
+            });
+            let (pstatus, ptext) =
+                pds_dpop_post(&record, &access_token, nonce, &create_url, post_body)
+                    .await
+                    .map_err(|e| (StatusCode::BAD_GATEWAY, format!("createRecord failed: {e}")))?;
+            if pstatus.is_success() {
+                post_uri = serde_json::from_str::<serde_json::Value>(&ptext)
+                    .ok()
+                    .and_then(|v| v.get("uri").cloned())
+                    .unwrap_or(serde_json::Value::Null);
+            } else {
+                tracing::warn!(did = %record.did, status = %pstatus, "pfp post createRecord failed (avatar still set)");
+            }
+        }
+    }
+
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "did": record.did,
+        "handle": record.handle,
+        "posted": !post_uri.is_null(),
+        "post_uri": post_uri,
+    })))
+}
+
 // Refresh + dead-vs-transient classification now live in the shared engine.
 use freeq_oauth::ClientProvider;
 use freeq_oauth::flow::RefreshError;
@@ -1509,7 +1748,17 @@ pub fn is_valid_return_to(url: &str) -> bool {
         return false;
     };
     match (parsed.scheme(), parsed.host_str()) {
-        ("https", Some("irc.freeq.at" | "staging.freeq.at" | "revenant-watch.boxd.sh")) => true,
+        (
+            "https",
+            Some(
+                "irc.freeq.at"
+                | "staging.freeq.at"
+                | "world.freeq.at"
+                | "freeqworld.boxd.sh"
+                | "pfp.freeq.at"
+                | "revenant-watch.boxd.sh",
+            ),
+        ) => true,
         // Loopback dev origins, any port.
         ("http", Some("localhost" | "127.0.0.1")) => true,
         _ => false,

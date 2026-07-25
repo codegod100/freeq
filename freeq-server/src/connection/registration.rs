@@ -10,6 +10,29 @@ use std::sync::Arc;
 /// presumed to be a zombie socket and evicted.
 const LIVENESS_PROBE_SECS: u64 = 10;
 
+/// The sibling sessions to probe for liveness when a session attaches for a
+/// DID: every *other* session currently registered under that DID, minus any
+/// already known to be stale (e.g. a ghost's session id being reclaimed).
+///
+/// Pure so the selection policy is unit-testable without a live socket map.
+/// Deduplicates so a session listed twice isn't PINGed twice.
+pub(super) fn siblings_to_probe(
+    all_for_did: &[String],
+    new_session: &str,
+    exclude: &[&str],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for sid in all_for_did {
+        if sid == new_session || exclude.contains(&sid.as_str()) {
+            continue;
+        }
+        if !out.iter().any(|s| s == sid) {
+            out.push(sid.clone());
+        }
+    }
+    out
+}
+
 /// Send a liveness PING to every existing session of a DID that just gained
 /// a new session, and evict any that have not answered with PONG after
 /// [`LIVENESS_PROBE_SECS`]. Eviction notifies the session's kill signal, so
@@ -145,6 +168,23 @@ pub(super) fn attach_same_did(
             .lock()
             .remove_by_session(&ghost.session_id);
 
+        // A ghost reclaim short-circuits the multi-device probe below, so any
+        // OTHER live sessions for this DID (a half-open zombie that never sent
+        // QUIT — distinct from the cleanly-ghosted session we just reclaimed)
+        // would otherwise never be probed and would linger until the ~60s
+        // server ping timeout. Probe them here too, excluding the ghost's own
+        // (already removed) session id.
+        let zombies = {
+            let session_dids = state.session_dids.lock();
+            let all: Vec<String> = session_dids
+                .iter()
+                .filter(|(_, d)| d.as_str() == did)
+                .map(|(sid, _)| sid.clone())
+                .collect();
+            siblings_to_probe(&all, session_id, &[ghost.session_id.as_str()])
+        };
+        probe_sibling_liveness(state, &zombies, session_id, send);
+
         // Store reclaimed channel names so try_complete_registration can send
         // synthetic state AFTER the client is fully registered (needed for CHATHISTORY).
         conn.ghost_channels = Some(
@@ -161,11 +201,12 @@ pub(super) fn attach_same_did(
     // Find existing sessions for this DID
     let existing_sessions: Vec<String> = {
         let session_dids = state.session_dids.lock();
-        session_dids
+        let all: Vec<String> = session_dids
             .iter()
-            .filter(|(sid, d)| d.as_str() == did && sid.as_str() != session_id)
+            .filter(|(_, d)| d.as_str() == did)
             .map(|(sid, _)| sid.clone())
-            .collect()
+            .collect();
+        siblings_to_probe(&all, session_id, &[])
     };
 
     if existing_sessions.is_empty() {
@@ -622,5 +663,60 @@ pub(super) fn try_complete_registration(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::siblings_to_probe;
+
+    fn v(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn excludes_the_new_session() {
+        // The attaching session must never probe itself.
+        let all = v(&["a", "b", "new"]);
+        assert_eq!(siblings_to_probe(&all, "new", &[]), v(&["a", "b"]));
+    }
+
+    #[test]
+    fn excludes_named_stale_sessions() {
+        // Ghost-reclaim path: the ghost's own (already-removed) session id is
+        // excluded so we don't probe a session we just tore down.
+        let all = v(&["ghost", "zombie", "new"]);
+        assert_eq!(
+            siblings_to_probe(&all, "new", &["ghost"]),
+            v(&["zombie"]),
+            "ghost excluded, the real zombie still gets probed"
+        );
+    }
+
+    #[test]
+    fn empty_when_new_session_is_only_one() {
+        let all = v(&["solo"]);
+        assert!(siblings_to_probe(&all, "solo", &[]).is_empty());
+    }
+
+    #[test]
+    fn dedups_repeated_ids() {
+        let all = v(&["a", "a", "b"]);
+        assert_eq!(siblings_to_probe(&all, "x", &[]), v(&["a", "b"]));
+    }
+
+    #[test]
+    fn multiple_exclusions() {
+        let all = v(&["a", "b", "c", "new"]);
+        assert_eq!(siblings_to_probe(&all, "new", &["a", "c"]), v(&["b"]));
+    }
+
+    #[test]
+    fn healthy_multidevice_sibling_is_returned_for_probing() {
+        // A genuine second device (laptop + phone) is probed too — but it
+        // answers the PING immediately and is spared eviction. Only silence
+        // past the deadline evicts, so this never breaks multi-device.
+        let all = v(&["laptop", "phone"]);
+        assert_eq!(siblings_to_probe(&all, "phone", &[]), v(&["laptop"]));
     }
 }

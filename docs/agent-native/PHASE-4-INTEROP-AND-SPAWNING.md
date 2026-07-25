@@ -66,7 +66,7 @@ pub struct ManifestPresence {
 display_name = "auditor"
 actor_class = "agent"
 description = "Architecture auditor — analyzes repos and provides recommendations"
-source_repo = "https://github.com/chad/freeq"
+source_repo = "https://github.com/freeq-irc/freeq"
 version = "0.1.0"
 documentation_url = "https://freeq.at/docs/bots/auditor"
 
@@ -439,7 +439,7 @@ async fn main() -> Result<()> {
 POST /api/v1/wrappers/register
 Body: {
     wrapper_name: "freeq-mcp-wrapper",
-    source_repo: "https://github.com/chad/freeq",
+    source_repo: "https://github.com/freeq-irc/freeq",
     supported_protocols: ["mcp"],
     audit_status: "community_reviewed"
 }
@@ -457,7 +457,7 @@ In the identity card for a wrapped external agent:
 │ DID: did:plc:...                       │
 ├────────────────────────────────────────┤
 │ Wrapper: freeq-mcp-wrapper v0.1.0     │
-│   Source: github.com/chad/freeq       │
+│   Source: github.com/freeq-irc/freeq       │
 │   Audit: ⚠ Community reviewed         │
 │   Protocol: MCP                        │
 ├────────────────────────────────────────┤
@@ -520,7 +520,7 @@ Spawned agents are visible on federated servers. When a child agent sends a mess
    # Register the auditor agent from a manifest
    curl -X POST http://localhost:8080/api/v1/agents/register \
      -H "Content-Type: application/json" \
-     -d '{"manifest_url": "https://raw.githubusercontent.com/chad/freeq/main/freeq-bots/manifests/auditor.freeq.toml"}'
+     -d '{"manifest_url": "https://raw.githubusercontent.com/freeq-irc/freeq/main/freeq-bots/manifests/auditor.freeq.toml"}'
    ```
 
    Start the auditor bot with `--manifest manifests/auditor.freeq.toml`. It connects, auto-registers as agent, auto-submits provenance, auto-requests capabilities, starts heartbeating. Zero manual setup.

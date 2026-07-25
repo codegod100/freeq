@@ -46,4 +46,25 @@ enum CallGridLayout {
         }
         return bestCols
     }
+
+    /// The exact 16:9 tile size that fits `count` tiles into `container` at the
+    /// optimal column count, bounded by BOTH the column width AND the row
+    /// height (minus inter-tile `spacing`). This is the piece that makes the
+    /// gallery behave like Meet/Zoom: every tile is fully visible with no
+    /// scrolling or clipping, because the tile is never taller than the rows
+    /// allow. Returns `.zero` for an empty/degenerate container.
+    static func tileSize(for count: Int, in container: CGSize, spacing: CGFloat = 8) -> CGSize {
+        guard count > 0, container.width > 0, container.height > 0 else { return .zero }
+        let cols = max(1, columns(for: count, in: container))
+        let rows = Int(ceil(Double(count) / Double(cols)))
+        // Space left for tiles after the gaps between them.
+        let availW = max(1, container.width - spacing * CGFloat(max(0, cols - 1)))
+        let availH = max(1, container.height - spacing * CGFloat(max(0, rows - 1)))
+        // Width is capped by the columns; height is capped by the rows
+        // (converted to an equivalent width via the aspect ratio). The min
+        // guarantees the tile fits both axes.
+        let tileW = min(availW / CGFloat(cols), (availH / CGFloat(rows)) * tileAspect)
+        let w = max(1, tileW)
+        return CGSize(width: w, height: w / tileAspect)
+    }
 }

@@ -18,6 +18,16 @@ dictionary IrcMessage {
     string? origin;
     sequence<ReactionTally> reactions;
     string? dm_key;
+    CoordinationEvent? coordination;
+};
+
+dictionary CoordinationEvent {
+    string event_type;
+    string? task_id;
+    string? phase;
+    string? evidence_type;
+    string? reference;
+    string? payload;
 };
 
 dictionary ReactionTally {

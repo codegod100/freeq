@@ -12,7 +12,9 @@ struct DetailPanel: View {
                 if ch.isChannel {
                     MemberListView(channel: ch)
                 } else {
-                    DMProfilePanel(nick: ch.name)
+                    // A DID-keyed DM buffer resolves to the peer's nick for
+                    // display/presence; the key itself supplies the DID.
+                    DMProfilePanel(nick: appState.displayNameForKey(ch.name), bufferKey: ch.name)
                 }
             }
         }
@@ -202,9 +204,9 @@ struct MemberRow: View {
         .contentShape(Rectangle())
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.clear))
         .onTapGesture {
-            if member.nick.lowercased() != appState.nick.lowercased() {
-                showProfile = true
-            }
+            // Clicking yourself opens your own card too (see your status,
+            // handle, proof) — the same card everyone else sees of you.
+            showProfile = true
         }
         .sheet(isPresented: $showProfile) {
             UserProfileSheet(nick: member.nick)
@@ -257,6 +259,9 @@ struct MemberRow: View {
 struct DMProfilePanel: View {
     @Environment(AppState.self) private var appState
     let nick: String
+    /// The thread's buffer key — when DID-keyed, it IS the peer's DID, so
+    /// identity is known even before a profile/WHOIS resolves the nick.
+    var bufferKey: String? = nil
     @State private var showIdentityDetails = false
 
     private var isOnline: Bool { appState.isNickOnline(nick) }
@@ -264,7 +269,10 @@ struct DMProfilePanel: View {
     private var isP2p: Bool { appState.p2pDMActive.contains(nick.lowercased()) }
     private var profile: ProfileCache.Profile? { ProfileCache.shared.profile(for: nick) }
     private var did: String? { ProfileCache.shared.did(for: nick) }
-    private var knownDid: String? { did ?? profile?.did }
+    private var knownDid: String? {
+        did ?? profile?.did
+            ?? bufferKey.flatMap { DidDisplay.isDid($0) ? $0 : nil }
+    }
     private var displayName: String {
         if let displayName = profile?.displayName, !displayName.isEmpty {
             return displayName

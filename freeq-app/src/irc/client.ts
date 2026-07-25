@@ -10,6 +10,47 @@ import { useStore } from '../store';
 import { notify } from '../lib/notifications';
 import { prefetchProfiles } from '@freeq/sdk';
 import { shouldRejoinCall, AV_REJOIN_WINDOW_MS, type PendingCallRejoin } from '../lib/av-mesh';
+import { fetchFavorites, pushFavorites, mergeFavorites, favoritesEqual } from '../lib/favorites-sync';
+
+// Roaming-favorites state (module scope so it survives reconnects).
+let favoritesSynced = false;
+let favoritesPushWired = false;
+
+/** Pull the DID's server favorites, union with local, write back if changed,
+ *  and wire a debounced push for future toggles. No-op without a bearer. */
+async function syncFavorites(c: FreeqClient): Promise<void> {
+  // The API-BEARER notice can land just after 'registered'; poll briefly.
+  let bearer = c.apiBearer;
+  for (let i = 0; !bearer && i < 20; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+    bearer = c.apiBearer;
+  }
+  if (!bearer) return; // guest / no authenticated session
+  try {
+    const server = await fetchFavorites(bearer);
+    const local = [...useStore.getState().favorites];
+    const merged = mergeFavorites(server, local);
+    if (!favoritesEqual(merged, local)) useStore.getState().setFavorites(merged);
+    if (!favoritesEqual(merged, server)) await pushFavorites(bearer, merged);
+    favoritesSynced = true;
+  } catch { /* transient; try again next connect */ }
+
+  // Push future changes (debounced). Wire once; guarded by favoritesSynced
+  // so the initial merge above doesn't echo a redundant push.
+  if (favoritesPushWired) return;
+  favoritesPushWired = true;
+  let last = [...useStore.getState().favorites].join(',');
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  useStore.subscribe((st) => {
+    const b = c.apiBearer;
+    if (!favoritesSynced || !b) return;
+    const now = [...st.favorites].join(',');
+    if (now === last) return;
+    last = now;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => { pushFavorites(b, [...st.favorites]).catch(() => {}); }, 400);
+  });
+}
 
 // ── Singleton SDK client ──
 
@@ -26,6 +67,16 @@ function saveJoinedChannels() {
 }
 
 /** Get the underlying SDK client (for advanced usage). */
+/** Local authed fetch. This module owns the singleton client, so it must not
+ *  import ../lib/api (that would be a cycle); components use apiFetch there. */
+function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const bearer = client?.apiBearer;
+  if (!bearer) return fetch(path, init);
+  const headers = new Headers(init.headers);
+  headers.set('Authorization', `Bearer ${bearer}`);
+  return fetch(path, { ...init, headers });
+}
+
 export function getClient(): FreeqClient | null {
   return client;
 }
@@ -295,6 +346,15 @@ export function getAvInstanceId(): string | null {
 // and silently no-op every future button click on that user's session.
 const _startInFlight = new Set<string>();
 
+/// Convergence-poll pacing for startAvSession. Injectable so tests don't sit
+/// through the production 16×500 ms schedule — a timed-out test used to leave
+/// the poll running, and the in-flight guard then silently suppressed every
+/// later startAvSession in the file (order-dependent failures).
+let avStartPoll = { intervalMs: 500, attempts: 16 };
+export function __setAvStartPollForTests(intervalMs: number, attempts: number): void {
+  avStartPoll = { intervalMs, attempts };
+}
+
 /** Seed an AV session into the store from the REST `/sessions` shape, so
  *  CallPanel (which renders `avSessions.get(activeAvSession)`) can mount
  *  immediately rather than waiting for the 5s discovery poll. */
@@ -335,7 +395,7 @@ export async function startAvSession(channel: string, title?: string) {
 
   try {
     try {
-      const resp = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+      const resp = await authedFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
       if (resp.ok) {
         const data = await resp.json();
         if (data.active && data.active.state === 'Active') {
@@ -373,11 +433,11 @@ export async function startAvSession(channel: string, title?: string) {
     // activate it directly. Idempotent with the event: whichever sets
     // activeAvSession first wins; the other no-ops.
     const myDid = store.authDid;
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < avStartPoll.attempts; i++) {
       if (useStore.getState().activeAvSession) { pendingAvStart = null; break; }
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, avStartPoll.intervalMs));
       try {
-        const r = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+        const r = await authedFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
         if (!r.ok) continue;
         const d = await r.json();
         const active = d.active;
@@ -504,6 +564,12 @@ function wireEvents(c: FreeqClient) {
         if (ch) useStore.getState().setActiveChannel(savedActive);
       }, 500);
     }
+
+    // Roaming favorites: pull the DID's server-side favorites, union with
+    // local (no device loses one), write back if changed, then keep the
+    // server in sync on subsequent toggles. Only for authenticated users
+    // (the bearer arrives via the API-BEARER notice around SASL success).
+    syncFavorites(c);
   });
 
   c.on('nickChanged', (nick) => {
@@ -625,21 +691,33 @@ function wireEvents(c: FreeqClient) {
         isDM ? `DM from ${message.from}` : channel,
         `${message.from}: ${message.text.slice(0, 100)}`,
         () => useStore.getState().setActiveChannel(channel),
+        isDM ? 'dm' : 'mention',
       );
     }
   });
 
-  c.on('messageEdited', (channel, originalMsgId, newText, newMsgId, isStreaming) => {
+  c.on('messageEdited', (channel, originalMsgId, newText, newMsgId, isStreaming, editorNick, editorAccount) => {
     // Ensure DM buffer exists
     const isChannel = channel.startsWith('#') || channel.startsWith('&');
     if (!isChannel && !useStore.getState().channels.has(channel.toLowerCase())) {
       s().addChannel(channel);
     }
-    s().editMessage(channel, originalMsgId, newText, newMsgId, isStreaming);
+    s().editMessage(channel, originalMsgId, newText, newMsgId, isStreaming, editorNick, editorAccount);
   });
 
-  c.on('messageDeleted', (channel, msgId) => {
-    s().deleteMessage(channel, msgId);
+  c.on('messageDeleted', (channel, msgId, deleterNick, deleterAccount) => {
+    s().deleteMessage(channel, msgId, deleterNick, deleterAccount);
+  });
+
+  c.on('serverFail', (text) => {
+    // Server rejected an action (FAIL <cmd> <code> <desc>). Show it where
+    // the user is looking — silent rejections are undebuggable. Exception:
+    // background history probes (speculative CHATHISTORY on opening a
+    // thread) fail routinely for guest peers; rendering those spams a red
+    // line per open while telling the user nothing actionable.
+    if (/^CHATHISTORY (INVALID_TARGET|ACCOUNT_REQUIRED)/.test(text)) return;
+    const active = useStore.getState().activeChannel || 'server';
+    s().addSystemMessage(active, `Server error: ${text}`);
   });
 
   c.on('reactionAdded', (channel, msgId, emoji, fromNick) => {
@@ -721,6 +799,34 @@ function wireEvents(c: FreeqClient) {
       s().setActiveAvSession(null);
       currentAvInstance = null;
       if (pendingCallRejoin?.sessionId === sess.id) pendingCallRejoin = null;
+    }
+  });
+
+  // Machine-readable AV failure from the server. `join-failed`: we were NOT
+  // admitted to the session our UI optimistically joined — tear the call
+  // state down instead of ghost-publishing into it (peers would never be
+  // told to subscribe to us: we're not in the roster). `start-collision`:
+  // our av-start lost a race; the tag names the winning session — converge
+  // onto it immediately instead of sitting in a dead solo call.
+  c.on('avError', (code, sessionId, reason) => {
+    const active = s().activeAvSession;
+    if (code === 'start-collision' && sessionId) {
+      const winner = s().avSessions.get(sessionId);
+      const channel = winner?.channel || pendingAvStart?.channel;
+      pendingAvStart = null;
+      if (channel) {
+        joinAvSession(channel, sessionId);
+        return;
+      }
+    }
+    if (code === 'join-failed' && (active === sessionId || !sessionId)) {
+      s().setAvAudioActive(false);
+      s().setAvCameraOn(false);
+      s().setActiveAvSession(null);
+      currentAvInstance = null;
+      if (pendingCallRejoin?.sessionId === sessionId) pendingCallRejoin = null;
+      const ch = s().activeChannel;
+      s().addSystemMessage(ch || 'server', `Couldn't join the call: ${reason || code}`);
     }
   });
 

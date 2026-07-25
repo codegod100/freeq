@@ -35,10 +35,16 @@ export interface FreeqEvents {
   message: (channel: string, message: Message) => void;
 
   /** Fired when a message is edited. */
-  messageEdited: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean) => void;
+  messageEdited: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean, editorNick?: string, editorAccount?: string) => void;
 
-  /** Fired when a message is deleted. */
-  messageDeleted: (channel: string, msgId: string) => void;
+  /** Fired when a message is deleted. Deleter identity lets receivers
+   *  enforce authorship in unpersisted (guest) threads, where the server
+   *  relays without a row to check. */
+  messageDeleted: (channel: string, msgId: string, deleterNick?: string, deleterAccount?: string) => void;
+
+  /** IRCv3 FAIL from the server ("COMMAND ERROR_CODE description") — render
+   *  it; silent rejections are indistinguishable from client bugs. */
+  serverFail: (text: string) => void;
 
   /** Fired when a reaction is added. */
   reactionAdded: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
@@ -139,6 +145,12 @@ export interface FreeqEvents {
   /** Fired when a MoQ access token for an AV session is received
    *  (`+freeq.at/av-token`). Append to the SFU dial URL as `?jwt=…`. */
   avToken: (sessionId: string, token: string) => void;
+
+  /** Fired when the server rejects an AV request (`+freeq.at/av-error`).
+   *  `code` is machine-readable: `join-failed` (tear down local call state —
+   *  we were NOT admitted), `start-collision` (our av-start lost a race;
+   *  `sessionId` names the winning session to join instead). */
+  avError: (code: string, sessionId: string, reason: string) => void;
 
   /** Fired when the join gate (policy acceptance) is required. */
   joinGateRequired: (channel: string) => void;

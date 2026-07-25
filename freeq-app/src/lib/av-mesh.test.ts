@@ -131,6 +131,36 @@ describe('computeParticipantSlots', () => {
     // And that path is exactly what the legacy client publishes.
     expect(broadcastName(sid, 'oldclient', null)).toBe('SESS/oldclient');
   });
+
+  // Audit F8: OUR OWN roster row can lose its instance (av-instance tag
+  // stripped en route / recorded as null). It must still be recognised as
+  // self by DID — subscribing to our own broadcast is a self-echo.
+  it('never self-subscribes when MY row lost its instance (DID match)', () => {
+    const roster: RosterParticipant[] = [
+      { did: 'did:a', nick: 'alice', instance_id: null }, // me, instance lost
+      { did: 'did:b', nick: 'bob', instance_id: 'b1' },
+    ];
+    const slots = computeParticipantSlots(roster, { nick: 'alice', instance: 'a1', did: 'did:a' }, sid);
+    expect(slots.map((s) => s.broadcastName)).toEqual(['SESS/bob~b1']);
+  });
+
+  it('never self-subscribes when MY row lost its instance (guest, nick match)', () => {
+    const roster: RosterParticipant[] = [
+      { did: null, nick: 'Guest7', instance_id: null }, // me, guest, instance lost
+      { did: 'did:b', nick: 'bob', instance_id: 'b1' },
+    ];
+    const slots = computeParticipantSlots(roster, { nick: 'guest7', instance: 'g1', did: null }, sid);
+    expect(slots.map((s) => s.broadcastName)).toEqual(['SESS/bob~b1']);
+  });
+
+  it('a DIFFERENT person with no instance and a different DID is still subscribed', () => {
+    const roster: RosterParticipant[] = [
+      { did: 'did:other', nick: 'alice', instance_id: null }, // same nick, other DID, legacy
+      { did: 'did:b', nick: 'bob', instance_id: 'b1' },
+    ];
+    const slots = computeParticipantSlots(roster, { nick: 'alice', instance: 'a1', did: 'did:a' }, sid);
+    expect(slots.map((s) => s.broadcastName).sort()).toEqual(['SESS/alice', 'SESS/bob~b1']);
+  });
 });
 
 // ── Full-mesh completeness (the no-split invariant) ────────────────

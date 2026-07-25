@@ -66,10 +66,59 @@ pub struct SfuState {
     /// `?jwt=` token are rejected. When false the SFU stays open for
     /// legacy clients while tokens are minted, delivered, and honored.
     pub require_token: bool,
+
+    /// Media-connection revocation registry: AV instance id → notify handle
+    /// shared by every live media connection that declared that instance
+    /// (`?inst=` on the dial URL). When the roster tears an instance down
+    /// (grace expiry, orphan reap, session end) the server closes its media
+    /// connections too — without this, a participant whose IRC died kept
+    /// streaming into the call: announcement-driven clients (native) heard a
+    /// roster-ghost forever while roster-driven clients (web) didn't, i.e.
+    /// class-C asymmetry (see docs/AV-SESSION-AUDIT.md F6). Cooperative
+    /// attribution (self-declared) — malicious clients are the token flag's
+    /// concern, not this registry's.
+    pub media_conns: parking_lot::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Notify>>>,
 }
 
 #[cfg(feature = "av-native")]
 impl SfuState {
+    /// Register a live media connection for an AV instance. The returned
+    /// notify fires if the server revokes the instance's media (roster
+    /// teardown); the connection handler selects on it and closes the socket.
+    pub fn register_media_conn(&self, instance: &str) -> Arc<tokio::sync::Notify> {
+        self.media_conns
+            .lock()
+            .entry(instance.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Notify::new()))
+            .clone()
+    }
+
+    /// Drop a connection's registration after it closes naturally. Removes
+    /// the map entry once no other live connection shares it (strong count 2
+    /// = the map's Arc + the caller's) so the registry can't grow unbounded.
+    pub fn unregister_media_conn(&self, instance: &str, handle: &Arc<tokio::sync::Notify>) {
+        let mut conns = self.media_conns.lock();
+        if let Some(n) = conns.get(instance)
+            && Arc::ptr_eq(n, handle)
+            && Arc::strong_count(n) <= 2
+        {
+            conns.remove(instance);
+        }
+    }
+
+    /// Close every media connection that declared this AV instance. Called
+    /// when the roster tears the instance down, so media membership can
+    /// never outlive roster membership (audit F6).
+    pub fn revoke_media(&self, instance: &str) {
+        if instance.is_empty() {
+            return;
+        }
+        if let Some(n) = self.media_conns.lock().remove(instance) {
+            tracing::info!(instance = %instance, "AV: revoking media connection(s) for torn-down roster slot");
+            n.notify_waiters();
+        }
+    }
+
     /// Mint a session-scoped MoQ JWT. The claims grant publish+subscribe
     /// under BOTH namespaces a client may root at — `{sid}/…` (legacy
     /// clients dialing `/av/moq` with absolute broadcast paths) and
@@ -185,6 +234,7 @@ pub async fn init_sfu(quic_port: Option<u16>, data_dir: &str) -> anyhow::Result<
         conn_id: AtomicU64::new(0),
         token_key,
         require_token,
+        media_conns: parking_lot::Mutex::new(std::collections::HashMap::new()),
     });
 
     // Optionally start QUIC accept loop (for direct connections bypassing HTTP proxy)
@@ -307,6 +357,7 @@ pub async fn handle_ws_moq(
     state: Arc<SfuState>,
     path: String,
     jwt: Option<String>,
+    inst: Option<String>,
     socket: axum::extract::ws::WebSocket,
 ) {
     use futures::{SinkExt, StreamExt};
@@ -359,8 +410,24 @@ pub async fn handle_ws_moq(
         }
     };
 
-    tracing::info!(conn = id, "SFU: client connected (WebSocket)");
-    let _ = session.closed().await;
+    tracing::info!(conn = id, inst = ?inst, "SFU: client connected (WebSocket)");
+    // Park until the client closes — or the server revokes this instance's
+    // media because its roster slot was torn down (see `revoke_media`).
+    match inst.as_deref().filter(|i| !i.is_empty()) {
+        Some(instance) => {
+            let notify = state.register_media_conn(instance);
+            tokio::select! {
+                _ = session.closed() => {}
+                _ = notify.notified() => {
+                    tracing::info!(conn = id, instance = %instance, "SFU: session revoked (roster teardown)");
+                }
+            }
+            state.unregister_media_conn(instance, &notify);
+        }
+        None => {
+            let _ = session.closed().await;
+        }
+    }
     tracing::info!(conn = id, "SFU: session closed (WebSocket)");
 }
 
@@ -503,6 +570,7 @@ mod token_tests {
             conn_id: AtomicU64::new(0),
             token_key: Some(Arc::new(key)),
             require_token: require,
+            media_conns: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 

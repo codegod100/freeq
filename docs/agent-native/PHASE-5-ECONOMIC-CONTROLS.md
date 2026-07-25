@@ -352,7 +352,7 @@ Clicking opens a detailed spend breakdown.
 │   └ Total: $20.10                                 │
 │                                                   │
 │ 🤖 auditor — $3.30 (12 items)                    │
-│   Task: Audit chad/freeq                          │
+│   Task: Audit freeq-irc/freeq                          │
 │   └ Total: $3.30                                  │
 ├──────────────────────────────────────────────────┤
 │ Budget: $50.00/day | Remaining: $26.60            │

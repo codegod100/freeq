@@ -196,6 +196,10 @@ pub fn router(state: Arc<SharedState>) -> Router {
         .route("/api/v1/channels/{name}/export", get(api_channel_export))
         .route("/api/v1/channels/{name}/topic", get(api_channel_topic))
         .route("/api/v1/channels/{name}/pins", get(api_channel_pins))
+        .route(
+            "/api/v1/favorites",
+            get(api_get_favorites).put(api_set_favorites),
+        )
         .route("/api/v1/users/{nick}", get(api_user))
         .route("/api/v1/users/{nick}/whois", get(api_user_whois))
         .route("/api/v1/upload", axum::routing::post(api_upload))
@@ -557,7 +561,10 @@ async fn api_did_signing_key_by_kid(
 async fn api_agent_capabilities(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // What this channel's agents are permitted to do.
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let grants: Vec<serde_json::Value> = state
         .with_db(|db| {
@@ -596,14 +603,19 @@ async fn api_agent_capabilities(
             Ok(all)
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "capabilities": grants }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "capabilities": grants }),
+    ))
 }
 
 /// GET /api/v1/channels/{name}/approvals — list pending approvals.
 async fn api_pending_approvals(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // What a private channel is waiting on a human to decide.
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let approvals: Vec<serde_json::Value> = state
         .with_db(|db| {
@@ -623,7 +635,9 @@ async fn api_pending_approvals(
                 .collect::<Vec<_>>())
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "approvals": approvals }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "approvals": approvals }),
+    ))
 }
 
 /// GET /api/v1/channels/{name}/events — query coordination events.
@@ -631,8 +645,11 @@ async fn api_channel_events(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
-    let channel = format!("#{name}");
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Signed task cards and agent activity — private-channel coordination must
+    // not be world-readable.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let event_type = params.get("type").map(|s| s.as_str());
     let ref_id = params.get("ref_id").map(|s| s.as_str());
     let actor = params.get("actor").map(|s| s.as_str());
@@ -664,7 +681,9 @@ async fn api_channel_events(
                 .collect::<Vec<_>>())
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "events": events }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "events": events }),
+    ))
 }
 
 /// GET /api/v1/tasks/{task_id} — task detail with all related events.
@@ -726,8 +745,11 @@ async fn api_channel_audit(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
-    let channel = format!("#{name}");
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // The audit timeline is the governance history of the room: coordination
+    // events, actor DIDs, signatures and payloads. Same access rules as history.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let actor = params.get("actor").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
         chrono::DateTime::parse_from_rfc3339(s)
@@ -791,7 +813,9 @@ async fn api_channel_audit(
         timeline.truncate(limit);
     }
 
-    Json(serde_json::json!({ "channel": channel, "timeline": timeline }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "timeline": timeline }),
+    ))
 }
 
 /// GET /api/v1/agents/manifests — list all registered manifests.
@@ -858,12 +882,15 @@ async fn api_spawned_agents(State(state): State<Arc<SharedState>>) -> Json<serde
 async fn api_channel_budget(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Spend limits and burn-down for a private channel's agents.
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let budget_json = state
         .with_db(|db| Ok(db.get_budget(&channel.to_lowercase(), None)))
         .flatten();
-    match budget_json {
+    Ok(match budget_json {
         Some(bj) => {
             if let Ok(budget) = serde_json::from_str::<crate::policy::types::BudgetPolicy>(&bj) {
                 let period_start = crate::connection::budget_period_start(&budget.period);
@@ -908,7 +935,7 @@ async fn api_channel_budget(
             }
         }
         None => Json(serde_json::json!({ "channel": channel, "budget": null })),
-    }
+    })
 }
 
 /// GET /api/v1/channels/{name}/spend — spend records.
@@ -916,7 +943,9 @@ async fn api_channel_spend(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let agent = params.get("agent").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
@@ -949,7 +978,9 @@ async fn api_channel_spend(
                 .collect::<Vec<_>>())
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "spend": records }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "spend": records }),
+    ))
 }
 
 /// GET /api/v1/actors/{did} — identity card for any actor (human or agent).
@@ -1394,6 +1425,59 @@ async fn api_channels(State(state): State<Arc<SharedState>>) -> Json<Vec<Channel
     Json(list)
 }
 
+/// GET /api/v1/favorites — the authenticated user's roaming favorite channels
+/// (in saved order). Per-DID, so a user's favorites follow them across all
+/// their devices. Requires a Bearer session.
+async fn api_get_favorites(
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(did) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+    let favs = state
+        .with_db(|db| db.get_user_favorites(&did))
+        .unwrap_or_default();
+    (StatusCode::OK, Json(serde_json::json!({ "favorites": favs })))
+}
+
+/// PUT /api/v1/favorites {"favorites": ["#a", "#b", ...]} — replace the
+/// authenticated user's roaming favorites (order preserved). Channel names
+/// only; capped at 200 to bound abuse. Returns the stored list.
+async fn api_set_favorites(
+    State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let Some(did) = caller_did_from_bearer(&state, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "Bearer session required" })),
+        );
+    };
+    let favs: Vec<String> = body
+        .get("favorites")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|c| c.starts_with('#') || c.starts_with('&'))
+                .map(|c| c.to_lowercase())
+                .take(200)
+                .collect()
+        })
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    state.with_db(|db| db.set_user_favorites(&did, &favs, now));
+    (StatusCode::OK, Json(serde_json::json!({ "favorites": favs })))
+}
+
 /// Resolve the authenticated caller DID from a `Bearer <session-id>` header.
 fn caller_did_from_bearer(
     state: &crate::server::SharedState,
@@ -1830,12 +1914,11 @@ async fn api_search(
 async fn api_channel_topic(
     Path(name): Path<String>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<ChannelTopicResponse>, StatusCode> {
-    let channel = if name.starts_with('#') {
-        name
-    } else {
-        format!("#{name}")
-    };
+    // Mode-restricted channels (+i/+k/encrypted) are not public: the topic of a
+    // private room routinely names the thing the room exists to discuss.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
 
     let channels = state.channels.lock();
     match channels.get(&channel) {
@@ -1852,12 +1935,10 @@ async fn api_channel_topic(
 async fn api_channel_pins(
     Path(name): Path<String>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let channel = if name.starts_with('#') {
-        name
-    } else {
-        format!("#{name}")
-    };
+    // Pins quote message text, so this is a history read by another name.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let pin_list = {
         let channels = state.channels.lock();
         match channels.get(&channel) {
@@ -3552,12 +3633,17 @@ async fn av_moq_ws_root(
     State(state): State<Arc<crate::server::SharedState>>,
 ) -> impl IntoResponse {
     let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
+    // Self-declared AV instance id — keys server-side media revocation on
+    // roster teardown (audit F6).
+    let inst = query.get("inst").filter(|v| !v.is_empty()).cloned();
     let sfu = state.sfu_state.lock().clone();
     match sfu {
         // qmux requires "webtransport" subprotocol for MoQ framing over WebSocket
         Some(sfu) => ws
             .protocols(["webtransport"])
-            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, String::new(), jwt, socket))
+            .on_upgrade(move |socket| {
+                crate::av_sfu::handle_ws_moq(sfu, String::new(), jwt, inst, socket)
+            })
             .into_response(),
         None => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -3587,11 +3673,12 @@ async fn av_moq_ws(
     tracing::info!(path = %path, "MoQ WebSocket upgrade with path");
 
     let jwt = query.get("jwt").filter(|v| !v.is_empty()).cloned();
+    let inst = query.get("inst").filter(|v| !v.is_empty()).cloned();
     let sfu = state.sfu_state.lock().clone();
     match sfu {
         Some(sfu) => ws
             .protocols(["webtransport"])
-            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, jwt, socket))
+            .on_upgrade(move |socket| crate::av_sfu::handle_ws_moq(sfu, path, jwt, inst, socket))
             .into_response(),
         None => (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -4444,16 +4531,48 @@ async fn api_session_artifacts(
 async fn api_create_artifact(
     State(state): State<Arc<SharedState>>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    // Verify session exists
-    {
+    // This endpoint writes to the provenance store AND broadcasts a NOTICE into
+    // the session's channel, so it must be authenticated. Previously it took no
+    // headers at all: anyone who knew a session id could forge an artifact
+    // attributed to someone else (`created_by` came from the request body) and
+    // inject caller-controlled text into the channel.
+    let caller = caller_did_from_bearer(&state, &headers).ok_or((
+        axum::http::StatusCode::UNAUTHORIZED,
+        "authentication required".to_string(),
+    ))?;
+
+    // Verify session exists, and capture what we need to authorize.
+    let (session_channel, is_participant) = {
         let mgr = state.av_sessions.lock();
-        if mgr.get(&id).is_none() {
-            return Err((
-                axum::http::StatusCode::NOT_FOUND,
-                "Session not found".to_string(),
-            ));
+        let session = mgr.get(&id).ok_or((
+            axum::http::StatusCode::NOT_FOUND,
+            "Session not found".to_string(),
+        ))?;
+        (
+            session.channel.clone(),
+            session.participants.contains_key(&caller),
+        )
+    };
+
+    // Participants may always attach an artifact. Otherwise fall back to the
+    // bound channel's read rule, so an op or member can attach a summary after
+    // leaving the call. Ad-hoc sessions with no channel: participants only.
+    if !is_participant {
+        match session_channel.as_deref() {
+            Some(channel) => {
+                authorize_channel_read(&state, channel, &headers).map_err(|status| {
+                    (status, "not authorized for this session".to_string())
+                })?;
+            }
+            None => {
+                return Err((
+                    axum::http::StatusCode::FORBIDDEN,
+                    "not a participant in this session".to_string(),
+                ));
+            }
         }
     }
 
@@ -4470,7 +4589,9 @@ async fn api_create_artifact(
         serde_json::from_str(&format!("\"{visibility_str}\""))
             .unwrap_or(crate::av::ArtifactVisibility::Participants);
     let title = body["title"].as_str();
-    let created_by = body["created_by"].as_str();
+    // Attribution comes from the authenticated caller, never from the body:
+    // a provenance record whose author is self-asserted is worthless.
+    let created_by = Some(caller.as_str());
 
     let artifact = crate::av::AvArtifact {
         id: ulid::Ulid::new().to_string(),
@@ -4513,17 +4634,24 @@ async fn api_create_artifact(
 async fn api_channel_sessions(
     State(state): State<Arc<SharedState>>,
     Path(name): Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Who is (or was) in a private channel's calls is itself sensitive.
+    // Use the *normalized* channel the guard returns: sessions are stored under
+    // the `#`-prefixed name, so looking up the raw path segment found nothing
+    // and this endpoint reported "no calls" for every channel unless the caller
+    // happened to URL-encode the `#`.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let mgr = state.av_sessions.lock();
 
     // Active session (if any)
     let active = mgr
-        .active_session_for_channel(&name)
+        .active_session_for_channel(&channel)
         .map(|s| session_to_json(s, &mgr));
 
     // Recent ended sessions from DB
     let recent = state
-        .with_db(|db| db.list_channel_av_sessions(&name, 20))
+        .with_db(|db| db.list_channel_av_sessions(&channel, 20))
         .unwrap_or_default();
     let recent_json: Vec<serde_json::Value> = recent
         .iter()
@@ -4538,10 +4666,10 @@ async fn api_channel_sessions(
         })
         .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "active": active,
         "recent": recent_json,
-    }))
+    })))
 }
 
 fn session_to_json(

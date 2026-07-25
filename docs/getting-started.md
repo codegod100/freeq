@@ -39,7 +39,7 @@ Runs in your terminal. Supports Bluesky OAuth, vi/emacs keybindings, inline imag
 ## Run your own server
 
 ```bash
-git clone https://github.com/chad/freeq
+git clone https://github.com/freeq-irc/freeq
 cd freeq
 cargo build --release -p freeq-server
 ./target/release/freeq-server --bind 0.0.0.0:6667

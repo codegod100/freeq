@@ -228,8 +228,8 @@ export interface Store {
   addMessage: (channel: string, msg: Message) => void;
   mergeHistory: (channel: string, messages: Message[]) => void;
   addSystemMessage: (channel: string, text: string) => void;
-  editMessage: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean) => void;
-  deleteMessage: (channel: string, msgId: string) => void;
+  editMessage: (channel: string, originalMsgId: string, newText: string, newMsgId?: string, isStreaming?: boolean, editorNick?: string, editorAccount?: string) => void;
+  deleteMessage: (channel: string, msgId: string, deleterNick?: string, deleterAccount?: string) => void;
   addReaction: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
   removeReaction: (channel: string, msgId: string, emoji: string, fromNick: string) => void;
   incrementMentions: (channel: string) => void;
@@ -254,6 +254,7 @@ export interface Store {
   setShowJoinPart: (v: boolean) => void;
   setLoadExternalMedia: (v: boolean) => void;
   toggleFavorite: (channel: string) => void;
+  setFavorites: (channels: string[]) => void;
   toggleMuted: (channel: string) => void;
   hideDM: (nick: string) => void;
   unhideDM: (nick: string) => void;
@@ -752,9 +753,36 @@ export const useStore = create<Store>((set, get) => ({
     const ch = getOrCreateChannel(channels, channel);
 
     // Dedup by msgid — existing (live) copy wins over a history copy.
+    // Edit-aware: a replayed row and a live row can be the SAME message
+    // under different msgids (edits re-key), so also reconcile via the
+    // edit anchor (editOf, root of the chain) instead of blindly
+    // appending — that append rendered as a stacked duplicate.
     const existingIds = new Set(ch.messages.map((m) => m.id).filter(Boolean));
-    const novel = incoming.filter((m) => !m.id || !existingIds.has(m.id));
-    if (novel.length === 0) return {};
+    const novel: Message[] = [];
+    let reconciled = false;
+    for (const m of incoming) {
+      if (m.id && existingIds.has(m.id)) continue;
+      const anchor = m.editOf;
+      if (anchor) {
+        // Incoming collapsed edit of a message we already hold → update
+        // the held row in place (id, text) rather than append.
+        const idx = ch.messages.findIndex(
+          (e) => e.id === anchor || e.editOf === anchor,
+        );
+        if (idx >= 0) {
+          ch.messages = ch.messages.map((e, i) =>
+            i === idx ? { ...e, text: m.text, id: m.id, editOf: e.editOf ?? anchor } : e,
+          );
+          reconciled = true;
+          continue;
+        }
+      }
+      // Incoming stale base row for which we already hold a collapsed
+      // edit → skip it.
+      if (m.id && ch.messages.some((e) => e.editOf === m.id)) continue;
+      novel.push(m);
+    }
+    if (novel.length === 0 && !reconciled) return {};
 
     const merged = [...ch.messages, ...novel];
     merged.sort((a, b) => {
@@ -780,7 +808,19 @@ export const useStore = create<Store>((set, get) => ({
     get().addMessage(channel, msg);
   },
 
-  editMessage: (channel, originalMsgId, newText, newMsgId, isStreaming) => set((s) => {
+  editMessage: (channel, originalMsgId, newText, newMsgId, isStreaming, editorNick, editorAccount) => set((s) => {
+    // Authorship gate: only the original sender may edit. The server
+    // enforces this when the thread is persisted; for unpersisted (guest)
+    // threads it relays without a check, so the client is the authority.
+    // Account (DID) comparison first, nick fallback; no editor identity
+    // provided (own optimistic path) passes.
+    const authorOk = (m: Message): boolean => {
+      if (!editorNick && !editorAccount) return true;
+      const mAccount = m.tags?.['account'];
+      if (editorAccount && mAccount) return editorAccount === mAccount;
+      if (editorNick) return editorNick.toLowerCase() === m.from.toLowerCase();
+      return true;
+    };
     // Treat empty edit as a "cleared" message to prevent invisible messages
     const displayText = newText || (isStreaming ? '' : '[message cleared]');
     const channels = new Map(s.channels);
@@ -789,8 +829,10 @@ export const useStore = create<Store>((set, get) => ({
       // Match on id OR editOf — handles chained edits (e.g., streaming)
       // where the first edit changes id but subsequent edits still reference the original
       ch.messages = ch.messages.map((m) =>
-        (m.id === originalMsgId || m.editOf === originalMsgId)
-          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
+        (m.id === originalMsgId || m.editOf === originalMsgId) && authorOk(m)
+          // editOf keeps the ROOT of the edit chain so chained edits and
+          // replayed collapsed rows keep matching each other.
+          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: m.editOf ?? originalMsgId, isStreaming: !!isStreaming }
           : m
       );
       channels.set(channel.toLowerCase(), { ...ch });
@@ -801,8 +843,8 @@ export const useStore = create<Store>((set, get) => ({
     for (const [id, batch] of batches) {
       if (batch.target.toLowerCase() !== channel.toLowerCase()) continue;
       batch.messages = batch.messages.map((m) =>
-        (m.id === originalMsgId || m.editOf === originalMsgId)
-          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: originalMsgId, isStreaming: !!isStreaming }
+        (m.id === originalMsgId || m.editOf === originalMsgId) && authorOk(m)
+          ? { ...m, text: displayText, id: newMsgId || m.id, editOf: m.editOf ?? originalMsgId, isStreaming: !!isStreaming }
           : m
       );
       batches.set(id, batch);
@@ -811,12 +853,28 @@ export const useStore = create<Store>((set, get) => ({
     return { channels, batches };
   }),
 
-  deleteMessage: (channel, msgId) => set((s) => {
+  deleteMessage: (channel, msgId, deleterNick, deleterAccount) => set((s) => {
     const channels = new Map(s.channels);
     const ch = channels.get(channel.toLowerCase());
     if (!ch) return { channels };
+    // Authorship gate — mirror of editMessage's (see there).
+    const authorOk = (m: Message): boolean => {
+      if (!deleterNick && !deleterAccount) return true;
+      const mAccount = m.tags?.['account'];
+      if (deleterAccount && mAccount) return deleterAccount === mAccount;
+      if (deleterNick) return deleterNick.toLowerCase() === m.from.toLowerCase();
+      return true;
+    };
+    // Match on id OR editOf, exactly as editMessage does. An edit re-keys the
+    // message to the edit's msgid and records the chain root in editOf, while a
+    // delete always names the ORIGINAL msgid — that's the identity clients hold
+    // and what the server relays in +draft/delete. Matching only on id meant a
+    // delete of an edited message found nothing and left it on screen after the
+    // server had removed it.
     ch.messages = ch.messages.map((m) =>
-      m.id === msgId ? { ...m, deleted: true, text: '' } : m
+      (m.id === msgId || m.editOf === msgId) && authorOk(m)
+        ? { ...m, deleted: true, text: '' }
+        : m
     );
     channels.set(channel.toLowerCase(), { ...ch });
     return { channels };
@@ -961,6 +1019,13 @@ export const useStore = create<Store>((set, get) => ({
     const favs = new Set(s.favorites);
     const key = channel.toLowerCase();
     if (favs.has(key)) favs.delete(key); else favs.add(key);
+    localStorage.setItem('freeq-favorites', JSON.stringify([...favs]));
+    return { favorites: favs };
+  }),
+  // Bulk replace (used by roaming-favorites sync so a server pull doesn't
+  // fire N per-item pushes). Order preserved for the Favorites section.
+  setFavorites: (channels) => set(() => {
+    const favs = new Set(channels.map((c) => c.toLowerCase()));
     localStorage.setItem('freeq-favorites', JSON.stringify([...favs]));
     return { favorites: favs };
   }),

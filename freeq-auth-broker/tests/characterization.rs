@@ -382,6 +382,13 @@ fn return_to_allowlist() {
     assert!(is_valid_return_to("https://irc.freeq.at"));
     assert!(is_valid_return_to("https://irc.freeq.at/some/path"));
     assert!(is_valid_return_to("https://staging.freeq.at"));
+    assert!(is_valid_return_to("https://freeqworld.boxd.sh"));
+    // FreeqWorld's own domain (world.freeq.at). The OAuth allowlist is compiled
+    // in, so serving the world from a new host requires this entry or Bluesky
+    // sign-in fails with a raw "Invalid return_to URL".
+    assert!(is_valid_return_to("https://world.freeq.at"));
+    assert!(is_valid_return_to("https://world.freeq.at/id"));
+    assert!(is_valid_return_to("https://pfp.freeq.at"));
     assert!(is_valid_return_to("http://localhost:5173"));
     assert!(is_valid_return_to("http://127.0.0.1:8000/x"));
     // Everything else rejected — incl. http downgrades of allowed hosts.
@@ -494,7 +501,7 @@ async fn client_metadata_document() {
     // The advertised scope union (incl. transition:generic grace period).
     assert_eq!(
         json["scope"],
-        "atproto blob:image/* repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic"
+        "atproto blob:image/* repo:app.bsky.actor.profile repo:blue.irc.media?action=create repo:app.bsky.feed.post transition:generic"
     );
     assert_eq!(json["grant_types"], serde_json::json!(["authorization_code", "refresh_token"]));
     assert_eq!(json["token_endpoint_auth_method"], "none");
@@ -1001,6 +1008,152 @@ async fn graph_setup() -> (String, Arc<std::sync::Mutex<PdsCapture>>) {
     let state = broker_state(&server_url);
     seed_session(&state, "BT1", "R0", &format!("{token_url}/token"), &pds_url).await;
     (spawn(router(state)).await, pds_cap)
+}
+
+// ── PFP avatar delegation ──────────────────────────────────────────────
+
+#[derive(Default)]
+struct PfpPdsCapture {
+    upload_blobs: usize,
+    get_record_hits: usize,
+    put_record: Option<serde_json::Value>,
+    create_record: Option<serde_json::Value>,
+}
+
+fn mock_pds_pfp(cap: Arc<std::sync::Mutex<PfpPdsCapture>>) -> axum::Router {
+    use axum::routing::{get, post};
+    let c1 = cap.clone();
+    let c2 = cap.clone();
+    let c3 = cap.clone();
+    let c4 = cap;
+    axum::Router::new()
+        .route(
+            "/xrpc/com.atproto.repo.uploadBlob",
+            post(move |headers: HeaderMap, body: Bytes| {
+                let c = c1.clone();
+                async move {
+                    // binary body, DPoP-authenticated, correct content-type
+                    assert_eq!(headers.get("content-type").unwrap(), "image/png");
+                    assert!(headers.get("dpop").is_some());
+                    assert!(!body.is_empty());
+                    c.lock().unwrap().upload_blobs += 1;
+                    axum::Json(serde_json::json!({
+                        "blob": {"$type":"blob","ref":{"$link":"bafyblob"},"mimeType":"image/png","size": body.len()}
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/xrpc/com.atproto.repo.getRecord",
+            get(move || {
+                let c = c2.clone();
+                async move {
+                    c.lock().unwrap().get_record_hits += 1;
+                    axum::Json(serde_json::json!({
+                        "uri": "at://did:plc:alice123/app.bsky.actor.profile/self",
+                        "cid": "bafyprofile",
+                        "value": {"$type":"app.bsky.actor.profile","displayName":"Alice","description":"keep me"}
+                    }))
+                }
+            }),
+        )
+        .route(
+            "/xrpc/com.atproto.repo.putRecord",
+            post(move |body: Bytes| {
+                let c = c3.clone();
+                async move {
+                    c.lock().unwrap().put_record = Some(serde_json::from_slice(&body).unwrap());
+                    axum::Json(serde_json::json!({"uri":"at://did:plc:alice123/app.bsky.actor.profile/self","cid":"c"}))
+                }
+            }),
+        )
+        .route(
+            "/xrpc/com.atproto.repo.createRecord",
+            post(move |body: Bytes| {
+                let c = c4.clone();
+                async move {
+                    c.lock().unwrap().create_record = Some(serde_json::from_slice(&body).unwrap());
+                    axum::Json(serde_json::json!({"uri":"at://did:plc:alice123/app.bsky.feed.post/3kpost","cid":"c"}))
+                }
+            }),
+        )
+}
+
+async fn pfp_setup() -> (String, Arc<std::sync::Mutex<PfpPdsCapture>>) {
+    let server_url = spawn(mock_freeq_server(Default::default())).await;
+    let refresh = rotate_state(None);
+    let token_url = spawn(mock_refresh_endpoint(refresh)).await;
+    let pds_cap = Arc::new(std::sync::Mutex::new(PfpPdsCapture::default()));
+    let pds_url = spawn(mock_pds_pfp(pds_cap.clone())).await;
+    let state = broker_state(&server_url);
+    seed_session(&state, "BT1", "R0", &format!("{token_url}/token"), &pds_url).await;
+    (spawn(router(state)).await, pds_cap)
+}
+
+fn tiny_png_b64() -> String {
+    let mut v = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    v.extend_from_slice(&[0u8; 64]);
+    base64::engine::general_purpose::STANDARD.encode(&v)
+}
+
+#[tokio::test]
+async fn pfp_set_avatar_preserves_profile_and_posts() {
+    let (base, cap) = pfp_setup().await;
+    let resp = http()
+        .post(format!("{base}/api/pfp/set-avatar"))
+        .json(&serde_json::json!({"broker_token": "BT1", "image_b64": tiny_png_b64(), "post": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["posted"], true);
+
+    let c = cap.lock().unwrap();
+    // two uploads: one for the avatar, one for the post embed
+    assert_eq!(c.upload_blobs, 2);
+    assert!(c.get_record_hits >= 1);
+    // profile write swaps avatar but keeps the existing fields
+    let put = c.put_record.as_ref().unwrap();
+    assert_eq!(put["collection"], "app.bsky.actor.profile");
+    assert_eq!(put["rkey"], "self");
+    assert_eq!(put["record"]["displayName"], "Alice");
+    assert_eq!(put["record"]["description"], "keep me");
+    assert_eq!(put["record"]["avatar"]["$type"], "blob");
+    // the post carries the image + a link facet whose bytes land on the URL
+    let post = c.create_record.as_ref().unwrap();
+    assert_eq!(post["collection"], "app.bsky.feed.post");
+    assert!(post["record"]["embed"]["images"][0]["image"]["$type"] == "blob");
+    let text = post["record"]["text"].as_str().unwrap();
+    let f = &post["record"]["facets"][0]["index"];
+    let (s, e) = (f["byteStart"].as_u64().unwrap() as usize, f["byteEnd"].as_u64().unwrap() as usize);
+    assert_eq!(&text.as_bytes()[s..e], b"pfp.freeq.at");
+    assert_eq!(post["record"]["facets"][0]["features"][0]["uri"], "https://pfp.freeq.at");
+}
+
+#[tokio::test]
+async fn pfp_set_avatar_rejections() {
+    let (base, _) = pfp_setup().await;
+    // bad broker token → 401
+    let resp = http()
+        .post(format!("{base}/api/pfp/set-avatar"))
+        .json(&serde_json::json!({"broker_token": "WRONG", "image_b64": tiny_png_b64()}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 401);
+    // non-PNG bytes → 400 before any auth work
+    let resp = http()
+        .post(format!("{base}/api/pfp/set-avatar"))
+        .json(&serde_json::json!({"broker_token": "BT1", "image_b64": base64::engine::general_purpose::STANDARD.encode(b"not a png")}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+    // disallowed browser origin → 403
+    let resp = http()
+        .post(format!("{base}/api/pfp/set-avatar"))
+        .header("origin", "https://evil.example")
+        .json(&serde_json::json!({"broker_token": "BT1", "image_b64": tiny_png_b64()}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 403);
 }
 
 #[tokio::test]

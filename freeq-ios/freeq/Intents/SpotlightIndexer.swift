@@ -22,9 +22,12 @@ enum SpotlightIndexer {
         }
         let dmItems = appState.dmBuffers.map { dm -> CSSearchableItem in
             let attrs = CSSearchableItemAttributeSet(contentType: .text)
-            attrs.title = "@\(dm.name)"
+            // DID-keyed buffers index under the peer's nick — a raw
+            // `did:plc:…` is useless as a Spotlight result title.
+            let display = appState.displayNameForKey(dm.name)
+            attrs.title = "@\(display)"
             attrs.contentDescription = "Direct message"
-            attrs.keywords = ["freeq", "dm", "direct message", dm.name]
+            attrs.keywords = ["freeq", "dm", "direct message", display, dm.name]
             return CSSearchableItem(uniqueIdentifier: dm.name,
                                     domainIdentifier: domain,
                                     attributeSet: attrs)

@@ -192,6 +192,21 @@ pub(super) fn handle_tagmsg(
         return; // TAGMSG with no tags is meaningless
     }
 
+    // Channel names are case-insensitive, and `process_privmsg` normalizes its
+    // target before persisting — so messages, reactions and pins all live under
+    // the lowercased key. Normalize here too, or every TAGMSG-driven feature
+    // addresses a key that may not exist: a client that keeps the display case
+    // it joined with ("#Case") could not delete or edit its own messages
+    // (MESSAGE_NOT_FOUND), and its reactions persisted under the un-normalized
+    // name, orphaned from the message they annotate.
+    let normalized_target;
+    let target: &str = if target.starts_with('#') || target.starts_with('&') {
+        normalized_target = normalize_channel(target);
+        &normalized_target
+    } else {
+        target
+    };
+
     // Normalize IRCv3 draft tags to their canonical forms so all downstream
     // code (persistence, relay, fallback) only needs to check one name.
     let mut tags = tags.clone();
@@ -380,14 +395,16 @@ pub(super) fn handle_tagmsg(
     }
 
     // ── Remove reactions (+freeq.at/unreact with +reply) ──
-    // The reactor is identified by the connection's current nick — same key the
-    // add path uses to scope a reaction. The TAGMSG itself still relays through
-    // the broadcast below so other clients can drop the pill from the UI.
+    // Identity-keyed: authenticated users remove by DID (so a nick change
+    // doesn't strand their reaction, and a nick squatter can't strip it);
+    // guests remove only their own DID-less rows. The TAGMSG itself still
+    // relays through the broadcast below so other clients drop the pill.
     if let (Some(emoji), Some(target_msgid)) = (tags.get("+freeq.at/unreact"), tags.get("+reply")) {
         let nick = conn.nick_or_star().to_string();
+        let did = conn.authenticated_did.clone();
         let target_msgid = target_msgid.clone();
         let emoji = emoji.clone();
-        state.with_db(|db| db.remove_reaction(&target_msgid, &nick, &emoji));
+        state.with_db(|db| db.remove_reaction(&target_msgid, &nick, did.as_deref(), &emoji));
     }
 
     let hostmask = conn.hostmask();
@@ -524,7 +541,20 @@ pub(super) fn handle_tagmsg(
         // tags. Emitting an `S2sMessage::Tagmsg` unconditionally (peers dedup
         // by event_id; a peer with no local session for the target just no-ops)
         // is the same shape the PRIVMSG DM path already uses.
-        let sessions = super::routing::local_sessions_for_target(state, target);
+        let mut sessions = super::routing::local_sessions_for_target(state, target);
+        // The sender's other devices get the event too — reactions/typing in
+        // a DM otherwise leave the sender's own other clients stale.
+        for sib in sender_sibling_sessions(state, conn) {
+            if !sessions.contains(&sib) {
+                sessions.push(sib);
+            }
+        }
+        // Echo to the sender, same as the channel branch: a client holding
+        // echo-message renders its own reaction from the echo, not
+        // optimistically.
+        if state.cap_echo_message.lock().contains(&conn.id) && !sessions.contains(&conn.id) {
+            sessions.push(conn.id.clone());
+        }
         {
             let tag_caps = state.cap_message_tags.lock();
             let time_caps = state.cap_server_time.lock();
@@ -1918,6 +1948,92 @@ fn handle_chathistory_targets(
 
 // ── Message editing ─────────────────────────────────────────────────
 
+/// Canonical DB storage key for a DM wire target from the sender's
+/// perspective. DM messages live under `dm:<didA>,<didB>` (see
+/// [`crate::db::canonical_dm_key`]), never under the wire target, which
+/// may be the peer's nick OR their DID. Returns None for guests (no
+/// sender DID) or an unresolvable nick.
+pub(super) fn dm_canonical_key(
+    conn: &Connection,
+    target: &str,
+    state: &Arc<SharedState>,
+) -> Option<String> {
+    let sender_did = conn.authenticated_did.as_deref()?;
+    let recipient_did = if target.starts_with("did:") {
+        target.to_string()
+    } else {
+        state.nick_owners.lock().get(&target.to_lowercase()).cloned()?
+    };
+    Some(crate::db::canonical_dm_key(sender_did, &recipient_did))
+}
+
+/// Whether a row found by the *global* msgid fallback may be acted on for an
+/// edit/delete addressed to a DM.
+///
+/// The fallback exists only to resolve DM-key ambiguity: the wire target may be
+/// a nick or a DID, and the nick→DID mapping can be unavailable (partner
+/// offline), so the canonical `dm:` key can't always be derived. It must never
+/// reach a **channel** row. `handle_edit` / `handle_delete` derive both their
+/// in-memory `ch.history`/`ch.pins` cleanup and their broadcast target from
+/// `is_channel`, which is computed from the *wire* target — so a channel row
+/// resolved through a DM target got soft-deleted in the DB while the channel
+/// kept serving it from memory, and the channel was never told. That message
+/// then vanished from search immediately and from history after the next
+/// restart, while every current member still saw it.
+///
+/// Authorship is re-checked by the caller, so this is not the only guard — but
+/// authorship alone doesn't make a cross-target mutation *coherent*.
+pub(super) fn dm_fallback_row_is_addressable(row_channel: &str, caller_did: Option<&str>) -> bool {
+    // Only DM rows are reachable this way; `dm:` keys are `dm:{did_a},{did_b}`.
+    let Some(participants) = row_channel.strip_prefix("dm:") else {
+        return false;
+    };
+    // Without an authenticated identity we cannot prove participation, so we
+    // don't guess. Guest DM threads aren't persisted anyway, so this costs
+    // nothing: the fallback would find no row for them regardless.
+    let Some(did) = caller_did else { return false };
+    participants.split(',').any(|p| p == did)
+}
+
+/// Look up an original message by msgid for an edit/delete. Channels key
+/// by the wire target; DMs key by the canonical dm_key, so a DM tries the
+/// target, then the canonical key, then a constrained global msgid search.
+/// Returns the row so the caller can write back under `row.channel` — the key
+/// it actually lives under — rather than re-deriving it.
+fn find_original_message(
+    conn: &Connection,
+    target: &str,
+    msgid: &str,
+    is_channel: bool,
+    state: &Arc<SharedState>,
+) -> Option<Option<crate::db::MessageRow>> {
+    let by_target = state.with_db(|db| db.get_message_by_msgid(target, msgid));
+    if matches!(&by_target, Some(Some(_))) || is_channel {
+        return by_target;
+    }
+    if let Some(dm_key) = dm_canonical_key(conn, target, state) {
+        let by_dm = state.with_db(|db| db.get_message_by_msgid(&dm_key, msgid));
+        if matches!(&by_dm, Some(Some(_))) {
+            return by_dm;
+        }
+    }
+    let global = state.with_db(|db| db.find_message_by_msgid(msgid));
+    match &global {
+        // Row exists but isn't addressable from this DM target — report it as
+        // "not found" so no cross-target mutation happens. `Some(None)` keeps
+        // the "DB present, no row" contract the callers already handle.
+        Some(Some(row))
+            if !dm_fallback_row_is_addressable(
+                &row.channel,
+                conn.authenticated_did.as_deref(),
+            ) =>
+        {
+            Some(None)
+        }
+        _ => global,
+    }
+}
+
 /// Handle a PRIVMSG with +draft/edit=<msgid> tag.
 /// Verifies authorship, stores the edit, and broadcasts to channel or DM recipient.
 ///
@@ -1941,46 +2057,17 @@ fn handle_edit(
     let nick = conn.nick_or_star();
     let is_channel = target.starts_with('#') || target.starts_with('&');
 
-    // Verify authorship: look up original message by msgid
-    // For DMs, messages are stored under the canonical dm_key, not the nick.
-    // Try the target first (works for channels), then fall back to a global lookup.
-    let original = {
-        let by_target = state.with_db(|db| db.get_message_by_msgid(target, original_msgid));
-        match &by_target {
-            Some(Some(_)) => by_target,
-            _ => {
-                // Channel lookup failed — try DM key if this is a DM
-                if !is_channel {
-                    if let Some(sender_did) = conn.authenticated_did.as_deref() {
-                        if let Some(recipient_did) = state
-                            .nick_owners
-                            .lock()
-                            .get(&target.to_lowercase())
-                            .cloned()
-                        {
-                            let dm_key = crate::db::canonical_dm_key(sender_did, &recipient_did);
-                            let by_dm = state
-                                .with_db(|db| db.get_message_by_msgid(&dm_key, original_msgid));
-                            if matches!(&by_dm, Some(Some(_))) {
-                                by_dm
-                            } else {
-                                // Final fallback: global msgid search
-                                state.with_db(|db| db.find_message_by_msgid(original_msgid))
-                            }
-                        } else {
-                            state.with_db(|db| db.find_message_by_msgid(original_msgid))
-                        }
-                    } else {
-                        state.with_db(|db| db.find_message_by_msgid(original_msgid))
-                    }
-                } else {
-                    by_target
-                }
-            }
-        }
+    // Verify authorship: look up original message by msgid, resolving the
+    // canonical dm_key for DMs (target may be a nick or a DID).
+    let original = find_original_message(conn, target, original_msgid, is_channel, state);
+    // The key the row actually lives under — the edit must be written back
+    // here (a DM lives under `dm:<a>,<b>`, not the wire target).
+    let store_channel = match &original {
+        Some(Some(row)) => row.channel.clone(),
+        _ => target.to_string(),
     };
     match original {
-        Some(Some(row)) => {
+        Some(Some(ref row)) => {
             // Prefer DID-based authorship check to prevent nick-reuse attacks
             let is_author = if let (Some(msg_did), Some(conn_did)) =
                 (&row.sender_did, &conn.authenticated_did)
@@ -2015,18 +2102,27 @@ fn handle_edit(
             }
         }
         _ => {
-            // Message not found (no DB, pruned, or wrong msgid) — reject
-            let reply = Message::from_server(
-                &state.server_name,
-                "FAIL",
-                vec!["EDIT", "MESSAGE_NOT_FOUND", "Original message not found"],
-            );
-            if let Some(tx) = state.connections.lock().get(&conn.id) {
-                let _ = tx.try_send(format!("{reply}\r\n"));
+            // No row. In a channel that means a genuinely unknown msgid —
+            // reject. In a DM the thread itself may be unpersisted (guest
+            // DMs never write rows): relay the edit live like any other
+            // message instead of failing — the DB is a bystander for these
+            // threads, exactly as it is for their PRIVMSGs and reactions.
+            // (No row also means no server-side authorship check; receiving
+            // clients enforce editor == original sender.)
+            if is_channel {
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "FAIL",
+                    vec!["EDIT", "MESSAGE_NOT_FOUND", "Original message not found"],
+                );
+                if let Some(tx) = state.connections.lock().get(&conn.id) {
+                    let _ = tx.try_send(format!("{reply}\r\n"));
+                }
+                return;
             }
-            return;
         }
     }
+    let persisted = matches!(original, Some(Some(_)));
 
     // Generate new msgid for the edit
     let edit_msgid = crate::msgid::generate();
@@ -2126,35 +2222,24 @@ fn handle_edit(
         .collect();
     // For DMs, store under the canonical dm_key (not the nick) so
     // edits appear in CHATHISTORY alongside the original message.
-    let store_channel = if is_channel {
-        target.to_string()
-    } else if let Some(sender_did) = conn.authenticated_did.as_deref() {
-        if let Some(recipient_did) = state
-            .nick_owners
-            .lock()
-            .get(&target.to_lowercase())
-            .cloned()
-        {
-            crate::db::canonical_dm_key(sender_did, &recipient_did)
-        } else {
-            target.to_string()
-        }
-    } else {
-        target.to_string()
-    };
+    // store_channel was captured from the original row above.
+    // Unpersisted threads (no original row) get no edit row either —
+    // the edit is as ephemeral as the message it replaces.
     let editor_did = conn.authenticated_did.as_deref();
-    state.with_db(|db| {
-        db.insert_edit(
-            &store_channel,
-            &hostmask,
-            new_text,
-            timestamp,
-            &store_tags,
-            &edit_msgid,
-            original_msgid,
-            editor_did,
-        )
-    });
+    if persisted {
+        state.with_db(|db| {
+            db.insert_edit(
+                &store_channel,
+                &hostmask,
+                new_text,
+                timestamp,
+                &store_tags,
+                &edit_msgid,
+                original_msgid,
+                editor_did,
+            )
+        });
+    }
 
     // Update in-memory history (channels only)
     // Note: we keep the original msgid stable so that subsequent edits
@@ -2346,11 +2431,21 @@ fn handle_edit(
                     }
                 };
 
+                // The sender's other devices need the edit too, or they show
+                // stale text until their next history refetch.
+                let siblings = sender_sibling_sessions(state, conn);
                 let conns = state.connections.lock();
                 // Deliver to all target sessions
                 for target_session in &target_sessions {
                     if let Some(tx) = conns.get(target_session) {
                         deliver_to_session(tx, target_session);
+                    }
+                }
+                for sib in &siblings {
+                    if !target_sessions.contains(sib)
+                        && let Some(tx) = conns.get(sib)
+                    {
+                        deliver_to_session(tx, sib);
                     }
                 }
 
@@ -2362,10 +2457,17 @@ fn handle_edit(
                 }
             }
             RouteResult::Relayed => {
-                // Target is on a federated peer — edit was relayed
-                // Echo to sender
+                // Target is on a federated peer — edit was relayed.
+                // Deliver to the sender's other local devices + echo.
+                let siblings = sender_sibling_sessions(state, conn);
+                let conns = state.connections.lock();
+                for sib in &siblings {
+                    if let Some(tx) = conns.get(sib) {
+                        deliver_to_session(tx, sib);
+                    }
+                }
                 if state.cap_echo_message.lock().contains(&conn.id)
-                    && let Some(tx) = state.connections.lock().get(&conn.id)
+                    && let Some(tx) = conns.get(&conn.id)
                 {
                     deliver_to_session(tx, &conn.id);
                 }
@@ -2394,10 +2496,17 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
     let nick = conn.nick_or_star();
     let is_channel = target.starts_with('#') || target.starts_with('&');
 
-    // Verify authorship
-    let original = state.with_db(|db| db.get_message_by_msgid(target, original_msgid));
+    // Verify authorship, resolving the canonical dm_key for DMs (target
+    // may be a nick or a DID).
+    let original = find_original_message(conn, target, original_msgid, is_channel, state);
+    // The key the row actually lives under — soft-delete must target this,
+    // not the wire target.
+    let storage_key = match &original {
+        Some(Some(row)) => row.channel.clone(),
+        _ => target.to_string(),
+    };
     match original {
-        Some(Some(row)) => {
+        Some(Some(ref row)) => {
             // Prefer DID-based authorship check to prevent nick-reuse attacks
             let is_author = if let (Some(msg_did), Some(conn_did)) =
                 (&row.sender_did, &conn.authenticated_did)
@@ -2442,21 +2551,28 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
             }
         }
         _ => {
-            // Message not found (no DB, pruned, or wrong msgid) — reject
-            let reply = Message::from_server(
-                &state.server_name,
-                "FAIL",
-                vec!["DELETE", "MESSAGE_NOT_FOUND", "Original message not found"],
-            );
-            if let Some(tx) = state.connections.lock().get(&conn.id) {
-                let _ = tx.try_send(format!("{reply}\r\n"));
+            // No row: unknown msgid in a channel → reject; unpersisted DM
+            // (guest threads) → relay the delete live like any other DM
+            // event. Receiving clients enforce deleter == original sender.
+            if is_channel {
+                let reply = Message::from_server(
+                    &state.server_name,
+                    "FAIL",
+                    vec!["DELETE", "MESSAGE_NOT_FOUND", "Original message not found"],
+                );
+                if let Some(tx) = state.connections.lock().get(&conn.id) {
+                    let _ = tx.try_send(format!("{reply}\r\n"));
+                }
+                return;
             }
-            return;
         }
     }
+    let persisted = matches!(original, Some(Some(_)));
 
-    // Soft-delete in DB
-    state.with_db(|db| db.soft_delete_message(target, original_msgid));
+    // Soft-delete in DB (no-op for unpersisted threads — nothing to mark)
+    if persisted {
+        state.with_db(|db| db.soft_delete_message(&storage_key, original_msgid));
+    }
 
     // Remove from in-memory history and pins (channels only)
     if is_channel {
@@ -2505,9 +2621,16 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
         }
     } else {
         // DM: deliver the delete to every local session bound to the target
-        // (a nick or a `did:`), fanning out across the DID's devices.
+        // (a nick or a `did:`), fanning out across the DID's devices — and
+        // to the sender's own other devices, which otherwise keep showing
+        // the deleted message until their next refetch.
         // TAGMSG-specific, so we don't reuse relay_to_nick (it sends PRIVMSG).
-        let target_sessions = super::routing::local_sessions_for_target(state, target);
+        let mut target_sessions = super::routing::local_sessions_for_target(state, target);
+        for sib in sender_sibling_sessions(state, conn) {
+            if !target_sessions.contains(&sib) {
+                target_sessions.push(sib);
+            }
+        }
         let tag_caps = state.cap_message_tags.lock();
         let conns = state.connections.lock();
         for target_session in &target_sessions {
@@ -2519,6 +2642,24 @@ fn handle_delete(conn: &Connection, target: &str, original_msgid: &str, state: &
         }
         // Note: For federated DM deletes, we'd need S2S support — not implemented yet
     }
+}
+
+/// Sessions of the sender's own DID other than the sending one. A DM event
+/// (edit/delete/reaction) must reach the sender's other devices too — the
+/// peer's sessions and the sending session alone leave the sender's other
+/// clients showing stale state until their next history refetch. Guests
+/// have no DID, hence no linkable siblings.
+fn sender_sibling_sessions(state: &Arc<SharedState>, conn: &Connection) -> Vec<String> {
+    let did = state.session_dids.lock().get(&conn.id).cloned();
+    let Some(did) = did else {
+        return Vec::new();
+    };
+    state
+        .did_sessions
+        .lock()
+        .get(&did)
+        .map(|s| s.iter().filter(|id| **id != conn.id).cloned().collect())
+        .unwrap_or_default()
 }
 
 // ── AV session control ─────────────────────────────────────────────
@@ -2702,6 +2843,14 @@ fn handle_av_tagmsg(
                         vec![&nick, &format!("Cannot start session: {e}")],
                     );
                     send_to(state, &conn.id, format!("{reply}\r\n"));
+                    // Concurrent-start loser: tell the client WHICH session won
+                    // so it can converge onto it immediately instead of waiting
+                    // on a timeout heuristic (or silently showing a dead call).
+                    let existing = mgr
+                        .active_session_for_channel(target)
+                        .map(|s| s.id.clone())
+                        .unwrap_or_default();
+                    send_av_error(state, &conn.id, &nick, &existing, "start-collision", &e);
                 }
             }
         }
@@ -2785,8 +2934,24 @@ fn handle_av_tagmsg(
                     .collect()
             };
 
+            let grace_pending = state.av_grace_pending.lock().clone();
+            // SFU handle taken BEFORE the av_sessions lock (single lock-order:
+            // never acquire sfu_state while holding av_sessions).
+            #[cfg(feature = "av-native")]
+            let sfu_for_revoke = state.sfu_state.lock().clone();
             let mut mgr = state.av_sessions.lock();
-            mgr.reap_orphan_slots(&session_id, &live);
+            let reaped = mgr.reap_orphan_slots(&session_id, &live, &grace_pending);
+            // Reaped roster slots lose their media too (F6): a ghost whose
+            // slot just vanished must not keep streaming to announcement-
+            // driven clients.
+            #[cfg(feature = "av-native")]
+            if let Some(sfu) = &sfu_for_revoke {
+                for inst in &reaped {
+                    sfu.revoke_media(inst);
+                }
+            }
+            #[cfg(not(feature = "av-native"))]
+            let _ = reaped;
             match mgr.join_session(&session_id, &did, &nick, instance_id) {
                 Ok(session) => {
                     let participant_count = mgr.active_participant_count(&session_id);
@@ -2884,6 +3049,12 @@ fn handle_av_tagmsg(
                         vec![&nick, &format!("Cannot join session: {e}")],
                     );
                     send_to(state, &conn.id, format!("{reply}\r\n"));
+                    // Machine-readable failure so clients can tear down the
+                    // ghost call state (a NOTICE alone is invisible to code:
+                    // macOS/web set up media & UI BEFORE the join round-trips,
+                    // so an unsignalled failure leaves them publishing into a
+                    // session they were never admitted to).
+                    send_av_error(state, &conn.id, &nick, &session_id, "join-failed", &e);
                 }
             }
         }
@@ -2897,7 +3068,13 @@ fn handle_av_tagmsg(
             {
                 set.remove(inst);
             }
+            #[cfg(feature = "av-native")]
+            let sfu_for_revoke = state.sfu_state.lock().clone();
             let mut mgr = state.av_sessions.lock();
+            // If this leave ends the session, every remaining media conn must
+            // die with it (F6) — snapshot instances before the state change.
+            #[cfg(feature = "av-native")]
+            let all_instances = mgr.active_instances(&session_id);
             match mgr.leave_session(&session_id, &did, instance_id) {
                 Ok((session, should_end)) => {
                     let participant_count = if should_end {
@@ -2928,6 +3105,11 @@ fn handle_av_tagmsg(
                         #[cfg(feature = "av-native")]
                         {
                             state.av_bridges.lock().remove(&session_id);
+                            if let Some(sfu) = &sfu_for_revoke {
+                                for inst in &all_instances {
+                                    sfu.revoke_media(inst);
+                                }
+                            }
                         }
                         let backend = state.av_media.lock().clone();
                         let sid = session_id.clone();
@@ -3005,13 +3187,25 @@ fn handle_av_tagmsg(
                 return;
             }
 
+            #[cfg(feature = "av-native")]
+            let sfu_for_revoke = state.sfu_state.lock().clone();
             let mut mgr = state.av_sessions.lock();
+            // Snapshot BEFORE end_session marks everyone left: an explicit
+            // /av end must also close every participant's media conn (F6).
+            #[cfg(feature = "av-native")]
+            let all_instances = mgr.active_instances(&session_id);
             match mgr.end_session(&session_id, Some(&did)) {
                 Ok(session) => {
                     let channel = session.channel.clone();
                     state.with_db(|db| db.save_av_session(&session));
                     drop(mgr);
 
+                    #[cfg(feature = "av-native")]
+                    if let Some(sfu) = &sfu_for_revoke {
+                        for inst in &all_instances {
+                            sfu.revoke_media(inst);
+                        }
+                    }
                     broadcast_av_state(state, target, &session_id, "ended", &nick, "", 0, "");
                     broadcast_av_s2s(
                         state,
@@ -3132,6 +3326,35 @@ fn send_av_token(state: &Arc<SharedState>, conn_id: &str, nick: &str, session_id
 
 #[cfg(not(feature = "av-native"))]
 fn send_av_token(_state: &Arc<SharedState>, _conn_id: &str, _nick: &str, _session_id: &str) {}
+
+/// Machine-readable AV failure signal: `@+freeq.at/av-error=<code>;
+/// +freeq.at/av-id=<sid>;+freeq.at/av-reason=<human> TAGMSG <nick>`.
+/// Codes: `join-failed` (av-join rejected — tear down local call state and
+/// re-discover), `start-collision` (av-start lost a race — av-id names the
+/// winning session to join). The NOTICE next to it is for humans; this tag
+/// is for code. Sent to the requesting connection only.
+fn send_av_error(
+    state: &Arc<SharedState>,
+    conn_id: &str,
+    nick: &str,
+    session_id: &str,
+    code: &str,
+    reason: &str,
+) {
+    let mut tags = std::collections::HashMap::new();
+    tags.insert("+freeq.at/av-error".to_string(), code.to_string());
+    if !session_id.is_empty() {
+        tags.insert("+freeq.at/av-id".to_string(), session_id.to_string());
+    }
+    tags.insert("+freeq.at/av-reason".to_string(), reason.to_string());
+    let tag_msg = super::super::irc::Message {
+        tags,
+        prefix: Some(state.server_name.clone()),
+        command: "TAGMSG".to_string(),
+        params: vec![nick.to_string()],
+    };
+    send_to(state, conn_id, format!("{tag_msg}\r\n"));
+}
 
 /// Build the message tags for an AV state TAGMSG (everything but the
 /// nondeterministic `time` tag). Pure + unit-testable.
@@ -3446,5 +3669,56 @@ mod av_state_tag_tests {
         let tags = av_state_tag_map("started", "s", "nick", "inst9", 1, "standup");
         assert_eq!(tags.get("+freeq.at/av-title").map(String::as_str), Some("standup"));
         assert_eq!(tags.get("+freeq.at/av-participants").map(String::as_str), Some("1"));
+    }
+}
+
+#[cfg(test)]
+mod dm_fallback_tests {
+    //! The global msgid fallback in `find_original_message` is the only path
+    //! that can resolve a row outside the addressed target. These pin the rule
+    //! that keeps it from mutating something the caller never addressed.
+    use super::dm_fallback_row_is_addressable;
+
+    const ALICE: &str = "did:plc:alice";
+    const BOB: &str = "did:plc:bob";
+
+    #[test]
+    fn channel_rows_are_never_addressable_from_a_dm() {
+        // The regression: a delete addressed to a DM soft-deleted a CHANNEL row
+        // in the DB while the channel kept serving it from memory.
+        assert!(!dm_fallback_row_is_addressable("#freeq", Some(ALICE)));
+        assert!(!dm_fallback_row_is_addressable("&local", Some(ALICE)));
+    }
+
+    #[test]
+    fn own_dm_thread_is_addressable() {
+        // The legitimate use: the canonical key couldn't be derived (partner
+        // offline, so nick→DID failed) but the row is genuinely ours.
+        let key = format!("dm:{ALICE},{BOB}");
+        assert!(dm_fallback_row_is_addressable(&key, Some(ALICE)));
+        assert!(dm_fallback_row_is_addressable(&key, Some(BOB)));
+    }
+
+    #[test]
+    fn other_peoples_dm_threads_are_not_addressable() {
+        let key = format!("dm:{BOB},did:plc:carol");
+        assert!(!dm_fallback_row_is_addressable(&key, Some(ALICE)));
+    }
+
+    #[test]
+    fn unauthenticated_callers_get_nothing_from_the_fallback() {
+        // Guests can't prove participation. Their DM threads aren't persisted,
+        // so refusing here costs nothing.
+        let key = format!("dm:{ALICE},{BOB}");
+        assert!(!dm_fallback_row_is_addressable(&key, None));
+        assert!(!dm_fallback_row_is_addressable("#freeq", None));
+    }
+
+    #[test]
+    fn did_must_match_a_whole_participant_not_a_prefix() {
+        // `dm:` keys are comma-joined, so a substring match would let
+        // did:plc:alice reach did:plc:alice2's threads.
+        let key = "dm:did:plc:alice2,did:plc:bob";
+        assert!(!dm_fallback_row_is_addressable(key, Some(ALICE)));
     }
 }

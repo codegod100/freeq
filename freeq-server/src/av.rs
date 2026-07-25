@@ -90,6 +90,24 @@ pub fn av_disconnect_deferred(is_did_user: bool, is_last_session: bool) -> bool 
 /// reappeared on some connection, the user reconnected and rejoined the call,
 /// so we keep the slot instead of tearing it down. Per-device instance ids are
 /// globally unique, so membership in *any* connection's set is sufficient.
+/// Cleanup-sweeper policy: should the periodic task auto-end this session?
+///
+/// - No active participants → yes (everyone left; the formal end was missed).
+/// - Active participants + any slot claimed by a live IRC connection → NO,
+///   regardless of age. A >2h call with people on it is a legitimate long
+///   call — ending it out from under them was observed to cause the "random
+///   pairwise deafness" split: clients that miss the `ended` TAGMSG keep
+///   publishing into the dead session while the rest restart a new one.
+/// - Active participants but NONE claimed by a live connection → resurrected
+///   ghosts (e.g. slots reloaded after a server restart whose owners never
+///   came back). Reap after the 2h age gate.
+pub fn should_auto_end(active_count: usize, age_secs: i64, any_slot_claimed: bool) -> bool {
+    if active_count == 0 {
+        return true;
+    }
+    age_secs > 7200 && !any_slot_claimed
+}
+
 pub fn instance_claimed_by_live_conn(
     per_conn: &std::collections::HashMap<String, std::collections::HashSet<String>>,
     instance: &str,
@@ -611,17 +629,21 @@ impl AvSessionManager {
     ///
     /// Callers should build the live-set by walking current connections
     /// and reading whatever av-instance they registered on join.
+    /// Returns the instance ids of the reaped slots so the caller can revoke
+    /// their media connections (media must not outlive the roster — F6).
     pub fn reap_orphan_slots(
         &mut self,
         session_id: &str,
         live: &std::collections::HashSet<(String, Option<String>)>,
-    ) {
+        grace_pending: &std::collections::HashSet<String>,
+    ) -> Vec<String> {
         let now = chrono::Utc::now().timestamp();
+        let mut reaped = Vec::new();
         let Some(session) = self.sessions.get_mut(session_id) else {
-            return;
+            return reaped;
         };
         if !matches!(session.state, AvSessionState::Active) {
-            return;
+            return reaped;
         }
         // A per-call instance suffix is a globally-unique per-device id, so a
         // slot that HAS an instance is live iff its instance is in the live
@@ -637,13 +659,42 @@ impl AvSessionManager {
                 continue;
             }
             let orphan = match &p.instance_id {
-                Some(inst) => !live_instances.contains(inst),
+                // A slot whose owner just dropped is NOT an orphan while its
+                // disconnect grace is pending — the owner's media is usually
+                // still live (the MoQ transport is a separate connection) and
+                // they'll rejoin in place within the window. Reaping here
+                // bypassed that grace: the instant anyone joined the call, a
+                // blipped participant vanished from the roster, so all
+                // roster-driven clients (web) dropped their audio while
+                // announcement-driven clients (native) kept hearing them —
+                // the observed "random one-way deafness". The grace task owns
+                // teardown for these; the reaper only takes true orphans.
+                Some(inst) => !live_instances.contains(inst) && !grace_pending.contains(inst),
                 None => !live.contains(&(p.did.clone(), None)),
             };
             if orphan {
                 p.left_at = Some(now);
+                if let Some(inst) = &p.instance_id {
+                    reaped.push(inst.clone());
+                }
             }
         }
+        reaped
+    }
+
+    /// Instance ids of all ACTIVE participants in a session — used to revoke
+    /// every media connection when the whole session is ended (F6).
+    pub fn active_instances(&self, session_id: &str) -> Vec<String> {
+        self.sessions
+            .get(session_id)
+            .map(|s| {
+                s.participants
+                    .values()
+                    .filter(|p| p.left_at.is_none())
+                    .filter_map(|p| p.instance_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Leave all active slots belonging to a DID — used on connection drop.
@@ -1047,7 +1098,7 @@ mod tests {
             [("did:plc:alice".to_string(), Some("tab4".to_string()))]
                 .into_iter()
                 .collect();
-        mgr.reap_orphan_slots(&id, &live);
+        mgr.reap_orphan_slots(&id, &live, &Default::default());
 
         assert_eq!(
             mgr.active_participant_count(&id),
@@ -1063,6 +1114,61 @@ mod tests {
             .filter_map(|p| p.instance_id.clone())
             .collect();
         assert_eq!(live_instances, vec!["tab4".to_string()]);
+    }
+
+    /// A participant in their disconnect-grace window (IRC blipped, media
+    /// still flowing, rejoin expected) must survive the join-time reaper.
+    /// Reaping them instantly (as it used to) made every roster-driven
+    /// client (web) drop their audio while announcement-driven clients
+    /// (native) kept hearing them — the observed random one-way deafness.
+    #[test]
+    fn reap_orphan_slots_spares_grace_pending_instances() {
+        let mut mgr = AvSessionManager::new();
+        let id = mgr
+            .create_session(Some("#test"), "did:plc:alice", "alice", None, Some("mac1"))
+            .unwrap()
+            .id;
+        mgr.join_session(&id, "did:plc:bob", "bob", Some("web1"))
+            .unwrap();
+
+        // Alice's IRC connection blipped: her instance is NOT in the live
+        // set, but her teardown is deferred behind the grace window.
+        let live: std::collections::HashSet<(String, Option<String>)> =
+            [("did:plc:bob".to_string(), Some("web1".to_string()))]
+                .into_iter()
+                .collect();
+        let grace: std::collections::HashSet<String> =
+            ["mac1".to_string()].into_iter().collect();
+        mgr.reap_orphan_slots(&id, &live, &grace);
+
+        assert_eq!(
+            mgr.active_participant_count(&id),
+            2,
+            "grace-pending participant must not be reaped"
+        );
+
+        // Once the grace resolves (instance no longer pending) and she still
+        // has no live connection, the reaper takes the slot as before.
+        mgr.reap_orphan_slots(&id, &live, &Default::default());
+        assert_eq!(mgr.active_participant_count(&id), 1);
+    }
+
+    /// Sweeper policy: a long call with live people on it is never auto-ended;
+    /// only empty sessions and resurrected ghosts (old + nobody claimed by a
+    /// live connection) are reaped.
+    #[test]
+    fn should_auto_end_policy() {
+        // Empty session — end regardless of age.
+        assert!(should_auto_end(0, 10, false));
+        // 3-hour call with a live participant — NEVER end. (This exact case
+        // used to force-end at 2h and split the call: clients that missed
+        // the `ended` TAGMSG kept publishing into the dead session.)
+        assert!(!should_auto_end(3, 3 * 3600, true));
+        // Young session, nobody claimed (e.g., everyone in grace) — keep.
+        assert!(!should_auto_end(2, 600, false));
+        // Old session whose "active" slots aren't claimed by any live
+        // connection — resurrected ghost, reap it.
+        assert!(should_auto_end(2, 3 * 3600, false));
     }
 
     /// State matrix cell #18: the reaper at av-join time must NOT mark a
@@ -1105,7 +1211,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        mgr.reap_orphan_slots(&id, &live);
+        mgr.reap_orphan_slots(&id, &live, &Default::default());
         mgr.join_session(&id, "did:plc:alice", "alice", Some("tab-new"))
             .unwrap();
 
@@ -1160,7 +1266,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        mgr.reap_orphan_slots(&id, &live_after_reap);
+        mgr.reap_orphan_slots(&id, &live_after_reap, &Default::default());
         mgr.join_session(&id, "did:plc:alice", "alice", Some("new"))
             .unwrap();
 
@@ -1339,7 +1445,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        mgr.reap_orphan_slots(&id, &live);
+        mgr.reap_orphan_slots(&id, &live, &Default::default());
 
         assert_eq!(
             mgr.active_participant_count(&id),

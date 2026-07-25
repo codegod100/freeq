@@ -1,5 +1,5 @@
 import Foundation
-import SwiftUI
+import Observation
 
 /// A channel with its messages and members.
 @Observable
@@ -70,9 +70,28 @@ class ChannelState: Identifiable {
     }
 
     /// Append a message only if its ID hasn't been seen before.
+    ///
+    /// An edit and its original are the same logical message that can arrive
+    /// under two different msgids: the local cache keeps the original id (it
+    /// edits the row in place), while server CHATHISTORY replays the edit
+    /// under a fresh msgid. Dedup on both the current id and the original
+    /// (`editOf`) so those two copies collapse instead of rendering twice.
     func appendIfNew(_ msg: ChatMessage) {
-        guard !messageIds.contains(msg.id) else { return }
+        if messageIds.contains(msg.id) {
+            // Already have this message (e.g. the local cache copy loaded
+            // first). A CHATHISTORY replay may still carry authoritative
+            // server-persisted reactions the cached copy lacked — fold them in
+            // so reactions survive logout/login, not just live ones.
+            if !msg.reactions.isEmpty, let idx = findMessage(byId: msg.id) {
+                for (emoji, nicks) in msg.reactions where !nicks.isEmpty {
+                    messages[idx].reactions[emoji] = nicks
+                }
+            }
+            return
+        }
+        if let editOf = msg.editOf, messageIds.contains(editOf) { return }
         messageIds.insert(msg.id)
+        if let editOf = msg.editOf { messageIds.insert(editOf) }
 
         if let last = messages.last, msg.timestamp < last.timestamp {
             let idx = messages.firstIndex(where: { $0.timestamp > msg.timestamp }) ?? messages.endIndex
@@ -86,9 +105,16 @@ class ChannelState: Identifiable {
     }
 
     func applyEdit(originalId: String, newId: String?, newText: String) {
-        if let idx = findMessage(byId: originalId) {
+        // Match on the current id OR a prior editOf: chained edits keep
+        // referencing the original msgid even after the first edit rewrote
+        // the in-memory id.
+        if let idx = messages.firstIndex(where: { $0.id == originalId || $0.editOf == originalId }) {
             messages[idx].text = newText
             messages[idx].isEdited = true
+            messages[idx].editOf = messages[idx].editOf ?? originalId
+            // Keep the original id registered so a later cache-loaded copy
+            // keyed under it is recognized as a duplicate.
+            messageIds.insert(originalId)
             if let newId {
                 messages[idx].id = newId
                 messageIds.insert(newId)
@@ -97,7 +123,13 @@ class ChannelState: Identifiable {
     }
 
     func applyDelete(msgId: String) {
-        if let idx = findMessage(byId: msgId) {
+        // Match on the current id OR a prior editOf, exactly as applyEdit does.
+        // An edit rewrites the in-memory id to the edit's msgid, while a delete
+        // always names the ORIGINAL msgid (the identity clients hold, and what
+        // the server relays in +draft/delete). Matching id alone meant a delete
+        // of an edited message found nothing and left it on screen after the
+        // server had already removed it.
+        if let idx = messages.firstIndex(where: { $0.id == msgId || $0.editOf == msgId }) {
             messages[idx].isDeleted = true
             messages[idx].text = ""
         }

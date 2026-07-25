@@ -164,6 +164,18 @@ pub(super) fn handle_markread(
     }
 }
 
+/// The durable storage key for a read marker. Channels key by their name;
+/// a DM keys by the canonical `dm:<didA>,<didB>` so the marker is tied to
+/// the conversation, not the alias used to address it (nick vs DID) — both
+/// resolve to one key. Guests and unresolvable nicks fall back to the raw
+/// target (session-local, ephemeral anyway).
+fn marker_storage_key(conn: &Connection, target: &str, state: &Arc<SharedState>) -> String {
+    if target.starts_with('#') || target.starts_with('&') {
+        return target.to_string();
+    }
+    super::messaging::dm_canonical_key(conn, target, state).unwrap_or_else(|| target.to_string())
+}
+
 /// Read the current marker for `target`: from SQLite for DID users, from the
 /// session-local map for guests.
 fn load_marker(
@@ -173,8 +185,9 @@ fn load_marker(
     target: &str,
 ) -> Option<String> {
     if let Some(ref did) = conn.authenticated_did {
+        let key = marker_storage_key(conn, target, state);
         state
-            .with_db(|db| db.get_read_marker(did, target))
+            .with_db(|db| db.get_read_marker(did, &key))
             .flatten()
     } else {
         state
@@ -202,8 +215,9 @@ fn store_marker(
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
+        let key = marker_storage_key(conn, target, state);
         state
-            .with_db(|db| db.set_read_marker(did, target, timestamp, now))
+            .with_db(|db| db.set_read_marker(did, &key, timestamp, now))
             .is_some()
     } else {
         state

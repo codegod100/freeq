@@ -8,8 +8,11 @@ struct ThreadView: View {
     let channelName: String
 
     private var channel: ChannelState? {
-        appState.channels.first { $0.name == channelName }
-            ?? appState.dmBuffers.first { $0.name == channelName }
+        // Follow a nick→DID re-key so an open thread survives the DM merging
+        // under its canonical (DID) key mid-session.
+        let key = appState.canonicalDmKey(channelName)
+        return appState.channels.first { $0.name.lowercased() == key.lowercased() }
+            ?? appState.dmBuffers.first { $0.name.lowercased() == key.lowercased() }
     }
 
     /// Build the reply chain: walk up from rootMessage via replyTo, then show all replies to root.

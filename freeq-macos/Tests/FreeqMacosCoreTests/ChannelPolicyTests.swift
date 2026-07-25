@@ -17,7 +17,7 @@ final class ChannelPolicyTests: XCTestCase {
             "op": { "type": "PRESENT", "credential_type": "github_repo", "issuer": "did:web:irc.freeq.at:verify" }
           },
           "credential_endpoints": {
-            "github_repo": { "issuer": "did:web:irc.freeq.at:verify", "url": "/verify/github/start?repo=chad/freeq", "label": "GitHub Repo Collaborator" }
+            "github_repo": { "issuer": "did:web:irc.freeq.at:verify", "url": "/verify/github/start?repo=freeq-irc/freeq", "label": "GitHub Repo Collaborator" }
           }
         }
         """

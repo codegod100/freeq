@@ -431,6 +431,18 @@ fn finish_av_slot_teardown(
     should_end: bool,
     instance: &str,
 ) {
+    // Media must not outlive the roster slot (audit F6): close this
+    // instance's SFU connection(s) so announcement-driven clients stop
+    // hearing a roster-ghost. No-op for legacy clients with no instance.
+    // (Guard taken and dropped before any av_sessions lock — single
+    // lock-order: sfu_state is never held while acquiring av_sessions.)
+    #[cfg(feature = "av-native")]
+    {
+        let sfu = state.sfu_state.lock().clone();
+        if let Some(sfu) = sfu {
+            sfu.revoke_media(instance);
+        }
+    }
     if let Some(ch) = channel {
         let participant_count = state.av_sessions.lock().active_participant_count(av_sid);
         if should_end {
@@ -1593,7 +1605,7 @@ where
                     "freeq - IRC with AT Protocol identity",
                     "",
                     "https://freeq.at",
-                    "https://github.com/chad/freeq",
+                    "https://github.com/freeq-irc/freeq",
                     "",
                     "SASL ATPROTO-CHALLENGE authentication",
                     "IRCv3 capabilities, E2EE channels, iroh QUIC transport",
@@ -3253,10 +3265,24 @@ where
                 did = %did_for_av, instances = instances.len(),
                 "AV: deferring teardown ({}s grace for blip/reconnect)", AV_GRACE_SECS
             );
+            // Mark these instances as grace-pending so the join-time orphan
+            // reaper leaves their roster slots alone until the grace decides.
+            {
+                let mut pending = state.av_grace_pending.lock();
+                for inst in &instances {
+                    pending.insert(inst.clone());
+                }
+            }
             let state2 = state.clone();
             let did2 = did_for_av.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(AV_GRACE_SECS)).await;
+                {
+                    let mut pending = state2.av_grace_pending.lock();
+                    for inst in &instances {
+                        pending.remove(inst);
+                    }
+                }
                 for inst in &instances {
                     // If the instance reappeared on any live connection, the
                     // user reconnected and rejoined — keep the slot untouched.

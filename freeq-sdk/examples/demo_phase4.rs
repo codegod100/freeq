@@ -192,7 +192,7 @@ async fn main() -> Result<()> {
         "origin_type": "external_import",
         "creator_did": "did:plc:4qsyxmnsblo4luuycm3572bq",
         "implementation_ref": "freeq/demo_phase4.rs@HEAD",
-        "source_repo": "https://github.com/chad/freeq",
+        "source_repo": "https://github.com/freeq-irc/freeq",
         "authority_basis": "Operated by server administrator",
         "revocation_authority": "did:plc:4qsyxmnsblo4luuycm3572bq",
     });
@@ -258,7 +258,7 @@ async fn main() -> Result<()> {
             "  [agent]",
             "  display_name = \"auditor\"",
             "  description = \"Architecture auditor\"",
-            "  source_repo = \"https://github.com/chad/freeq\"",
+            "  source_repo = \"https://github.com/freeq-irc/freeq\"",
             "  version = \"0.1.0\"",
             "",
             "  [provenance]",
@@ -495,7 +495,7 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_secs(1)).await;
 
     handle.raw(&format!(
-        "AGENT MSG github-bot {ch} :🌐 My wrapper is freeq-mcp-wrapper v0.1.0 (source: github.com/chad/freeq)"
+        "AGENT MSG github-bot {ch} :🌐 My wrapper is freeq-mcp-wrapper v0.1.0 (source: github.com/freeq-irc/freeq)"
     )).await?;
     tokio::time::sleep(Duration::from_secs(1)).await;
 
@@ -507,7 +507,7 @@ async fn main() -> Result<()> {
     // Simulate a tool call
     handle
         .raw(&format!(
-            "AGENT MSG github-bot {ch} :🔍 Searching issues in chad/freeq for 'heartbeat'..."
+            "AGENT MSG github-bot {ch} :🔍 Searching issues in freeq-irc/freeq for 'heartbeat'..."
         ))
         .await?;
     tokio::time::sleep(Duration::from_secs(2)).await;

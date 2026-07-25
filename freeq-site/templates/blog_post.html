@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% set nav_active = 'blog' %}
+{% block title %}{{ doc.title }}{% endblock %}
+
+{% block head %}
+<style>
+.post-body h1 { font-size: 26px; margin-bottom: 4px; }
+.post-body { max-width: 760px; }
+.post-body p { line-height: 1.9; }
+.post-body em:first-of-type { color: var(--fg3); }
+</style>
+{% endblock %}
+
+{% block body %}
+<div class="container post-body">
+{{ doc.html | safe }}
+<p style="margin-top:40px;border-top:1px solid var(--surface);padding-top:16px">
+  <a href="/blog/">← All posts</a> · Discuss in <a href="https://irc.freeq.at">#freeq</a>
+</p>
+</div>
+{% endblock %}

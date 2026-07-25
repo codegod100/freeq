@@ -8,6 +8,7 @@ import { fetchProfile, getCachedProfile } from '../lib/profiles';
 import { parseAwayStatus } from '../lib/status';
 import { isDid, shortenDid, findMemberByKey, isPeerBlocked } from '../lib/identity';
 import { displayNameForKey } from '../lib/display-name';
+import { unjoinedFavorites } from '../lib/favorites-sync';
 
 interface SidebarProps {
   onOpenSettings: () => void;
@@ -61,6 +62,11 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
   const allChans = allJoined.filter((ch) => ch.name.startsWith('#') || ch.name.startsWith('&')).sort((a, b) => a.name.localeCompare(b.name));
   const favList = allChans.filter((ch) => favorites.has(ch.name.toLowerCase()));
   const chanList = allChans.filter((ch) => !favorites.has(ch.name.toLowerCase()));
+  // Favorites roam per-DID, so one set on another device can name a channel
+  // we're not joined to here. Both lists above filter the joined channels, so
+  // such a favorite would render nowhere — invisible AND unreachable. Surface
+  // it as a join-on-click row.
+  const favUnjoined = unjoinedFavorites(favorites, allChans.map((ch) => ch.name));
   const dmList = allJoined
     .filter((ch) => !ch.name.startsWith('#') && !ch.name.startsWith('&') && ch.name !== 'server')
     .filter((ch) => !hiddenDMs.has(ch.name.toLowerCase()))
@@ -187,7 +193,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
         {!channelsCollapsed && (
           <>
             {/* Favorites */}
-            {favList.length > 0 && (
+            {(favList.length > 0 || favUnjoined.length > 0) && (
               <>
                 <div className="mt-3 mb-1 px-2">
                   <span className="text-xs uppercase tracking-wider text-fg-dim font-bold flex items-center gap-1">
@@ -195,6 +201,20 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
                   </span>
                 </div>
                 {favList.map((ch) => <ChannelButton key={ch.name} ch={ch as any} isActive={activeChannel.toLowerCase() === ch.name.toLowerCase()} onSelect={setActive} icon="#" />)}
+                {favUnjoined.map((name) => (
+                  <button
+                    key={name}
+                    onClick={() => joinChannel(name)}
+                    title={`Favorited on another device — click to join ${name}`}
+                    className="w-full text-left px-2 py-1 rounded flex items-center gap-1.5 text-fg-dim hover:bg-bg-hover hover:text-fg group"
+                  >
+                    <span className="text-fg-dim">#</span>
+                    <span className="truncate flex-1">{name.replace(/^[#&]/, '')}</span>
+                    <span className="text-[10px] uppercase tracking-wider font-bold text-accent opacity-0 group-hover:opacity-100">
+                      Join
+                    </span>
+                  </button>
+                ))}
               </>
             )}
 

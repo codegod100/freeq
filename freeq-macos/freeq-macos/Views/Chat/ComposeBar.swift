@@ -170,7 +170,7 @@ struct ComposeBar: View {
                 // Text editor — full width
                 ZStack(alignment: .topLeading) {
                     if text.isEmpty {
-                        Text("Message \(appState.activeChannel ?? "")…")
+                        Text("Message \(appState.activeChannel.map { appState.displayNameForKey($0) } ?? "")…")
                             .foregroundStyle(Theme.textTertiary)
                             .lineLimit(1)
                             .truncationMode(.tail)
@@ -855,19 +855,42 @@ class ComposeNSTextView: NSTextView {
     var members: [String] = []
     private var tabCompletionCandidates: [String] = []
 
+    /// Read an image off a pasteboard, preferring raw image data (screenshots,
+    /// copied images) and falling back to NSImage. Returns nil for text-only.
+    private func image(from pb: NSPasteboard) -> NSImage? {
+        // Raw bitmap data first — a screenshot lands as png/tiff with no string.
+        for type in [NSPasteboard.PasteboardType.png, .tiff] {
+            if let data = pb.data(forType: type), let img = NSImage(data: data) {
+                return img
+            }
+        }
+        // Then any object the pasteboard can vend as an NSImage.
+        if pb.canReadObject(forClasses: [NSImage.self], options: nil),
+           let img = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
+            return img
+        }
+        return nil
+    }
+
     /// Intercept ⌘V: if the clipboard holds an image (a screenshot, a copied
-    /// image) and no meaningful text, stage it as an upload instead of pasting.
-    /// Text (or mixed image+text) falls through to the normal paste.
+    /// image), stage it as an upload instead of pasting. A text-only clipboard
+    /// has no image, so a normal text paste falls straight through to super.
     override func paste(_ sender: Any?) {
-        let pb = NSPasteboard.general
-        let hasText = !(pb.string(forType: .string)?.isEmpty ?? true)
-        if !hasText,
-           pb.canReadObject(forClasses: [NSImage.self], options: nil),
-           let image = pb.readObjects(forClasses: [NSImage.self], options: nil)?.first as? NSImage {
-            pasteImageAction?(image)
+        if let img = image(from: .general) {
+            pasteImageAction?(img)
             return
         }
         super.paste(sender)
+    }
+
+    /// The lower-level hook every paste/drop read funnels through — covered too
+    /// in case `paste(_:)` is bypassed for this plain-text view.
+    override func readSelection(from pboard: NSPasteboard) -> Bool {
+        if let img = image(from: pboard) {
+            pasteImageAction?(img)
+            return true
+        }
+        return super.readSelection(from: pboard)
     }
     private var tabCompletionIndex: Int = 0
     private var tabCompletionPrefix: String = ""
@@ -901,6 +924,16 @@ class ComposeNSTextView: NSTextView {
         }
         if event.modifierFlags.contains(.command) && event.keyCode == 125 {
             historyNextAction?()
+            return
+        }
+        // ⌘V with an image on the clipboard → stage it as an upload. Belt-and-
+        // suspenders with the paste(_:) override: if keyDown gets the event
+        // (no menu Paste binding intercepts it first) we handle it here; if the
+        // menu sends paste: instead, the override handles it. A text-only
+        // clipboard has no image, so a normal ⌘V falls through to super.
+        if event.modifierFlags.contains(.command) && event.keyCode == 9,
+           let img = image(from: .general) {
+            pasteImageAction?(img)
             return
         }
 

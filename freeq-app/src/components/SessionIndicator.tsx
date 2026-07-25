@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { useStore } from '../store';
 import { joinAvSession, leaveAvSession, endAvSession, startAvSession, getNick } from '../irc/client';
 import type { AvSession, AvParticipant } from '../store';
+import { apiFetch } from '../lib/api';
 
 /** Shows active AV session status in the channel header.
  *  Polls the REST API to discover sessions. One-click to start/join + connect audio. */
@@ -21,7 +22,7 @@ export function SessionIndicator({ channel }: { channel: string }) {
 
     async function poll() {
       try {
-        const resp = await fetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
+        const resp = await apiFetch(`/api/v1/channels/${encodeURIComponent(channel)}/sessions`);
         if (!resp.ok || cancelled) return;
         const data = await resp.json();
         if (cancelled) return;

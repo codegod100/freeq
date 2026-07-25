@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
         "origin_type": "external_import",
         "creator_did": "did:plc:4qsyxmnsblo4luuycm3572bq",
         "implementation_ref": "freeq/spawn_test.rs@HEAD",
-        "source_repo": "https://github.com/chad/freeq",
+        "source_repo": "https://github.com/freeq-irc/freeq",
         "authority_basis": "Operated by server administrator",
         "revocation_authority": "did:plc:4qsyxmnsblo4luuycm3572bq",
     });
