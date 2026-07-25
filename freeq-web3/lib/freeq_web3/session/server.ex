@@ -42,6 +42,9 @@ defmodule FreeqWeb3.Session.Server do
     channels: MapSet.new(),
     joined: MapSet.new(),
     join_sent: MapSet.new(),
+    # Channels for which we already sent POLICY ACCEPT this process
+    # (ACCEPT is durable per DID server-side; avoid spam on reconnect).
+    policy_accept_sent: MapSet.new(),
     channel_members: %{},
     nick_to_did: %{},
     outbound: :queue.new(),
@@ -116,7 +119,8 @@ defmodule FreeqWeb3.Session.Server do
       state
       | auth: :guest,
         api_bearer: nil,
-        sasl_status: :none
+        sasl_status: :none,
+        policy_accept_sent: MapSet.new()
     }
 
     state = disconnect_upstream(state, "logout")
@@ -527,7 +531,21 @@ defmodule FreeqWeb3.Session.Server do
 
     Session.broadcast(state.session_id, {:auth_changed, snapshot_auth(state)})
     state = reply_auth_waiters(state, authenticated?(state))
+    # Guest-time JOIN 477 is sticky via join_sent; re-assert My Channels now
+    # that the connection has a DID (policy ACCEPT may still be needed after).
+    state = rejoin_my_channels(state)
     {:noreply, state}
+  end
+
+  def handle_info({:policy_rejoin, channel}, state) do
+    ch = Render.canonical_channel(channel)
+
+    Logger.info(
+      "session #{short(state.session_id)} re-JOIN #{ch} after POLICY ACCEPT " <>
+        "handle=#{auth_handle(state) || "-"}"
+    )
+
+    {:noreply, force_join(state, ch)}
   end
 
   def handle_info({:upstream_sasl, status}, state)
@@ -1033,7 +1051,94 @@ defmodule FreeqWeb3.Session.Server do
       end
     end
 
-    state
+    # JOIN rejected (471/473/474/475/477) — clear sticky join_sent; for
+    # policy-gated channels auto-POLICY ACCEPT then re-JOIN (web2 parity).
+    handle_join_failure(state, line)
+  end
+
+  defp handle_join_failure(state, line) do
+    case Render.parse_join_failure(line) do
+      nil ->
+        state
+
+      %{channel: ch, trailing: trailing} ->
+        Logger.warning(
+          "session #{short(state.session_id)} JOIN rejected for #{ch}: " <>
+            String.slice(to_string(line), 0, 200)
+        )
+
+        state = %{state | join_sent: MapSet.delete(state.join_sent, ch)}
+
+        cond do
+          authenticated?(state) and String.contains?(trailing, "policy acceptance") ->
+            maybe_policy_accept_and_rejoin(state, ch)
+
+          has_credentials?(state) and
+              (String.contains?(trailing, "requires authentication") or
+                 String.contains?(trailing, "authentication")) ->
+            # Still guest on the wire while OAuth is loaded — SASL + API-BEARER
+            # path will rejoin_my_channels; nothing else to do here.
+            state
+
+          true ->
+            state
+        end
+    end
+  end
+
+  defp maybe_policy_accept_and_rejoin(state, channel) do
+    ch = Render.canonical_channel(channel)
+
+    if MapSet.member?(state.policy_accept_sent, ch) do
+      # ACCEPT already sent this process — still try re-JOIN (attestation may
+      # have landed after a previous race).
+      Process.send_after(self(), {:policy_rejoin, ch}, 600)
+      state
+    else
+      Logger.info(
+        "session #{short(state.session_id)} POLICY #{ch} ACCEPT " <>
+          "(then re-JOIN) handle=#{auth_handle(state) || "-"}"
+      )
+
+      state = %{state | policy_accept_sent: MapSet.put(state.policy_accept_sent, ch)}
+      state = enqueue(state, "POLICY #{ch} ACCEPT\r\n")
+      Process.send_after(self(), {:policy_rejoin, ch}, 600)
+      state
+    end
+  end
+
+  # Re-assert every My Channel after SASL (clears guest-time join_sent sticky).
+  defp rejoin_my_channels(state) do
+    if state.ws_state != :ready do
+      state
+    else
+      chans =
+        state.channels
+        |> MapSet.to_list()
+        |> Enum.map(&Render.canonical_channel/1)
+
+      chans = if chans == [], do: ["#freeq"], else: chans
+
+      Enum.reduce(chans, %{state | join_sent: MapSet.new()}, fn ch, st ->
+        st = %{st | joined: MapSet.put(st.joined, ch), channels: MapSet.put(st.channels, ch)}
+        Logger.info("session #{short(st.session_id)} post-SASL JOIN #{ch}")
+        maybe_enqueue_join(st, ch)
+      end)
+    end
+  end
+
+  defp force_join(state, channel) do
+    ch = Render.canonical_channel(channel)
+
+    state = %{
+      state
+      | channels: MapSet.put(state.channels, ch),
+        joined: MapSet.put(state.joined, ch),
+        join_sent: MapSet.delete(state.join_sent, ch)
+    }
+
+    state = ensure_upstream(state, ch)
+    maybe_enqueue_join(state, ch)
   end
 
   defp apply_member_change(state, %{kind: :join, channel: ch, nick: nick} = change) do

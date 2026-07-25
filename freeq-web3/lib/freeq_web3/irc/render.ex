@@ -531,6 +531,42 @@ defmodule FreeqWeb3.Irc.Render do
     end
   end
 
+  @doc """
+  Parse a JOIN-failure numeric (471/473/474/475/477).
+
+  Returns `%{channel: "#ch", numeric: "477", trailing: "..."}` or `nil`.
+  Used by Session.Server to clear sticky `join_sent` and auto-send
+  `POLICY ACCEPT` (web2 parity for policy-gated channels like `#freeq`).
+  """
+  def parse_join_failure(line) when is_binary(line) do
+    line = line |> String.trim_trailing("\r") |> String.trim_trailing("\n")
+    {_tags, after_line} = parse_irc_tags(line)
+
+    rest =
+      if String.starts_with?(after_line, ":"),
+        do: String.slice(after_line, 1..-1//1),
+        else: after_line
+
+    tokens = String.split(rest)
+    numeric = Enum.at(tokens, 1)
+    channel = Enum.at(tokens, 3)
+
+    if numeric in ~w(471 473 474 475 477) and is_binary(channel) and
+         String.starts_with?(channel, ["#", "&"]) do
+      trailing = line |> String.split(" :", parts: 2) |> Enum.at(1) || ""
+
+      %{
+        channel: canonical_channel(channel),
+        numeric: numeric,
+        trailing: trailing
+      }
+    else
+      nil
+    end
+  end
+
+  def parse_join_failure(_), do: nil
+
   def parse_channel_error(line, current_channel) do
     line = String.trim_trailing(line, "\r")
     {_tags, after_line} = parse_irc_tags(line)
@@ -567,7 +603,7 @@ defmodule FreeqWeb3.Irc.Render do
           trailing = line |> String.split(" :", parts: 2) |> Enum.at(1) || ""
 
           if String.contains?(trailing, "policy acceptance") do
-            "#{channel} requires policy acceptance — open the policy dialog and accept, or wait for auto-accept."
+            "#{channel} requires policy acceptance — accepting policy…"
           else
             "#{channel} requires authentication — sign in to join."
           end

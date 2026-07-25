@@ -650,7 +650,38 @@ defmodule FreeqWeb3Web.ChatLive do
   end
 
   def handle_info({:auth_changed, auth}, socket) do
-    {:noreply, update(socket, :snap, &Map.merge(&1, auth))}
+    socket = update(socket, :snap, &Map.merge(&1, auth))
+
+    # After SASL, JOIN may still need POLICY ACCEPT then re-JOIN. History was
+    # often fetched anonymously on first paint (403 for #freeq) — backfill once
+    # we have a bearer and the wire join has had a moment to settle.
+    socket =
+      if auth[:authenticated?] == true and auth[:api_bearer] not in [nil, ""] and
+           socket.assigns.view == :channel do
+        Process.send_after(self(), :auth_history_backfill, 1_200)
+        socket
+      else
+        socket
+      end
+
+    {:noreply, socket}
+  end
+
+  def handle_info(:auth_history_backfill, socket) do
+    if socket.assigns.view != :channel or socket.assigns.channel in [nil, ""] do
+      {:noreply, socket}
+    else
+      snap = Session.snapshot(socket.assigns.freeq_session)
+      members = Session.members(socket.assigns.freeq_session, socket.assigns.channel)
+
+      socket =
+        socket
+        |> assign(:snap, snap)
+        |> assign(:members, members)
+        |> backfill_history_gap()
+
+      {:noreply, socket}
+    end
   end
 
   def handle_info(:poll_channel_call, socket) do

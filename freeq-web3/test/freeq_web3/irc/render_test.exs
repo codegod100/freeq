@@ -8,6 +8,24 @@ defmodule FreeqWeb3.Irc.RenderTest do
     assert Render.canonical_channel("#freeq") == "#freeq"
   end
 
+  test "parse_join_failure extracts channel and trailing for 477" do
+    line =
+      ":irc.freeq.at 477 nandi.uk #freeq :This channel requires policy acceptance — use POLICY <channel> ACCEPT"
+
+    assert %{channel: "#freeq", numeric: "477", trailing: trailing} =
+             Render.parse_join_failure(line)
+
+    assert String.contains?(trailing, "policy acceptance")
+
+    auth_line =
+      ":irc.freeq.at 477 web12345 #freeq :This channel requires authentication — sign in to join"
+
+    assert %{channel: "#freeq", numeric: "477"} = Render.parse_join_failure(auth_line)
+
+    assert Render.parse_join_failure(":irc.freeq.at 001 web :Welcome") == nil
+    assert Render.parse_join_failure(":alice!a@h PRIVMSG #freeq :hi") == nil
+  end
+
   test "image_url? matches extensions, freeq media, and bsky CDN" do
     assert Render.image_url?("https://cdn.example.com/photo.jpg")
     assert Render.image_url?("https://cdn.example.com/photo.JPEG?size=large")
