@@ -786,3 +786,58 @@ describe('edit/delete authorship gate', () => {
     expect(s().channels.get(ch)!.messages[0].deleted).toBe(true);
   });
 });
+
+// ═══════════════════════════════════════════════════════════════
+// BUG: deleting an EDITED message leaves it on screen
+// ═══════════════════════════════════════════════════════════════
+
+describe('delete after edit', () => {
+  it('marks an edited message deleted when the delete names the ORIGINAL msgid', () => {
+    // editMessage re-keys the message to the edit's msgid (`id: newMsgId`) and
+    // keeps the chain root in `editOf`. Deletes always name the ORIGINAL msgid —
+    // that is the identity clients hold and what the server relays in
+    // +draft/delete. deleteMessage matched only `m.id === msgId`, so after an
+    // edit the delete found nothing and the message stayed visible, even though
+    // the server had removed it. editMessage already matches id OR editOf;
+    // deleteMessage must too.
+    ensureChannel('#test');
+    useStore.getState().addMessage('#test', mkMsg({ id: 'orig', text: 'secret v1' }));
+    useStore.getState().editMessage('#test', 'orig', 'secret v2', 'edit1');
+
+    // Sanity: the edit re-keyed the row and recorded the chain root.
+    const afterEdit = useStore.getState().channels.get('#test')!
+      .messages.find((m) => m.editOf === 'orig');
+    expect(afterEdit?.id).toBe('edit1');
+    expect(afterEdit?.text).toBe('secret v2');
+
+    useStore.getState().deleteMessage('#test', 'orig');
+
+    const m = useStore.getState().channels.get('#test')!
+      .messages.find((x) => x.id === 'edit1' || x.editOf === 'orig');
+    expect(m?.deleted).toBe(true);
+    expect(m?.text).toBe('');
+  });
+
+  it('still deletes when the delete names the edit revision', () => {
+    // The other end of the same chain: whichever id the caller holds must work.
+    ensureChannel('#test');
+    useStore.getState().addMessage('#test', mkMsg({ id: 'orig', text: 'v1' }));
+    useStore.getState().editMessage('#test', 'orig', 'v2', 'edit1');
+    useStore.getState().deleteMessage('#test', 'edit1');
+    const m = useStore.getState().channels.get('#test')!
+      .messages.find((x) => x.id === 'edit1' || x.editOf === 'orig');
+    expect(m?.deleted).toBe(true);
+  });
+
+  it('does not delete unrelated messages', () => {
+    ensureChannel('#test');
+    useStore.getState().addMessage('#test', mkMsg({ id: 'orig', text: 'v1' }));
+    useStore.getState().addMessage('#test', mkMsg({ id: 'other', text: 'keep me' }));
+    useStore.getState().editMessage('#test', 'orig', 'v2', 'edit1');
+    useStore.getState().deleteMessage('#test', 'orig');
+    const other = useStore.getState().channels.get('#test')!
+      .messages.find((x) => x.id === 'other');
+    expect(other?.deleted).toBeFalsy();
+    expect(other?.text).toBe('keep me');
+  });
+});

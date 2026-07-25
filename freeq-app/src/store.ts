@@ -865,8 +865,16 @@ export const useStore = create<Store>((set, get) => ({
       if (deleterNick) return deleterNick.toLowerCase() === m.from.toLowerCase();
       return true;
     };
+    // Match on id OR editOf, exactly as editMessage does. An edit re-keys the
+    // message to the edit's msgid and records the chain root in editOf, while a
+    // delete always names the ORIGINAL msgid — that's the identity clients hold
+    // and what the server relays in +draft/delete. Matching only on id meant a
+    // delete of an edited message found nothing and left it on screen after the
+    // server had removed it.
     ch.messages = ch.messages.map((m) =>
-      m.id === msgId && authorOk(m) ? { ...m, deleted: true, text: '' } : m
+      (m.id === msgId || m.editOf === msgId) && authorOk(m)
+        ? { ...m, deleted: true, text: '' }
+        : m
     );
     channels.set(channel.toLowerCase(), { ...ch });
     return { channels };
