@@ -1054,11 +1054,21 @@ defmodule FreeqWeb3.Session.Server do
   end
 
   defp apply_member_change(state, %{kind: :quit, nick: nick}) do
+    nick_key = String.downcase(to_string(nick))
+
     members =
       Map.new(state.channel_members, fn {ch, map} ->
-        map = Map.delete(map, nick)
-        Session.broadcast_channel(state.session_id, ch, {:members, map})
-        {ch, map}
+        # Case-insensitive remove; only push roster updates for channels that
+        # actually had this nick (avoids thrashing every joined pane on quit).
+        case Enum.find(map, fn {k, _} -> String.downcase(to_string(k)) == nick_key end) do
+          {key, _} ->
+            map = Map.delete(map, key)
+            Session.broadcast_channel(state.session_id, ch, {:members, map})
+            {ch, map}
+
+          nil ->
+            {ch, map}
+        end
       end)
 
     %{state | channel_members: members}

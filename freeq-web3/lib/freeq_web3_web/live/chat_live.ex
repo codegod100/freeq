@@ -410,39 +410,46 @@ defmodule FreeqWeb3Web.ChatLive do
 
   @impl true
   def handle_info({:message, row}, socket) do
-    # Prefer cache-only for the first paint; resolve+download off the LV process.
-    lookup = remember_parent(socket.assigns.parent_lookup || %{}, row)
-    row_fast =
-      row
-      |> LinkPreview.attach_cache_only()
-      |> attach_parent_info(lookup)
-      |> ensure_reactions()
+    # Join/part/quit must never land in the pane (roster-only). Defense in
+    # depth if an older Session.Server still broadcasts presence rows.
+    if row[:kind] in [:join, :part] do
+      {:noreply, socket}
+    else
+      # Prefer cache-only for the first paint; resolve+download off the LV process.
+      lookup = remember_parent(socket.assigns.parent_lookup || %{}, row)
 
-    socket =
-      socket
-      |> assign(:parent_lookup, lookup)
-      |> track_row(row_fast)
-      |> stream_insert(:messages, row_fast, at: -1)
-      |> assign(:message_count, socket.assigns.message_count + 1)
-      |> push_event("scroll_bottom", %{})
+      row_fast =
+        row
+        |> LinkPreview.attach_cache_only()
+        |> attach_parent_info(lookup)
+        |> ensure_reactions()
 
-    if row_fast.kind == :msg and is_nil(row_fast[:embed]) and is_binary(row_fast[:text]) do
-      lv = self()
+      socket =
+        socket
+        |> assign(:parent_lookup, lookup)
+        |> track_row(row_fast)
+        |> stream_insert(:messages, row_fast, at: -1)
+        |> assign(:message_count, socket.assigns.message_count + 1)
+        |> push_event("scroll_bottom", %{})
 
-      Task.start(fn ->
-        full =
-          row
-          |> LinkPreview.attach()
-          |> attach_parent_info(lookup)
-          |> ensure_reactions()
+      if row_fast.kind == :msg and is_nil(row_fast[:embed]) and is_binary(row_fast[:text]) do
+        lv = self()
 
-        if full[:embed] do
-          send(lv, {:message_embed, full})
-        end
-      end)
+        Task.start(fn ->
+          full =
+            row
+            |> LinkPreview.attach()
+            |> attach_parent_info(lookup)
+            |> ensure_reactions()
+
+          if full[:embed] do
+            send(lv, {:message_embed, full})
+          end
+        end)
+      end
+
+      {:noreply, socket}
     end
-
-    {:noreply, socket}
   end
 
   def handle_info({:message_embed, row}, socket) do

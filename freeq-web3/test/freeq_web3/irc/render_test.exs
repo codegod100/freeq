@@ -66,20 +66,23 @@ defmodule FreeqWeb3.Irc.RenderTest do
     refute Render.should_emit?(line, "#other")
   end
 
-  test "should_emit? scopes JOIN/PART to the target channel (no fan-out)" do
+  test "should_emit? suppresses JOIN/PART/QUIT (presence is roster-only)" do
+    # Walls of "— nick quit" from flaky guests / reconnect loops must not
+    # appear in the message pane. Member list still updates via parse_member_change.
     join = ":nandi.uk!u@h JOIN #dev"
-    assert Render.should_emit?(join, "#dev")
+    refute Render.should_emit?(join, "#dev")
     refute Render.should_emit?(join, "#freeq")
-    refute Render.should_emit?(join, "#other")
 
-    # Extended-join / colon form used by some servers.
     join_colon = ":nandi.uk!u@h JOIN :#freeq"
-    assert Render.should_emit?(join_colon, "#freeq")
-    refute Render.should_emit?(join_colon, "#dev")
+    refute Render.should_emit?(join_colon, "#freeq")
 
     part = ":nandi.uk!u@h PART #dev :bye"
-    assert Render.should_emit?(part, "#dev")
-    refute Render.should_emit?(part, "#freeq")
+    refute Render.should_emit?(part, "#dev")
+
+    quit = ":glum-hippo!u@h QUIT :Client closed"
+    refute Render.should_emit?(quit, "#dev")
+    refute Render.should_emit?(quit, "#freeq")
+    refute Render.should_emit?(quit, "#other")
   end
 
   test "extract_irc_target handles JOIN with optional colon" do
@@ -92,6 +95,15 @@ defmodule FreeqWeb3.Irc.RenderTest do
   test "should_emit? ignores TAGMSG and CAP" do
     refute Render.should_emit?("@+react=👍 :a!u@h TAGMSG #freeq", "#freeq")
     refute Render.should_emit?(":server CAP * ACK :sasl", "#freeq")
+  end
+
+  test "should_emit? still scopes PRIVMSG/NOTICE to channel" do
+    notice = ":irc.freeq.at NOTICE #freeq :server note"
+    assert Render.should_emit?(notice, "#freeq")
+    refute Render.should_emit?(notice, "#other")
+
+    # Nick-targeted NOTICE is not a channel row
+    refute Render.should_emit?(":irc.freeq.at NOTICE alice :hi", "#freeq")
   end
 
   test "parse_message_line PRIVMSG" do

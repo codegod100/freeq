@@ -277,7 +277,14 @@ defmodule FreeqWeb3.Irc.Render do
 
   def parse_reactions_tag(_), do: %{}
 
-  @doc "Should this line emit into the message pane for `current_channel`?"
+  @doc """
+  Should this line emit into the message pane for `current_channel`?
+
+  JOIN/PART/QUIT are **not** shown in the pane — they only update the
+  member roster (see `parse_member_change/1`). Otherwise a flaky guest or
+  reconnect loop paints walls of "— nick quit" noise (and QUITs have no
+  channel target, so they used to fan out into every joined channel).
+  """
   def should_emit?(line, current_channel) do
     line = String.trim_trailing(line, "\r")
 
@@ -301,10 +308,14 @@ defmodule FreeqWeb3.Irc.Render do
                 String.match?(cmd, ~r/^\d{3}$/) ->
                   false
 
+                # Presence noise: roster handles these; never chat rows.
+                cmd in ~w(JOIN PART QUIT) ->
+                  false
+
                 cmd in ~w(CAP AUTHENTICATE BATCH PING PONG ERROR TAGMSG) ->
                   false
 
-                cmd in ~w(PRIVMSG NOTICE JOIN PART QUIT TOPIC KICK NICK MODE) ->
+                cmd in ~w(PRIVMSG NOTICE TOPIC KICK NICK MODE) ->
                   target = extract_irc_target(after_prefix)
 
                   cond do
@@ -315,8 +326,10 @@ defmodule FreeqWeb3.Irc.Render do
                       String.downcase(canonical_channel(target)) ==
                         String.downcase(canonical_channel(current_channel))
 
+                    # NICK has no channel target — session-wide notice is OK
+                    # but rare; still emit when target-less.
                     is_nil(target) ->
-                      true
+                      cmd == "NICK"
 
                     true ->
                       String.downcase(canonical_channel(target)) ==
