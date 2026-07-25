@@ -112,7 +112,9 @@ def main [
     $lines = (
       $lines | append [
         "echo '==> mix deps.get + compile + assets.deploy'"
-        $"nix develop ($remote_web3) -c bash -lc 'set -euo pipefail; mix deps.get; mix compile; mix assets.deploy'"
+        # </dev/null: nix/mix must not drain bash -s stdin or later steps
+        # (restart) never run — that left production on a pre-filter BEAM.
+        $"nix develop ($remote_web3) -c bash -lc 'set -euo pipefail; mix deps.get; mix compile; mix assets.deploy' </dev/null"
       ]
     )
   }
@@ -132,7 +134,18 @@ def main [
 
   let remote = ($lines | str join "\n")
   print $"==> ($host): build/restart freeq-web3"
-  $remote | ^ssh $host bash -s
+  # Write to a remote temp file first. Piping the whole body to `ssh bash -s`
+  # is unsafe: `nix develop` / mix can drain stdin and skip later steps
+  # (notably systemctl restart), which left production on a stale BEAM.
+  let remote_script = $"/tmp/freeq-web3-deploy-(random chars --length 8).sh"
+  [
+    "set -euo pipefail"
+    $"cat > ($remote_script) <<'FREEQ_WEB3_DEPLOY_EOF'"
+    $remote
+    "FREEQ_WEB3_DEPLOY_EOF"
+    $"bash ($remote_script)"
+    $"rm -f ($remote_script)"
+  ] | str join "\n" | ^ssh $host bash -s
 
   print "==> done. https://freeq.boxd.sh/chat"
 }
