@@ -1,0 +1,82 @@
+# freeq-web4
+
+Gleam Lightspeed LiveView port of `freeq-web3`. See `../freeq-web3/AGENTS.md`
+for the Phoenix BFF this was ported from, and `../freeq-web2/AGENTS.md` for
+the Rails/StimulusReflex origin.
+
+## Build
+
+Workspace-sibling. From `freeq-web4/`:
+
+```bash
+nix develop          # preferred (gleam-preview + Erlang)
+gleam deps download
+gleam run            # http://127.0.0.1:4004
+gleam test
+```
+
+Without the flake: Gleam 1.17+, OTP 26+.
+
+## Architecture
+
+| Path | Role |
+|------|------|
+| `src/freeq_web4.gleam` | Mist HTTP + `/live` WebSocket + static assets |
+| `src/freeq_web4/live.gleam` | Stateful Lightspeed component (model/msg/render) |
+| `src/freeq_web4/ws.gleam` | Live session host — protocol Event → handle → Diff |
+| `src/freeq_web4/irc/upstream.gleam` | Stratus WebSocket client to freeq-server `/irc` |
+| `src/freeq_web4/irc/render.gleam` | IRC parse + history rows (port of web3 `Irc.Render`) |
+| `src/freeq_web4/rest.gleam` | REST client for channels + history |
+| `src/freeq_web4/config.gleam` | Env: `FREEQ_UPSTREAM`, `FREEQ_UPSTREAM_REST`, `PORT` |
+| `priv/static/app.css` | freeq dark theme (from web3) |
+| `priv/static/lightspeed.js` | Lightspeed browser runtime |
+
+## Key decisions
+
+- **Lightspeed over Phoenix**: typed msgs + fine-grained `diff` patches.
+- **Server holds the upstream IRC WS** (BFF), same as web2/web3/webui.
+- **One IRC connection per LiveView socket** (MVP). web3 uses a cookie
+  session registry for multi-tab; that can land later as a Gleam actor
+  registry.
+- **Guest mode first**. OAuth/SASL is the next porting milestone.
+- **Client-authoritative channel list** in the LiveView model (`my_channels`).
+  Only join/part/navigate mutates it.
+
+## Porting checklist (from freeq-web3)
+
+- [x] Lightspeed session + Mist HTTP
+- [x] Upstream IRC WS (guest CAP/NICK/USER)
+- [x] Channel list + chat shell LiveView
+- [x] Send / join / part / topic
+- [x] REST history + channel list
+- [x] Member roster (353 / JOIN / PART / QUIT)
+- [x] freeq dark theme CSS
+- [ ] AT Protocol OAuth + SASL ATPROTO-CHALLENGE
+- [ ] Encrypted session store + multi-tab registry
+- [ ] Reactions (TAGMSG +react / unreact)
+- [ ] Message edit/delete UI
+- [ ] DMs + E2EE
+- [ ] Voice/video
+- [ ] Link embeds / preview cache
+- [ ] Upload proxy / PWA
+
+## Idioms
+
+```gleam
+// verified route + live controller
+endpoint.new(contract.allow_all("owner-1"), "/live")
+|> endpoint.get_live(index, "freeq_view", fn(_conn) { initial_body(path) })
+
+// stateful component (mount / handle / render / routes)
+// see freeq_web4/live.gleam
+
+// server-push IRC → model → plan_patches → protocol.Diff
+```
+
+## Nix-host notes
+
+- **`nix develop`** is the recommended entry point (`freeq-web4/flake.nix`).
+- Pure Nix flakes only see files in the **Git** tree. This monorepo uses
+  colocated **jj**: finish a change that includes freeq-web4
+  (`jj commit -m "…"`) so the flake can read sources. Prefer `jj` for all
+  other VCS ops — see root `AGENTS.md` § Version control.
