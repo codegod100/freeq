@@ -1321,6 +1321,22 @@ impl Db {
             &format!("UPDATE messages SET deleted_at = ? WHERE id IN ({id_ph})"),
             rusqlite::params_from_iter(binds.iter()),
         )?;
+
+        // A deleted message must not stay pinned. `handle_delete` only purges
+        // the in-memory `ch.pins`, and pins are reloaded from this table on
+        // startup — so without this the channel advertises a pin whose message
+        // no longer exists after the next restart. Covers the whole family,
+        // since the pin may name a different revision than the delete did.
+        {
+            let mut pin_binds: Vec<String> = Vec::with_capacity(family.len() + 1);
+            pin_binds.push(channel.to_string());
+            pin_binds.extend(family.iter().cloned());
+            self.conn.execute(
+                &format!("DELETE FROM pins WHERE channel = ? AND msgid IN ({ph})"),
+                rusqlite::params_from_iter(pin_binds.iter()),
+            )?;
+        }
+
         Ok(changed)
     }
 
@@ -2051,6 +2067,56 @@ mod tests {
         assert!(
             live.is_empty(),
             "delete of the original left revisions readable: {live:?}"
+        );
+    }
+
+    /// Deleting a pinned message must drop the pin.
+    ///
+    /// `handle_delete` only purges the in-memory `ch.pins`; the `pins` row
+    /// outlives the message. Pins are reloaded from the DB on startup, so after
+    /// a restart the channel advertises a pin whose message no longer exists.
+    #[test]
+    fn soft_delete_drops_pins_for_the_deleted_message() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "pin me", 100, "id-pinned");
+        msg(&db, "#c", "other", 101, "id-other");
+        db.store_pin("#c", "id-pinned", "alice", 100).unwrap();
+        db.store_pin("#c", "id-other", "alice", 101).unwrap();
+
+        db.soft_delete_message("#c", "id-pinned").unwrap();
+
+        let pinned: Vec<String> = db
+            .get_pins("#c")
+            .unwrap()
+            .into_iter()
+            .map(|p| p.msgid)
+            .collect();
+        assert_eq!(
+            pinned,
+            vec!["id-other".to_string()],
+            "a deleted message must not stay pinned (dangling pin survives restart)"
+        );
+    }
+
+    /// …including when the pin names a different revision than the delete.
+    #[test]
+    fn soft_delete_drops_pins_across_the_revision_family() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "v1", 100, "id-1");
+        db.insert_edit(
+            "#c", "alice!a@host", "v2", 110, &HashMap::new(), "id-2", "id-1",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        // Pinned after editing, so the pin names the edit revision.
+        db.store_pin("#c", "id-2", "alice", 110).unwrap();
+
+        // The client deletes using the identity it holds: the original.
+        db.soft_delete_message("#c", "id-1").unwrap();
+
+        assert!(
+            db.get_pins("#c").unwrap().is_empty(),
+            "pin on an edit revision survived deletion of the message"
         );
     }
 
