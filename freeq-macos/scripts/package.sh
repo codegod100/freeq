@@ -28,9 +28,17 @@ echo "== xcodegen =="
 command -v xcodegen >/dev/null || { echo "install xcodegen: brew install xcodegen"; exit 1; }
 xcodegen generate >/dev/null
 
-echo "== build Release (identity: $IDENTITY, hardened: $HARDENED) =="
+# arm64 only, deliberately. The Rust FFI is built solely for
+# aarch64-apple-darwin (see build-rust.sh; FreeqSDK.xcframework declares
+# SupportedArchitectures = [arm64]), so any x86_64 slice cannot link:
+#   ld: symbol(s) not found for architecture x86_64
+# Without pinning ARCHS, xcodebuild picks up the x86_64 destination on an
+# Apple Silicon Mac and the Release build fails outright. Shipping Intel would
+# mean adding an x86_64 Rust target and lipo-ing a universal static lib first.
+echo "== build Release arm64 (identity: $IDENTITY, hardened: $HARDENED) =="
 xcodebuild -project freeq-macos.xcodeproj -scheme freeq-macos \
   -configuration Release -derivedDataPath "$DERIVED" \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
   CODE_SIGN_IDENTITY="$IDENTITY" \
   DEVELOPMENT_TEAM="$TEAM" \
   ENABLE_HARDENED_RUNTIME="$HARDENED" \
