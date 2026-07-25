@@ -233,3 +233,61 @@ async fn public_channel_reads_still_work() {
     }
     server.abort();
 }
+
+/// The governance family: approvals, budget, spend and agent capabilities.
+/// None of these accepted a `HeaderMap` either, so a private channel's
+/// operational state — what its agents may do, what it has spent, what is
+/// awaiting a human decision — was readable by anyone.
+#[tokio::test]
+async fn private_channel_governance_endpoints_are_not_public() {
+    let (web, server) = fixture().await;
+    for path in [
+        "/api/v1/channels/secretplan/approvals",
+        "/api/v1/channels/secretplan/budget",
+        "/api/v1/channels/secretplan/spend",
+        "/api/v1/channels/secretplan/agent-capabilities",
+    ] {
+        let (status, body) = get(web, path).await;
+        assert!(
+            status == 403 || status == 404,
+            "anonymous GET {path} returned {status}: {body}"
+        );
+    }
+    server.abort();
+}
+
+/// Control: the same governance endpoints must keep working for a public
+/// channel, so the fix doesn't blind legitimate dashboards.
+#[tokio::test]
+async fn public_channel_governance_endpoints_still_work() {
+    let (web, server) = fixture().await;
+    for path in [
+        "/api/v1/channels/townsquare/approvals",
+        "/api/v1/channels/townsquare/budget",
+        "/api/v1/channels/townsquare/spend",
+        "/api/v1/channels/townsquare/agent-capabilities",
+    ] {
+        let (status, body) = get(web, path).await;
+        assert_eq!(status, 200, "public {path} returned {status}: {body}");
+    }
+    server.abort();
+}
+
+/// The unauthenticated channel *list* must not name a private channel.
+/// (`api_channels` already filters on `channel_is_discoverable`; this pins it,
+/// because it's the one place a private channel's existence would leak wholesale.)
+#[tokio::test]
+async fn channel_list_hides_private_channels() {
+    let (web, server) = fixture().await;
+    let (status, body) = get(web, "/api/v1/channels").await;
+    assert_eq!(status, 200, "channel list should be public: {body}");
+    assert!(
+        !body.contains("secretplan"),
+        "private channel leaked into the public channel list: {body}"
+    );
+    assert!(
+        body.contains("townsquare"),
+        "public channel missing from the list: {body}"
+    );
+    server.abort();
+}

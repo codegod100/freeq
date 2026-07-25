@@ -561,7 +561,10 @@ async fn api_did_signing_key_by_kid(
 async fn api_agent_capabilities(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // What this channel's agents are permitted to do.
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let grants: Vec<serde_json::Value> = state
         .with_db(|db| {
@@ -600,14 +603,19 @@ async fn api_agent_capabilities(
             Ok(all)
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "capabilities": grants }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "capabilities": grants }),
+    ))
 }
 
 /// GET /api/v1/channels/{name}/approvals — list pending approvals.
 async fn api_pending_approvals(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // What a private channel is waiting on a human to decide.
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let approvals: Vec<serde_json::Value> = state
         .with_db(|db| {
@@ -627,7 +635,9 @@ async fn api_pending_approvals(
                 .collect::<Vec<_>>())
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "approvals": approvals }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "approvals": approvals }),
+    ))
 }
 
 /// GET /api/v1/channels/{name}/events — query coordination events.
@@ -872,12 +882,15 @@ async fn api_spawned_agents(State(state): State<Arc<SharedState>>) -> Json<serde
 async fn api_channel_budget(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Spend limits and burn-down for a private channel's agents.
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let budget_json = state
         .with_db(|db| Ok(db.get_budget(&channel.to_lowercase(), None)))
         .flatten();
-    match budget_json {
+    Ok(match budget_json {
         Some(bj) => {
             if let Ok(budget) = serde_json::from_str::<crate::policy::types::BudgetPolicy>(&bj) {
                 let period_start = crate::connection::budget_period_start(&budget.period);
@@ -922,7 +935,7 @@ async fn api_channel_budget(
             }
         }
         None => Json(serde_json::json!({ "channel": channel, "budget": null })),
-    }
+    })
 }
 
 /// GET /api/v1/channels/{name}/spend — spend records.
@@ -930,7 +943,9 @@ async fn api_channel_spend(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    authorize_channel_read(&state, &name, &headers)?;
     let channel = format!("#{name}");
     let agent = params.get("agent").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
@@ -963,7 +978,9 @@ async fn api_channel_spend(
                 .collect::<Vec<_>>())
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "spend": records }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "spend": records }),
+    ))
 }
 
 /// GET /api/v1/actors/{did} — identity card for any actor (human or agent).
