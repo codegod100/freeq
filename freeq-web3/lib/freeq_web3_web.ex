@@ -21,6 +21,13 @@ defmodule FreeqWeb3Web do
     do:
       ~w(assets fonts images favicon.ico favicon.png icon-192.png apple-touch-icon.png freeq-180.png robots.txt)
 
+  @doc """
+  Prefixes for Plug.Static `:only_matching` — required so digested root files
+  like `favicon-<hash>.png` / `icon-192-<hash>.png` are served in prod.
+  """
+  def static_path_prefixes,
+    do: ~w(favicon icon-192 apple-touch-icon freeq-180 robots)
+
   def router do
     quote do
       use Phoenix.Router, helpers: false
