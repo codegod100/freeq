@@ -204,36 +204,116 @@ break that ships green and surfaces as "pins are broken for me".
   "blank bearer is treated as absent" so a cleared session can't send
   `Bearer `.
 
+### 9. RED→GREEN: reactions outlived the message they annotate
+`ea648a45`
+
+Completes the delete lifecycle: `soft_delete_message` now sweeps messages, FTS,
+pins **and** reactions for the whole revision family. Mildest of the family (
+nothing surfaces them today) but they retain a record of who reacted to content
+the author deleted.
+
+*Process note:* my first version of this test failed for the **wrong reason** — I
+had `store_reaction`'s first two arguments swapped. Fixed the call so the failure
+was the real one before writing any fix. A red test that's red for the wrong
+reason is worse than no test.
+
+### 10. Strengthened a test that was buying false confidence
+`6b6de9a8`
+
+`edit_delete_adversarial.rs` **already had** a `delete_after_edit` test. Cycle 3's
+bug walked straight past it, because all it asserted was that the delete TAGMSG
+got relayed:
+
+```rust
+assert!(del.is_some(), "Delete after edit should succeed");
+```
+
+Relaying the TAGMSG isn't the contract; removing the content is. Now asserts
+neither revision returns from CHATHISTORY — and I **verified the new assertion
+has teeth** rather than passing vacuously (an absence-check trivially passes if
+the query returns nothing) by reverting `soft_delete_message` to its pre-fix
+behaviour and watching it fail with the leaked wire line, then restoring.
+
+### 11. RED→GREEN: the same delete-after-edit bug in *every* client
+`4005179d` (web, macOS, iOS), `05eca625` (TUI)
+
+One conceptual mistake replicated across four surfaces: **treating a message's
+identity as its latest revision's id.** Every client's edit path re-keys the
+message to the edit's msgid; every client's delete path matched on that id alone.
+Deletes always name the *original* msgid, so a delete of an edited message
+matched nothing and **left it on screen** after the server had removed it.
+
+Each client's *edit* path had already learned to match "id OR chain-root"; only
+the delete path hadn't. Fixed in all four, with per-client tests including
+"reaching the line via the alias must not bypass the author check" (that check is
+the defence against spoofed peer wire events). TUI needed a new `edit_of` field —
+its `edit_aliases` set records *that* an id was seen, not which line owns it. Also
+verified non-vacuous by reverting the lookup and re-running.
+
+### 12. Repaired the workspace build (pre-existing)
+`9dfc814c`
+
+`cargo test --workspace` couldn't complete at all: `AvConfig` grew an
+`audio_only` field and two initializers (`freeq-av-image`, plus a **doctest**)
+were never updated. Confirmed pre-existing — reproduces 13 commits back, and I
+never touched those crates. Found only because I ran the *whole* workspace at the
+end instead of just the crates I'd been in: **a crate that doesn't compile is
+invisible to per-crate test runs.**
+
 ## Scoreboard
 
 | | before | after |
 |---|---|---|
-| freeq-server tests | 1105 | **1122** |
-| web (vitest) | 787 | **793** |
-| macOS core | 472 | **476** |
-| iOS core | 114 | **118** |
+| Rust workspace | *did not build* | **2125 passing** |
+| freeq-server | 1105 | **1123** |
+| web (vitest) | 787 | **796** |
+| macOS core | 472 | **479** |
+| iOS core | 114 | **121** |
+| freeq-tui | 86 | **90** |
 
-**8 real defects found and fixed**, every one caught by a test that failed
-first. Two of them (delete-leaves-edited-text, private-channel REST reads) I'd
-call release blockers.
+**11 real defects found and fixed**, each caught by a test that failed first, plus
+one pre-existing build breakage and one false-confidence test corrected.
 
-Areas swept: message delete/edit lifecycle (DB + memory + FTS + pins), TAGMSG
-target normalization, the entire channel-scoped REST authorization surface
-(reads *and* writes), and client-side bearer propagation.
+Release blockers among them:
+1. **Delete left the edited text readable** (server DB) — fails in the worst
+   direction: you redact something, delete it, and the redacted text persists.
+2. **Private-channel data world-readable over REST** — topic, audit/governance
+   timeline, coordination events, pins, call membership, spend, agent
+   permissions. No bearer required.
+3. **Unauthenticated artifact writes** with body-supplied `created_by` —
+   attribution forgery plus message injection into a channel.
+
+Areas swept: the message delete/edit lifecycle end to end (DB, in-memory, FTS,
+pins, reactions, and all four clients), TAGMSG target normalization, the entire
+channel-scoped REST surface (reads *and* writes), and client bearer propagation.
+
+## Patterns worth keeping
+
+- **The same bug lived in four clients** because each was written against `id`
+  while the edit path had already learned better. When a fix touches identity
+  semantics, grep the other surfaces before closing.
+- **Two of my own tests were initially wrong** (a stale echo-message match; a
+  swapped argument). Both would have "passed" and hidden real bugs. When a test
+  passes on the first run, suspect the test.
+- **Absence assertions need proving.** "X is not in history" passes trivially if
+  the query returns nothing. I verified by reverting the fix each time.
 
 ## Not done / notes for the morning
 
-- **Orphaned reactions on delete.** `soft_delete_message` sweeps messages, FTS
-  and pins, but `reactions` rows for the deleted msgids remain. Harmless today
-  (nothing reads them once the message is gone) so I left it — but it's the same
-  family and worth a tidy-up.
-- **`edit_delete_adversarial.rs` exists and missed all four delete/edit bugs.**
-  Worth reading to see what it *does* assert; adversarial suites that pass while
-  the feature leaks content are a false-confidence risk.
-- **`AGENTS.md` hotspot notes are stale** (see item 0). Top gamma is now
-  `freeq-eliza/src/irc.rs` (520), unlisted; the "ZERO unit tests" and
-  "UNDERTESTED" claims for `sdk/client.rs` and `irc/client.ts` are out of date.
-  I did not update AGENTS.md — that's a judgement call for you.
-- **Nothing deployed.** All fixes are committed and pushed but the server has
-  not been restarted, per the no-overnight-infra rule. The REST authorization
-  changes are the ones to deploy deliberately, with the client updates.
+- **Nothing deployed.** Everything is committed and pushed; the server has not
+  been restarted, per the no-overnight-infra rule. **Deploy the server and the
+  clients together** — the REST authorization fixes make private-channel
+  endpoints require a bearer, and the client commits are what start sending it.
+  Server-only deploy = private-channel pins/audit/calls break in older clients.
+- **`addReaction`/`removeReaction` still match on `id` only** (web + native), the
+  same narrow match I fixed for delete. I could not construct a failing case (a
+  reaction is sent against the id the client currently holds, so it round-trips),
+  and I won't change behaviour without a failing test. Worth a deliberate look.
+- **`AGENTS.md` hotspot notes are stale** (see item 0): top gamma is now
+  `freeq-eliza/src/irc.rs` (520), unlisted, and the "ZERO unit tests" /
+  "UNDERTESTED" claims for `sdk/client.rs` and `irc/client.ts` are out of date. I
+  left AGENTS.md alone — editing the instructions I'm working from felt like your
+  call, not mine.
+- **`freeq-eliza/src/irc.rs` never got swept.** It's the #1 hotspot by gamma and
+  I spent the night where the user-facing risk was (data loss, then
+  authorization). It's the obvious next target.
