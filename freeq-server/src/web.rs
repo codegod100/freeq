@@ -635,8 +635,11 @@ async fn api_channel_events(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
-    let channel = format!("#{name}");
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Signed task cards and agent activity — private-channel coordination must
+    // not be world-readable.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let event_type = params.get("type").map(|s| s.as_str());
     let ref_id = params.get("ref_id").map(|s| s.as_str());
     let actor = params.get("actor").map(|s| s.as_str());
@@ -668,7 +671,9 @@ async fn api_channel_events(
                 .collect::<Vec<_>>())
         })
         .unwrap_or_default();
-    Json(serde_json::json!({ "channel": channel, "events": events }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "events": events }),
+    ))
 }
 
 /// GET /api/v1/tasks/{task_id} — task detail with all related events.
@@ -730,8 +735,11 @@ async fn api_channel_audit(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(name): axum::extract::Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Json<serde_json::Value> {
-    let channel = format!("#{name}");
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // The audit timeline is the governance history of the room: coordination
+    // events, actor DIDs, signatures and payloads. Same access rules as history.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let actor = params.get("actor").map(|s| s.as_str());
     let since = params.get("since").and_then(|s| {
         chrono::DateTime::parse_from_rfc3339(s)
@@ -795,7 +803,9 @@ async fn api_channel_audit(
         timeline.truncate(limit);
     }
 
-    Json(serde_json::json!({ "channel": channel, "timeline": timeline }))
+    Ok(Json(
+        serde_json::json!({ "channel": channel, "timeline": timeline }),
+    ))
 }
 
 /// GET /api/v1/agents/manifests — list all registered manifests.
@@ -1887,12 +1897,11 @@ async fn api_search(
 async fn api_channel_topic(
     Path(name): Path<String>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<ChannelTopicResponse>, StatusCode> {
-    let channel = if name.starts_with('#') {
-        name
-    } else {
-        format!("#{name}")
-    };
+    // Mode-restricted channels (+i/+k/encrypted) are not public: the topic of a
+    // private room routinely names the thing the room exists to discuss.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
 
     let channels = state.channels.lock();
     match channels.get(&channel) {
@@ -1909,12 +1918,10 @@ async fn api_channel_topic(
 async fn api_channel_pins(
     Path(name): Path<String>,
     State(state): State<Arc<SharedState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let channel = if name.starts_with('#') {
-        name
-    } else {
-        format!("#{name}")
-    };
+    // Pins quote message text, so this is a history read by another name.
+    let channel = authorize_channel_read(&state, &name, &headers)?;
     let pin_list = {
         let channels = state.channels.lock();
         match channels.get(&channel) {
@@ -4576,7 +4583,10 @@ async fn api_create_artifact(
 async fn api_channel_sessions(
     State(state): State<Arc<SharedState>>,
     Path(name): Path<String>,
-) -> Json<serde_json::Value> {
+    headers: axum::http::HeaderMap,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // Who is (or was) in a private channel's calls is itself sensitive.
+    authorize_channel_read(&state, &name, &headers)?;
     let mgr = state.av_sessions.lock();
 
     // Active session (if any)
@@ -4601,10 +4611,10 @@ async fn api_channel_sessions(
         })
         .collect();
 
-    Json(serde_json::json!({
+    Ok(Json(serde_json::json!({
         "active": active,
         "recent": recent_json,
-    }))
+    })))
 }
 
 fn session_to_json(
