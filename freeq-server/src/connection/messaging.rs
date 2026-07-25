@@ -1952,12 +1952,39 @@ pub(super) fn dm_canonical_key(
     Some(crate::db::canonical_dm_key(sender_did, &recipient_did))
 }
 
+/// Whether a row found by the *global* msgid fallback may be acted on for an
+/// edit/delete addressed to a DM.
+///
+/// The fallback exists only to resolve DM-key ambiguity: the wire target may be
+/// a nick or a DID, and the nick→DID mapping can be unavailable (partner
+/// offline), so the canonical `dm:` key can't always be derived. It must never
+/// reach a **channel** row. `handle_edit` / `handle_delete` derive both their
+/// in-memory `ch.history`/`ch.pins` cleanup and their broadcast target from
+/// `is_channel`, which is computed from the *wire* target — so a channel row
+/// resolved through a DM target got soft-deleted in the DB while the channel
+/// kept serving it from memory, and the channel was never told. That message
+/// then vanished from search immediately and from history after the next
+/// restart, while every current member still saw it.
+///
+/// Authorship is re-checked by the caller, so this is not the only guard — but
+/// authorship alone doesn't make a cross-target mutation *coherent*.
+pub(super) fn dm_fallback_row_is_addressable(row_channel: &str, caller_did: Option<&str>) -> bool {
+    // Only DM rows are reachable this way; `dm:` keys are `dm:{did_a},{did_b}`.
+    let Some(participants) = row_channel.strip_prefix("dm:") else {
+        return false;
+    };
+    // Without an authenticated identity we cannot prove participation, so we
+    // don't guess. Guest DM threads aren't persisted anyway, so this costs
+    // nothing: the fallback would find no row for them regardless.
+    let Some(did) = caller_did else { return false };
+    participants.split(',').any(|p| p == did)
+}
+
 /// Look up an original message by msgid for an edit/delete. Channels key
 /// by the wire target; DMs key by the canonical dm_key, so a DM tries the
-/// target, then the canonical key, then a global msgid search (a ULID is
-/// unique, and the caller re-checks authorship). Returns the row so the
-/// caller can write back under `row.channel` — the key it actually lives
-/// under — rather than re-deriving it.
+/// target, then the canonical key, then a constrained global msgid search.
+/// Returns the row so the caller can write back under `row.channel` — the key
+/// it actually lives under — rather than re-deriving it.
 fn find_original_message(
     conn: &Connection,
     target: &str,
@@ -1975,7 +2002,21 @@ fn find_original_message(
             return by_dm;
         }
     }
-    state.with_db(|db| db.find_message_by_msgid(msgid))
+    let global = state.with_db(|db| db.find_message_by_msgid(msgid));
+    match &global {
+        // Row exists but isn't addressable from this DM target — report it as
+        // "not found" so no cross-target mutation happens. `Some(None)` keeps
+        // the "DB present, no row" contract the callers already handle.
+        Some(Some(row))
+            if !dm_fallback_row_is_addressable(
+                &row.channel,
+                conn.authenticated_did.as_deref(),
+            ) =>
+        {
+            Some(None)
+        }
+        _ => global,
+    }
 }
 
 /// Handle a PRIVMSG with +draft/edit=<msgid> tag.
@@ -3613,5 +3654,56 @@ mod av_state_tag_tests {
         let tags = av_state_tag_map("started", "s", "nick", "inst9", 1, "standup");
         assert_eq!(tags.get("+freeq.at/av-title").map(String::as_str), Some("standup"));
         assert_eq!(tags.get("+freeq.at/av-participants").map(String::as_str), Some("1"));
+    }
+}
+
+#[cfg(test)]
+mod dm_fallback_tests {
+    //! The global msgid fallback in `find_original_message` is the only path
+    //! that can resolve a row outside the addressed target. These pin the rule
+    //! that keeps it from mutating something the caller never addressed.
+    use super::dm_fallback_row_is_addressable;
+
+    const ALICE: &str = "did:plc:alice";
+    const BOB: &str = "did:plc:bob";
+
+    #[test]
+    fn channel_rows_are_never_addressable_from_a_dm() {
+        // The regression: a delete addressed to a DM soft-deleted a CHANNEL row
+        // in the DB while the channel kept serving it from memory.
+        assert!(!dm_fallback_row_is_addressable("#freeq", Some(ALICE)));
+        assert!(!dm_fallback_row_is_addressable("&local", Some(ALICE)));
+    }
+
+    #[test]
+    fn own_dm_thread_is_addressable() {
+        // The legitimate use: the canonical key couldn't be derived (partner
+        // offline, so nick→DID failed) but the row is genuinely ours.
+        let key = format!("dm:{ALICE},{BOB}");
+        assert!(dm_fallback_row_is_addressable(&key, Some(ALICE)));
+        assert!(dm_fallback_row_is_addressable(&key, Some(BOB)));
+    }
+
+    #[test]
+    fn other_peoples_dm_threads_are_not_addressable() {
+        let key = format!("dm:{BOB},did:plc:carol");
+        assert!(!dm_fallback_row_is_addressable(&key, Some(ALICE)));
+    }
+
+    #[test]
+    fn unauthenticated_callers_get_nothing_from_the_fallback() {
+        // Guests can't prove participation. Their DM threads aren't persisted,
+        // so refusing here costs nothing.
+        let key = format!("dm:{ALICE},{BOB}");
+        assert!(!dm_fallback_row_is_addressable(&key, None));
+        assert!(!dm_fallback_row_is_addressable("#freeq", None));
+    }
+
+    #[test]
+    fn did_must_match_a_whole_participant_not_a_prefix() {
+        // `dm:` keys are comma-joined, so a substring match would let
+        // did:plc:alice reach did:plc:alice2's threads.
+        let key = "dm:did:plc:alice2,did:plc:bob";
+        assert!(!dm_fallback_row_is_addressable(key, Some(ALICE)));
     }
 }

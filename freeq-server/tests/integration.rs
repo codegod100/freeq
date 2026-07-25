@@ -59,6 +59,40 @@ fn empty_resolver() -> DidResolver {
     DidResolver::static_map(HashMap::new())
 }
 
+/// Consume everything currently queued. Required before asserting on a
+/// *reply*: the SDK negotiates `echo-message`, so a sender's own PRIVMSG is
+/// sitting in its own event queue and will otherwise satisfy a later
+/// "did history contain X?" scan (a false positive that hides real bugs).
+async fn drain_events(events: &mut mpsc::Receiver<Event>) {
+    while let Ok(Some(_)) = timeout(Duration::from_millis(50), events.recv()).await {}
+}
+
+/// Like `expect_event`, but returns `false` on timeout instead of panicking.
+/// Needed to assert the *absence* of a message (e.g. "history must not replay
+/// a deleted message"), which `expect_event` cannot express.
+async fn saw_event(
+    events: &mut mpsc::Receiver<Event>,
+    timeout_ms: u64,
+    predicate: impl Fn(&Event) -> bool,
+) -> bool {
+    let deadline = Duration::from_millis(timeout_ms);
+    let start = tokio::time::Instant::now();
+    loop {
+        let remaining = deadline.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            return false;
+        }
+        match timeout(remaining, events.recv()).await {
+            Ok(Some(event)) => {
+                if predicate(&event) {
+                    return true;
+                }
+            }
+            Ok(None) | Err(_) => return false,
+        }
+    }
+}
+
 // ── Test: Guest connection (no SASL) ────────────────────────────────
 
 #[tokio::test]
@@ -4705,5 +4739,182 @@ async fn dm_history_rejected_for_guest() {
 
     handle_alice.quit(None).await.unwrap();
     handle_guest.quit(None).await.unwrap();
+    server_handle.abort();
+}
+
+// ── Test: a delete addressed to the wrong target must not desync views ──
+//
+// `handle_delete` resolves the original row through
+// `find_original_message`, whose last resort is a *global* msgid lookup with
+// no target constraint (a ULID is unique, and authorship is re-checked). But
+// the rest of `handle_delete` decides what to clean up from `is_channel`,
+// derived from the WIRE target:
+//
+//   - the DB soft-delete uses `storage_key` = the row's REAL channel, while
+//   - the in-memory `ch.history` / `ch.pins` purge is gated on `is_channel`.
+//
+// So a `+draft/delete` sent to a DM target for a msgid that lives in a
+// channel deletes the row in the DB but leaves it in the channel's in-memory
+// history. CHATHISTORY is DB-backed and JOIN replay is memory-backed
+// (channel.rs reads `ch.history`), so the two views disagree and the
+// "deleted" message resurrects for every new joiner until a restart.
+//
+// The invariant asserted here is deliberately NOT "the delete took effect" —
+// it's "both views agree", which holds whether the server honours or rejects
+// the cross-target delete. That keeps the test valid under either fix.
+#[tokio::test]
+async fn cross_target_delete_does_not_desync_channel_views() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("xdelete.db");
+    let db_str = db_path.to_str().unwrap();
+    let (addr, server_handle) = start_test_server_with_db(empty_resolver(), db_str).await;
+
+    let mk = |nick: &str| ConnectConfig {
+        server_addr: addr.to_string(),
+        nick: nick.to_string(),
+        user: nick.to_string(),
+        realname: nick.to_string(),
+        ..Default::default()
+    };
+
+    let (handle_alice, mut events_alice) = client::connect(mk("alice"), None);
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "alice registered",
+    )
+    .await;
+    handle_alice.join("#xdelete").await.unwrap();
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Joined { .. }),
+        "alice joined",
+    )
+    .await;
+
+    let (handle_bob, mut events_bob) = client::connect(mk("bob"), None);
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "bob registered",
+    )
+    .await;
+    handle_bob.join("#xdelete").await.unwrap();
+    expect_event(
+        &mut events_bob,
+        2000,
+        |e| matches!(e, Event::Joined { .. }),
+        "bob joined",
+    )
+    .await;
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::Joined { nick, .. } if nick == "bob"),
+        "alice sees bob join",
+    )
+    .await;
+
+    // Alice posts in the channel; Bob's copy carries the server-assigned msgid.
+    handle_alice
+        .privmsg("#xdelete", "resurrect me")
+        .await
+        .unwrap();
+    let msg_evt = expect_event(
+        &mut events_bob,
+        2000,
+        |e| {
+            matches!(e, Event::Message { from, target, text, .. }
+            if from == "alice" && target == "#xdelete" && text == "resurrect me")
+        },
+        "bob receives alice's channel message",
+    )
+    .await;
+    let msgid = if let Event::Message { tags, .. } = &msg_evt {
+        tags.get("msgid")
+            .cloned()
+            .expect("server should attach msgid")
+    } else {
+        unreachable!()
+    };
+
+    // The attack/bug shape: delete addressed to a DM target ("bob"), for a
+    // msgid that lives in "#xdelete".
+    let mut del_tags = HashMap::new();
+    del_tags.insert("+draft/delete".to_string(), msgid.clone());
+    handle_alice.send_tagmsg("bob", del_tags).await.unwrap();
+
+    // Let the server finish any DB write before we compare the two views.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // What the DB now believes, which is the authority the two live views are
+    // supposed to agree with.
+    let db_says_deleted = {
+        let db = freeq_server::db::Db::open(db_str).unwrap();
+        db.get_message_by_msgid("#xdelete", &msgid)
+            .unwrap()
+            .and_then(|r| r.deleted_at)
+            .is_some()
+    };
+
+    // View 1 — CHATHISTORY, served from the DB (`get_messages` filters
+    // `deleted_at IS NULL`). Drain first, then anchor on the batch opener, so
+    // this cannot match Alice's own echo-message copy.
+    drain_events(&mut events_alice).await;
+    handle_alice.history_latest("#xdelete", 50).await.unwrap();
+    expect_event(
+        &mut events_alice,
+        2000,
+        |e| matches!(e, Event::BatchStart { batch_type, .. } if batch_type == "chathistory"),
+        "chathistory batch start",
+    )
+    .await;
+    let in_chathistory = saw_event(&mut events_alice, 1500, |e| {
+        matches!(e, Event::Message { text, .. } if text == "resurrect me")
+    })
+    .await;
+
+    // View 2 — a fresh joiner's replay, served from in-memory ch.history.
+    let (handle_carol, mut events_carol) = client::connect(mk("carol"), None);
+    expect_event(
+        &mut events_carol,
+        2000,
+        |e| matches!(e, Event::Registered { .. }),
+        "carol registered",
+    )
+    .await;
+    handle_carol.join("#xdelete").await.unwrap();
+    let in_join_replay = saw_event(&mut events_carol, 2000, |e| {
+        matches!(e, Event::Message { text, .. } if text == "resurrect me")
+    })
+    .await;
+
+    // The invariant: the DB and every live view must tell the same story.
+    // Whether the server honours the cross-target delete or rejects it, these
+    // three must agree — otherwise a message is "deleted" in one view and
+    // alive in another.
+    assert_eq!(
+        in_chathistory, in_join_replay,
+        "channel views disagree after a cross-target delete: \
+         CHATHISTORY(db-backed)={in_chathistory} vs JOIN-replay(memory-backed)={in_join_replay}"
+    );
+    assert_eq!(
+        db_says_deleted, !in_join_replay,
+        "DB and live channel view disagree: db_says_deleted={db_says_deleted} but the \
+         channel still replays the message to new joiners (in_join_replay={in_join_replay}). \
+         A delete addressed to a DM target soft-deleted a CHANNEL row in the DB while \
+         `handle_delete` skipped the in-memory history/pin purge (it gates that on \
+         `is_channel`, derived from the wire target) and broadcast the removal to the DM \
+         recipient instead of the channel. Net effect: the message is gone from search and \
+         from history after the next restart, but every current member still sees it, and \
+         nobody in the channel was told."
+    );
+
+    handle_alice.quit(None).await.unwrap();
+    handle_bob.quit(None).await.unwrap();
+    handle_carol.quit(None).await.unwrap();
     server_handle.abort();
 }
