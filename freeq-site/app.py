@@ -31,6 +31,26 @@ SITE_DOCS_DIR = Path(__file__).parent / "docs"
 REPO_DOCS_DIR = Path(__file__).parent.parent / "docs"
 BLOG_DIR = Path(__file__).parent / "blog"
 
+# ── Blog: read from AT Protocol ──────────────────────────────────────────────
+# Posts are authored in Leaflet, which writes them to the author's own PDS as
+# `site.standard.document` records. We read those directly, so the blog is a
+# demonstration of the thing this site is about: the data is in the author's
+# repo, and this renderer is replaceable.
+#
+#   FREEQ_BLOG_DID          author DID (default: chadfowler.com's)
+#   FREEQ_BLOG_PUBLICATION  at:// of the publication to show. Unset shows every
+#                           document in the repo, which is wrong once there is
+#                           more than one publication — set it as soon as the
+#                           freeq publication exists.
+#
+# Until a publication is configured and reachable, /blog falls back to the local
+# blog/*.md files, so the page is never empty or broken.
+import atproto_blog
+
+BLOG_DID = os.environ.get("FREEQ_BLOG_DID", "did:plc:4qsyxmnsblo4luuycm3572bq")
+BLOG_PUBLICATION = os.environ.get("FREEQ_BLOG_PUBLICATION") or None
+BLOG_SOURCE = atproto_blog.BlogSource(BLOG_DID, BLOG_PUBLICATION, ttl=300.0)
+
 # Markdown renderer
 MD_EXTENSIONS = [
     FencedCodeExtension(),
@@ -153,17 +173,50 @@ def _blog_posts():
     return posts
 
 
+def _atproto_posts():
+    """Posts from AT Protocol, or [] if unavailable (falls back to markdown)."""
+    try:
+        return BLOG_SOURCE.posts()
+    except Exception:
+        return []
+
+
 @app.route("/blog/")
 def blog_index():
-    return render_template("blog_index.html", posts=_blog_posts())
+    posts = _atproto_posts()
+    if posts:
+        return render_template(
+            "blog_index.html",
+            posts=posts,
+            from_atproto=True,
+            publication_url=BLOG_PUBLICATION,
+        )
+    return render_template("blog_index.html", posts=_blog_posts(), from_atproto=False)
 
 
 @app.route("/blog/<slug>/")
 def blog_post(slug):
+    if ".." in slug or "/" in slug:
+        abort(404)
+    post = None
+    try:
+        post = BLOG_SOURCE.post(slug)
+    except Exception:
+        post = None
+    if post is not None:
+        return render_template("blog_post_atproto.html", post=post, did=BLOG_DID)
     filepath = BLOG_DIR / f"{slug}.md"
-    if not filepath.exists() or ".." in slug or "/" in slug:
+    if not filepath.exists():
         abort(404)
     return render_template("blog_post.html", doc=render_md(filepath))
+
+
+def _feed_posts():
+    """Feed entries as plain dicts, from AT Protocol when available."""
+    posts = _atproto_posts()
+    if posts:
+        return [{"title": p.title, "slug": p.slug, "date": p.date} for p in posts]
+    return _blog_posts()
 
 
 @app.route("/blog/feed.xml")
@@ -173,7 +226,7 @@ def blog_feed():
         f"<link>https://freeq.at/blog/{p['slug']}/</link>"
         f"<guid>https://freeq.at/blog/{p['slug']}/</guid>"
         f"<pubDate>{p['date']}</pubDate></item>"
-        for p in _blog_posts()
+        for p in _feed_posts()
     )
     rss = (
         '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'
