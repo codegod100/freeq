@@ -166,3 +166,74 @@ correct so they can't regress (the channel *list* hides private channels; the
 governance endpoints stay 200 for public channels).
 
 Every channel-scoped read endpoint in `web.rs` now funnels through one guard.
+
+### 7. RED→GREEN: unauthenticated artifact writes + a dead sessions lookup
+`fa457e17` — two bugs, one commit
+
+**7a.** `POST /api/v1/sessions/{id}/artifacts` took **no auth at all**.
+RED: `anonymous POST of a session artifact returned 200`. Worse than a plain
+write: `created_by` came from the **request body** (attribution forgery in the
+one layer whose value proposition is verifiable authorship), and the handler
+broadcasts a NOTICE into the session's channel using caller-supplied text —
+unauthenticated message injection into a room the caller isn't in. Session ids
+are not secret (channel members see them in `av-*` TAGMSGs).
+Fix: require a bearer; authorize as participant, else fall back to the bound
+channel's read rule; take `created_by` from the authenticated caller.
+
+**7b.** `GET /channels/{name}/sessions` never found anything.
+RED: `bare channel name found no active session, but one is running` — it
+passed the raw path segment to `active_session_for_channel` while sessions are
+stored `#`-prefixed, so it reported "no calls" for every channel unless the
+caller URL-encoded the `#`. Found *accidentally*, while building the fixture for
+7a — the test needed a real session and couldn't see one.
+
+### 8. Follow-through: clients must send the bearer
+`29d70d34` (web), `b4c9d187` (macOS + iOS)
+
+Not an independent discovery — but the authorization fixes above would have been
+a **silent release regression** without it. Every client called `/pins`,
+`/audit`, `/sessions` with no `Authorization` header, so those features would
+have kept working on public channels and started 403ing on private ones: the
+case the people who most care about privacy actually use. This is the kind of
+break that ships green and surfaces as "pins are broken for me".
+
+- web: new `lib/api.ts` (`authHeaders`/`apiFetch`, 6 tests). `irc/client.ts`
+  uses a local `authedFetch` instead — it owns the singleton client, so
+  importing `lib/api` would be an import cycle.
+- native: new `Models/ApiAuth.swift` in both clients (4 tests each), including
+  "blank bearer is treated as absent" so a cleared session can't send
+  `Bearer `.
+
+## Scoreboard
+
+| | before | after |
+|---|---|---|
+| freeq-server tests | 1105 | **1122** |
+| web (vitest) | 787 | **793** |
+| macOS core | 472 | **476** |
+| iOS core | 114 | **118** |
+
+**8 real defects found and fixed**, every one caught by a test that failed
+first. Two of them (delete-leaves-edited-text, private-channel REST reads) I'd
+call release blockers.
+
+Areas swept: message delete/edit lifecycle (DB + memory + FTS + pins), TAGMSG
+target normalization, the entire channel-scoped REST authorization surface
+(reads *and* writes), and client-side bearer propagation.
+
+## Not done / notes for the morning
+
+- **Orphaned reactions on delete.** `soft_delete_message` sweeps messages, FTS
+  and pins, but `reactions` rows for the deleted msgids remain. Harmless today
+  (nothing reads them once the message is gone) so I left it — but it's the same
+  family and worth a tidy-up.
+- **`edit_delete_adversarial.rs` exists and missed all four delete/edit bugs.**
+  Worth reading to see what it *does* assert; adversarial suites that pass while
+  the feature leaks content are a false-confidence risk.
+- **`AGENTS.md` hotspot notes are stale** (see item 0). Top gamma is now
+  `freeq-eliza/src/irc.rs` (520), unlisted; the "ZERO unit tests" and
+  "UNDERTESTED" claims for `sdk/client.rs` and `irc/client.ts` are out of date.
+  I did not update AGENTS.md — that's a judgement call for you.
+- **Nothing deployed.** All fixes are committed and pushed but the server has
+  not been restarted, per the no-overnight-infra rule. The REST authorization
+  changes are the ones to deploy deliberately, with the client updates.
