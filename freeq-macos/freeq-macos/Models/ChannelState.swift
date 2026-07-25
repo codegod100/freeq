@@ -123,7 +123,13 @@ class ChannelState: Identifiable {
     }
 
     func applyDelete(msgId: String) {
-        if let idx = findMessage(byId: msgId) {
+        // Match on the current id OR a prior editOf, exactly as applyEdit does.
+        // An edit rewrites the in-memory id to the edit's msgid, while a delete
+        // always names the ORIGINAL msgid (the identity clients hold, and what
+        // the server relays in +draft/delete). Matching id alone meant a delete
+        // of an edited message found nothing and left it on screen after the
+        // server had already removed it.
+        if let idx = messages.firstIndex(where: { $0.id == msgId || $0.editOf == msgId }) {
             messages[idx].isDeleted = true
             messages[idx].text = ""
         }

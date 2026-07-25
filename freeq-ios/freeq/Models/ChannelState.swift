@@ -132,7 +132,10 @@ class ChannelState: ObservableObject, Identifiable {
     /// pinned to the stale row while an id CHANGE releases it and rebuilds.
     /// The original id stays in `messageIds` so a replay can't resurrect it.
     func applyDelete(msgId: String) {
-        if let idx = findMessage(byId: msgId) {
+        // Match on the current id OR a prior editOf, exactly as applyEdit does:
+        // an edit re-keys the row to the edit's msgid while a delete names the
+        // ORIGINAL msgid, so matching id alone left edited messages on screen.
+        if let idx = messages.firstIndex(where: { $0.id == msgId || $0.editOf == msgId }) {
             var tomb = messages[idx]
             tomb.id = msgId + ":tombstone"
             tomb.isDeleted = true
