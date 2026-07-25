@@ -17,7 +17,9 @@ defmodule FreeqWeb3Web do
   those modules here.
   """
 
-  def static_paths, do: ~w(assets fonts images favicon.ico robots.txt)
+  def static_paths,
+    do:
+      ~w(assets fonts images favicon.ico favicon.png icon-192.png apple-touch-icon.png freeq-180.png robots.txt)
 
   def router do
     quote do
