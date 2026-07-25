@@ -1,0 +1,48 @@
+{
+  "nodes": {
+    "agentic": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1784944199,
+        "narHash": "sha256-trHCKxvC3RYYetffGYBfqWvaxONB815oZy1EmQAsESI=",
+        "ref": "refs/heads/main",
+        "rev": "ad6e024b31a43ab3098db4a8df805668f86581c9",
+        "revCount": 14,
+        "type": "git",
+        "url": "https://tangled.org/nandi.uk/agentic"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://tangled.org/nandi.uk/agentic"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1784796856,
+        "narHash": "sha256-wWFrV5/Qbm+lyt5x20E/bSbfJiGKMo4RCxZV8cl/WZI=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "e2587caef70cea85dd97d7daab492899902dbf5d",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "agentic": "agentic",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

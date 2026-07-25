@@ -24,10 +24,15 @@ Without the flake: Gleam 1.17+, OTP 26+.
 | `src/freeq_web4.gleam` | Mist HTTP + `/live` WebSocket + static assets |
 | `src/freeq_web4/live.gleam` | Stateful Lightspeed component (model/msg/render) |
 | `src/freeq_web4/ws.gleam` | Live session host — protocol Event → handle → Diff |
-| `src/freeq_web4/irc/upstream.gleam` | Stratus WebSocket client to freeq-server `/irc` |
+| `src/freeq_web4/irc/upstream.gleam` | Stratus WS to freeq-server `/irc` (guest + SASL) |
 | `src/freeq_web4/irc/render.gleam` | IRC parse + history rows (port of web3 `Irc.Render`) |
 | `src/freeq_web4/rest.gleam` | REST client for channels + history |
-| `src/freeq_web4/config.gleam` | Env: `FREEQ_UPSTREAM`, `FREEQ_UPSTREAM_REST`, `PORT` |
+| `src/freeq_web4/auth.gleam` | OAuth login / callback / logout / client metadata |
+| `src/freeq_web4/atproto/*` | DPoP, OAuth, SASL ATPROTO-CHALLENGE |
+| `src/freeq_web4/cookie_session.gleam` | `freeq_session` cookie |
+| `src/freeq_web4/pending_oauth_store.gleam` | PKCE state (disk) |
+| `src/freeq_web4/session_store.gleam` | Persisted OAuth credentials (disk) |
+| `src/freeq_web4/config.gleam` | Env: upstream, REST, PORT, public URL, store dirs |
 | `priv/static/app.css` | freeq dark theme (from web3) |
 | `priv/static/lightspeed.js` | Lightspeed browser runtime |
 
@@ -38,9 +43,14 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - **One IRC connection per LiveView socket** (MVP). web3 uses a cookie
   session registry for multi-tab; that can land later as a Gleam actor
   registry.
-- **Guest mode first**. OAuth/SASL is the next porting milestone.
+- **Guest mode first**, with optional AT Protocol OAuth + SASL.
 - **Client-authoritative channel list** in the LiveView model (`my_channels`).
-  Only join/part/navigate mutates it.
+  Only join/part/navigate mutates it; persisted under the session cookie
+  (`session_store` `.channels` file) so refresh restores the sidebar + re-JOINs.
+- **OAuth**: cookie `freeq_session` + disk stores under `.dev-data/web4-*`.
+  Login at `/login`; callback at `/auth/callback`; client metadata at
+  `/.well-known/oauth-client-metadata`. Upstream IRC runs SASL
+  `ATPROTO-CHALLENGE` when credentials are present.
 
 ## Porting checklist (from freeq-web3)
 
@@ -51,12 +61,12 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [x] REST history + channel list
 - [x] Member roster (353 / JOIN / PART / QUIT)
 - [x] freeq dark theme CSS
-- [ ] AT Protocol OAuth + SASL ATPROTO-CHALLENGE
+- [x] AT Protocol OAuth + SASL ATPROTO-CHALLENGE
+- [x] Voice/video AV calls (TAGMSG signaling + MoQ media panel)
 - [ ] Encrypted session store + multi-tab registry
 - [ ] Reactions (TAGMSG +react / unreact)
 - [ ] Message edit/delete UI
 - [ ] DMs + E2EE
-- [ ] Voice/video
 - [ ] Link embeds / preview cache
 - [ ] Upload proxy / PWA
 

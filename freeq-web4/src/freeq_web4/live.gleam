@@ -4,8 +4,11 @@
 //// Browser events become typed Msgs; IRC lines become PushLine/etc.
 //// Fine-grained region patches keep the shell responsive.
 
+import freeq_web4/config
 import freeq_web4/irc/render
 import freeq_web4/rest
+import gleam/bit_array
+import gleam/crypto
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -20,18 +23,27 @@ import lightspeed/form
 
 // ── Model ────────────────────────────────────────────────────────────────────
 
+/// Which page the LiveView is showing: channel directory or a single channel.
 pub type View {
+  /// Channel list / directory (`/chat`).
   Index
+  /// Single channel chat shell (`/chat/:name`).
   Channel
 }
 
+/// Upstream IRC WebSocket connection phase, shown in the shell status.
 pub type WsLabel {
+  /// No upstream socket (or closed).
   WsDisconnected
+  /// TCP/WebSocket connect in progress.
   WsConnecting
+  /// CAP/NICK/USER (and optional SASL) in progress.
   WsRegistering
+  /// Registered and ready for PRIVMSG / JOIN.
   WsReady
 }
 
+/// Full server-side state for one LiveView socket (channel shell + AV).
 pub type Model {
   Model(
     view: View,
@@ -48,6 +60,27 @@ pub type Model {
     status: String,
     /// Last error / system banner.
     flash: String,
+    /// AT Protocol identity (after OAuth + SASL).
+    authenticated: Bool,
+    auth_handle: String,
+    auth_did: String,
+    /// freeq-server session bearer from API-BEARER NOTICE (post-SASL).
+    api_bearer: Option(String),
+    /// In an AV call (media panel visible).
+    av_active: Bool,
+    /// Someone else has a live call on the *viewed* channel.
+    av_call_present: Bool,
+    /// freeq-server AV session id (`+freeq.at/av-id`).
+    av_session_id: Option(String),
+    /// Channel the call is on (may differ from text `channel` while browsing).
+    av_channel: Option(String),
+    av_participant_count: Int,
+    av_muted: Bool,
+    av_camera: Bool,
+    /// Per-device instance id (8 lowercase hex).
+    av_instance: String,
+    /// MoQ JWT from directed `+freeq.at/av-token` TAGMSG.
+    av_token: Option(String),
   )
 }
 
@@ -58,6 +91,7 @@ pub type Assigns {
 
 // ── Messages ─────────────────────────────────────────────────────────────────
 
+/// Typed events for the chat LiveView: browser actions and server-side pushes.
 pub type Msg {
   /// Browser: submit compose form.
   Send(text: String)
@@ -85,12 +119,31 @@ pub type Msg {
   SetTopicText(String)
   /// Server: flash/status.
   SetFlash(String)
+  /// Server: OAuth credentials loaded / SASL identity.
+  SetAuth(authenticated: Bool, handle: String, did: String)
+  /// Server: API-BEARER from freeq-server after SASL.
+  SetApiBearer(String)
+  /// Browser: start voice call on current channel.
+  AvStart
+  /// Browser: join existing call on current channel.
+  AvJoin
+  /// Browser: leave the active call.
+  AvLeave
+  /// Browser: toggle mute.
+  AvToggleMute
+  /// Browser: toggle camera.
+  AvToggleCamera
+  /// Browser: roster poll reported participant count.
+  AvRoster(count: Int)
+  /// Server: REST probe found (or cleared) an active call on a channel.
+  AvProbe(channel: String, call: Option(rest.ActiveCall))
   /// No-op / ignored.
   Nop
 }
 
 /// Side effects the session host should perform after a handle.
 pub type Effect {
+  /// Nothing to do.
   NoEffect
   /// Send raw IRC line(s) upstream.
   IrcSend(List(String))
@@ -100,6 +153,8 @@ pub type Effect {
   FetchHistory(channel: String)
   /// Fetch public channel list.
   FetchChannels
+  /// Probe freeq-server for an active AV call on a channel.
+  FetchActiveCall(channel: String)
   /// Stop upstream (logout / socket close).
   StopUpstream
 }
@@ -163,6 +218,19 @@ fn mount(
       compose: "",
       status: "connecting…",
       flash: "",
+      authenticated: False,
+      auth_handle: "",
+      auth_did: "",
+      api_bearer: None,
+      av_active: False,
+      av_call_present: False,
+      av_session_id: None,
+      av_channel: None,
+      av_participant_count: 0,
+      av_muted: False,
+      av_camera: False,
+      av_instance: generate_av_instance(),
+      av_token: None,
     )
   helpers.no_effect(model)
 }
@@ -205,23 +273,54 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         True -> #(model, NoEffect)
         False -> {
           let my = list_unique_append(model.my_channels, ch)
-          let model =
-            Model(
-              ..model,
-              view: Channel,
-              channel: Some(ch),
-              my_channels: my,
-              messages: [],
-              members: [],
-              topic: "",
-              flash: "",
-            )
+          // Seed from directory when present (#test); host REST fills private
+          // rooms (#freeq) and IRC 332 may refine further.
+          let topic = rest.topic_for(model.all_channels, ch)
+          let model = case model.av_active {
+            True ->
+              Model(
+                ..model,
+                view: Channel,
+                channel: Some(ch),
+                my_channels: my,
+                messages: [],
+                members: [],
+                topic: topic,
+                flash: "",
+                av_channel: case model.av_channel {
+                  Some(_) -> model.av_channel
+                  None -> model.channel
+                },
+              )
+            False ->
+              Model(
+                ..model,
+                view: Channel,
+                channel: Some(ch),
+                my_channels: my,
+                messages: [],
+                members: [],
+                topic: topic,
+                flash: "",
+                av_call_present: False,
+                av_session_id: None,
+                av_channel: None,
+                av_participant_count: 0,
+                av_muted: False,
+                av_camera: False,
+                av_instance: generate_av_instance(),
+                av_token: None,
+              )
+          }
           #(
             model,
             multi_effect([
               EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
-              IrcSend(["JOIN " <> ch <> "\r\n"]),
+              // JOIN + NAMES: re-open of an already-joined channel still refreshes
+              // the userlist (some servers skip 353 on redundant JOIN).
+              IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
               FetchHistory(ch),
+              FetchActiveCall(ch),
             ]),
           )
         }
@@ -251,38 +350,69 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       #(model, IrcSend(["PART " <> ch <> "\r\n"]))
     }
 
-    GoIndex -> #(
-      Model(
-        ..model,
-        view: Index,
-        channel: None,
-        messages: [],
-        members: [],
-        topic: "",
-      ),
-      FetchChannels,
-    )
+    GoIndex ->
+      // Keep AV state — browsing the directory must not leave the call.
+      #(
+        Model(
+          ..model,
+          view: Index,
+          channel: None,
+          messages: [],
+          members: [],
+          topic: "",
+        ),
+        FetchChannels,
+      )
 
     OpenChannel(bare) -> {
       let ch = render.canonical_channel(bare)
       let my = list_unique_append(model.my_channels, ch)
-      let model =
-        Model(
-          ..model,
-          view: Channel,
-          channel: Some(ch),
-          my_channels: my,
-          messages: [],
-          members: [],
-          topic: "",
-          flash: "",
-        )
+      // Seed from directory when present (#test); host REST fills private
+      // rooms (#freeq) and IRC 332 may refine further.
+      let topic = rest.topic_for(model.all_channels, ch)
+      let model = case model.av_active {
+        True ->
+          Model(
+            ..model,
+            view: Channel,
+            channel: Some(ch),
+            my_channels: my,
+            messages: [],
+            members: [],
+            topic: topic,
+            flash: "",
+            av_channel: case model.av_channel {
+              Some(_) -> model.av_channel
+              None -> model.channel
+            },
+          )
+        False ->
+          Model(
+            ..model,
+            view: Channel,
+            channel: Some(ch),
+            my_channels: my,
+            messages: [],
+            members: [],
+            topic: topic,
+            flash: "",
+            av_call_present: False,
+            av_session_id: None,
+            av_channel: None,
+            av_participant_count: 0,
+            av_muted: False,
+            av_camera: False,
+            av_instance: generate_av_instance(),
+            av_token: None,
+          )
+      }
       #(
         model,
         multi_effect([
           EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
-          IrcSend(["JOIN " <> ch <> "\r\n"]),
+          IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
           FetchHistory(ch),
+          FetchActiveCall(ch),
         ]),
       )
     }
@@ -309,15 +439,164 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     SetTopicText(topic) -> #(Model(..model, topic: topic), NoEffect)
 
     SetFlash(flash) -> #(Model(..model, flash: flash), NoEffect)
+
+    SetAuth(authenticated, handle, did) -> #(
+      Model(
+        ..model,
+        authenticated: authenticated,
+        auth_handle: handle,
+        auth_did: did,
+        nick: case authenticated && handle != "" {
+          True -> render.sanitize_nick(handle)
+          False -> model.nick
+        },
+      ),
+      NoEffect,
+    )
+
+    SetApiBearer(bearer) -> #(
+      Model(..model, api_bearer: Some(bearer), authenticated: True),
+      NoEffect,
+    )
+
+    AvStart -> av_start_or_join(model)
+    AvJoin -> av_start_or_join(model)
+    AvLeave -> av_leave(model)
+    AvToggleMute -> #(Model(..model, av_muted: !model.av_muted), NoEffect)
+    AvToggleCamera -> #(Model(..model, av_camera: !model.av_camera), NoEffect)
+    AvRoster(count) ->
+      case count >= 0 {
+        True -> #(Model(..model, av_participant_count: count), NoEffect)
+        False -> #(model, NoEffect)
+      }
+    AvProbe(channel, call) -> apply_av_probe(model, channel, call)
+  }
+}
+
+fn av_start_or_join(model: Model) -> #(Model, Effect) {
+  case model.av_active {
+    True -> #(model, NoEffect)
+    False ->
+      case model.channel {
+        None -> #(Model(..model, flash: "Join a channel first"), NoEffect)
+        Some(ch) -> {
+          let instance = model.av_instance
+          let line = case
+            model.av_call_present,
+            model.av_session_id
+          {
+            True, Some(sid) if sid != "" ->
+              render.av_join_line(ch, sid, instance)
+            _, _ -> render.av_start_line(ch, instance)
+          }
+          #(
+            Model(
+              ..model,
+              av_active: True,
+              av_channel: Some(ch),
+              flash: "",
+            ),
+            IrcSend([line]),
+          )
+        }
+      }
+  }
+}
+
+fn av_leave(model: Model) -> #(Model, Effect) {
+  let ch = case model.av_channel {
+    Some(c) -> Some(c)
+    None -> model.channel
+  }
+  let line = case ch, model.av_session_id {
+    Some(c), Some(sid) if sid != "" ->
+      Some(render.av_leave_line(c, sid, model.av_instance))
+    _, _ -> None
+  }
+  let next =
+    Model(
+      ..model,
+      av_active: False,
+      av_call_present: False,
+      av_session_id: None,
+      av_channel: None,
+      av_participant_count: 0,
+      av_muted: False,
+      av_camera: False,
+      av_token: None,
+    )
+  case line {
+    Some(l) -> #(next, IrcSend([l]))
+    None -> #(next, NoEffect)
+  }
+}
+
+fn apply_av_probe(
+  model: Model,
+  channel: String,
+  call: Option(rest.ActiveCall),
+) -> #(Model, Effect) {
+  // Never overwrite an active local call (may be on another channel).
+  case model.av_active {
+    True -> #(model, NoEffect)
+    False -> {
+      let ch = render.canonical_channel(channel)
+      let viewing = case model.channel {
+        Some(c) -> c == ch
+        None -> False
+      }
+      case viewing {
+        False -> #(model, NoEffect)
+        True ->
+          case call {
+            Some(info) if info.session_id != "" -> #(
+              Model(
+                ..model,
+                av_call_present: True,
+                av_session_id: Some(info.session_id),
+                av_participant_count: info.participant_count,
+              ),
+              NoEffect,
+            )
+            _ -> #(
+              Model(
+                ..model,
+                av_call_present: False,
+                av_session_id: None,
+                av_participant_count: 0,
+              ),
+              NoEffect,
+            )
+          }
+      }
+    }
+  }
+}
+
+fn generate_av_instance() -> String {
+  crypto.strong_random_bytes(4)
+  |> bit_array.base16_encode
+  |> string.lowercase
+}
+
+fn av_actor_is_self(model: Model, actor: String) -> Bool {
+  case string.trim(actor) {
+    "" -> False
+    a -> {
+      let a = string.lowercase(a)
+      let candidates =
+        [model.nick, model.auth_handle]
+        |> list.filter(fn(n) { n != "" })
+        |> list.map(string.lowercase)
+      list.contains(candidates, a)
+    }
   }
 }
 
 /// Collapse a list of effects into one (session host expands multi).
+/// Prefer EnsureUpstream so the host opens IRC; after_join sends JOIN + history.
+/// FetchActiveCall is applied by the host after join when present.
 fn multi_effect(effects: List(Effect)) -> Effect {
-  // Session host special-cases EnsureUpstream + list via apply; we encode
-  // the common join path as EnsureUpstream and rely on host to also send
-  // JOIN + fetch. For simplicity, prefer the first non-NoEffect that is
-  // EnsureUpstream, else first.
   case effects {
     [EnsureUpstream(p, e), ..] -> EnsureUpstream(p, e)
     [other, ..] -> other
@@ -326,6 +605,105 @@ fn multi_effect(effects: List(Effect)) -> Effect {
 }
 
 fn apply_line(model: Model, line: String) -> #(Model, Effect) {
+  // AV token (directed to us) — preferred MoQ JWT path for guests + SASL.
+  let own_nicks =
+    [model.nick, model.auth_handle]
+    |> list.filter(fn(n) { n != "" })
+  case render.parse_av_token_tagmsg(line, own_nicks) {
+    Some(#(sid, token)) if token != "" -> {
+      let session_id = case sid {
+        "" -> model.av_session_id
+        s -> Some(s)
+      }
+      #(
+        Model(..model, av_session_id: session_id, av_token: Some(token)),
+        NoEffect,
+      )
+    }
+    _ ->
+      case render.parse_av_state_tagmsg(line) {
+        Some(av) -> apply_av_state(model, av)
+        None -> apply_line_chat(model, line)
+      }
+  }
+}
+
+fn apply_av_state(model: Model, av: render.AvState) -> #(Model, Effect) {
+  let ch = render.canonical_channel(av.channel)
+  let av_ch = case model.av_channel {
+    Some(c) -> Some(render.canonical_channel(c))
+    None -> None
+  }
+  let our_call =
+    model.av_active
+    && case av_ch {
+      Some(c) -> c == ch
+      None -> False
+    }
+  let view_channel = case model.channel {
+    Some(c) -> c == ch
+    None -> False
+  }
+  let state = string.lowercase(av.state)
+
+  case state {
+    "started" | "joined" -> {
+      case model.av_active && !our_call {
+        // Already in a different call — ignore.
+        True -> #(model, NoEffect)
+        False -> {
+          let become_active = model.av_active || av_actor_is_self(model, av.actor)
+          #(
+            Model(
+              ..model,
+              av_call_present: True,
+              av_session_id: case av.session_id {
+                "" -> model.av_session_id
+                s -> Some(s)
+              },
+              av_participant_count: av.participants,
+              av_active: become_active,
+              av_channel: case become_active {
+                True -> Some(ch)
+                False -> model.av_channel
+              },
+            ),
+            NoEffect,
+          )
+        }
+      }
+    }
+    "ended" ->
+      case our_call || { view_channel && !model.av_active } {
+        True -> #(
+          Model(
+            ..model,
+            av_active: False,
+            av_call_present: False,
+            av_session_id: None,
+            av_channel: None,
+            av_participant_count: 0,
+            av_muted: False,
+            av_camera: False,
+            av_token: None,
+          ),
+          NoEffect,
+        )
+        False -> #(model, NoEffect)
+      }
+    "left" ->
+      case our_call || { view_channel && !model.av_active } {
+        True -> #(
+          Model(..model, av_participant_count: av.participants),
+          NoEffect,
+        )
+        False -> #(model, NoEffect)
+      }
+    _ -> #(model, NoEffect)
+  }
+}
+
+fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
   // Topic
   case render.parse_topic(line) {
     Some(#(ch, topic)) ->
@@ -334,80 +712,105 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
         _ -> #(model, NoEffect)
       }
     None ->
-      // Member roster 353
-      case string.contains(line, " 353 ") {
-        True -> {
-          let members = render.parse_353_members(line)
-          // Merge by nick
-          let members = merge_members(model.members, members)
-          #(Model(..model, members: members), NoEffect)
-        }
+      // Member roster 353 (only for the channel currently in view)
+      case render.is_353(line) {
+        True ->
+          case render.channel_from_353(line), model.channel {
+            Some(ch), Some(c) if ch == c -> {
+              let members =
+                merge_members(model.members, render.parse_353_members(line))
+              #(Model(..model, members: members), NoEffect)
+            }
+            _, _ -> #(model, NoEffect)
+          }
         False ->
-          case render.parse_member_change(line) {
-            Some(#("join", nick, Some(ch))) ->
+          case render.parse_mode_change(line) {
+            Some(#(ch, ops)) ->
               case model.channel {
                 Some(c) if c == ch -> #(
                   Model(
                     ..model,
-                    members: upsert_member(
-                      model.members,
-                      render.Member(
-                        nick: nick,
-                        op: False,
-                        voice: False,
-                        color: render.nick_color_class(nick),
-                      ),
-                    ),
+                    members: render.apply_mode_ops(model.members, ops),
                   ),
                   NoEffect,
                 )
                 _ -> #(model, NoEffect)
               }
-            Some(#("part", nick, Some(ch))) ->
-              case model.channel {
-                Some(c) if c == ch -> #(
+            None ->
+              case render.parse_member_change(line) {
+                Some(#("join", nick, Some(ch))) ->
+                  case model.channel {
+                    Some(c) if c == ch -> #(
+                      Model(
+                        ..model,
+                        members: upsert_member(
+                          model.members,
+                          render.Member(
+                            nick: nick,
+                            op: False,
+                            halfop: False,
+                            voice: False,
+                            color: render.nick_color_class(nick),
+                          ),
+                        ),
+                      ),
+                      NoEffect,
+                    )
+                    _ -> #(model, NoEffect)
+                  }
+                Some(#("part", nick, Some(ch))) ->
+                  case model.channel {
+                    Some(c) if c == ch -> #(
+                      Model(
+                        ..model,
+                        members: list.filter(model.members, fn(m) {
+                          m.nick != nick
+                        }),
+                      ),
+                      NoEffect,
+                    )
+                    _ -> #(model, NoEffect)
+                  }
+                Some(#("quit", nick, _)) -> #(
                   Model(
                     ..model,
                     members: list.filter(model.members, fn(m) { m.nick != nick }),
                   ),
                   NoEffect,
                 )
-                _ -> #(model, NoEffect)
-              }
-            Some(#("quit", nick, _)) -> #(
-              Model(
-                ..model,
-                members: list.filter(model.members, fn(m) { m.nick != nick }),
-              ),
-              NoEffect,
-            )
-            Some(#("nick", old, Some(new))) -> #(
-              Model(
-                ..model,
-                nick: case
-                  string.lowercase(model.nick) == string.lowercase(old)
-                {
-                  True -> new
-                  False -> model.nick
-                },
-                members: list.map(model.members, fn(m) {
-                  case m.nick == old {
-                    True -> render.Member(..m, nick: new)
-                    False -> m
+                Some(#("nick", old, Some(new))) -> #(
+                  Model(
+                    ..model,
+                    nick: case
+                      string.lowercase(model.nick) == string.lowercase(old)
+                    {
+                      True -> new
+                      False -> model.nick
+                    },
+                    members: list.map(model.members, fn(m) {
+                      case string.lowercase(m.nick) == string.lowercase(old) {
+                        True ->
+                          render.Member(
+                            ..m,
+                            nick: new,
+                            color: render.nick_color_class(new),
+                          )
+                        False -> m
+                      }
+                    }),
+                  ),
+                  NoEffect,
+                )
+                _ ->
+                  case render.parse_message_line(line, Some(model.nick)) {
+                    Some(row) -> {
+                      // Filter to current channel for PRIVMSG when possible —
+                      // full line parse doesn't always carry target; show all.
+                      let messages = append_capped(model.messages, row, 400)
+                      #(Model(..model, messages: messages), NoEffect)
+                    }
+                    None -> #(model, NoEffect)
                   }
-                }),
-              ),
-              NoEffect,
-            )
-            _ ->
-              case render.parse_message_line(line, Some(model.nick)) {
-                Some(row) -> {
-                  // Filter to current channel for PRIVMSG when possible —
-                  // full line parse doesn't always carry target; show all.
-                  let messages = append_capped(model.messages, row, 400)
-                  #(Model(..model, messages: messages), NoEffect)
-                }
-                None -> #(model, NoEffect)
               }
           }
       }
@@ -442,11 +845,27 @@ fn append_capped(
   row: render.Row,
   cap: Int,
 ) -> List(render.Row) {
-  let rows = list.append(rows, [row])
-  let n = list.length(rows)
-  case n > cap {
-    True -> list.drop(rows, n - cap)
-    False -> rows
+  // Skip IRC chathistory / echo duplicates when msgid already present.
+  let already = case row.msgid {
+    Some(id) ->
+      list.any(rows, fn(r) {
+        case r.msgid {
+          Some(existing) -> existing == id
+          None -> r.id == id
+        }
+      })
+    None -> False
+  }
+  case already {
+    True -> rows
+    False -> {
+      let rows = list.append(rows, [row])
+      let n = list.length(rows)
+      case n > cap {
+        True -> list.drop(rows, n - cap)
+        False -> rows
+      }
+    }
   }
 }
 
@@ -476,6 +895,20 @@ fn path_to_view(path: String) -> #(View, Option(String)) {
         False -> #(Index, None)
       }
   }
+}
+
+/// Browser path for the current view (`/chat` or `/chat/freeq`).
+/// Used by the client to keep the address bar in sync with LiveView state.
+pub fn path_for_model(model: Model) -> String {
+  case model.view, model.channel {
+    Channel, Some(ch) -> channel_path(ch)
+    _, _ -> "/chat"
+  }
+}
+
+/// `/chat/<bare>` for a channel name (with or without `#`).
+pub fn channel_path(channel: String) -> String {
+  "/chat/" <> render.bare_channel(channel)
 }
 
 fn ws_status(ws: WsLabel) -> String {
@@ -527,6 +960,30 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
         Ok(SetTopic(topic))
       })
     }),
+    stateful.route("av_start", fn(e) {
+      event.decode_unit(e, "av_start", AvStart)
+    }),
+    stateful.route("av_join", fn(e) {
+      event.decode_unit(e, "av_join", AvJoin)
+    }),
+    stateful.route("av_leave", fn(e) {
+      event.decode_unit(e, "av_leave", AvLeave)
+    }),
+    stateful.route("av_toggle_mute", fn(e) {
+      event.decode_unit(e, "av_toggle_mute", AvToggleMute)
+    }),
+    stateful.route("av_toggle_camera", fn(e) {
+      event.decode_unit(e, "av_toggle_camera", AvToggleCamera)
+    }),
+    stateful.route("av_roster", fn(e) {
+      event.decode_form(e, "av_roster", fn(data) {
+        use raw <- result.try(form.require(data, "count"))
+        case int.parse(raw) {
+          Ok(n) -> Ok(AvRoster(n))
+          Error(_) -> Ok(AvRoster(0))
+        }
+      })
+    }),
   ]
 }
 
@@ -539,7 +996,20 @@ pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
       let acc = []
       let acc = maybe_region(before, after, "nav", nav_region, acc)
       let acc = maybe_region(before, after, "sidebar", sidebar_region, acc)
-      let acc = maybe_region(before, after, "main", main_region, acc)
+      // Channel chat: patch messages / compose separately so the compose
+      // input is not remounted on every PRIVMSG (would drop focus + draft).
+      // Index, or Index↔Channel: replace the whole main region.
+      let acc = case before.view, after.view {
+        Channel, Channel -> {
+          let acc = maybe_region(before, after, "flash", flash_region, acc)
+          let acc =
+            maybe_region(before, after, "messages", messages_region, acc)
+          maybe_region(before, after, "compose", compose_region, acc)
+        }
+        _, _ -> maybe_region(before, after, "main", main_region, acc)
+      }
+      // AV panel is a sibling of main so directory browse keeps the call.
+      let acc = maybe_region(before, after, "av", av_region, acc)
       let acc = maybe_region(before, after, "members", members_region, acc)
       list.reverse(acc)
     }
@@ -571,11 +1041,17 @@ fn render(model: Model) -> component.Rendered {
 }
 
 fn shell(model: Model) -> String {
+  // Center column = main + av so AV survives index↔channel main swaps
+  // (sibling region) while staying a vertical flex child of the chat column.
   "<div id=\"freeq-chat\" class=\"freeq-root\">"
   <> nav_region(model)
+  <> "<div id=\"drawer-scrim\" aria-hidden=\"true\"></div>"
   <> "<div class=\"chat-body\">"
   <> sidebar_region(model)
+  <> "<div class=\"chat-center\">"
   <> main_region(model)
+  <> av_region(model)
+  <> "</div>"
   <> members_region(model)
   <> "</div></div>"
 }
@@ -594,7 +1070,21 @@ fn nav_region(model: Model) -> String {
     WsReady -> " connected"
     _ -> ""
   }
+  let people_btn = case model.view {
+    Channel ->
+      "<button type=\"button\" class=\"mobile-btn\" data-drawer=\"members\" aria-label=\"People\">"
+      <> "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
+      <> "<path d=\"M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1\" />"
+      <> "<circle cx=\"9.5\" cy=\"8\" r=\"3.5\" />"
+      <> "<path d=\"M20 19v-1a3.5 3.5 0 0 0-2.5-3.35\" />"
+      <> "<path d=\"M16.5 4.6a3.5 3.5 0 0 1 0 6.8\" />"
+      <> "</svg></button>"
+    Index -> ""
+  }
   "<nav data-ls-region=\"nav\">"
+  <> "<button type=\"button\" class=\"mobile-btn\" data-drawer=\"sidebar\" aria-label=\"Channels\">"
+  <> "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 7h16M4 12h16M4 17h16\" /></svg>"
+  <> "</button>"
   <> "<span class=\"brand\">freeq</span>"
   <> "<div class=\"nav-channel-meta\">"
   <> "<span class=\"nav-channel\">"
@@ -605,6 +1095,7 @@ fn nav_region(model: Model) -> String {
       "<span id=\"channel-topic\" class=\"editable\">" <> topic <> "</span>"
     Index -> ""
   }
+  <> av_call_button(model)
   <> "</div>"
   <> "<div class=\"nav-right\">"
   <> "<span id=\"status\" class=\""
@@ -612,10 +1103,219 @@ fn nav_region(model: Model) -> String {
   <> "\"><span class=\"dot\"></span><span>"
   <> render.escape_html(model.status)
   <> "</span></span>"
-  <> "<span class=\"auth-badge guest\">👤 "
-  <> render.escape_html(model.nick)
-  <> "</span>"
+  <> people_btn
+  <> auth_badge(model)
   <> "</div></nav>"
+}
+
+fn av_call_button(model: Model) -> String {
+  let show = case model.view {
+    Channel -> True
+    Index -> model.av_active
+  }
+  case show {
+    False -> ""
+    True -> {
+      let class = case model.av_active, model.av_call_present {
+        True, _ -> "av-call-btn in-call"
+        False, True -> "av-call-btn has-call"
+        False, False -> "av-call-btn"
+      }
+      let action = case model.av_active, model.av_call_present {
+        True, _ -> "av_leave"
+        False, True -> "av_join"
+        False, False -> "av_start"
+      }
+      let icon = case model.av_active, model.av_call_present {
+        True, _ -> "📞"
+        False, True -> "🔊"
+        False, False -> "🎙️"
+      }
+      let call_ch = case model.av_channel {
+        Some(c) -> c
+        None -> option.unwrap(model.channel, "")
+      }
+      let title = case model.av_active, model.av_call_present {
+        True, _ ->
+          "In call on " <> call_ch <> " — click to leave"
+        False, True -> {
+          let n = model.av_participant_count
+          let who = case n == 1 {
+            True -> "person"
+            False -> "people"
+          }
+          "Join voice call (" <> int.to_string(n) <> " " <> who <> ")"
+        }
+        False, False -> "Start voice call"
+      }
+      let badge = case model.av_active, model.av_call_present {
+        False, True ->
+          "<span class=\"av-call-badge\">"
+          <> case model.av_participant_count {
+            0 -> "!"
+            n -> int.to_string(n)
+          }
+          <> "</span>"
+        _, _ -> ""
+      }
+      "<button type=\"button\" id=\"av-call-btn\" class=\""
+      <> class
+      <> "\" data-ls-click=\""
+      <> action
+      <> "\" data-channel=\""
+      <> render.escape_html(call_ch)
+      <> "\" data-nick=\""
+      <> render.escape_html(model.nick)
+      <> "\" data-instance=\""
+      <> render.escape_html(model.av_instance)
+      <> "\" data-active=\""
+      <> case model.av_active {
+        True -> "true"
+        False -> "false"
+      }
+      <> "\" title=\""
+      <> render.escape_html(title)
+      <> "\">"
+      <> icon
+      <> badge
+      <> "</button>"
+    }
+  }
+}
+
+fn av_region(model: Model) -> String {
+  case model.av_active {
+    False -> "<div data-ls-region=\"av\" class=\"av-region empty\"></div>"
+    True -> {
+      let call_ch = case model.av_channel {
+        Some(c) -> c
+        None -> option.unwrap(model.channel, "")
+      }
+      let session = option.unwrap(model.av_session_id, "")
+      let token = option.unwrap(model.av_token, "")
+      let count = case model.av_participant_count {
+        n if n > 0 -> n
+        _ -> 1
+      }
+      let panel_class =
+        "av-call-panel active"
+        <> case model.av_camera {
+          True -> " is-camera-on"
+          False -> ""
+        }
+        <> case model.av_muted {
+          True -> " is-muted"
+          False -> ""
+        }
+      let mute_class =
+        "av-call-action av-mute-btn"
+        <> case model.av_muted {
+          True -> " muted"
+          False -> ""
+        }
+      let cam_class =
+        "av-call-action av-cam-btn"
+        <> case model.av_camera {
+          True -> " on"
+          False -> ""
+        }
+      "<div data-ls-region=\"av\">"
+      <> "<div id=\"av-call-panel\" class=\""
+      <> panel_class
+      <> "\" data-channel=\""
+      <> render.escape_html(call_ch)
+      <> "\" data-nick=\""
+      <> render.escape_html(model.nick)
+      <> "\" data-instance=\""
+      <> render.escape_html(model.av_instance)
+      <> "\" data-session-id=\""
+      <> render.escape_html(session)
+      <> "\" data-moq-token=\""
+      <> render.escape_html(token)
+      <> "\" data-muted=\""
+      <> bool_attr(model.av_muted)
+      <> "\" data-camera=\""
+      <> bool_attr(model.av_camera)
+      <> "\" data-authenticated=\""
+      <> bool_attr(model.authenticated)
+      <> "\" data-av-origin=\""
+      <> render.escape_html(config.av_origin())
+      <> "\">"
+      <> "<div class=\"av-call-bar\">"
+      <> "<span class=\"av-call-status\">📞 "
+      <> render.escape_html(call_ch)
+      <> " · "
+      <> int.to_string(count)
+      <> " in call</span>"
+      <> "<div class=\"av-call-actions\">"
+      <> "<button type=\"button\" class=\""
+      <> mute_class
+      <> "\" data-ls-click=\"av_toggle_mute\" title=\""
+      <> case model.av_muted {
+        True -> "Unmute"
+        False -> "Mute"
+      }
+      <> "\">"
+      <> case model.av_muted {
+        True -> "🎤 off"
+        False -> "🎤 on"
+      }
+      <> "</button>"
+      <> "<button type=\"button\" class=\""
+      <> cam_class
+      <> "\" data-ls-click=\"av_toggle_camera\" title=\""
+      <> case model.av_camera {
+        True -> "Turn off camera"
+        False -> "Turn on camera"
+      }
+      <> "\">"
+      <> case model.av_camera {
+        True -> "📷 on"
+        False -> "📷 off"
+      }
+      <> "</button>"
+      <> "<button type=\"button\" class=\"av-call-action av-leave-btn\" data-ls-click=\"av_leave\" title=\"Leave call\">Leave</button>"
+      <> "</div></div>"
+      // Media tiles: client AvCall owns children; morph preserves #av-video-grid.
+      <> "<div id=\"av-video-grid\" class=\"av-video-grid\" data-ls-ignore>"
+      <> "<div class=\"av-tile av-tile-local\" id=\"av-local-tile\" title=\"Click to enlarge\" role=\"button\" tabindex=\"0\">"
+      <> "<video id=\"av-local-video\" class=\"av-local-video\" autoplay muted playsinline hidden></video>"
+      <> "<div class=\"av-tile-avatar local\">You</div>"
+      <> "<span class=\"av-tile-label\">You</span>"
+      <> "</div>"
+      <> "<div id=\"av-remote-tiles\" class=\"av-remote-tiles\"></div>"
+      <> "</div>"
+      <> "<div id=\"av-publish-container\" class=\"av-publish-container\" data-ls-ignore></div>"
+      <> "</div></div>"
+    }
+  }
+}
+
+fn bool_attr(b: Bool) -> String {
+  case b {
+    True -> "true"
+    False -> "false"
+  }
+}
+
+fn auth_badge(model: Model) -> String {
+  case model.authenticated {
+    True -> {
+      let label = case model.auth_handle {
+        "" -> model.nick
+        h -> h
+      }
+      "<span class=\"auth-badge signed-in\" title=\""
+      <> render.escape_html(model.auth_did)
+      <> "\">👤 "
+      <> render.escape_html(label)
+      <> "</span>"
+    }
+    False ->
+      "<span class=\"auth-badge guest\">👤 "
+      <> render.escape_html(model.nick)
+      <> "</span>"
+  }
 }
 
 fn sidebar_region(model: Model) -> String {
@@ -629,11 +1329,13 @@ fn sidebar_region(model: Model) -> String {
       "<li class=\""
       <> active
       <> "\">"
-      <> "<button type=\"button\" class=\"channel-link\" data-ls-click=\"open\" data-ls-payload=\"channel="
+      <> "<a href=\""
+      <> channel_path(ch)
+      <> "\" class=\"channel-link\" data-ls-click=\"open\" data-ls-payload=\"channel="
       <> bare
       <> "\"><span class=\"channel-link-name\">"
       <> render.escape_html(ch)
-      <> "</span></button>"
+      <> "</span></a>"
       <> "<button type=\"button\" class=\"sidebar-channel-part\" data-ls-click=\"part\" data-ls-payload=\"channel="
       <> bare
       <> "\" title=\"Part\">×</button>"
@@ -654,13 +1356,38 @@ fn sidebar_region(model: Model) -> String {
   <> "</ul>"
   <> "</div>"
   <> "<div id=\"user-info\">"
-  <> "<div class=\"user-handle guest\" id=\"user-handle\">👤 "
-  <> render.escape_html(model.nick)
-  <> "</div>"
+  <> user_handle_block(model)
   <> "<div class=\"user-actions\">"
-  <> "<button type=\"button\" class=\"btn-link\" data-ls-click=\"go_index\">All channels</button>"
-  <> "<span class=\"btn-link\" title=\"OAuth not yet ported\">guest</span>"
+  <> "<a href=\"/chat\" class=\"btn-link\" data-ls-click=\"go_index\">All channels</a>"
+  <> auth_action(model)
   <> "</div></div></aside>"
+}
+
+fn user_handle_block(model: Model) -> String {
+  case model.authenticated {
+    True -> {
+      let label = case model.auth_handle {
+        "" -> model.nick
+        h -> h
+      }
+      "<div class=\"user-handle signed-in\" id=\"user-handle\" title=\""
+      <> render.escape_html(model.auth_did)
+      <> "\">👤 "
+      <> render.escape_html(label)
+      <> "</div>"
+    }
+    False ->
+      "<div class=\"user-handle guest\" id=\"user-handle\">👤 "
+      <> render.escape_html(model.nick)
+      <> "</div>"
+  }
+}
+
+fn auth_action(model: Model) -> String {
+  case model.authenticated {
+    True -> "<a href=\"/logout\" class=\"btn-link\">Sign out</a>"
+    False -> "<a href=\"/login\" class=\"btn-link\">Sign in</a>"
+  }
 }
 
 fn main_region(model: Model) -> String {
@@ -679,7 +1406,9 @@ fn index_main(model: Model) -> String {
         t ->
           "<span class=\"channel-topic\">" <> render.escape_html(t) <> "</span>"
       }
-      "<li><button type=\"button\" class=\"channel-item\" data-ls-click=\"open\" data-ls-payload=\"channel="
+      "<li><a href=\""
+      <> channel_path(ch.name)
+      <> "\" class=\"channel-item\" data-ls-click=\"open\" data-ls-payload=\"channel="
       <> bare
       <> "\"><span class=\"channel-name\">"
       <> render.escape_html(ch.name)
@@ -687,7 +1416,7 @@ fn index_main(model: Model) -> String {
       <> topic
       <> "<span class=\"channel-members\">"
       <> int.to_string(ch.members)
-      <> "</span></button></li>"
+      <> "</span></a></li>"
     })
     |> string.concat
 
@@ -711,30 +1440,46 @@ fn index_main(model: Model) -> String {
 }
 
 fn channel_main(model: Model) -> String {
-  let msgs =
-    list.map(model.messages, message_html)
-    |> string.concat
+  // Nested regions: messages updates must not remount #send-form.
+  "<section class=\"chat-main\" data-ls-region=\"main\">"
+  <> flash_region(model)
+  <> messages_region(model)
+  <> compose_region(model)
+  <> "</section>"
+}
 
-  let flash = case model.flash {
+fn flash_region(model: Model) -> String {
+  let inner = case model.flash {
     "" -> ""
     f -> "<div class=\"flash\">" <> render.escape_html(f) <> "</div>"
   }
+  "<div data-ls-region=\"flash\">" <> inner <> "</div>"
+}
 
-  "<section class=\"chat-main\" data-ls-region=\"main\">"
-  <> flash
-  <> "<div id=\"messages\" class=\"messages\">"
+fn messages_region(model: Model) -> String {
+  let msgs =
+    list.map(model.messages, message_html)
+    |> string.concat
+  "<div id=\"messages\" class=\"messages\" data-ls-region=\"messages\">"
   <> msgs
   <> "</div>"
-  <> "<form id=\"compose\" data-ls-submit=\"send\" class=\"compose\">"
-  <> "<input type=\"text\" name=\"msg\" placeholder=\"Message "
+}
+
+fn compose_region(model: Model) -> String {
+  // IDs match app.css (#send-bar / #send-form) — same shell as freeq-web3.
+  // No value attr: draft is client-owned so message patches never wipe it.
+  "<div id=\"send-bar\" data-ls-region=\"compose\">"
+  <> "<form id=\"send-form\" data-ls-submit=\"send\">"
+  <> "<input id=\"message-input\" type=\"text\" name=\"msg\" placeholder=\"Message "
   <> render.escape_html(option.unwrap(model.channel, ""))
   <> "\" autocomplete=\"off\" autofocus />"
   <> "<button type=\"submit\">Send</button>"
   <> "</form>"
-  <> "</section>"
+  <> "</div>"
 }
 
 fn message_html(row: render.Row) -> String {
+  // Match freeq-web3 row shape: 2-column grid `.ts` | `.body` (nick inline).
   let kind = render.kind_class(row.kind)
   let nick = case row.nick {
     Some(n) ->
@@ -742,25 +1487,31 @@ fn message_html(row: render.Row) -> String {
       <> row.color
       <> "\">"
       <> render.escape_html(n)
-      <> "</span>"
+      <> "</span> "
     None -> ""
   }
   let own = case row.own {
     True -> " own"
     False -> ""
   }
+  let data_nick = case row.nick {
+    Some(n) -> " data-nick=\"" <> render.escape_html(n) <> "\""
+    None -> ""
+  }
   "<div class=\"row "
   <> kind
   <> own
   <> "\" data-msgid=\""
   <> render.escape_html(option.unwrap(row.msgid, row.id))
-  <> "\">"
-  <> "<span class=\"time\">"
+  <> "\""
+  <> data_nick
+  <> ">"
+  <> "<span class=\"ts\">"
   <> render.escape_html(row.time_label)
   <> "</span>"
-  <> nick
   <> "<span class=\"body\">"
-  <> render.escape_html(row.text)
+  <> nick
+  <> render.linkify_html(row.text)
   <> "</span></div>"
 }
 
@@ -769,27 +1520,48 @@ fn members_region(model: Model) -> String {
     Index ->
       "<aside id=\"member-panel\" data-ls-region=\"members\" class=\"hidden\"></aside>"
     Channel -> {
-      let items =
-        list.map(model.members, fn(m) {
-          let prefix = case m.op, m.voice {
-            True, _ -> "@"
-            False, True -> "+"
-            False, False -> ""
+      let sorted = render.sort_members(model.members)
+      let items = case sorted {
+        [] -> "<div class=\"member empty\">—</div>"
+        _ ->
+          list.map(sorted, fn(m) {
+            let pfx = render.member_prefix_char(m)
+            let pfx_class = render.member_prefix_class(m)
+            let pfx_cls = case pfx_class {
+              "" -> "pfx"
+              c -> "pfx " <> c
+            }
+            // data-nick drives Tab complete; prefix is display-only.
+            "<div class=\"member\" data-nick=\""
+            <> render.escape_html(m.nick)
+            <> "\"><span class=\""
+            <> pfx_cls
+            <> "\">"
+            <> render.escape_html(pfx)
+            <> "</span><span class=\"nick "
+            <> m.color
+            <> "\">"
+            <> render.escape_html(m.nick)
+            <> "</span></div>"
+          })
+          |> string.concat
+      }
+      let count = list.length(sorted)
+      let heading = case count {
+        0 ->
+          case model.ws {
+            WsReady -> "People · joining…"
+            _ -> "People"
           }
-          "<li class=\""
-          <> m.color
-          <> "\">"
-          <> render.escape_html(prefix <> m.nick)
-          <> "</li>"
-        })
-        |> string.concat
+        n -> "People · " <> int.to_string(n)
+      }
       "<aside id=\"member-panel\" data-ls-region=\"members\">"
-      <> "<p class=\"drawer-heading\">People ("
-      <> int.to_string(list.length(model.members))
-      <> ")</p>"
-      <> "<ul id=\"members\">"
+      <> "<p class=\"member-heading\">"
+      <> heading
+      <> "</p>"
+      <> "<div id=\"member-list\">"
       <> items
-      <> "</ul></aside>"
+      <> "</div></aside>"
     }
   }
 }
@@ -809,4 +1581,17 @@ pub fn mount_model(path: String) -> Model {
   let #(instance, _, _) =
     stateful.start(definition(), context, Assigns(path: path), target)
   stateful.model(instance)
+}
+
+/// Replace the client-authoritative channel list (session restore).
+pub fn with_my_channels(model: Model, channels: List(String)) -> Model {
+  Model(..model, my_channels: channels)
+}
+
+/// Merge path-seeded channels with a persisted list (path first, then rest).
+pub fn merge_my_channels(
+  seed: List(String),
+  persisted: List(String),
+) -> List(String) {
+  list.fold(persisted, seed, list_unique_append)
 }

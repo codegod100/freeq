@@ -66,6 +66,13 @@ gleam run
 | `FREEQ_UPSTREAM` | `wss://irc.freeq.at/irc` | Upstream IRC WebSocket URL |
 | `FREEQ_UPSTREAM_REST` | `https://irc.freeq.at` | Upstream freeq-server REST base |
 | `PORT` | `4004` | HTTP listen port |
+| `FREEQ_PUBLIC_URL` | *(from Host header)* | Public base URL for OAuth client_id / redirect |
+| `FREEQ_WEB4_PENDING_OAUTH_DIR` | `.dev-data/web4-pending-oauth` | In-flight OAuth PKCE state |
+| `FREEQ_WEB4_SESSIONS_DIR` | `.dev-data/web4-sessions` | Persisted OAuth credentials |
+
+For local OAuth against a real PDS, set `FREEQ_PUBLIC_URL` to a reachable
+URL (or use localhost — AT Protocol allows the special
+`http://localhost?redirect_uri=…` client id).
 
 ## HTTP surface
 
@@ -74,6 +81,11 @@ gleam run
 | GET | `/` | Redirect → `/chat` |
 | GET | `/chat` | LiveView channel list |
 | GET | `/chat/:channel` | LiveView chat shell |
+| GET | `/login` | AT Protocol OAuth form |
+| GET | `/login/start` | Start OAuth (handle query) |
+| GET/POST | `/auth/callback` | OAuth redirect target |
+| GET/POST | `/logout` | Clear session credentials |
+| GET | `/.well-known/oauth-client-metadata` | OAuth client metadata |
 | GET | `/health` | Health check (`ok`) |
 | GET | `/up` | Health check JSON |
 | GET | `/assets/*` | CSS + Lightspeed client |
@@ -91,12 +103,12 @@ This is a **core-chat** port of freeq-web3 (itself a port of freeq-web2):
 - Send / join / part / topic
 - IRC line parsing (`irc/render`)
 - REST scrollback + channel list
-- Upstream WS bridge (guest CAP/NICK/USER)
+- Upstream WS bridge (guest CAP/NICK/USER + SASL)
+- AT Protocol OAuth + SASL `ATPROTO-CHALLENGE`
 - freeq dark theme CSS
 
 **Not yet ported** (track in AGENTS.md)
 
-- AT Protocol OAuth + SASL `ATPROTO-CHALLENGE`
 - Encrypted session store / multi-tab session registry
 - Reactions UI, edit/delete, DMs/E2EE
 - Voice/video, link-preview cache, upload proxy, PWA

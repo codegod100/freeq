@@ -24,9 +24,19 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Never cache: non-GET, WebSocket, API, OAuth
+  // Never touch blob:/data: — MoQ AudioWorklet loads capture/render modules
+  // via blob: URLs. Intercepting those yields:
+  //   AbortError: Unable to load a worklet's module.
+  if (url.protocol === 'blob:' || url.protocol === 'data:') return;
+
+  // Never cache: non-GET, WebSocket, API, OAuth, MoQ media plane
   if (event.request.method !== 'GET') return;
-  if (url.pathname.startsWith('/irc') || url.pathname.startsWith('/api') || url.pathname.startsWith('/auth')) {
+  if (
+    url.pathname.startsWith('/irc') ||
+    url.pathname.startsWith('/api') ||
+    url.pathname.startsWith('/auth') ||
+    url.pathname.startsWith('/av/')
+  ) {
     return;
   }
 
@@ -62,7 +72,17 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Static files (favicon, icons, manifest) — stale-while-revalidate
+  // Known static shell files only — do NOT catch-all every GET (that used to
+  // race AudioWorklet / Worker module loads).
+  const staticShell = new Set([
+    '/favicon.png',
+    '/freeq.png',
+    '/freeq-180.png',
+    '/manifest.json',
+    '/sw.js',
+  ]);
+  if (!staticShell.has(url.pathname)) return;
+
   event.respondWith(
     caches.match(event.request).then((cached) => {
       const fetchPromise = fetch(event.request).then((resp) => {

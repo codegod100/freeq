@@ -8,8 +8,12 @@
 //// - freeq-server REST via gleam_httpc (`freeq_web4/rest`)
 
 import filepath
+import freeq_web4/auth
 import freeq_web4/config
+import freeq_web4/cookie_session
 import freeq_web4/live
+import freeq_web4/rest
+import freeq_web4/session_store
 import freeq_web4/ws
 import gleam/bit_array
 import gleam/bytes_tree
@@ -17,10 +21,13 @@ import gleam/erlang/process
 import gleam/http as gleam_http
 import gleam/http/request as http_request
 import gleam/http/response as http_response
+import gleam/httpc
 import gleam/int
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/string
+import gleam/uri
 import lightspeed/framework/controller
 import lightspeed/framework/endpoint
 import lightspeed/framework/http as ls_http
@@ -103,6 +110,35 @@ fn to_http_response(
   })
 }
 
+/// CSP for Live HTML. MoQ's AudioWorklet loads a blob: module — without
+/// `blob:` in script-src/worker-src Chrome throws:
+///   AbortError: Unable to load a worklet's module.
+/// Keep this in sync with freeq-server's default CSP (plus font CDN used below).
+/// Public so tests can lock the blob: worklet allowance.
+pub fn live_csp() -> String {
+  "default-src 'self'; "
+  <> "script-src 'self' blob:; "
+  <> "worker-src 'self' blob:; "
+  <> "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+  <> "font-src 'self' https://fonts.gstatic.com data:; "
+  <> "img-src 'self' https: data: blob:; "
+  <> "media-src 'self' blob:; "
+  <> "connect-src 'self' ws: wss: https:; "
+  <> "frame-ancestors 'none'; "
+  <> "base-uri 'self'; "
+  <> "form-action 'self'; "
+  <> "object-src 'none'"
+}
+
+fn with_live_security_headers(
+  resp: http_response.Response(mist.ResponseData),
+) -> http_response.Response(mist.ResponseData) {
+  resp
+  |> http_response.set_header("content-security-policy", live_csp())
+  |> http_response.set_header("x-content-type-options", "nosniff")
+  |> http_response.set_header("referrer-policy", "strict-origin-when-cross-origin")
+}
+
 fn enhance_live_html(body: String) -> String {
   body
   |> string.replace(
@@ -111,6 +147,7 @@ fn enhance_live_html(body: String) -> String {
       <> "<meta name=\"color-scheme\" content=\"dark\">"
       <> "<link rel=\"stylesheet\" href=\"/assets/app.css\">"
       <> "<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">"
+      <> "<script type=\"module\" src=\"/assets/av_call.js\"></script>"
       <> "<script type=\"module\" src=\"/assets/lightspeed.js\"></script>"
       <> "</head>",
   )
@@ -148,19 +185,191 @@ fn handle_request(
   port: Int,
   css: String,
   client_js: String,
+  av_js: String,
 ) -> http_response.Response(mist.ResponseData) {
   case req.path, req.method, is_websocket_upgrade(req) {
     "/live", gleam_http.Get, True -> upgrade_live(req)
 
-    path, gleam_http.Get, False ->
-      case string.starts_with(path, "/chat/") {
-        True -> live_html_response(path)
-        False -> call_endpoint(req, port, css, client_js)
+    "/favicon.ico", gleam_http.Get, False ->
+      http_response.new(204)
+      |> http_response.set_body(mist.Bytes(bytes_tree.new()))
+
+    "/assets/av_call.js", gleam_http.Get, False ->
+      http_response.new(200)
+      |> http_response.set_header(
+        "content-type",
+        "application/javascript; charset=utf-8",
+      )
+      |> http_response.set_body(mist.Bytes(bytes_tree.from_string(av_js)))
+
+    _, _, False ->
+      case auth.handle(req) {
+        Some(resp) -> resp
+        None ->
+          case handle_av_api(req) {
+            Some(resp) -> resp
+            None ->
+              case req.method {
+                gleam_http.Get ->
+                  case string.starts_with(req.path, "/chat/") {
+                    True -> live_html_response(req)
+                    False -> call_endpoint(req, port, css, client_js)
+                  }
+                _ ->
+                  http_response.new(404)
+                  |> http_response.set_body(
+                    mist.Bytes(bytes_tree.from_string("not found")),
+                  )
+              }
+          }
       }
 
-    _, _, _ ->
+    _, _, True ->
       http_response.new(404)
       |> http_response.set_body(mist.Bytes(bytes_tree.from_string("not found")))
+  }
+}
+
+/// Same-origin BFF for AV roster / token / MoQ static assets.
+fn handle_av_api(
+  req: http_request.Request(mist.Connection),
+) -> Option(http_response.Response(mist.ResponseData)) {
+  let path = req.path
+  case req.method {
+    gleam_http.Get ->
+      case string.starts_with(path, "/api/v1/sessions/") {
+        True -> {
+          let id = string.drop_start(path, string.length("/api/v1/sessions/"))
+          case id == "" || string.contains(id, "/") {
+            True -> None
+            False ->
+              Some(json_or_empty(rest.fetch_session_detail(uri.percent_decode(
+                id,
+              )
+              |> result.unwrap(id))))
+          }
+        }
+        False ->
+          case
+            string.starts_with(path, "/api/v1/av/sessions/")
+            && string.ends_with(path, "/token")
+          {
+            True -> {
+              let mid =
+                string.drop_start(path, string.length("/api/v1/av/sessions/"))
+              let id = string.drop_end(mid, string.length("/token"))
+              case id == "" {
+                True -> None
+                False -> {
+                  let sid = cookie_session.ensure_id(req)
+                  let bearer = session_store.load_api_bearer(sid)
+                  case bearer {
+                    None ->
+                      Some(
+                        json_response(
+                          401,
+                          "{\"error\":\"guest — use +freeq.at/av-token TAGMSG\",\"guest\":true}",
+                        ),
+                      )
+                    Some(_) -> {
+                      let tok =
+                        rest.fetch_av_token(
+                          uri.percent_decode(id) |> result.unwrap(id),
+                          bearer,
+                        )
+                      case tok {
+                        Some(t) ->
+                          Some(json_response(
+                            200,
+                            "{\"token\":\"" <> json_escape(t) <> "\"}",
+                          ))
+                        None ->
+                          Some(json_response(
+                            403,
+                            "{\"error\":\"upstream refused token\"}",
+                          ))
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            False ->
+              case string.starts_with(path, "/av/assets/") {
+                True -> {
+                  let rel = string.drop_start(path, string.length("/av/assets/"))
+                  Some(proxy_av_asset(rel))
+                }
+                False -> None
+              }
+          }
+      }
+    _ -> None
+  }
+}
+
+fn json_or_empty(body: Option(String)) -> http_response.Response(
+  mist.ResponseData,
+) {
+  case body {
+    Some(b) -> json_response(200, b)
+    None -> json_response(200, "{}")
+  }
+}
+
+fn json_response(
+  status: Int,
+  body: String,
+) -> http_response.Response(mist.ResponseData) {
+  http_response.new(status)
+  |> http_response.set_header("content-type", "application/json; charset=utf-8")
+  |> http_response.set_body(mist.Bytes(bytes_tree.from_string(body)))
+}
+
+fn json_escape(s: String) -> String {
+  s
+  |> string.replace("\\", "\\\\")
+  |> string.replace("\"", "\\\"")
+  |> string.replace("\n", "\\n")
+  |> string.replace("\r", "\\r")
+}
+
+fn proxy_av_asset(rel: String) -> http_response.Response(mist.ResponseData) {
+  // Prevent path traversal.
+  case string.contains(rel, "..") || rel == "" {
+    True ->
+      http_response.new(400)
+      |> http_response.set_body(mist.Bytes(bytes_tree.from_string("bad path")))
+    False -> {
+      let url = config.upstream_rest() <> "/av/assets/" <> rel
+      case http_request.to(url) {
+        Error(_) ->
+          http_response.new(502)
+          |> http_response.set_body(mist.Bytes(bytes_tree.from_string("")))
+        Ok(req) -> {
+          let req =
+            req
+            |> http_request.set_method(gleam_http.Get)
+          case httpc.send(req) {
+            Ok(resp) -> {
+              let ct = case string.ends_with(rel, ".js") {
+                True -> "application/javascript; charset=utf-8"
+                False -> "application/octet-stream"
+              }
+              http_response.new(resp.status)
+              |> http_response.set_header("content-type", ct)
+              |> http_response.set_header("access-control-allow-origin", "*")
+              |> http_response.set_body(
+                mist.Bytes(bytes_tree.from_string(resp.body)),
+              )
+            }
+            Error(_) ->
+              http_response.new(502)
+              |> http_response.set_body(mist.Bytes(bytes_tree.from_string("")))
+          }
+        }
+      }
+    }
   }
 }
 
@@ -170,13 +379,17 @@ fn call_endpoint(
   css: String,
   client_js: String,
 ) -> http_response.Response(mist.ResponseData) {
+  let sid = cookie_session.ensure_id(req)
   let response =
     req
     |> to_ls_request(port)
     |> endpoint.call(app(css, client_js), _)
     |> to_http_response
 
-  case response.status, http_response.get_header(response, "content-type") {
+  let response = case
+    response.status,
+    http_response.get_header(response, "content-type")
+  {
     200, Ok(ct) ->
       case string.contains(ct, "text/html") {
         True ->
@@ -186,17 +399,21 @@ fn call_endpoint(
               |> http_response.set_body(
                 mist.Bytes(bytes_tree.from_string(enhance_live_html(body))),
               )
+              |> with_live_security_headers
             Error(_) -> response
           }
         False -> response
       }
     _, _ -> response
   }
+  cookie_session.set_on_response(response, sid)
 }
 
 fn live_html_response(
-  path: String,
+  req: http_request.Request(mist.Connection),
 ) -> http_response.Response(mist.ResponseData) {
+  let path = chat_path(req.path)
+  let sid = cookie_session.ensure_id(req)
   let inner = live.initial_html(path)
   let shell =
     "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
@@ -209,9 +426,12 @@ fn live_html_response(
     <> inner
     <> "</main></body></html>"
   let body = enhance_live_html(shell)
-  http_response.new(200)
-  |> http_response.set_header("content-type", "text/html; charset=utf-8")
-  |> http_response.set_body(mist.Bytes(bytes_tree.from_string(body)))
+  let resp =
+    http_response.new(200)
+    |> http_response.set_header("content-type", "text/html; charset=utf-8")
+    |> http_response.set_body(mist.Bytes(bytes_tree.from_string(body)))
+    |> with_live_security_headers
+  cookie_session.set_on_response(resp, sid)
 }
 
 fn upgrade_live(
@@ -225,13 +445,30 @@ fn upgrade_live(
       }
     Error(_) -> "/chat"
   }
+  let session_id = cookie_session.ensure_id(req)
+
+  // Browsers send `Sec-WebSocket-Extensions: permessage-deflate`. Mist will
+  // negotiate it, but compressed frames have been observed as
+  // "Invalid frame header" in Chrome. Drop the extension so we speak plain
+  // text frames (same as a curl client without extensions).
+  let req =
+    http_request.Request(
+      ..req,
+      headers: list.filter(req.headers, fn(h) {
+        string.lowercase(h.0) != "sec-websocket-extensions"
+      }),
+    )
 
   mist.websocket(
     request: req,
-    on_init: fn(_conn) {
+    on_init: fn(conn) {
       let self_subject = process.new_subject()
-      let #(session, frames) = ws.mount(path, self_subject)
-      #(#(session, frames), Some(ws.push_selector(session)))
+      let #(session, frames) = ws.mount(path, self_subject, session_id)
+      // Hello first — must not block on REST/IRC or Mist aborts the upgrade
+      // (browser then sees "Invalid frame header" / HTTP 400 on the socket).
+      ws.push_frames(conn, frames)
+      ws.schedule_bootstrap(self_subject)
+      #(#(session, []), Some(ws.push_selector(session)))
     },
     handler: handle_ws,
     on_close: fn(state) {
@@ -278,10 +515,21 @@ pub fn main() -> Nil {
   let port = config.port()
   let css = load_asset("app.css")
   let client_js = freeq_client_js()
+  let av_js = load_asset("av_call.js")
 
+  // Log before bind so Eaddrinuse (etc.) still shows which port we tried.
+  io_println(
+    "freeq-web4 listening on port "
+    <> int.to_string(port)
+    <> " (PORT env, default 4004)",
+  )
+
+  // Bind all interfaces + IPv6 so browsers resolving localhost → ::1 work.
   let assert Ok(_) =
-    mist.new(fn(req) { handle_request(req, port, css, client_js) })
+    mist.new(fn(req) { handle_request(req, port, css, client_js, av_js) })
     |> mist.port(port)
+    |> mist.bind("0.0.0.0")
+    |> mist.with_ipv6
     |> mist.start
 
   echo_banner(port)
@@ -293,10 +541,15 @@ fn echo_banner(port: Int) -> Nil {
   io_println("freeq-web4 (Lightspeed) at " <> base)
   io_println("  GET  /chat            channel list")
   io_println("  GET  /chat/:channel   chat shell")
+  io_println("  GET  /login           AT Protocol OAuth")
+  io_println("  GET  /auth/callback   OAuth callback")
   io_println("  WS   /live            lightspeed protocol")
   io_println("  GET  /health          ok")
+  io_println("  GET  /api/v1/sessions/:id   AV roster proxy")
+  io_println("  GET  /av/assets/*     MoQ asset proxy")
   io_println("  upstream " <> config.upstream_ws())
   io_println("  rest     " <> config.upstream_rest())
+  io_println("  av       " <> config.av_origin())
 }
 
 @external(erlang, "io", "format")
@@ -331,9 +584,34 @@ fn freeq_client_js() -> String {
 if (!ROOT) throw new Error('Lightspeed: #app missing');
 
 const wsPath = ROOT.dataset.lsWs || '/live';
-const route = ROOT.dataset.lsRoute || '/chat';
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-const url = proto + '://' + location.host + wsPath + '?path=' + encodeURIComponent(route);
+
+function currentRoute() {
+  return ROOT.dataset.lsRoute || location.pathname || '/chat';
+}
+
+function wsUrl() {
+  return proto + '://' + location.host + wsPath + '?path=' + encodeURIComponent(currentRoute());
+}
+
+/** Keep the address bar + reconnect route in sync (LiveView push_patch style). */
+function pushPath(path, options) {
+  if (!path || typeof path !== 'string') return;
+  const replace = !!(options && options.replace);
+  if (path !== location.pathname) {
+    try {
+      if (replace) history.replaceState({ freeq: true }, '', path);
+      else history.pushState({ freeq: true }, '', path);
+    } catch (_) {}
+  }
+  ROOT.dataset.lsRoute = path;
+}
+
+function channelPathFromInput(raw) {
+  const bare = String(raw || '').trim().replace(/^#+/, '');
+  if (!bare) return null;
+  return '/chat/' + bare;
+}
 
 let socket;
 let refSeq = 1;
@@ -401,11 +679,93 @@ function applyReplace(target, html) {
   }
 }
 
+function applyAppend(target, html) {
+  if (!target || html == null) return;
+  let el = null;
+  try { el = ROOT.querySelector(target) || document.querySelector(target); }
+  catch (_) { el = null; }
+  if (!el) return;
+  el.insertAdjacentHTML('beforeend', html);
+}
+
+function applyPrepend(target, html) {
+  if (!target || html == null) return;
+  let el = null;
+  try { el = ROOT.querySelector(target) || document.querySelector(target); }
+  catch (_) { el = null; }
+  if (!el) return;
+  el.insertAdjacentHTML('afterbegin', html);
+}
+
+function applyRemove(target) {
+  if (!target) return;
+  let el = null;
+  try { el = ROOT.querySelector(target) || document.querySelector(target); }
+  catch (_) { el = null; }
+  if (el && el.parentNode) el.remove();
+}
+
+// Lightspeed patch stream: ps|ver|dictLen|…dict|opCount|ops
+// Ops are dictionary-compressed: r,ti,hi = replace (see lightspeed/diff).
+function dictAt(dictionary, indexText) {
+  const i = parseInt(indexText, 10);
+  if (!Number.isFinite(i) || i < 0 || i >= dictionary.length) return '';
+  return dictionary[i] || '';
+}
+
+function applyCompressedOp(opField, dictionary) {
+  const tokens = String(opField || '').split(',');
+  const tag = tokens[0];
+  if (tag === 'r' && tokens.length >= 3) {
+    applyReplace(dictAt(dictionary, tokens[1]), dictAt(dictionary, tokens[2]));
+    return true;
+  }
+  if (tag === 'a' && tokens.length >= 3) {
+    applyAppend(dictAt(dictionary, tokens[1]), dictAt(dictionary, tokens[2]));
+    return true;
+  }
+  if (tag === 'p' && tokens.length >= 3) {
+    applyPrepend(dictAt(dictionary, tokens[1]), dictAt(dictionary, tokens[2]));
+    return true;
+  }
+  if (tag === 'x' && tokens.length >= 2) {
+    applyRemove(dictAt(dictionary, tokens[1]));
+    return true;
+  }
+  // Segment / keyed ops not needed for freeq MVP region replaces.
+  return false;
+}
+
+function applyPatchStream(parts) {
+  // parts[0] === 'ps'
+  if (parts.length < 5) return false;
+  const version = parseInt(parts[1], 10);
+  if (version !== 1) return false;
+  const dictLen = parseInt(parts[2], 10);
+  if (!Number.isFinite(dictLen) || dictLen < 0) return false;
+  let i = 3;
+  if (parts.length < i + dictLen + 1) return false;
+  const dictionary = parts.slice(i, i + dictLen);
+  i += dictLen;
+  const opCount = parseInt(parts[i++], 10);
+  if (!Number.isFinite(opCount) || opCount < 0) return false;
+  const ops = parts.slice(i, i + opCount);
+  let applied = false;
+  for (const op of ops) {
+    if (applyCompressedOp(op, dictionary)) applied = true;
+  }
+  return applied;
+}
+
 function applyPatches(encoded) {
   if (!encoded) return;
   const parts = splitFields(encoded);
+  if (parts[0] === 'ps') {
+    applyPatchStream(parts);
+    return;
+  }
+  // Legacy uncompressed: replace|target|html …
   let i = 0;
-  if (parts[0] === 'ps') i = 3;
   let applied = false;
   while (i < parts.length) {
     const op = (parts[i] || '').toLowerCase();
@@ -424,6 +784,49 @@ function applyPatches(encoded) {
   }
 }
 
+function composeInput() {
+  return ROOT.querySelector('#message-input, #send-form input[name=\"msg\"]');
+}
+
+function focusCompose() {
+  const input = composeInput();
+  if (!input) return false;
+  try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+  return true;
+}
+
+function snapshotCompose() {
+  const input = composeInput();
+  if (!input) return null;
+  const ae = document.activeElement;
+  const focused =
+    ae === input ||
+    (ae && input.form && (ae === input.form || input.form.contains(ae)));
+  return {
+    focused: !!focused,
+    value: input.value,
+    start: input.selectionStart ?? input.value.length,
+    end: input.selectionEnd ?? input.value.length,
+  };
+}
+
+function restoreCompose(snap, forceFocus) {
+  const input = composeInput();
+  if (!input) return;
+  if (snap) {
+    // Region morphs remount nodes; re-apply draft + caret when needed.
+    if (input.value !== snap.value) input.value = snap.value;
+    if (snap.focused || forceFocus) {
+      focusCompose();
+      try { input.setSelectionRange(snap.start, snap.end); } catch (_) {}
+    }
+  } else if (forceFocus) {
+    focusCompose();
+  }
+}
+
+let pendingComposeFocus = false;
+
 function onFrame(text) {
   const fields = splitFields(text);
   const tag = fields[0];
@@ -432,9 +835,18 @@ function onFrame(text) {
     return;
   }
   if (tag === 'diff') {
+    const hadCompose = !!composeInput();
+    const snap = snapshotCompose();
+    const force = pendingComposeFocus;
+    pendingComposeFocus = false;
     applyPatches(fields[2] || '');
+    // autofocus only runs on initial HTML parse; re-focus when compose
+    // appears after join/open, and restore after morph/send.
+    const hasCompose = !!composeInput();
+    restoreCompose(snap, force || (!hadCompose && hasCompose));
     const msgs = document.getElementById('messages');
     if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    try { if (window.__freeqAv && window.__freeqAv.sync) window.__freeqAv.sync(); } catch (_) {}
     return;
   }
   if (tag === 'ack') return;
@@ -443,12 +855,75 @@ function onFrame(text) {
   }
 }
 
+function closeDrawers() {
+  const sidebar = document.getElementById('sidebar');
+  const members = document.getElementById('member-panel');
+  const scrim = document.getElementById('drawer-scrim');
+  if (sidebar) sidebar.classList.remove('open');
+  if (members) members.classList.remove('open');
+  if (scrim) scrim.classList.remove('open');
+}
+
+function toggleDrawer(which) {
+  const sidebar = document.getElementById('sidebar');
+  const members = document.getElementById('member-panel');
+  const scrim = document.getElementById('drawer-scrim');
+  if (!scrim) return;
+  const target = which === 'members' ? members : sidebar;
+  if (!target) return;
+  const opening = !target.classList.contains('open');
+  if (sidebar) sidebar.classList.remove('open');
+  if (members) members.classList.remove('open');
+  if (opening) {
+    target.classList.add('open');
+    scrim.classList.add('open');
+  } else {
+    scrim.classList.remove('open');
+  }
+}
+
 function onClick(ev) {
+  // Mobile drawer toggles (People / Channels) — pure client class toggles.
+  const drawerBtn = ev.target && ev.target.closest
+    ? ev.target.closest('[data-drawer]')
+    : null;
+  if (drawerBtn && ROOT.contains(drawerBtn)) {
+    ev.preventDefault();
+    toggleDrawer(drawerBtn.getAttribute('data-drawer') || 'sidebar');
+    return;
+  }
+  const scrim = ev.target && ev.target.id === 'drawer-scrim'
+    ? ev.target
+    : (ev.target && ev.target.closest ? ev.target.closest('#drawer-scrim') : null);
+  if (scrim && ROOT.contains(scrim)) {
+    ev.preventDefault();
+    closeDrawers();
+    return;
+  }
+
   const el = ev.target && ev.target.closest ? ev.target.closest('[data-ls-click]') : null;
   if (!el || !ROOT.contains(el)) return;
+  const href = el.tagName === 'A' ? el.getAttribute('href') : null;
+  // Let modified / non-primary clicks open real hrefs in a new tab.
+  if (href && (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button !== 0)) {
+    return;
+  }
   ev.preventDefault();
+  // Navigating / parting closes mobile drawers.
+  closeDrawers();
   const name = el.getAttribute('data-ls-click');
   if (!name) return;
+  // Patch URL immediately (same as web3 push_patch) so the bar matches.
+  if (href && href.startsWith('/chat')) {
+    pushPath(href);
+  } else if (name === 'part') {
+    // Leaving the active channel returns to the directory.
+    const li = el.closest('li');
+    if (li && li.classList.contains('active')) pushPath('/chat');
+  }
+  // Channel open steals focus to the link; re-grab compose after the diff
+  // (same as web3 focus_compose on navigate).
+  if (name === 'open') pendingComposeFocus = true;
   const payload = el.getAttribute('data-ls-payload') || '';
   pushEvent(name, payload);
 }
@@ -459,15 +934,145 @@ function onSubmit(ev) {
   ev.preventDefault();
   const name = form.getAttribute('data-ls-submit');
   if (!name) return;
+  if (name === 'join') {
+    const input = form.querySelector('input[name=\"channel\"]');
+    const path = channelPathFromInput(input && input.value);
+    if (path) pushPath(path);
+    pendingComposeFocus = true;
+  }
   pushEvent(name, formPayload(form));
-  if (name === 'send') {
-    const input = form.querySelector('input[name=\"msg\"]');
+  if (name === 'send' || form.id === 'send-form') {
+    const input = form.querySelector('input[name=\"msg\"]') || composeInput();
     if (input) input.value = '';
+    focusCompose();
+    // Keep focus after the next diff even if the Send button was active.
+    pendingComposeFocus = true;
+    tabCycle = null;
   }
 }
 
+function onPopState() {
+  const path = location.pathname || '/chat';
+  ROOT.dataset.lsRoute = path;
+  if (path === '/chat' || path === '/chat/' || path === '/') {
+    pushEvent('go_index', '');
+    return;
+  }
+  if (path.startsWith('/chat/')) {
+    const bare = path.slice('/chat/'.length).replace(/\\/+$/, '');
+    if (!bare) {
+      pushEvent('go_index', '');
+      return;
+    }
+    pendingComposeFocus = true;
+    pushEvent('open', 'channel=' + bare);
+  }
+}
+
+// IRC-style Tab nick completion (port of freeq-web3 tab_complete.js).
+// Event-delegated so Lightspeed region replaces do not drop the handler.
+let tabCycle = null;
+
+function channelNicks() {
+  const seen = new Set();
+  const out = [];
+  const push = (n) => {
+    n = (n || '').trim();
+    if (!n) return;
+    const k = n.toLowerCase();
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(n);
+  };
+  const panel = document.getElementById('member-panel');
+  if (panel) {
+    panel.querySelectorAll('[data-nick]').forEach((el) => push(el.dataset.nick));
+    if (out.length) return out;
+  }
+  document.querySelectorAll('#messages [data-nick]').forEach((el) => push(el.dataset.nick));
+  return out;
+}
+
+function applyTabMatch(input, wordStart, after, cycle) {
+  const nick = cycle.matches[cycle.index];
+  // freeq-app style: keep a typed \"@\", use \"nick: \" only at line start.
+  const prefix = cycle.hasAt ? '@' : '';
+  const suffix = cycle.isStart ? ': ' : ' ';
+  const replacement = prefix + nick + suffix;
+  let rest = after;
+  if (cycle.insertedLen > 0) {
+    const already = (input.selectionStart ?? wordStart) - wordStart;
+    const leftover = cycle.insertedLen - already;
+    if (leftover > 0) rest = rest.slice(leftover);
+  }
+  input.value = input.value.substring(0, wordStart) + replacement + rest;
+  cycle.insertedLen = replacement.length;
+  cycle.inserted = replacement;
+  const newCursor = wordStart + replacement.length;
+  input.setSelectionRange(newCursor, newCursor);
+}
+
+function onKeyDown(ev) {
+  const t = ev.target;
+  if (!t || t.tagName !== 'INPUT') return;
+  if (t.name !== 'msg' && t.id !== 'message-input') return;
+  if (!ROOT.contains(t)) return;
+
+  if (ev.key !== 'Tab') {
+    if (tabCycle && ev.key !== 'Shift') tabCycle = null;
+    return;
+  }
+
+  ev.preventDefault();
+  const input = t;
+  const pos = input.selectionStart ?? 0;
+  const value = input.value;
+  const before = value.substring(0, pos);
+  const after = value.substring(pos);
+
+  if (tabCycle) {
+    const { wordStart, insertedLen, matches, inserted } = tabCycle;
+    const stillThere =
+      pos >= wordStart &&
+      pos <= wordStart + insertedLen &&
+      value.substring(wordStart, wordStart + insertedLen) === inserted;
+    if (stillThere) {
+      tabCycle.index = (tabCycle.index + 1) % matches.length;
+      applyTabMatch(input, wordStart, after, tabCycle);
+      return;
+    }
+    tabCycle = null;
+  }
+
+  // Word before caret, optional leading @. IRC nicks: letter/digit/._-
+  const m = before.match(/(?:^|[\\s,])(@?[\\w.\\-]*)$/);
+  if (!m) return;
+  const token = m[1];
+  const wordStart = before.length - token.length;
+  const hasAt = token.startsWith('@');
+  const partial = (hasAt ? token.slice(1) : token).toLowerCase();
+  const nicks = channelNicks();
+  if (!nicks.length) return;
+  const matches =
+    partial === ''
+      ? nicks.slice()
+      : nicks.filter((n) => n.toLowerCase().startsWith(partial));
+  if (!matches.length) return;
+  tabCycle = {
+    matches,
+    index: 0,
+    wordStart,
+    insertedLen: 0,
+    inserted: '',
+    hasAt,
+    isStart: wordStart === 0,
+    basePartial: partial,
+  };
+  applyTabMatch(input, wordStart, after, tabCycle);
+}
+
 function connect() {
-  socket = new WebSocket(url);
+  socket = new WebSocket(wsUrl());
   socket.addEventListener('open', () => ROOT.classList.add('ls-connected'));
   socket.addEventListener('message', (ev) => onFrame(String(ev.data)));
   socket.addEventListener('close', () => {
@@ -479,7 +1084,14 @@ function connect() {
 
 ROOT.addEventListener('click', onClick);
 ROOT.addEventListener('submit', onSubmit);
+ROOT.addEventListener('keydown', onKeyDown);
+window.addEventListener('popstate', onPopState);
+// Align dataset with the real URL (SSR sets data-ls-route; keep them matched).
+ROOT.dataset.lsRoute = location.pathname || ROOT.dataset.lsRoute || '/chat';
+// Grab chat input on SSR channel pages (autofocus is flaky with module scripts).
+focusCompose();
+queueMicrotask(focusCompose);
 connect();
-window.__freeq = { pushEvent };
+window.__freeq = { pushEvent, pushPath };
 "
 }

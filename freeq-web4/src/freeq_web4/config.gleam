@@ -1,10 +1,12 @@
 //// Runtime configuration for freeq-web4.
 ////
 //// Defaults target production freeq-server (`irc.freeq.at`). Override with
-//// `FREEQ_UPSTREAM` / `FREEQ_UPSTREAM_REST` / `PORT` for local development.
+//// `FREEQ_UPSTREAM` / `FREEQ_UPSTREAM_REST` / `PORT` / `FREEQ_PUBLIC_URL`
+//// for local development.
 
 import envoy
 import gleam/int
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -31,6 +33,64 @@ pub fn port() -> Int {
         _ -> 4004
       }
     Error(_) -> 4004
+  }
+}
+
+/// Public base URL for OAuth client_id / redirect_uri.
+/// When unset, derived from the request Host header.
+pub fn public_url() -> Option(String) {
+  case envoy.get("FREEQ_PUBLIC_URL") {
+    Ok(url) ->
+      case string.trim(url) {
+        "" -> None
+        u -> Some(trim_trailing_slash(u))
+      }
+    Error(_) -> None
+  }
+}
+
+/// Pending OAuth (PKCE) disk store directory.
+pub fn pending_oauth_dir() -> String {
+  envoy.get("FREEQ_WEB4_PENDING_OAUTH_DIR")
+  |> result.unwrap(".dev-data/web4-pending-oauth")
+}
+
+/// Persisted OAuth session credentials directory.
+pub fn sessions_dir() -> String {
+  envoy.get("FREEQ_WEB4_SESSIONS_DIR")
+  |> result.unwrap(".dev-data/web4-sessions")
+}
+
+/// HTTP(S) origin of freeq-server for MoQ media (`/av/moq`).
+///
+/// The BFF does not terminate MoQ WebSockets; the browser dials this origin
+/// directly. Override with `FREEQ_AV_ORIGIN`; default is derived from
+/// `FREEQ_UPSTREAM_REST`.
+pub fn av_origin() -> String {
+  case envoy.get("FREEQ_AV_ORIGIN") {
+    Ok(origin) ->
+      case string.trim(origin) {
+        "" -> av_origin_from_rest()
+        o -> trim_trailing_slash(o)
+      }
+    Error(_) -> av_origin_from_rest()
+  }
+}
+
+fn av_origin_from_rest() -> String {
+  let base = upstream_rest()
+  case string.split_once(base, "://") {
+    Error(_) -> base
+    Ok(#(scheme, rest)) -> {
+      let hostport = case string.split_once(rest, "/") {
+        Ok(#(hp, _)) -> hp
+        Error(_) -> rest
+      }
+      case hostport {
+        "" -> base
+        hp -> scheme <> "://" <> hp
+      }
+    }
   }
 }
 

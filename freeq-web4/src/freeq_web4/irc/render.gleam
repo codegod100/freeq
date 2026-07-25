@@ -6,18 +6,26 @@
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/string
 
-/// Structured chat row shown in the message stream.
+/// Visual/semantic kind of a structured chat row in the message stream.
 pub type Kind {
+  /// Channel PRIVMSG (user chat).
   Msg
+  /// NOTICE (server or user).
   Notice
+  /// JOIN presence line.
   Join
+  /// PART presence line.
   Part
+  /// QUIT presence line.
   Quit
+  /// Local system / status line (not from IRC).
   System
 }
 
+/// One rendered message or presence line in the chat stream.
 pub type Row {
   Row(
     id: String,
@@ -33,8 +41,14 @@ pub type Row {
   )
 }
 
+/// Channel roster entry from 353 / JOIN / MODE (+o/+h/+v).
 pub type Member {
-  Member(nick: String, op: Bool, voice: Bool, color: String)
+  Member(nick: String, op: Bool, halfop: Bool, voice: Bool, color: String)
+}
+
+/// One privilege change from a channel MODE line: mode letter, adding?, target nick.
+pub type ModeOp {
+  ModeOp(mode: String, adding: Bool, target: String)
 }
 
 const nick_classes = ["n1", "n2", "n3", "n4", "n5", "n6", "n7", "n8"]
@@ -53,6 +67,154 @@ pub fn bare_channel(s: String) -> String {
   canonical_channel(s)
   |> string.trim_start
   |> drop_leading_hash
+}
+
+/// Sanitize an AT handle into a legal IRC nick (max 20, [A-Za-z0-9.\-_]).
+pub fn sanitize_nick(handle: String) -> String {
+  let out =
+    string.to_graphemes(handle)
+    |> list.filter(fn(g) {
+      case g {
+        "A"
+        | "B"
+        | "C"
+        | "D"
+        | "E"
+        | "F"
+        | "G"
+        | "H"
+        | "I"
+        | "J"
+        | "K"
+        | "L"
+        | "M"
+        | "N"
+        | "O"
+        | "P"
+        | "Q"
+        | "R"
+        | "S"
+        | "T"
+        | "U"
+        | "V"
+        | "W"
+        | "X"
+        | "Y"
+        | "Z"
+        | "a"
+        | "b"
+        | "c"
+        | "d"
+        | "e"
+        | "f"
+        | "g"
+        | "h"
+        | "i"
+        | "j"
+        | "k"
+        | "l"
+        | "m"
+        | "n"
+        | "o"
+        | "p"
+        | "q"
+        | "r"
+        | "s"
+        | "t"
+        | "u"
+        | "v"
+        | "w"
+        | "x"
+        | "y"
+        | "z"
+        | "0"
+        | "1"
+        | "2"
+        | "3"
+        | "4"
+        | "5"
+        | "6"
+        | "7"
+        | "8"
+        | "9"
+        | "."
+        | "-"
+        | "_" -> True
+        _ -> False
+      }
+    })
+    |> list.take(20)
+    |> string.concat
+  case out {
+    "" -> ""
+    _ ->
+      case string.first(out) {
+        Ok(ch) ->
+          case is_alpha(ch) {
+            True -> out
+            False -> string.slice("u" <> out, 0, 20)
+          }
+        Error(_) -> out
+      }
+  }
+}
+
+fn is_alpha(g: String) -> Bool {
+  case g {
+    "A"
+    | "B"
+    | "C"
+    | "D"
+    | "E"
+    | "F"
+    | "G"
+    | "H"
+    | "I"
+    | "J"
+    | "K"
+    | "L"
+    | "M"
+    | "N"
+    | "O"
+    | "P"
+    | "Q"
+    | "R"
+    | "S"
+    | "T"
+    | "U"
+    | "V"
+    | "W"
+    | "X"
+    | "Y"
+    | "Z"
+    | "a"
+    | "b"
+    | "c"
+    | "d"
+    | "e"
+    | "f"
+    | "g"
+    | "h"
+    | "i"
+    | "j"
+    | "k"
+    | "l"
+    | "m"
+    | "n"
+    | "o"
+    | "p"
+    | "q"
+    | "r"
+    | "s"
+    | "t"
+    | "u"
+    | "v"
+    | "w"
+    | "x"
+    | "y"
+    | "z" -> True
+    _ -> False
+  }
 }
 
 fn drop_leading_hash(s: String) -> String {
@@ -224,34 +386,43 @@ fn reply_parent(tags: List(#(String, String))) -> Option(String) {
 }
 
 /// Parse a PRIVMSG/NOTICE/JOIN/PART/QUIT line into a row.
+///
+/// Protocol noise (CAP, numerics, BATCH, MOTD, MODE, …) returns `None` so the
+/// chat stream never dumps raw IRC registration / chathistory framing.
 pub fn parse_message_line(
   line: String,
   own_nick: Option(String),
 ) -> Option(Row) {
   let line = string.trim_end(line)
   let #(tags, rest) = parse_irc_tags(line)
+  // IRCv3 chathistory arrives inside BATCH with a `batch=` tag. freeq-web4
+  // already loads history via REST — rendering the batch again doubles the
+  // stream and scrambles chronology. Live traffic is untagged.
+  case tag_get(tags, "batch") {
+    Some(_) -> None
+    None -> parse_message_line_body(tags, rest, own_nick)
+  }
+}
+
+fn parse_message_line_body(
+  tags: List(#(String, String)),
+  rest: String,
+  own_nick: Option(String),
+) -> Option(Row) {
   let msgid = tag_get(tags, "msgid")
   let edit = tag_get(tags, "+draft/edit")
   let effective_msgid = case edit {
     Some(e) -> Some(e)
     None -> msgid
   }
-  let time = time_label_now()
+  let time = case tag_get(tags, "time") {
+    Some(iso) -> time_label_from_iso(iso)
+    None -> time_label_now()
+  }
 
   case string.starts_with(rest, ":") {
-    False ->
-      Some(Row(
-        id: option.unwrap(effective_msgid, unique_id()),
-        kind: Notice,
-        nick: None,
-        text: rest,
-        msgid: effective_msgid,
-        time_label: time,
-        own: False,
-        color: "n1",
-        parent: reply_parent(tags),
-        account: tag_get(tags, "account"),
-      ))
+    // Unprefixed client-style commands are not chat content.
+    False -> None
     True -> {
       let body = string.drop_start(rest, 1)
       case string.split_once(body, " ") {
@@ -333,23 +504,33 @@ pub fn parse_message_line(
                 parent: None,
                 account: None,
               ))
-            _ ->
-              Some(Row(
-                id: unique_id(),
-                kind: Notice,
-                nick: None,
-                text: line,
-                msgid: None,
-                time_label: time,
-                own: False,
-                color: "n1",
-                parent: None,
-                account: None,
-              ))
+            // CAP / numerics / BATCH / MODE / TOPIC / etc. — not chat rows.
+            _ -> None
           }
         }
       }
     }
+  }
+}
+
+/// Best-effort `HH:MM` from IRCv3 `time` tag (`2026-07-24T20:06:25.000Z`).
+fn time_label_from_iso(iso: String) -> String {
+  case string.split(iso, "T") {
+    [_, clock, ..] -> {
+      let clock = case string.split_once(clock, ".") {
+        Ok(#(hms, _)) -> hms
+        Error(_) ->
+          case string.split_once(clock, "Z") {
+            Ok(#(hms, _)) -> hms
+            Error(_) -> clock
+          }
+      }
+      case string.split(clock, ":") {
+        [h, m, ..] -> h <> ":" <> m
+        _ -> time_label_now()
+      }
+    }
+    _ -> time_label_now()
   }
 }
 
@@ -396,17 +577,39 @@ pub fn history_row(
   )
 }
 
+/// Whether the line is RPL_NAMREPLY (353).
+pub fn is_353(line: String) -> Bool {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  string.contains(rest, " 353 ")
+}
+
+/// Channel name from a 353 line (`353 me = #chan :names`).
+pub fn channel_from_353(line: String) -> Option(String) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  let rest = strip_server_prefix(rest)
+  // Drop trailing names segment so channel tokens stay in the middle.
+  let head = case string.split_once(rest, " :") {
+    Ok(#(h, _)) -> h
+    Error(_) -> rest
+  }
+  string.split(head, " ")
+  |> list.find(fn(p) {
+    string.starts_with(p, "#") || string.starts_with(p, "&")
+  })
+  |> option.from_result
+  |> option.map(canonical_channel)
+}
+
 /// Parse RPL_NAMREPLY (353) member tokens → members.
 pub fn parse_353_members(line: String) -> List(Member) {
   let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
   // :server 353 me = #chan :@op +voice nick
-  case string.split(rest, " :") {
-    [_, names] ->
+  case string.split_once(rest, " :") {
+    Ok(#(_, names)) ->
       string.split(names, " ")
       |> list.filter(fn(t) { t != "" })
       |> list.map(parse_member_token)
-    _ ->
-      // try last colon segment
+    Error(_) ->
       case string.split(rest, ":") {
         parts ->
           case list.last(parts) {
@@ -421,16 +624,190 @@ pub fn parse_353_members(line: String) -> List(Member) {
 }
 
 fn parse_member_token(token: String) -> Member {
-  let #(op, voice, nick) = case string.to_graphemes(token) {
-    ["@", ..rest] -> #(True, False, string.concat(rest))
-    ["+", ..rest] -> #(False, True, string.concat(rest))
-    ["%", ..rest] -> #(True, False, string.concat(rest))
-    _ -> #(False, False, token)
-  }
-  Member(nick: nick, op: op, voice: voice, color: nick_color_class(nick))
+  // Multi-prefix tokens: ~&@%+ (founder/admin/op/halfop/voice).
+  let #(prefixes, nick) = split_nick_prefixes(token)
+  let op =
+    string.contains(prefixes, "@")
+    || string.contains(prefixes, "~")
+    || string.contains(prefixes, "&")
+  let halfop = string.contains(prefixes, "%")
+  let voice = string.contains(prefixes, "+")
+  Member(
+    nick: nick,
+    op: op,
+    halfop: halfop,
+    voice: voice,
+    color: nick_color_class(nick),
+  )
 }
 
-/// Parse JOIN/PART/QUIT for member roster updates.
+fn split_nick_prefixes(token: String) -> #(String, String) {
+  do_split_prefixes(string.to_graphemes(token), [])
+}
+
+fn do_split_prefixes(
+  chars: List(String),
+  acc: List(String),
+) -> #(String, String) {
+  case chars {
+    ["@" as c, ..rest]
+    | ["%" as c, ..rest]
+    | ["+" as c, ..rest]
+    | ["~" as c, ..rest]
+    | ["&" as c, ..rest] -> do_split_prefixes(rest, [c, ..acc])
+    _ -> #(string.concat(list.reverse(acc)), string.concat(chars))
+  }
+}
+
+/// Sort members: ops → halfops → voice → plain, then nick (case-insensitive).
+pub fn sort_members(members: List(Member)) -> List(Member) {
+  list.sort(members, fn(a, b) {
+    let ra = member_rank(a)
+    let rb = member_rank(b)
+    case int.compare(ra, rb) {
+      order.Eq ->
+        string.compare(string.lowercase(a.nick), string.lowercase(b.nick))
+      other -> other
+    }
+  })
+}
+
+fn member_rank(m: Member) -> Int {
+  case m.op, m.halfop, m.voice {
+    True, _, _ -> 0
+    False, True, _ -> 1
+    False, False, True -> 2
+    False, False, False -> 3
+  }
+}
+
+/// Display prefix character for the userlist (`@` / `%` / `+` / empty).
+pub fn member_prefix_char(m: Member) -> String {
+  case m.op, m.halfop, m.voice {
+    True, _, _ -> "@"
+    False, True, _ -> "%"
+    False, False, True -> "+"
+    False, False, False -> ""
+  }
+}
+
+/// CSS class on `.pfx` for privilege colouring.
+pub fn member_prefix_class(m: Member) -> String {
+  case m.op, m.halfop, m.voice {
+    True, _, _ -> "op"
+    False, True, _ -> "halfop"
+    False, False, True -> "voice"
+    False, False, False -> ""
+  }
+}
+
+/// Apply MODE o/h/v ops to a member list (current channel only).
+pub fn apply_mode_ops(
+  members: List(Member),
+  ops: List(ModeOp),
+) -> List(Member) {
+  list.fold(ops, members, fn(acc, op) {
+    apply_one_mode(acc, op.mode, op.adding, op.target)
+  })
+}
+
+fn apply_one_mode(
+  members: List(Member),
+  mode: String,
+  adding: Bool,
+  target: String,
+) -> List(Member) {
+  case list.any(members, fn(m) { m.nick == target }) {
+    True ->
+      list.map(members, fn(m) {
+        case m.nick == target {
+          True ->
+            case mode {
+              "o" -> Member(..m, op: adding)
+              "h" -> Member(..m, halfop: adding)
+              "v" -> Member(..m, voice: adding)
+              _ -> m
+            }
+          False -> m
+        }
+      })
+    False ->
+      case mode {
+        "o" | "h" | "v" -> {
+          let base =
+            Member(
+              nick: target,
+              op: False,
+              halfop: False,
+              voice: False,
+              color: nick_color_class(target),
+            )
+          let entry = case mode {
+            "o" -> Member(..base, op: adding)
+            "h" -> Member(..base, halfop: adding)
+            "v" -> Member(..base, voice: adding)
+            _ -> base
+          }
+          list.append(members, [entry])
+        }
+        _ -> members
+      }
+  }
+}
+
+/// Parse channel MODE for privilege changes → `#(channel, ops)`.
+pub fn parse_mode_change(line: String) -> Option(#(String, List(ModeOp))) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  case string.starts_with(rest, ":") {
+    False -> None
+    True -> {
+      let body = string.drop_start(rest, 1)
+      case string.split_once(body, " ") {
+        Error(_) -> None
+        Ok(#(_prefix, cmd_args)) ->
+          case string.split(cmd_args, " ") {
+            ["MODE", chan, modestring, ..args] -> {
+              let chan = drop_leading_colon(chan)
+              case
+                string.starts_with(chan, "#") || string.starts_with(chan, "&")
+              {
+                True ->
+                  Some(#(
+                    canonical_channel(chan),
+                    parse_mode_ops(modestring, args),
+                  ))
+                False -> None
+              }
+            }
+            _ -> None
+          }
+      }
+    }
+  }
+}
+
+fn parse_mode_ops(modestring: String, args: List(String)) -> List(ModeOp) {
+  let #(ops, _) =
+    list.fold(string.to_graphemes(modestring), #([], #(True, args)), fn(acc, c) {
+      let #(ops, #(adding, remaining)) = acc
+      case c {
+        "+" -> #(ops, #(True, remaining))
+        "-" -> #(ops, #(False, remaining))
+        "o" | "h" | "v" ->
+          case remaining {
+            [target, ..rest] -> #(
+              [ModeOp(mode: c, adding: adding, target: target), ..ops],
+              #(adding, rest),
+            )
+            [] -> #(ops, #(adding, remaining))
+          }
+        _ -> #(ops, #(adding, remaining))
+      }
+    })
+  list.reverse(ops)
+}
+
+/// Parse JOIN/PART/QUIT/NICK for member roster updates.
 /// Returns `#(kind, nick, channel_opt)`.
 pub fn parse_member_change(
   line: String,
@@ -468,6 +845,32 @@ pub fn parse_member_change(
         }
       }
     }
+  }
+}
+
+/// Parse JOIN-failure numerics (471/473/474/475/477).
+/// Returns `#(channel, numeric, trailing)` or None.
+pub fn parse_join_failure(line: String) -> Option(#(String, String, String)) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  let rest = strip_server_prefix(rest)
+  let tokens = string.split(rest, " ")
+  case tokens {
+    [numeric, _me, chan, ..] ->
+      case numeric {
+        "471" | "473" | "474" | "475" | "477" ->
+          case string.starts_with(chan, "#") || string.starts_with(chan, "&") {
+            True -> {
+              let trailing = case string.split_once(rest, " :") {
+                Ok(#(_, t)) -> t
+                Error(_) -> ""
+              }
+              Some(#(canonical_channel(chan), numeric, trailing))
+            }
+            False -> None
+          }
+        _ -> None
+      }
+    _ -> None
   }
 }
 
@@ -545,4 +948,294 @@ pub fn escape_html(s: String) -> String {
   |> string.replace("<", "&lt;")
   |> string.replace(">", "&gt;")
   |> string.replace("\"", "&quot;")
+}
+
+/// Escape message text and turn http(s) URLs into clickable anchors.
+///
+/// Direct image URLs (file extension, freeq media, bsky CDN) also get an
+/// inline preview — freeq-web2 / freeq-web3 parity.
+pub fn linkify_html(text: String) -> String {
+  text
+  |> escape_html
+  |> linkify_escaped
+}
+
+/// True when `url` should render as an inline image preview.
+pub fn is_image_url(url: String) -> Bool {
+  let lower = string.lowercase(url)
+  string.contains(lower, "/api/v1/media/")
+  || string.contains(lower, "cdn.bsky.app/img/")
+  || has_image_ext(lower)
+}
+
+fn has_image_ext(url: String) -> Bool {
+  let path = case string.split_once(url, "?") {
+    Ok(#(p, _)) -> p
+    Error(_) -> url
+  }
+  let path = case string.split_once(path, "#") {
+    Ok(#(p, _)) -> p
+    Error(_) -> path
+  }
+  string.ends_with(path, ".jpg")
+  || string.ends_with(path, ".jpeg")
+  || string.ends_with(path, ".png")
+  || string.ends_with(path, ".gif")
+  || string.ends_with(path, ".webp")
+}
+
+fn linkify_escaped(escaped: String) -> String {
+  linkify_loop(escaped, "")
+}
+
+fn linkify_loop(rest: String, acc: String) -> String {
+  case next_url_split(rest) {
+    None -> acc <> rest
+    Some(#(before, scheme, after_scheme)) -> {
+      let #(raw_url, after_url) = take_url_body(after_scheme)
+      let #(url, trailing) = trim_url_punctuation(raw_url)
+      let full = scheme <> url
+      let link = case url {
+        "" -> scheme <> raw_url
+        _ -> link_anchor(full) <> trailing
+      }
+      linkify_loop(after_url, acc <> before <> link)
+    }
+  }
+}
+
+/// Earliest `http://` or `https://` in `rest` → `#(before, scheme, after)`.
+fn next_url_split(rest: String) -> Option(#(String, String, String)) {
+  let https = string.split_once(rest, "https://")
+  let http = string.split_once(rest, "http://")
+  case https, http {
+    Ok(#(pre_s, after_s)), Ok(#(pre_h, after_h)) ->
+      case string.length(pre_s) <= string.length(pre_h) {
+        True -> Some(#(pre_s, "https://", after_s))
+        False ->
+          // `http://` match may be the start of `https://` (same offset).
+          case string.starts_with(after_h, "s://") {
+            True -> Some(#(pre_s, "https://", after_s))
+            False -> Some(#(pre_h, "http://", after_h))
+          }
+      }
+    Ok(#(pre, after)), Error(_) -> Some(#(pre, "https://", after))
+    Error(_), Ok(#(pre, after)) ->
+      case string.starts_with(after, "s://") {
+        True -> None
+        False -> Some(#(pre, "http://", after))
+      }
+    Error(_), Error(_) -> None
+  }
+}
+
+/// Consume until whitespace or `<` (web2 end-of-URL markers).
+fn take_url_body(rest: String) -> #(String, String) {
+  take_url_body_loop(rest, "")
+}
+
+fn take_url_body_loop(rest: String, acc: String) -> #(String, String) {
+  case string.pop_grapheme(rest) {
+    Error(Nil) -> #(acc, "")
+    Ok(#(g, more)) ->
+      case g {
+        " " | "\t" | "\n" | "\r" | "<" -> #(acc, rest)
+        _ -> take_url_body_loop(more, acc <> g)
+      }
+  }
+}
+
+/// Strip trailing punctuation commonly glued onto URLs (web2 parity).
+/// Returns `#(clean_url, trailing_chars_kept_as_text)`.
+fn trim_url_punctuation(url: String) -> #(String, String) {
+  trim_url_punctuation_loop(url, "")
+}
+
+fn trim_url_punctuation_loop(url: String, trailing: String) -> #(String, String) {
+  case string.pop_grapheme(string.reverse(url)) {
+    Error(Nil) -> #("", trailing)
+    Ok(#(last, rev_rest)) ->
+      case is_url_trailing_punct(last) {
+        True ->
+          trim_url_punctuation_loop(string.reverse(rev_rest), last <> trailing)
+        False -> #(url, trailing)
+      }
+  }
+}
+
+fn is_url_trailing_punct(g: String) -> Bool {
+  case g {
+    "." | "," | ")" | "]" | "!" | "?" | ";" | "'" | "\"" -> True
+    _ -> False
+  }
+}
+
+fn link_anchor(url: String) -> String {
+  case is_image_url(url) {
+    True ->
+      "<a href=\""
+      <> url
+      <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"msg-img-url\">"
+      <> url
+      <> "</a>"
+      <> "<a href=\""
+      <> url
+      <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"msg-img-link\">"
+      <> "<img src=\""
+      <> url
+      <> "\" alt=\"\" class=\"msg-img\" loading=\"lazy\" referrerpolicy=\"no-referrer\"></a>"
+    False ->
+      "<a href=\""
+      <> url
+      <> "\" target=\"_blank\" rel=\"noopener noreferrer\">"
+      <> url
+      <> "</a>"
+  }
+}
+
+// ── AV call TAGMSG (control plane) ───────────────────────────────────────────
+
+/// Parsed `+freeq.at/av-state` TAGMSG broadcast (call lifecycle on a channel).
+pub type AvState {
+  AvState(
+    /// Canonical channel name (e.g. `#freeq`).
+    channel: String,
+    /// Lifecycle token: `started`, `ended`, `joined`, etc.
+    state: String,
+    /// freeq-server AV session id.
+    session_id: String,
+    /// Nick or DID of the actor who emitted the event.
+    actor: String,
+    /// Reported participant count.
+    participants: Int,
+    /// Per-device instance id of the actor.
+    instance: String,
+    /// Optional call title.
+    title: String,
+  )
+}
+
+/// Parse an AV state broadcast TAGMSG.
+/// Returns `Some(AvState)` when `+freeq.at/av-state` is present.
+pub fn parse_av_state_tagmsg(line: String) -> Option(AvState) {
+  let #(tags, after) = parse_irc_tags(string.trim_end(line))
+  case tag_get(tags, "+freeq.at/av-state") {
+    None | Some("") -> None
+    Some(state) -> {
+      let rest = case string.starts_with(after, ":") {
+        True -> string.drop_start(after, 1)
+        False -> after
+      }
+      let parts = string.split(rest, " ")
+      // :nick!u@h TAGMSG #channel
+      let channel = case parts {
+        [_, _, ch, ..] ->
+          ch
+          |> drop_leading_colon
+          |> canonical_channel
+        _ -> ""
+      }
+      let participants = case tag_get(tags, "+freeq.at/av-participants") {
+        Some(raw) ->
+          case int.parse(raw) {
+            Ok(n) -> n
+            Error(_) -> 0
+          }
+        None -> 0
+      }
+      Some(AvState(
+        channel: channel,
+        state: state,
+        session_id: option.unwrap(tag_get(tags, "+freeq.at/av-id"), ""),
+        actor: option.unwrap(tag_get(tags, "+freeq.at/av-actor"), ""),
+        participants: participants,
+        instance: option.unwrap(tag_get(tags, "+freeq.at/av-instance"), ""),
+        title: option.unwrap(tag_get(tags, "+freeq.at/av-title"), ""),
+      ))
+    }
+  }
+}
+
+/// Parse a directed `+freeq.at/av-token` TAGMSG for one of `own_nicks`.
+/// Returns `Some(#(session_id, token))`.
+pub fn parse_av_token_tagmsg(
+  line: String,
+  own_nicks: List(String),
+) -> Option(#(String, String)) {
+  let own =
+    list.filter(own_nicks, fn(n) { string.trim(n) != "" })
+    |> list.map(string.lowercase)
+  case own {
+    [] -> None
+    _ -> {
+      let #(tags, after) = parse_irc_tags(string.trim_end(line))
+      case tag_get(tags, "+freeq.at/av-token") {
+        None | Some("") -> None
+        Some(token) -> {
+          let rest = case string.starts_with(after, ":") {
+            True -> string.drop_start(after, 1)
+            False -> after
+          }
+          let parts = string.split(rest, " ")
+          case parts {
+            [_, cmd, target, ..] ->
+              case string.uppercase(cmd) == "TAGMSG" {
+                False -> None
+                True -> {
+                  let t = string.lowercase(drop_leading_colon(target))
+                  case list.contains(own, t) {
+                    True ->
+                      Some(#(
+                        option.unwrap(tag_get(tags, "+freeq.at/av-id"), ""),
+                        token,
+                      ))
+                    False -> None
+                  }
+                }
+              }
+            _ -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Client → server: open a new call.
+pub fn av_start_line(channel: String, instance: String) -> String {
+  let ch = canonical_channel(channel)
+  let tags =
+    "+freeq.at/av-start=;+freeq.at/av-instance="
+    <> escape_tag_value(instance)
+  "@" <> tags <> " TAGMSG " <> ch <> "\r\n"
+}
+
+/// Client → server: join an existing call.
+pub fn av_join_line(
+  channel: String,
+  session_id: String,
+  instance: String,
+) -> String {
+  let ch = canonical_channel(channel)
+  let tags =
+    "+freeq.at/av-join=;+freeq.at/av-id="
+    <> escape_tag_value(session_id)
+    <> ";+freeq.at/av-instance="
+    <> escape_tag_value(instance)
+  "@" <> tags <> " TAGMSG " <> ch <> "\r\n"
+}
+
+/// Client → server: leave a call.
+pub fn av_leave_line(
+  channel: String,
+  session_id: String,
+  instance: String,
+) -> String {
+  let ch = canonical_channel(channel)
+  let tags =
+    "+freeq.at/av-leave=;+freeq.at/av-id="
+    <> escape_tag_value(session_id)
+    <> ";+freeq.at/av-instance="
+    <> escape_tag_value(instance)
+  "@" <> tags <> " TAGMSG " <> ch <> "\r\n"
 }
