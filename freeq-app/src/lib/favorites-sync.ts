@@ -28,6 +28,31 @@ export function favoritesEqual(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
+/**
+ * Favorites naming a channel we aren't joined to in this session.
+ *
+ * Favorites roam per-DID, so a favorite set on another device can name a
+ * channel absent from this session's list. The sidebar builds both its
+ * Favorites and Channels groups by filtering the *joined* channels, so without
+ * this such a favorite appears in neither — invisible and unreachable, which
+ * reads as "I can't find #freeq, how do I join it?". Callers render these as
+ * join-on-click rows.
+ *
+ * Only `#`/`&` targets are joinable, so DM favorites are excluded.
+ * Returns lowercase names, sorted, deduped.
+ */
+export function unjoinedFavorites(favorites: Iterable<string>, joined: string[]): string[] {
+  const joinedLower = new Set(joined.map((c) => c.toLowerCase()));
+  const out = new Set<string>();
+  for (const f of favorites) {
+    const k = f.toLowerCase();
+    if (!k.startsWith('#') && !k.startsWith('&')) continue;
+    if (joinedLower.has(k)) continue;
+    out.add(k);
+  }
+  return [...out].sort();
+}
+
 export async function fetchFavorites(bearer: string): Promise<string[]> {
   const r = await fetch('/api/v1/favorites', {
     headers: { Authorization: `Bearer ${bearer}` },
