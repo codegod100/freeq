@@ -174,24 +174,54 @@ def _blog_posts():
 
 
 def _atproto_posts():
-    """Posts from AT Protocol, or [] if unavailable (falls back to markdown)."""
+    """Posts from AT Protocol, or [] if unavailable/unconfigured."""
     try:
         return BLOG_SOURCE.posts()
     except Exception:
         return []
 
 
+def _merged_posts():
+    """
+    Every post, newest first, from both sources.
+
+    Posts live in two places during (and after) the move to Leaflet: AT Protocol
+    records and the older blog/*.md files. Showing only one source would make
+    the other's posts vanish from the index the moment the first Leaflet post
+    went up, so they are merged. On a slug collision the AT Protocol record wins:
+    if a file post has been migrated, the record is the canonical copy.
+    """
+    entries = []
+    seen = set()
+    # Defensive: a fault anywhere in the AT Protocol path must degrade to the
+    # local posts, never 500 the blog index.
+    try:
+        remote = _atproto_posts()
+    except Exception:
+        remote = []
+    for p in remote:
+        seen.add(p.slug)
+        entries.append(
+            {"slug": p.slug, "title": p.title, "date": p.date,
+             "description": p.description, "atproto": True}
+        )
+    for p in _blog_posts():
+        if p["slug"] in seen:
+            continue
+        entries.append({**p, "description": p.get("description", ""), "atproto": False})
+    entries.sort(key=lambda e: e["date"], reverse=True)
+    return entries
+
+
 @app.route("/blog/")
 def blog_index():
-    posts = _atproto_posts()
-    if posts:
-        return render_template(
-            "blog_index.html",
-            posts=posts,
-            from_atproto=True,
-            publication_url=BLOG_PUBLICATION,
-        )
-    return render_template("blog_index.html", posts=_blog_posts(), from_atproto=False)
+    posts = _merged_posts()
+    return render_template(
+        "blog_index.html",
+        posts=posts,
+        from_atproto=any(p.get("atproto") for p in posts),
+        publication_url=BLOG_PUBLICATION,
+    )
 
 
 @app.route("/blog/<slug>/")
@@ -212,11 +242,8 @@ def blog_post(slug):
 
 
 def _feed_posts():
-    """Feed entries as plain dicts, from AT Protocol when available."""
-    posts = _atproto_posts()
-    if posts:
-        return [{"title": p.title, "slug": p.slug, "date": p.date} for p in posts]
-    return _blog_posts()
+    """Feed entries: both sources, newest first."""
+    return _merged_posts()
 
 
 @app.route("/blog/feed.xml")
