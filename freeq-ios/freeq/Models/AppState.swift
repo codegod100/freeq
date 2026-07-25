@@ -1075,7 +1075,9 @@ class AppState: ObservableObject {
         let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/channels/\(encoded)/sessions")
 
         if let url {
-            var req = URLRequest(url: url)
+            // Private channels require the bearer (same access rule as history),
+            // otherwise discovery silently finds no active call.
+            var req = ApiAuth.request(url, bearer: apiBearerSessionId)
             req.timeoutInterval = 4
             if let (data, _) = try? await URLSession.shared.data(for: req),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -1890,9 +1892,11 @@ class AppState: ObservableObject {
         let name = channel.hasPrefix("#") ? String(channel.dropFirst()) : channel
         guard let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
               let url = URL(string: "\(ServerConfig.apiBaseUrl)/api/v1/channels/\(encoded)/pins") else { return }
+        // Pins on a mode-restricted channel need the session bearer.
+        let req = ApiAuth.request(url, bearer: apiBearerSessionId)
         Task {
             do {
-                let (data, _) = try await URLSession.shared.data(from: url)
+                let (data, _) = try await URLSession.shared.data(for: req)
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let pinsArray = json["pins"] as? [[String: Any]] {
                     let msgIds = Set(pinsArray.compactMap { $0["msgid"] as? String })

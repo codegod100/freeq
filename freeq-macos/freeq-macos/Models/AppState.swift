@@ -851,8 +851,11 @@ class AppState {
         let host = serverAddress.split(separator: ":").first.map(String.init) ?? "irc.freeq.at"
         let encoded = channel.addingPercentEncoding(withAllowedCharacters: .urlHostAllowed) ?? channel
         guard let url = URL(string: "https://\(host)/api/v1/channels/\(encoded)/pins") else { return }
+        // Pins on a mode-restricted channel require the session bearer, or the
+        // server (correctly) refuses with 403.
+        let req = ApiAuth.request(url, bearer: apiBearerSessionId)
         Task {
-            guard let (data, _) = try? await URLSession.shared.data(from: url),
+            guard let (data, _) = try? await URLSession.shared.data(for: req),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let pins = json["pins"] as? [[String: Any]] else { return }
             let msgs: [ChatMessage] = pins.compactMap { p in

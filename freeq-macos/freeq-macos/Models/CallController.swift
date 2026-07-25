@@ -58,7 +58,9 @@ extension AppState {
         let url = URL(string: "\(avApiBaseUrl)/api/v1/channels/\(encoded)/sessions")
 
         if let url {
-            var req = URLRequest(url: url)
+            // Sessions on a private channel need the bearer (same access rule
+            // as history), otherwise discovery silently finds no active call.
+            var req = ApiAuth.request(url, bearer: apiBearerSessionId)
             req.timeoutInterval = 4
             if let (data, _) = try? await URLSession.shared.data(for: req),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {

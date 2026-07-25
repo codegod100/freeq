@@ -108,6 +108,7 @@
 		F13BBF3DAA2C028548D91551 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 04D3AAFE430FB0DC2DA62F57 /* Theme.swift */; };
 		F166A44537B071CBCB90128C /* ComposeHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06360D5F1B334245B936F78F /* ComposeHistory.swift */; };
 		F221FBCD2F33FDE638027BB4 /* BrokerAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16659A05393DA59C0C3AC3C4 /* BrokerAuth.swift */; };
+		F32E9C6E2C26DC15931F9430 /* ApiAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 69D7F8C4D262E9181F0888CF /* ApiAuth.swift */; };
 		F564EDD064F706DA1FED48B0 /* QuickSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B36CCCF8041100BDA937EAB /* QuickSwitcher.swift */; };
 		F804DF96FC5F782461D42394 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BFC0A0C4F585C97716A8C4B /* SearchView.swift */; };
 		FDC15A8F819924DB11EA2B88 /* Validation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2DFA3935D1A36696CF3DBC0 /* Validation.swift */; };
@@ -180,6 +181,7 @@
 		62B0B9FB9D87D335C6B9327D /* MessageBlocks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageBlocks.swift; sourceTree = "<group>"; };
 		635E43C3825BFA51AFB89DF6 /* DidDisplay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DidDisplay.swift; sourceTree = "<group>"; };
 		68D19F735EC72757A61B1D6C /* DetailPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailPanel.swift; sourceTree = "<group>"; };
+		69D7F8C4D262E9181F0888CF /* ApiAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApiAuth.swift; sourceTree = "<group>"; };
 		6AD26F0F8B6173EE7643F964 /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		6D0D657E5F637E5EFD232E19 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
 		71D02469D6C6FADFE295A523 /* ReconnectPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReconnectPolicy.swift; sourceTree = "<group>"; };
@@ -383,6 +385,7 @@
 		9FEEFDA2BB675FA6773DD208 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				69D7F8C4D262E9181F0888CF /* ApiAuth.swift */,
 				59A3EE3A6E9D8B6CCE8D4940 /* AppDelegate.swift */,
 				932AFF9B3AF0BCF257A2DCE2 /* AppState.swift */,
 				0F52BF9F99E9D9772373AA39 /* AudioLevelMeter.swift */,
@@ -583,6 +586,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F32E9C6E2C26DC15931F9430 /* ApiAuth.swift in Sources */,
 				9A656A1FED0DA78997CD68B4 /* App.swift in Sources */,
 				E5D568CFB88348DD107086ED /* AppDelegate.swift in Sources */,
 				82F06962C82E36993AC3F92C /* AppKitMessageList.swift in Sources */,

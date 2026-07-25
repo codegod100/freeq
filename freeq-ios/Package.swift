@@ -29,6 +29,7 @@ let package = Package(
                 "Jumbomoji.swift",
                 "CallLayoutPolicies.swift",
                 "FavoritesSync.swift",
+                "ApiAuth.swift",
                 "ChannelCrypto.swift",
                 "ChannelE2eeState.swift",
                 "ChannelAccessNotice.swift",

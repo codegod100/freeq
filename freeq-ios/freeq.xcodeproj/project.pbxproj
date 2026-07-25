@@ -79,6 +79,7 @@
 		968D06E61F78B48BE723CCA8 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 03FEC306B6E024D2BBF561BE /* SharedStore.swift */; };
 		9ADC4B8DCD3BCB087C8FF8C2 /* ChatDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C01B51AD480FA3889B5B5D29 /* ChatDetailView.swift */; };
 		A03375CBD6C2B0D82185AFA1 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D567BC948344D3BCA2F31223 /* SwiftUI.framework */; };
+		A27FE79FCF2981CFC8D03D80 /* ApiAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00D21A39BF3823FEA1457075 /* ApiAuth.swift */; };
 		A6E303F99C6393665AE44025 /* ThreadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83E16EC2E4202D7B88D8DEDE /* ThreadView.swift */; };
 		AA5C84EC4D1A8D5C37828312 /* CallControlIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40EA2E012985430B01C97EBC /* CallControlIntents.swift */; };
 		B0B30A71D723A43E4225953F /* AvStartRaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9801936979D608D0162632A4 /* AvStartRaceTests.swift */; };
@@ -162,6 +163,7 @@
 
 /* Begin PBXFileReference section */
 		00499E45672763D6A58D9A8A /* freeq.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = freeq.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		00D21A39BF3823FEA1457075 /* ApiAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApiAuth.swift; sourceTree = "<group>"; };
 		0115700FA5AE53FD60E9FEAA /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
 		01F3FF90C3280207C507F1F7 /* CoordinationCardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoordinationCardView.swift; sourceTree = "<group>"; };
 		03FEC306B6E024D2BBF561BE /* SharedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStore.swift; sourceTree = "<group>"; };
@@ -427,6 +429,7 @@
 		676C36EAFEA4BA9756D5A42C /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				00D21A39BF3823FEA1457075 /* ApiAuth.swift */,
 				DB66829DE40DA60667ECBB43 /* AppState.swift */,
 				6D03D34D14D46D454A451066 /* AppState+Navigation.swift */,
 				D2EE05180089D95AD96D9B76 /* AuthSession.swift */,
@@ -723,6 +726,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A27FE79FCF2981CFC8D03D80 /* ApiAuth.swift in Sources */,
 				7EDFB2CF1E3DC0E8E4861C4E /* AppState+Navigation.swift in Sources */,
 				95571CB3A530D8A2555D2BE3 /* AppState.swift in Sources */,
 				45EE47A41295B02CF2A3A689 /* AudioTestView.swift in Sources */,

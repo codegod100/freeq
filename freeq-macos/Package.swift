@@ -66,6 +66,7 @@ let package = Package(
                 "CoordinationCard.swift",
                 "Jumbomoji.swift",
                 "FavoritesSync.swift",
+                "ApiAuth.swift",
                 "MenuBarModel.swift",
                 "MessageActions.swift",
                 "Safety.swift",
