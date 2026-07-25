@@ -1068,6 +1068,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                             is_edited: false,
                             is_deleted: false,
                             reply_to: reply_to.clone(),
+                            edit_of: None,
                         },
                     );
                 }
@@ -1098,6 +1099,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                         is_edited: false,
                         is_deleted: false,
                         reply_to: reply_to.clone(),
+                        edit_of: None,
                     },
                 );
             } else {
@@ -1120,6 +1122,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                             is_edited: false,
                             is_deleted: false,
                             reply_to: reply_to.clone(),
+                            edit_of: None,
                         },
                     );
                 } else {
@@ -1138,6 +1141,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                             is_edited: false,
                             is_deleted: false,
                             reply_to: reply_to.clone(),
+                            edit_of: None,
                         },
                     );
 
@@ -1205,6 +1209,7 @@ fn process_irc_event(app: &mut App, event: Event, _handle: &client::ClientHandle
                     is_edited: false,
                     is_deleted: false,
                     reply_to: None,
+                    edit_of: None,
                 });
             }
         }

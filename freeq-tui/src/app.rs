@@ -132,6 +132,11 @@ pub struct BufferLine {
     pub is_deleted: bool,
     /// Parent message ID this is a reply to (from IRCv3 `+reply` tag).
     pub reply_to: Option<String>,
+    /// Root msgid of this message's edit chain, once an edit has rewritten
+    /// `msgid`. Deletes name the ORIGINAL msgid, so lookups must be able to
+    /// reach the line by it; `edit_aliases` only records that an id was seen,
+    /// not which line it belongs to.
+    pub edit_of: Option<String>,
 }
 
 /// State of a cached image.
@@ -331,6 +336,7 @@ impl Buffer {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         });
     }
 
@@ -421,6 +427,9 @@ impl Buffer {
             }
             line.text = sanitize_text(new_text);
             line.is_edited = true;
+            if line.edit_of.is_none() {
+                line.edit_of = Some(original_msgid.to_string());
+            }
             if let Some(id) = new_msgid {
                 line.msgid = Some(id.to_string());
             }
@@ -454,7 +463,16 @@ impl Buffer {
     ///
     /// Returns true if a line was marked deleted.
     pub fn apply_delete(&mut self, deleter_nick: &str, msgid: &str) -> bool {
-        if let Some(line) = self.find_by_msgid_mut(msgid) {
+        // Match the current msgid OR the edit-chain root: `apply_edit` rewrites
+        // `msgid` to the edit's id, while a delete names the ORIGINAL. Matching
+        // only the current id left edited messages on screen after the server
+        // had removed them.
+        if let Some(line) = self
+            .messages
+            .iter_mut()
+            .rev()
+            .find(|l| l.msgid.as_deref() == Some(msgid) || l.edit_of.as_deref() == Some(msgid))
+        {
             if !line.from.eq_ignore_ascii_case(deleter_nick) {
                 return false;
             }
@@ -845,6 +863,7 @@ impl App {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         });
 
         // Track unread + mentions for inactive buffers. IRC nicks are
@@ -1166,6 +1185,7 @@ mod tests {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         }
     }
 
@@ -1540,6 +1560,7 @@ mod tests {
                     is_edited: false,
                     is_deleted: false,
                     reply_to: None,
+                    edit_of: None,
                 },
             );
         }
@@ -1700,6 +1721,7 @@ mod tests {
             is_edited: false,
             is_deleted: false,
             reply_to: None,
+            edit_of: None,
         });
         let line = buf.messages.back().unwrap();
         for c in line.from.chars() {
@@ -2152,5 +2174,84 @@ pub fn evict_image_cache(cache: &ImageCache) {
             }
             guard.remove(&k);
         }
+    }
+}
+
+#[cfg(test)]
+mod delete_after_edit_tests {
+    //! Deleting an *edited* message must still work.
+    //!
+    //! `apply_edit` rewrites `line.msgid` to the edit's msgid (so subsequent
+    //! streaming edits and history dedup line up), recording the original only in
+    //! the buffer-level `edit_aliases` set. Deletes always name the ORIGINAL
+    //! msgid — the identity clients hold, and what the server relays in
+    //! `+draft/delete` — so `apply_delete`'s `find_by_msgid_mut` lookup missed and
+    //! the line stayed on screen after the server had removed it.
+    use super::*;
+
+    fn line(msgid: &str, from: &str, text: &str) -> BufferLine {
+        BufferLine {
+            timestamp: "12:00".into(),
+            from: from.into(),
+            text: text.into(),
+            is_system: false,
+            image_url: None,
+            msgid: Some(msgid.into()),
+            is_edited: false,
+            is_deleted: false,
+            reply_to: None,
+            edit_of: None,
+        }
+    }
+
+    #[test]
+    fn delete_by_original_msgid_after_edit() {
+        let mut buf = Buffer::new("#t");
+        buf.messages.push_back(line("orig", "alice", "secret v1"));
+        assert!(buf.apply_edit("alice", "orig", Some("edit1"), "secret v2"));
+
+        assert!(
+            buf.apply_delete("alice", "orig"),
+            "delete naming the original msgid must apply after an edit"
+        );
+        let l = buf.messages.back().unwrap();
+        assert!(l.is_deleted);
+        assert!(l.text.is_empty());
+    }
+
+    #[test]
+    fn delete_by_edit_msgid_still_works() {
+        let mut buf = Buffer::new("#t");
+        buf.messages.push_back(line("orig", "alice", "v1"));
+        buf.apply_edit("alice", "orig", Some("edit1"), "v2");
+        assert!(buf.apply_delete("alice", "edit1"));
+        assert!(buf.messages.back().unwrap().is_deleted);
+    }
+
+    #[test]
+    fn author_check_still_applies_through_the_alias() {
+        // The nick check is the client-side defence against spoofed wire events;
+        // reaching the line via editOf must not bypass it.
+        let mut buf = Buffer::new("#t");
+        buf.messages.push_back(line("orig", "alice", "v1"));
+        buf.apply_edit("alice", "orig", Some("edit1"), "v2");
+        assert!(!buf.apply_delete("mallory", "orig"));
+        assert!(!buf.messages.back().unwrap().is_deleted);
+    }
+
+    #[test]
+    fn unrelated_lines_are_untouched() {
+        let mut buf = Buffer::new("#t");
+        buf.messages.push_back(line("orig", "alice", "v1"));
+        buf.messages.push_back(line("other", "alice", "keep me"));
+        buf.apply_edit("alice", "orig", Some("edit1"), "v2");
+        buf.apply_delete("alice", "orig");
+        let other = buf
+            .messages
+            .iter()
+            .find(|l| l.msgid.as_deref() == Some("other"))
+            .unwrap();
+        assert!(!other.is_deleted);
+        assert_eq!(other.text, "keep me");
     }
 }
