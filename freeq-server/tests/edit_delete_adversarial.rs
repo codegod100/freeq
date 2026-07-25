@@ -603,6 +603,31 @@ async fn delete_after_edit() {
         alice.send_delete("#dae", &msgid);
         let del = bob.maybe(|l| l.contains("TAGMSG") && l.contains("draft/delete"), 2000);
         assert!(del.is_some(), "Delete after edit should succeed");
+
+        // …and the content must actually be gone.
+        //
+        // This assertion was missing, and its absence hid a real bug: an edit is
+        // stored as a NEW row carrying replaces_msgid, while clients keep the
+        // ORIGINAL msgid as the message's identity — so this delete named the
+        // original and `soft_delete_message` marked only that exact row. The
+        // delete was relayed (asserted above), the message vanished from every
+        // client, and "edited" stayed readable in CHATHISTORY and FTS search
+        // forever. Relaying the TAGMSG is not the contract; removing the content
+        // is. See db::tests::soft_delete_sweeps_the_whole_revision_family.
+        alice.drain();
+        alice.tx("CHATHISTORY LATEST #dae * 50");
+        let leaked_edit = alice.maybe(|l| l.contains("edited"), 1500);
+        assert!(
+            leaked_edit.is_none(),
+            "edit revision still in history after delete: {leaked_edit:?}"
+        );
+        alice.drain();
+        alice.tx("CHATHISTORY LATEST #dae * 50");
+        let leaked_original = alice.maybe(|l| l.contains("original"), 1500);
+        assert!(
+            leaked_original.is_none(),
+            "original revision still in history after delete: {leaked_original:?}"
+        );
     })
     .await;
 }
