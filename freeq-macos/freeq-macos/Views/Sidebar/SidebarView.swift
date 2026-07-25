@@ -7,6 +7,9 @@ struct SidebarView: View {
     @State private var isSelecting = false
     @State private var selected: Set<String> = []
     @State private var confirmLeave = false
+    /// One-shot: the restored channel has been scrolled into view. Channels
+    /// load incrementally after connect, so this waits for the row to exist.
+    @State private var didRevealActive = false
 
     private func exitSelectMode() {
         isSelecting = false
@@ -29,7 +32,15 @@ struct SidebarView: View {
     private var listSections: some View {
         // Favorites
         let favChannels = appState.channels.filter { appState.favorites.contains($0.name.lowercased()) }
-        if !favChannels.isEmpty {
+        // Favorites roam per-DID, so a favorite can name a channel this device
+        // isn't currently joined to. Both sections below filter `channels`, so
+        // such a favorite would render NOWHERE — invisible and unreachable,
+        // which reads as "I can't find #freeq, how do I even join it?". Show it
+        // as a dimmed row that joins on click.
+        let unjoinedFavorites = FavoritesSync.unjoined(
+            favorites: appState.favorites,
+            joined: appState.channels.map(\.name))
+        if !favChannels.isEmpty || !unjoinedFavorites.isEmpty {
             Section("Favorites") {
                 ForEach(favChannels) { channel in
                     ChannelRow(channel: channel,
@@ -39,6 +50,26 @@ struct SidebarView: View {
                         .tag(channel.name)
                         .listRowBackground(Color.clear)
                         .listRowSeparator(.hidden)
+                }
+                ForEach(unjoinedFavorites, id: \.self) { name in
+                    Button {
+                        appState.joinChannel(name)
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "number")
+                                .foregroundStyle(Theme.textSecondary)
+                            Text(name.dropFirst())
+                                .foregroundStyle(Theme.textSecondary)
+                            Spacer()
+                            Text("Join")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Favorited on another device — click to join \(name)")
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
                 }
             }
         }
@@ -88,43 +119,73 @@ struct SidebarView: View {
 
     var body: some View {
         @Bindable var state = appState
-        // In select mode the list drives a multi-selection Set (native ⌘/⇧-click
+        // In select mode the list drives a multi-selection Set (⌘/⇧-click
         // + highlight); otherwise it drives single-selection navigation. Same
         // section content feeds both so there's one source of truth.
-        Group {
-            if isSelecting {
-                List(selection: $selected) { listSections }
-            } else {
-                List(selection: $state.activeChannel) { listSections }
+        //
+        // ScrollViewReader so the active conversation can be scrolled into
+        // view. Without it the sidebar can sit scrolled anywhere while the
+        // selected channel is off-screen — and because favorited channels are
+        // lifted out of the alphabetical "Channels" list into "Favorites" at
+        // the very top, hunting for a favorite alphabetically finds nothing.
+        // That combination reads as "I'm not in #freeq, how do I join it?"
+        ScrollViewReader { proxy in
+            Group {
+                if isSelecting {
+                    List(selection: $selected) { listSections }
+                } else {
+                    List(selection: $state.activeChannel) { listSections }
+                }
             }
-        }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        .background(Theme.sidebarBackground)
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 0) {
-                if isSelecting { selectionBar }
-                Divider().overlay(Theme.borderSoft)
-                bottomBar
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
+            .background(Theme.sidebarBackground)
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 0) {
+                    if isSelecting { selectionBar }
+                    Divider().overlay(Theme.borderSoft)
+                    bottomBar
+                }
             }
-        }
-        .sheet(isPresented: $showStatusEditor) {
-            StatusEditorSheet()
-                .environment(appState)
-        }
-        .onChange(of: appState.activeChannel) { _, newValue in
-            if let ch = newValue {
-                appState.clearUnread(ch)
-                // Request DM history if no messages loaded yet. Guests skip
-                // it: guest DMs are never persisted server-side, so the
-                // request can only fail (ACCOUNT_REQUIRED noise).
-                if !ch.hasPrefix("#"), appState.authenticatedDID != nil {
-                    if let dm = appState.dmBuffers.first(where: { $0.name.lowercased() == ch.lowercased() }),
-                       dm.messages.isEmpty {
-                        appState.requestHistory(channel: ch)
+            .sheet(isPresented: $showStatusEditor) {
+                StatusEditorSheet()
+                    .environment(appState)
+            }
+            .onChange(of: appState.activeChannel) { _, newValue in
+                if let ch = newValue {
+                    reveal(ch, proxy)
+                    appState.clearUnread(ch)
+                    // Request DM history if no messages loaded yet. Guests skip
+                    // it: guest DMs are never persisted server-side, so the
+                    // request can only fail (ACCOUNT_REQUIRED noise).
+                    if !ch.hasPrefix("#"), appState.authenticatedDID != nil {
+                        if let dm = appState.dmBuffers.first(where: { $0.name.lowercased() == ch.lowercased() }),
+                           dm.messages.isEmpty {
+                            appState.requestHistory(channel: ch)
+                        }
                     }
                 }
             }
+            // Channels arrive incrementally after connect, so the row for the
+            // restored channel usually doesn't exist yet when `activeChannel`
+            // is first set. Reveal it once, as soon as its row is real.
+            .onChange(of: appState.channels.count) { _, _ in
+                guard !didRevealActive, let ch = appState.activeChannel else { return }
+                let exists = appState.channels.contains { $0.name.caseInsensitiveCompare(ch) == .orderedSame }
+                    || appState.dmBuffers.contains { $0.name.caseInsensitiveCompare(ch) == .orderedSame }
+                guard exists else { return }
+                didRevealActive = true
+                reveal(ch, proxy)
+            }
+        }
+    }
+
+    /// Scroll the sidebar so `id` (a channel/DM row id — both are their name)
+    /// is visible. Centred so the surrounding section header is visible too,
+    /// which is what tells you *why* a channel is where it is.
+    private func reveal(_ id: String, _ proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.2)) {
+            proxy.scrollTo(id, anchor: .center)
         }
     }
 
