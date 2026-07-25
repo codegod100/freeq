@@ -142,11 +142,14 @@ const ChatScroll = {
       input.removeEventListener("blur", this._onComposeBlur);
   },
   /**
-   * Rewrite .ts[data-ts] into the browser's local timezone.
-   * Server still emits UTC as a no-JS fallback.
+   * Rewrite .ts[data-ts] into the browser's local timezone and rebuild
+   * day separators on local calendar boundaries (web2 parity).
+   * Server still emits UTC clocks as a no-JS fallback.
    */
   localizeTimes() {
     const root = this.el.querySelector("#messages") || this.el;
+    if (!root) return;
+
     root.querySelectorAll(".ts[data-ts]").forEach((el) => {
       const sec = parseInt(el.dataset.ts, 10);
       if (!Number.isFinite(sec)) return;
@@ -160,6 +163,63 @@ const ChatScroll = {
         })
         .replace(/\s+/g, "\u00A0");
     });
+
+    this.rebuildDateSeparators(root);
+  },
+  localDayKey(d) {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  },
+  formatLocalDateLabel(d) {
+    const now = new Date();
+    const today = this.localDayKey(now);
+    const key = this.localDayKey(d);
+    if (key === today) return "Today";
+    const yest = new Date(now);
+    yest.setDate(yest.getDate() - 1);
+    if (key === this.localDayKey(yest)) return "Yesterday";
+    return d.toLocaleDateString(undefined, {
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      year: "numeric",
+    });
+  },
+  /**
+   * Insert .date-sep rows between message stream items when the local
+   * calendar day changes. Pure DOM (not LiveView stream items) — rebuilt
+   * after every patch so stream morphdom can't leave stale separators.
+   */
+  rebuildDateSeparators(root) {
+    root.querySelectorAll(".date-sep").forEach((el) => el.remove());
+
+    let lastDay = null;
+    // Only real message rows (have a clock). Skip join/part if they lack .ts
+    // — our rows always include .ts when time is present.
+    const children = Array.from(root.children);
+    for (const node of children) {
+      if (node.classList?.contains("date-sep")) continue;
+      const tsEl = node.querySelector?.(".ts[data-ts]");
+      if (!tsEl) continue;
+      const sec = parseInt(tsEl.dataset.ts, 10);
+      if (!Number.isFinite(sec)) continue;
+      const d = new Date(sec * 1000);
+      const day = this.localDayKey(d);
+      if (day === lastDay) continue;
+      lastDay = day;
+
+      const sep = document.createElement("div");
+      sep.className = "date-sep";
+      sep.dataset.ts = String(sec);
+      sep.dataset.day = day;
+      sep.setAttribute("role", "separator");
+      const span = document.createElement("span");
+      span.textContent = this.formatLocalDateLabel(d);
+      sep.appendChild(span);
+      node.parentNode.insertBefore(sep, node);
+    }
   },
   scrollToBottom() {
     const el = this.el.querySelector("#messages");
