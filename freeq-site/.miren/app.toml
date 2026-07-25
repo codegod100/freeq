@@ -1,5 +1,16 @@
 name = "freeq-site"
 
+# The blog is read from AT Protocol: posts are `site.standard.document` records
+# in the author's own PDS, written by Leaflet. Not a secret — it's the same URI
+# any reader can resolve — so it's declared here rather than set out of band.
+#
+# This MUST stay set. Without it the reader refuses to serve anything (the repo
+# also holds a different publication, and serving "every document" would put the
+# wrong posts on freeq.at), and /blog falls back to the local markdown files.
+[[env]]
+key = "FREEQ_BLOG_PUBLICATION"
+value = "at://did:plc:4qsyxmnsblo4luuycm3572bq/site.standard.publication/3mri2ajri7c2w"
+
 [services.web]
 command = "gunicorn --bind 0.0.0.0:8000 --workers 2 app:app"
 port = 8000
