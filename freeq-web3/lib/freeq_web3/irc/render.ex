@@ -181,9 +181,16 @@ defmodule FreeqWeb3.Irc.Render do
               }
 
             cmd in ~w(JOIN PART QUIT) ->
+              kind =
+                case cmd do
+                  "JOIN" -> :join
+                  "PART" -> :part
+                  "QUIT" -> :quit
+                end
+
               %{
                 id: unique_id(),
-                kind: if(cmd == "JOIN", do: :join, else: :part),
+                kind: kind,
                 nick: nick,
                 text: String.downcase(cmd),
                 time: msg_time,

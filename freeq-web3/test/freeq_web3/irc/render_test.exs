@@ -115,6 +115,16 @@ defmodule FreeqWeb3.Irc.RenderTest do
     assert row.msgid == "m1"
   end
 
+  test "parse_message_line maps JOIN/PART/QUIT kinds distinctly" do
+    assert Render.parse_message_line(":n!u@h JOIN #freeq").kind == :join
+    assert Render.parse_message_line(":n!u@h PART #freeq :bye").kind == :part
+
+    quit = Render.parse_message_line(":cartographer!u@h QUIT :Client closed")
+    assert quit.kind == :quit
+    assert quit.nick == "cartographer"
+    assert quit.text == "quit"
+  end
+
   test "parse_353_members" do
     line = ":irc.freeq.at 353 me = #freeq :@alice +bob carol"
     members = Render.parse_353_members(line)

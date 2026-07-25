@@ -412,7 +412,8 @@ defmodule FreeqWeb3Web.ChatLive do
   def handle_info({:message, row}, socket) do
     # Join/part/quit must never land in the pane (roster-only). Defense in
     # depth if an older Session.Server still broadcasts presence rows.
-    if row[:kind] in [:join, :part] do
+    # QUIT is currently parsed as kind :part with text "quit"; accept :quit too.
+    if row[:kind] in [:join, :part, :quit] do
       {:noreply, socket}
     else
       # Prefer cache-only for the first paint; resolve+download off the LV process.
@@ -1146,6 +1147,7 @@ defmodule FreeqWeb3Web.ChatLive do
   defp msg_row_class(:msg), do: "msg"
   defp msg_row_class(:join), do: "join"
   defp msg_row_class(:part), do: "part"
+  defp msg_row_class(:quit), do: "part"
   defp msg_row_class(:notice), do: "notice"
   defp msg_row_class(_), do: "notice"
 
@@ -1210,7 +1212,7 @@ defmodule FreeqWeb3Web.ChatLive do
           ↩
         </button>
       <% else %>
-        <%= if @msg.kind in [:join, :part] do %>
+        <%= if @msg.kind in [:join, :part, :quit] do %>
           — {@msg.nick} {@msg.text}
         <% else %>
           <.rich_text text={@msg.text} />
