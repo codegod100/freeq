@@ -1337,6 +1337,20 @@ impl Db {
             )?;
         }
 
+        // Reactions annotate a message that no longer exists. Nothing surfaces
+        // them today, but they are orphaned rows that any future "reactions in
+        // this channel" read would resurrect — and they retain a record of who
+        // reacted to content the author asked to have deleted.
+        {
+            let mut reaction_binds: Vec<String> = Vec::with_capacity(family.len() + 1);
+            reaction_binds.push(channel.to_string());
+            reaction_binds.extend(family.iter().cloned());
+            self.conn.execute(
+                &format!("DELETE FROM reactions WHERE channel = ? AND target_msgid IN ({ph})"),
+                rusqlite::params_from_iter(reaction_binds.iter()),
+            )?;
+        }
+
         Ok(changed)
     }
 
@@ -2067,6 +2081,46 @@ mod tests {
         assert!(
             live.is_empty(),
             "delete of the original left revisions readable: {live:?}"
+        );
+    }
+
+    /// Deleting a message must not leave its reactions behind.
+    ///
+    /// `soft_delete_message` sweeps messages, FTS rows and pins; reaction rows
+    /// keyed by the deleted msgids outlived them. Nothing surfaces them today
+    /// (the message they annotate is gone), but they are orphaned state that any
+    /// future "reactions in this channel" read would resurrect, and they keep a
+    /// record of who reacted to content the author deleted.
+    #[test]
+    fn soft_delete_removes_reactions_for_the_revision_family() {
+        let db = Db::open_memory().unwrap();
+        msg(&db, "#c", "v1", 100, "id-1");
+        db.insert_edit(
+            "#c", "alice!a@host", "v2", 110, &HashMap::new(), "id-2", "id-1",
+            Some("did:plc:alice"),
+        )
+        .unwrap();
+        msg(&db, "#c", "unrelated", 120, "id-other");
+        db.store_reaction("id-1", "#c", "bob", Some("did:plc:bob"), "🔥", 111)
+            .unwrap();
+        db.store_reaction("id-2", "#c", "bob", Some("did:plc:bob"), "👍", 112)
+            .unwrap();
+        db.store_reaction("id-other", "#c", "bob", Some("did:plc:bob"), "🎉", 121)
+            .unwrap();
+
+        db.soft_delete_message("#c", "id-1").unwrap();
+
+        let left = db
+            .get_reactions_for_messages(&["id-1", "id-2", "id-other"])
+            .unwrap();
+        assert!(
+            !left.contains_key("id-1") && !left.contains_key("id-2"),
+            "reactions survived deletion of the message they annotate: {:?}",
+            left.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            left.contains_key("id-other"),
+            "unrelated reactions must be untouched"
         );
     }
 
