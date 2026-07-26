@@ -42,7 +42,7 @@ li{margin:.5em 0}
 """
 
 PLACEHOLDER_RE = re.compile(
-    r"(&lt;!--\s*(?:TODO|VERIFY|FIXME)[^&]*--&gt;|xxxx+|sig=\.\.\.|\]\(#\)|\bTODO\b|\bFIXME\b|\bVERIFY\b)", re.I)
+    r"(&lt;!--\s*(?:TODO|VERIFY|FIXME)[^&]*--&gt;|xxxx+|sig=\.\.\.|\]\(#\)|\bTODO\b|\bFIXME\b|\bVERIFY\b)")
 
 
 def inline(t: str) -> str:

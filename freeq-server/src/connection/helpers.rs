@@ -262,3 +262,122 @@ pub(crate) fn make_extended_join_with_class(
 pub(crate) fn make_standard_join(hostmask: &str, channel: &str) -> String {
     format!(":{hostmask} JOIN {channel}\r\n")
 }
+
+/// Membership flags for one *person* in a channel.
+///
+/// `ch.ops` / `ch.voiced` are keyed by SESSION, but identity is keyed by DID and
+/// a person can hold several sessions at once (phone, laptop, web). A MODE lands
+/// on the single session that was resolved, so asking "is this session an op?"
+/// gives a different answer per device and depends on hash order.
+///
+/// Every surface that renders membership — NAMES, WHO, WHOIS — must fold all of
+/// a nick's sessions together and apply the same DID authority that permission
+/// checks use, or the member list disagrees with what the server will allow.
+/// Three sites previously did this three different ways; this is the one answer.
+pub(super) fn folded_membership(
+    sessions: &[String],
+    ops: &std::collections::HashSet<String>,
+    voiced: &std::collections::HashSet<String>,
+    founder_did: Option<&str>,
+    did_ops: &std::collections::HashSet<String>,
+    session_dids: &std::collections::HashMap<String, String>,
+) -> (bool, bool) {
+    let mut is_op = false;
+    let mut is_voiced = false;
+    for s in sessions {
+        if ops.contains(s) {
+            is_op = true;
+        }
+        if voiced.contains(s) {
+            is_voiced = true;
+        }
+        if let Some(did) = session_dids.get(s)
+            && (founder_did == Some(did.as_str()) || did_ops.contains(did))
+        {
+            is_op = true;
+        }
+    }
+    (is_op, is_voiced)
+}
+
+#[cfg(test)]
+mod folded_membership_tests {
+    use super::folded_membership;
+    use std::collections::{HashMap, HashSet};
+
+    fn set(items: &[&str]) -> HashSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn op_on_any_session_makes_the_person_an_op() {
+        // The MODE landed on one socket; the person is still an op.
+        let (op, _) = folded_membership(
+            &["s1".into(), "s2".into()],
+            &set(&["s2"]),
+            &HashSet::new(),
+            None,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert!(op);
+    }
+
+    #[test]
+    fn did_authority_counts_even_with_no_session_flag() {
+        // Persistent ops survive reconnects via did_ops; permission checks
+        // already honour this, so the member list must too.
+        let dids: HashMap<String, String> =
+            [("s1".to_string(), "did:plc:bob".to_string())].into_iter().collect();
+        let (op, _) = folded_membership(
+            &["s1".into()],
+            &HashSet::new(),
+            &HashSet::new(),
+            None,
+            &set(&["did:plc:bob"]),
+            &dids,
+        );
+        assert!(op);
+    }
+
+    #[test]
+    fn founder_is_always_an_op() {
+        let dids: HashMap<String, String> =
+            [("s1".to_string(), "did:plc:alice".to_string())].into_iter().collect();
+        let (op, _) = folded_membership(
+            &["s1".into()],
+            &HashSet::new(),
+            &HashSet::new(),
+            Some("did:plc:alice"),
+            &HashSet::new(),
+            &dids,
+        );
+        assert!(op);
+    }
+
+    #[test]
+    fn voice_folds_across_sessions_too() {
+        let (_, voiced) = folded_membership(
+            &["s1".into(), "s2".into()],
+            &HashSet::new(),
+            &set(&["s1"]),
+            None,
+            &HashSet::new(),
+            &HashMap::new(),
+        );
+        assert!(voiced);
+    }
+
+    #[test]
+    fn a_plain_member_is_neither() {
+        let (op, voiced) = folded_membership(
+            &["s1".into()],
+            &HashSet::new(),
+            &HashSet::new(),
+            Some("did:plc:someone-else"),
+            &set(&["did:plc:another"]),
+            &HashMap::new(),
+        );
+        assert!(!op && !voiced);
+    }
+}

@@ -1,0 +1,80 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>proof-03-identity-signs-in-and-signs — freeq draft</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0a0c12;color:#e8e8ea;
+     font:17px/1.72 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:720px;margin:0 auto;padding:56px 26px 100px}
+h1{font-size:2.05em;line-height:1.18;letter-spacing:-.02em;margin:0 0 .1em;color:#fff}
+.date{color:#8b8b95;font-style:italic;margin:0 0 2.2em}
+h2{font-size:1.32em;margin:2.3em 0 .5em;color:#fff;
+   padding-bottom:.25em;border-bottom:1px solid #ffffff14}
+p{margin:1.05em 0}
+strong{color:#fff}
+a{color:#e05a6d}
+code{font:.88em ui-monospace,'JetBrains Mono',Menlo,monospace;
+     background:#ffffff0f;padding:.12em .35em;border-radius:4px;color:#f0b8a8}
+pre{background:#12151e;border:1px solid #2a2f3a;border-radius:10px;
+    padding:1em 1.1em;overflow-x:auto;margin:1.3em 0}
+pre code{background:none;padding:0;color:#cfd3dc;font-size:.85em;line-height:1.6}
+ul{margin:1.05em 0;padding-left:1.3em}
+li{margin:.5em 0}
+.flag{background:#e05a6d;color:#0a0c12;font-weight:700;padding:.05em .35em;border-radius:3px}
+.note{font-size:.8em;color:#8b8b95;font-family:ui-monospace,Menlo,monospace;
+      border-top:1px solid #ffffff14;margin-top:3.5em;padding-top:1em}
+</style><div class=wrap><h1>Your identity signs in, and signs what it says</h1>
+<p>Here is the question this post exists to answer. You receive a message from a channel. Can you determine who produced it without trusting the relay that delivered it?</p>
+<p>The honest answer today is: partly, and the part that is missing is specific enough to name. This post shows the chain, and then shows where it currently stops.</p>
+<h2>Four different things</h2>
+<p>Most arguments about identity go wrong by collapsing these together. Keep them apart.</p>
+<p><strong>Authentication</strong> is the current connection proving it holds a key. <strong>Authorization</strong> is the account saying that a particular session key may speak for it. <strong>Authorship</strong> is a single message carrying a signature. <strong>Revocation</strong> is the account withdrawing that permission before the key would otherwise expire.</p>
+<p>A system can do the first and third well and still be weak, because those two only establish that <em>some</em> key signed, and that <em>some</em> key authenticated. The link between &quot;the key that signed&quot; and &quot;the account you think it belongs to&quot; is authorization, and it is the interesting one.</p>
+<h2>The chain</h2>
+<pre><code>DID controls a root key
+  -&gt; a session signing key is authorized to speak for that DID
+  -&gt; the connection authenticates with ATPROTO-CHALLENGE
+  -&gt; each message carries +freeq.at/sig over its bytes
+  -&gt; a third party verifies the signature and the authorization</code></pre>
+<p>The first four steps run today. Start at the bottom and work up.</p>
+<p>A message arrives:</p>
+<pre><code>@account=did:plc:4qsyxmnsblo4luuycm3572bq;msgid=01KTC7AY5JPAZ8GXQVYTVJG327;
++freeq.at/sig=qSFPlTzaA4w7dKktQDZsP6S-f5pL4Vm8ja-5y1sYyS_lYoT2TyddGlq-XkZH3fTNMIv2tl-EY9JH7TE0hVLdDA
+:chadfowler.com!chadfowler.com@freeq/plc/4qsyxmns PRIVMSG #lobby :this server is lit</code></pre>
+<p>Fetch the key that signed it:</p>
+<pre><code>curl https://irc.freeq.at/api/v1/signing-keys/did:plc:4qsyxmnsblo4luuycm3572bq</code></pre>
+<pre><code>{&quot;algorithm&quot;:&quot;ed25519&quot;,&quot;did&quot;:&quot;did:plc:4qsyxmnsblo4luuycm3572bq&quot;,
+ &quot;encoding&quot;:&quot;base64url&quot;,&quot;public_key&quot;:&quot;Oq-cs6779KVZ6LcNEkxAvWB8adDioyQU1u8DvN7icyQ&quot;,
+ &quot;source&quot;:&quot;key-store&quot;}</code></pre>
+<p>Verify the signature over the message bytes with any ed25519 library, about twenty lines. If it checks, you know the message was not altered in transit and that it was signed by the holder of that key. That is independently verifiable message authorship and integrity, and it is a narrower claim than it sounds. It is not a legal-grade claim about a person&#x27;s intent, and freeq does not make one.</p>
+<p>Authentication is a separate step from signing. A connection proves control of a key by answering a challenge, using a single new SASL mechanism called <code>ATPROTO-CHALLENGE</code>. The server sends a nonce, the client signs it, the private key never leaves the device. There is no password and no registration.</p>
+<h2>did:key and did:plc are not the same trust model</h2>
+<p>Both strings start with <code>did:</code>, and that is where the similarity ends.</p>
+<p>A <code>did:key</code> <strong>is</strong> its public key. Resolution is local: you parse the string and you have the key. Nothing to fetch and nobody to ask. It cannot rotate, because rotating means becoming a different identity. Agents use these, which is why <code>cartographer</code> appears as <code>freeq/key/z6Mkp5we</code>.</p>
+<p>A <code>did:plc</code> is a pointer into a directory. Resolving it means fetching a document that can change over time, which is what makes key rotation and account recovery possible, and which also means you depend on that directory. Humans signing in with Bluesky get these.</p>
+<p>For a <code>did:key</code>, a verifier needs nothing but the message. For a <code>did:plc</code>, a verifier has to go somewhere to learn what the account currently authorizes. You can fetch that document without asking freeq anything:</p>
+<pre><code>curl https://plc.directory/did:plc:4qsyxmnsblo4luuycm3572bq</code></pre>
+<pre><code>{&quot;id&quot;:&quot;did:plc:4qsyxmnsblo4luuycm3572bq&quot;,&quot;alsoKnownAs&quot;:[&quot;at://chadfowler.com&quot;],
+ &quot;verificationMethod&quot;:[{&quot;id&quot;:&quot;#atproto&quot;,&quot;type&quot;:&quot;Multikey&quot;,
+ &quot;publicKeyMultibase&quot;:&quot;zQ3shhEsEspoGmdb84GSCAx7ULBhMj3CsoGrvEcWTjdMUeQ3v&quot;}], ...}</code></pre>
+<p>That is the account&#x27;s root of trust, served by a directory that is not freeq.</p>
+<h2>Where the chain currently stops</h2>
+<p>Compare the two documents above and you will see the gap immediately.</p>
+<p>The signing key is <code>Oq-cs6779KVZ6LcNEkxAvWB8adDioyQU1u8DvN7icyQ</code>, and it came from <code>irc.freeq.at</code>. The DID document from <code>plc.directory</code> does not mention it. It lists the account&#x27;s atproto key and nothing about freeq session keys.</p>
+<p>So if you fetch the message from freeq and the key from freeq, you have verified integrity against a key the relay handed you. A hostile relay that wanted to attribute a message to me could serve you a key it controls, and your verification would pass. The signature proves the message was not tampered with in flight. It does not, on its own, prove the account authorized that key.</p>
+<p>Closing this requires a signed authorization: an object, signed by the key the DID document actually names, that says this ed25519 session key may speak for this DID until some expiry. Then a verifier fetches the DID document from <code>plc.directory</code>, checks the authorization against the root key, checks the message against the session key, and never has to trust the relay for anything except delivery.</p>
+<p>That object exists for agents. Signed delegation certificates for <code>did:key</code> identities landed in the bot kit in July. For <code>did:plc</code> humans it does not exist today, which is the case most readers will test first.</p>
+<p>We could have written this post without that paragraph. The claim would have sounded stronger and been wrong, and the first cryptographer to read it would have found the hole in about a minute.</p>
+<h2>Try it</h2>
+<p><strong>See it in 30 seconds.</strong> Fetch a signing key with the curl above and read the JSON.</p>
+<p><strong>Run it in 5 minutes.</strong> Capture a signed message from <code>#lobby</code>, fetch the key, verify the signature with an ed25519 library.</p>
+<p><strong>Extend it in 30 minutes.</strong> Write a verifier that does the honest thing: check the signature, then check whether the key binding can be confirmed independently of the relay, and <strong>flag every message where it cannot</strong>. Today that verifier will flag every <code>did:plc</code> message on the server. That is the correct output, and it is the most useful contribution anyone could make to this proof.</p>
+<h2>What this does not claim</h2>
+<p>A signature proves integrity and authorship relative to a key. Binding that key to an account is a separate step, complete for agents and incomplete for humans.</p>
+<p>Nothing here protects message contents in an unencrypted channel. The relay sees plaintext. Encryption is a different mechanism and a later proof.</p>
+<p>A verified signature says nothing about whether the signer was compromised.</p>
+<h2>What is rough</h2>
+<p>The human key binding, described above, is the largest open item and the reason this post is proof 3 rather than a finished story.</p>
+<p>Revocation for session keys is expiry-based. Immediate revocation for <code>did:plc</code> sessions is not implemented, so a compromised session key stays valid until it expires.</p>
+<p>There is no published test vector set. If you write a verifier, you are working from the running server rather than from a specification with fixtures, and that is a gap we should close.</p>
+<h2>Come in</h2>
+<p><code>#freeq-dev</code> on <code>irc.freeq.at</code>. If you build the flagging verifier, that is where to bring it, and it will be the most welcome kind of contribution: the kind that tells us we are wrong in public. <code>#freeq</code> is the general channel.</p>
+<p>Next: what an encrypted freeq message actually puts on the wire.</p><div class="note">draft preview · red = placeholder the artifact gate is holding publication on</div></div>

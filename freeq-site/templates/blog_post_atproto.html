@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% set nav_active = 'blog' %}
+{% block title %}{{ post.title }}{% endblock %}
+{% block head %}
+<meta name="description" content="{{ post.description }}">
+<meta property="og:title" content="{{ post.title }}">
+<meta property="og:description" content="{{ post.description }}">
+<meta property="og:type" content="article">
+{% endblock %}
+
+{% block body %}
+<div class="container" style="max-width:44rem">
+  <p style="margin-bottom:.5rem"><a href="/blog/">&larr; Blog</a></p>
+  <h1 style="margin-bottom:.25rem">{{ post.title }}</h1>
+  <p style="color:var(--fg3);font-size:.9rem;margin-top:0">
+    {{ post.date }}
+    {% if post.tags %}
+      · {% for t in post.tags %}<span style="color:var(--fg3)">#{{ t }}</span>{% if not loop.last %} {% endif %}{% endfor %}
+    {% endif %}
+  </p>
+
+  <article class="prose">
+    {{ post.html | safe }}
+  </article>
+
+  {# The post is a record in the author's own repo. Say so, and link it: that is
+     the whole reason the blog is served this way rather than from a file. #}
+  <hr style="margin:2.5rem 0 1rem">
+  <p style="color:var(--fg3);font-size:.85rem;line-height:1.6">
+    This post is an AT Protocol record in its author's repository, not a file on
+    this server. You can read it without asking us:
+    <br>
+    <code style="font-size:.8rem;word-break:break-all">{{ post.uri }}</code>
+    <br>
+    <a href="https://pdsls.dev/{{ post.uri }}" rel="noopener">Inspect the record</a>
+    · <a href="/blog/feed.xml">RSS</a>
+  </p>
+</div>
+{% endblock %}

@@ -1527,7 +1527,23 @@ extension AppState {
         case .joined(let channel, let joinNick):
             if joinNick.lowercased() == nick.lowercased() {
                 let ch = getOrCreateChannel(channel)
-                ch.members.removeAll()
+                Log.roster.notice("""
+                    JOIN(self?) channel=\(channel, privacy: .public)                     joinNick=\(joinNick, privacy: .public) myNick=\(self.nick, privacy: .public)                     membersBefore=\(ch.members.count)                     pendingBefore=\(self.pendingNames[channel.lowercased()]?.count ?? -1)                     -> WIPING roster
+                    """)
+                // Do NOT clear ch.members here.
+                //
+                // This branch fires on "a JOIN whose nick equals mine", which
+                // cannot distinguish *this* client joining from another of my own
+                // devices joining: multi-device sessions share the nick. When the
+                // web client or phone reconnects, this fires here with no NAMES
+                // to follow (that reply went to the other device), so clearing
+                // would blank the roster permanently — the channel shows nobody,
+                // not even me, while messages keep arriving.
+                //
+                // Clearing was never needed: `namesEnd` assigns `ch.members`
+                // wholesale, so a real join replaces the roster completely.
+                // Resetting `pendingNames` is still right, so a fresh NAMES
+                // accumulates cleanly instead of appending to a stale partial.
                 ch.accessDeniedReason = nil
                 ch.messages.removeAll { $0.id.hasPrefix("channel-access-denied-\(channel)-") }
                 pendingNames[channel.lowercased()] = []
@@ -1562,6 +1578,7 @@ extension AppState {
                     }
                 }
             } else {
+                Log.roster.notice("JOIN(other) channel=\(channel, privacy: .public) nick=\(joinNick, privacy: .public)")
                 if let ch = channels.first(where: { $0.name.lowercased() == channel.lowercased() }) {
                     if !ch.members.contains(where: { $0.nick.lowercased() == joinNick.lowercased() }) {
                         ch.members.append(MemberInfo(nick: joinNick, isOp: false, isHalfop: false, isVoiced: false, awayMsg: nil, did: nil))
@@ -1844,6 +1861,9 @@ extension AppState {
 
         case .names(let channel, let memberList):
             let key = channel.lowercased()
+            Log.roster.notice("""
+                NAMES channel=\(channel, privacy: .public)                 incoming=\(memberList.count)                 pendingBefore=\(self.pendingNames[key]?.count ?? -1)                 nicks=\(memberList.prefix(8).map { ($0.isOp ? "@" : "") + $0.nick }.joined(separator: ","), privacy: .public)
+                """)
             var existing = pendingNames[key] ?? []
             existing.append(contentsOf: memberList.map { m in
                 MemberInfo(nick: m.nick, isOp: m.isOp, isHalfop: m.isHalfop, isVoiced: m.isVoiced, awayMsg: m.awayMsg, did: nil)
@@ -2025,6 +2045,10 @@ extension AppState {
                 let key = channel.lowercased()
                 // Ensure channel exists before flushing
                 let ch = getOrCreateChannel(channel)
+                let pending = pendingNames[key]
+                Log.roster.notice("""
+                    NAMES-END channel=\(channel, privacy: .public)                     pending=\(pending?.count ?? -1) membersBefore=\(ch.members.count)                     \(pending == nil ? "NO PENDING ENTRY — roster left as-is" : "flushing")
+                    """)
                 if let members = pendingNames.removeValue(forKey: key) {
                     ch.members = members
                     // WHOIS each member to discover DIDs (background, rate-limited)

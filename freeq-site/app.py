@@ -31,6 +31,40 @@ SITE_DOCS_DIR = Path(__file__).parent / "docs"
 REPO_DOCS_DIR = Path(__file__).parent.parent / "docs"
 BLOG_DIR = Path(__file__).parent / "blog"
 
+# ── Blog: read from AT Protocol ──────────────────────────────────────────────
+# Posts are authored in Leaflet, which writes them to the author's own PDS as
+# `site.standard.document` records. We read those directly, so the blog is a
+# demonstration of the thing this site is about: the data is in the author's
+# repo, and this renderer is replaceable.
+#
+#   FREEQ_BLOG_DID          contributing DIDs, comma-separated. A publication
+#                           can have collaborators, and in AT Protocol you only
+#                           write to your OWN repo — so a collaborator's post
+#                           lives in their repo with `site` pointing at the
+#                           owner's publication. Every contributing repo must be
+#                           listed here or its posts are invisible.
+#   FREEQ_BLOG_PUBLICATION  at:// of the publication to show. Unset shows every
+#                           document in the repo, which is wrong once there is
+#                           more than one publication — set it as soon as the
+#                           freeq publication exists.
+#
+# Until a publication is configured and reachable, /blog falls back to the local
+# blog/*.md files, so the page is never empty or broken.
+import atproto_blog
+
+BLOG_DIDS = [
+    d.strip()
+    for d in os.environ.get(
+        "FREEQ_BLOG_DID",
+        # publication owner (chadfowler.com), then contributors (freeq.at)
+        "did:plc:4qsyxmnsblo4luuycm3572bq,did:plc:3wbo7sapgihteh7h46773ru6",
+    ).split(",")
+    if d.strip()
+]
+BLOG_DID = BLOG_DIDS[0]
+BLOG_PUBLICATION = os.environ.get("FREEQ_BLOG_PUBLICATION") or None
+BLOG_SOURCE = atproto_blog.BlogSource(BLOG_DIDS, BLOG_PUBLICATION, ttl=300.0)
+
 # Markdown renderer
 MD_EXTENSIONS = [
     FencedCodeExtension(),
@@ -153,17 +187,77 @@ def _blog_posts():
     return posts
 
 
+def _atproto_posts():
+    """Posts from AT Protocol, or [] if unavailable/unconfigured."""
+    try:
+        return BLOG_SOURCE.posts()
+    except Exception:
+        return []
+
+
+def _merged_posts():
+    """
+    Every post, newest first, from both sources.
+
+    Posts live in two places during (and after) the move to Leaflet: AT Protocol
+    records and the older blog/*.md files. Showing only one source would make
+    the other's posts vanish from the index the moment the first Leaflet post
+    went up, so they are merged. On a slug collision the AT Protocol record wins:
+    if a file post has been migrated, the record is the canonical copy.
+    """
+    entries = []
+    seen = set()
+    # Defensive: a fault anywhere in the AT Protocol path must degrade to the
+    # local posts, never 500 the blog index.
+    try:
+        remote = _atproto_posts()
+    except Exception:
+        remote = []
+    for p in remote:
+        seen.add(p.slug)
+        entries.append(
+            {"slug": p.slug, "title": p.title, "date": p.date,
+             "description": p.description, "atproto": True}
+        )
+    for p in _blog_posts():
+        if p["slug"] in seen:
+            continue
+        entries.append({**p, "description": p.get("description", ""), "atproto": False})
+    entries.sort(key=lambda e: e["date"], reverse=True)
+    return entries
+
+
 @app.route("/blog/")
 def blog_index():
-    return render_template("blog_index.html", posts=_blog_posts())
+    posts = _merged_posts()
+    return render_template(
+        "blog_index.html",
+        posts=posts,
+        from_atproto=any(p.get("atproto") for p in posts),
+        publication_url=BLOG_PUBLICATION,
+    )
 
 
 @app.route("/blog/<slug>/")
 def blog_post(slug):
+    if ".." in slug or "/" in slug:
+        abort(404)
+    post = None
+    try:
+        post = BLOG_SOURCE.post(slug)
+    except Exception:
+        post = None
+    if post is not None:
+        return render_template("blog_post_atproto.html", post=post, did=BLOG_DID)
     filepath = BLOG_DIR / f"{slug}.md"
-    if not filepath.exists() or ".." in slug or "/" in slug:
+    if not filepath.exists():
         abort(404)
     return render_template("blog_post.html", doc=render_md(filepath))
+
+
+def _feed_posts():
+    """Feed entries: both sources, newest first."""
+    return _merged_posts()
 
 
 @app.route("/blog/feed.xml")
@@ -173,7 +267,7 @@ def blog_feed():
         f"<link>https://freeq.at/blog/{p['slug']}/</link>"
         f"<guid>https://freeq.at/blog/{p['slug']}/</guid>"
         f"<pubDate>{p['date']}</pubDate></item>"
-        for p in _blog_posts()
+        for p in _feed_posts()
     )
     rss = (
         '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>'

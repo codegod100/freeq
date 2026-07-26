@@ -321,6 +321,66 @@ pub(super) fn handle_whois(
         send(state, session_id, format!("{client_line}\r\n"));
     }
 
+    // 319 RPL_WHOISCHANNELS — the channels they share, with membership prefix.
+    //
+    // The remote-member branch above has always sent this; the local branch never
+    // did, so `/whois` on someone on your own server told you nothing about where
+    // they are or what they can do there. Uses the same folded, DID-aware answer
+    // as NAMES and WHO so all three agree.
+    {
+        // Snapshot and release before taking `channels`; never hold two of
+        // these at once (see the lock-order note in channel.rs::handle_names).
+        let dids_snapshot = state.session_dids.lock().clone();
+        let target_did = dids_snapshot.get(&target_session).cloned();
+        let channels = state.channels.lock();
+        let mut listed: Vec<String> = channels
+            .iter()
+            .filter_map(|(name, ch)| {
+                // Every session belonging to this person, not just the resolved one.
+                let sessions: Vec<String> = ch
+                    .members
+                    .iter()
+                    .filter(|s| {
+                        *s == &target_session
+                            || target_did
+                                .as_ref()
+                                .is_some_and(|d| dids_snapshot.get(*s) == Some(d))
+                    })
+                    .cloned()
+                    .collect();
+                if sessions.is_empty() {
+                    return None;
+                }
+                let (is_op, is_voiced) = super::helpers::folded_membership(
+                    &sessions,
+                    &ch.ops,
+                    &ch.voiced,
+                    ch.founder_did.as_deref(),
+                    &ch.did_ops,
+                    &dids_snapshot,
+                );
+                let prefix = if is_op {
+                    "@"
+                } else if is_voiced {
+                    "+"
+                } else {
+                    ""
+                };
+                Some(format!("{prefix}{name}"))
+            })
+            .collect();
+        drop(channels);
+        listed.sort();
+        if !listed.is_empty() {
+            let chans = Message::from_server(
+                server_name,
+                "319",
+                vec![my_nick, target_nick, &listed.join(" ")],
+            );
+            send(state, session_id, format!("{chans}\r\n"));
+        }
+    }
+
     // 301 RPL_AWAY — show away message if target is away
     if let Some(away_msg) = state.session_away.lock().get(&target_session) {
         let away = Message::from_server(
@@ -352,27 +412,59 @@ pub(super) fn handle_who(
 
     if target.starts_with('#') || target.starts_with('&') {
         let channel = normalize_channel(target);
+        // Snapshot before taking channels/nick_to_session — see the lock-order
+        // note in channel.rs::handle_names.
+        let dids_snapshot = state.session_dids.lock().clone();
         let channels = state.channels.lock();
         if let Some(ch) = channels.get(&channel) {
             let n2s = state.nick_to_session.lock();
             let away = state.session_away.lock();
 
+            // One row per PERSON, not per socket. Group this channel's sessions
+            // by nick first: a user signed in on two devices was emitted twice,
+            // with whichever flags each socket happened to carry.
+            let mut by_nick: Vec<(String, Vec<String>)> = Vec::new();
             for session in &ch.members {
-                if let Some(member_nick) = n2s.get_nick(session) {
+                let Some(n) = n2s.get_nick(session) else { continue };
+                let lower = n.to_lowercase();
+                match by_nick.iter_mut().find(|(k, _)| k.to_lowercase() == lower) {
+                    Some((_, sessions)) => sessions.push(session.clone()),
+                    None => by_nick.push((n.to_string(), vec![session.clone()])),
+                }
+            }
+
+            for (member_nick, sessions) in &by_nick {
+                {
+                    let member_nick = member_nick.as_str();
+                    let session = &sessions[0];
                     let user = "~u";
                     let host =
-                        super::cloak_for_did(state.session_dids.lock().get(session).map(|s| s.as_str()));
-                    let away_flag = if away.contains_key(session) { "G" } else { "H" };
-                    let op_flag = if ch.ops.contains(session) {
+                        super::cloak_for_did(dids_snapshot.get(session).map(|s| s.as_str()));
+                    // Away only when every device is away: reachable on one
+                    // device means reachable.
+                    let away_flag = if sessions.iter().all(|s| away.contains_key(s)) {
+                        "G"
+                    } else {
+                        "H"
+                    };
+                    let (is_op, is_voiced) = super::helpers::folded_membership(
+                        sessions,
+                        &ch.ops,
+                        &ch.voiced,
+                        ch.founder_did.as_deref(),
+                        &ch.did_ops,
+                        &dids_snapshot,
+                    );
+                    let op_flag = if is_op {
                         "@"
-                    } else if ch.voiced.contains(session) {
+                    } else if is_voiced {
                         "+"
                     } else {
                         ""
                     };
                     let flags = format!("{away_flag}{op_flag}");
                     // Include DID in realname if authenticated
-                    let did_info = state.session_dids.lock().get(session).cloned();
+                    let did_info = dids_snapshot.get(session).cloned();
                     let realname = match did_info {
                         Some(did) => format!("0 {did}"),
                         None => "0 IRC User".to_string(),

@@ -1,0 +1,70 @@
+<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>proof-02-server-least-interesting — freeq draft</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0a0c12;color:#e8e8ea;
+     font:17px/1.72 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:720px;margin:0 auto;padding:56px 26px 100px}
+h1{font-size:2.05em;line-height:1.18;letter-spacing:-.02em;margin:0 0 .1em;color:#fff}
+.date{color:#8b8b95;font-style:italic;margin:0 0 2.2em}
+h2{font-size:1.32em;margin:2.3em 0 .5em;color:#fff;
+   padding-bottom:.25em;border-bottom:1px solid #ffffff14}
+p{margin:1.05em 0}
+strong{color:#fff}
+a{color:#e05a6d}
+code{font:.88em ui-monospace,'JetBrains Mono',Menlo,monospace;
+     background:#ffffff0f;padding:.12em .35em;border-radius:4px;color:#f0b8a8}
+pre{background:#12151e;border:1px solid #2a2f3a;border-radius:10px;
+    padding:1em 1.1em;overflow-x:auto;margin:1.3em 0}
+pre code{background:none;padding:0;color:#cfd3dc;font-size:.85em;line-height:1.6}
+ul{margin:1.05em 0;padding-left:1.3em}
+li{margin:.5em 0}
+.flag{background:#e05a6d;color:#0a0c12;font-weight:700;padding:.05em .35em;border-radius:3px}
+.note{font-size:.8em;color:#8b8b95;font-family:ui-monospace,Menlo,monospace;
+      border-top:1px solid #ffffff14;margin-top:3.5em;padding-top:1em}
+</style><div class=wrap><h1>The server is the least interesting part</h1>
+<p>The previous proof showed a pixel world and a terminal sharing one room. That only works because of something boring: the server in the middle does very little.</p>
+<p>freeq is a shared environment where humans, agents, services, and media sources participate as identifiable, programmable peers. IRC is its narrow waist, not its product category. Identity, signing, policy, encryption, media, and intelligence live at the edges.</p>
+<p>This post is about the waist.</p>
+<h2>What the server actually does</h2>
+<p>It accepts connections, relays events to the channels those events are addressed to, and keeps enough state to answer who is here and what happened recently. It does not decrypt anything. It does not mint identities. It does not decide what a message means.</p>
+<p>That sounds like an omission. It is the design. Every capability freeq adds is carried as an IRCv3 message tag, and tags are data the server forwards rather than features the server implements. Connect a raw socket and watch:</p>
+<pre><code>irssi -c irc.freeq.at -p 6697
+/join #lobby</code></pre>
+<p>Or without a client at all:</p>
+<pre><code>openssl s_client -connect irc.freeq.at:6697 -quiet
+NICK yourname
+USER yourname 0 * :yourname
+CAP REQ :message-tags
+CAP END
+JOIN #lobby</code></pre>
+<p>The server tells you what it knows how to carry:</p>
+<pre><code>:irc.freeq.at CAP * LS :sasl message-tags multi-prefix echo-message server-time
+batch draft/chathistory account-notify account-tag extended-join away-notify
+draft/read-marker draft/multiline=max-bytes=40000,max-lines=100 iroh=910a9acf...</code></pre>
+<p>Most of that is standard IRCv3. <code>sasl</code> carries one new mechanism, <code>ATPROTO-CHALLENGE</code>, which is how a DID proves it holds a key. <code>iroh</code> advertises a QUIC transport for server-to-server traffic. Nothing there is a freeq feature in the sense of a thing the server does on your behalf.</p>
+<h2>Tags are the extension point</h2>
+<p>Watch a busy channel and the tags stream past:</p>
+<pre><code>@+freeq.at/sig=WNXY9YUF7B-ZOfD7vPJuzLUTPaUl3L_UaOQZYAapSFzjt74YJU80BK0IF5Q7SunR7rijCkxfCZ6DoXyxQvk5CA;
+msgid=01KXZ0NM839VVBXMAHC84B8QXV;account=did:key:z6MkpYk9z5Y8iCX4bfqtHuFekvWmzEyqQt89yecTqFNtxbTW
+:chadfowler!chadfowler@freeq/key/z6MkpYk9 PRIVMSG #lobby :hello</code></pre>
+<pre><code>@+freeq.at/reactions=🎉:chadmac;+freeq.at/sig=sSMmWIDdDz9w76-pp9cH1LFvlKSXkPUYiSZ7bvw2fPixX7Nn5w_Jz8t7A9tg_tkh_jI5Sh3KOiQvFpl9wb7TDA;
+msgid=01KK7DHD8AVQW99HEGF2ZZNJCF :chadfowler.com!chadfowler.com@freeq/plc/4qsyxmns PRIVMSG #lobby :...</code></pre>
+<p>The <code>+freeq.at/</code> namespace is a public contract. <code>sig</code> carries authorship. <code>reactions</code> carries who reacted with what. A reply carries <code>+reply</code> pointing at another <code>msgid</code>. None of these required a server release, because the server was already forwarding tags it does not interpret.</p>
+<p>The consequence is the part worth sitting with. A 1999 client receives every one of those lines. It ignores the tags and prints the sentence. Two people can sit in one channel, one of them in a modern client seeing reactions and threaded replies, the other in irssi seeing plain text, and neither is degraded into a worse version of the other. Graceful degradation is not a compatibility courtesy here. It is the test that keeps features from migrating into the server.</p>
+<h2>Why this matters for agents and media</h2>
+<p>If a capability has to be a server feature, then the server operator decides who gets it, and every new capability is a negotiation with whoever runs the relay.</p>
+<p>freeq puts them at the edges instead. An agent authenticates with the same SASL mechanism a human uses and emits typed events as tags. A voice call sets some channel metadata with an ordinary <code>TAGMSG</code> while the media travels separately over MoQ. The server carries the metadata and never touches the audio. A client that does not know about calls sees messages and is unharmed.</p>
+<p>That is why the pixel world in proof 1 could exist without anyone adding a world-mode to the server. It reads the same events every other client reads.</p>
+<h2>Try it</h2>
+<p><strong>Run it in 5 minutes.</strong> The <code>openssl s_client</code> sequence above. Join <code>#lobby</code> and read the tags going by. That is the whole substrate, visible.</p>
+<p><strong>Extend it in 30 minutes.</strong> Add a client-side feature keyed on a tag, with zero server changes. Pick an unused name in your own namespace, emit it from one client, and render it in another. If it works, you have just extended the system without asking permission from the thing in the middle. That exercise is the thesis of this post.</p>
+<h2>What this does not claim</h2>
+<p>A thin server is not a trustless one. The relay still sees plaintext in unencrypted channels, still knows who is connected, and can still drop or delay messages. Nothing in this post prevents that. What it changes is what the relay can forge without being caught, and that argument depends on the signature chain, which is the next proof and is not finished.</p>
+<p>&quot;Nothing was forked&quot; is a claim about the wire protocol, not about clients. A client that wants to render task cards has to learn the tags.</p>
+<h2>What is rough</h2>
+<p>The <code>+freeq.at/</code> namespace is a public contract by intention, and it is versioned informally. It is documented in the repo and stable in practice, but it has not been through the IRCv3 process.</p>
+<p><code>draft/chathistory</code> is exactly what the name says. Replay works and the specification may move.</p>
+<p>Federation over iroh converges and is tested, but it has not run between many independent operators for long, so claims about the relay layer are strongest for the single-server case today.</p>
+<h2>Come in</h2>
+<p><code>#freeq-dev</code> on <code>irc.freeq.at</code> is where this gets argued about, and <code>#freeq</code> is the general channel. Source is at <code>github.com/freeq-irc/freeq</code>.</p>
+<p>Next: your identity signs in, and signs what it says. We follow the key from a DID down to a single message, and we are honest about where that chain is currently complete and where it is not.</p><div class="note">draft preview · red = placeholder the artifact gate is holding publication on</div></div>

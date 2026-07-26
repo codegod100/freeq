@@ -296,37 +296,6 @@ pub(super) fn handle_join(
         }
     }
 
-    // Broadcast MODE +o/+h to existing channel members if the joiner was auto-opped/halfopped
-    {
-        let (is_op, is_halfop) = state
-            .channels
-            .lock()
-            .get(channel)
-            .map(|ch| (ch.ops.contains(session_id), ch.halfops.contains(session_id)))
-            .unwrap_or((false, false));
-        let auto_mode = if is_op {
-            Some("+o")
-        } else if is_halfop {
-            Some("+h")
-        } else {
-            None
-        };
-        if let Some(mode) = auto_mode {
-            let mode_msg = format!(":{server_name} MODE {channel} {mode} {nick}\r\n");
-            let channels = state.channels.lock();
-            if let Some(ch) = channels.get(channel) {
-                let members: Vec<String> = ch.members.iter().cloned().collect();
-                drop(channels);
-                let conns = state.connections.lock();
-                for member_session in &members {
-                    if let Some(tx) = conns.get(member_session) {
-                        let _ = tx.try_send(mode_msg.clone());
-                    }
-                }
-            }
-        }
-    }
-
     // Plugin on_join hook
     state.plugin_manager.on_join(&crate::plugin::JoinEvent {
         nick: nick.to_string(),
@@ -385,6 +354,48 @@ pub(super) fn handle_join(
     drop(conns);
     drop(tag_set);
     drop(ext_set);
+
+    // Announce an auto-op/-halfop AFTER the JOIN, never before.
+    //
+    // A DID in the channel's persistent `did_ops` is re-opped as part of joining.
+    // Sending that MODE before the JOIN meant members already in the channel got
+    // an op change for a nick they did not yet know was present, and clients
+    // rightly ignore modes for unknown members (otherwise a stray MODE invents
+    // phantom members). The op was therefore dropped by everyone already sitting
+    // in the channel, while anyone who connected later saw it correctly in their
+    // NAMES reply — two clients disagreeing about who is an op.
+    {
+        let (is_op, is_halfop, is_voiced) = state
+            .channels
+            .lock()
+            .get(channel)
+            .map(|ch| {
+                (
+                    ch.ops.contains(session_id),
+                    ch.halfops.contains(session_id),
+                    ch.voiced.contains(session_id),
+                )
+            })
+            .unwrap_or((false, false, false));
+        let modes = auto_modes_for(is_op, is_halfop, is_voiced);
+        if !modes.is_empty() {
+            let members: Vec<String> = state
+                .channels
+                .lock()
+                .get(channel)
+                .map(|ch| ch.members.iter().cloned().collect())
+                .unwrap_or_default();
+            let conns = state.connections.lock();
+            for mode in modes {
+                let mode_msg = format!(":{server_name} MODE {channel} +{mode} {nick}\r\n");
+                for member_session in &members {
+                    if let Some(tx) = conns.get(member_session) {
+                        let _ = tx.try_send(mode_msg.clone());
+                    }
+                }
+            }
+        }
+    }
 
     // Broadcast JOIN to S2S peers
     let origin = state.server_iroh_id.lock().clone().unwrap_or_default();
@@ -693,6 +704,17 @@ pub(super) fn handle_join(
                 "NAMES: all members resolved to empty list!"
             );
         }
+        // Release `nick_to_session` before touching `channels` again.
+        //
+        // LOCK ORDER: this held nick_to_session and then took channels, while
+        // WHO (queries.rs) takes channels and then nick_to_session. That is an
+        // AB/BA deadlock, and a JOIN racing a WHO wedged both. It does not look
+        // like a hang from the client's side: the server has already inserted
+        // the member and broadcast the JOIN, so messages keep arriving — only
+        // the 353/366 never come, leaving a channel you are demonstrably in with
+        // an empty member list.
+        drop(nicks);
+
         // Remote members from S2S peers (with @ prefix if op on home server or DID-based)
         let channels_lock = state.channels.lock();
         let ch_state = channels_lock.get(channel);
@@ -1957,6 +1979,16 @@ pub(super) fn handle_names(
     let nick = conn.nick_or_star();
     let multi_prefix = state.cap_multi_prefix.lock().contains(session_id);
 
+    // Snapshot session→DID FIRST and release the lock immediately.
+    //
+    // LOCK ORDER: registration holds `session_dids` and then takes
+    // `nick_to_session`. Taking them in the opposite order here (as this did
+    // when it first gained DID awareness) is an AB/BA deadlock: a NAMES racing
+    // a registration wedges both. The visible symptom is a client that joins,
+    // receives messages — those are written by other tasks — and never gets a
+    // member list. Hold at most one of these at a time.
+    let session_dids_snapshot = state.session_dids.lock().clone();
+
     let nick_list: Vec<String> = {
         let channels = state.channels.lock();
         let (member_sessions, remote_members, ops, voiced) = match channels.get(channel) {
@@ -1968,36 +2000,67 @@ pub(super) fn handle_names(
             ),
             None => Default::default(),
         };
+        // Read from the guard already held; re-locking here deadlocks
+        // (parking_lot mutexes are not reentrant).
+        let ch_did_authority = channels
+            .get(channel)
+            .map(|ch| (ch.founder_did.clone(), ch.did_ops.clone()));
         drop(channels);
         let nicks = state.nick_to_session.lock();
         let mut seen_nicks = std::collections::HashSet::new();
-        let mut list: Vec<String> = member_sessions
-            .iter()
-            .filter_map(|s| {
-                nicks.get_nick(s).and_then(|n| {
-                    // Deduplicate by nick (multi-device: same nick, multiple sessions)
-                    let nick_lower = n.to_lowercase();
-                    if !seen_nicks.insert(nick_lower) {
-                        return None;
+        // Fold every session of a nick together before deciding its prefix.
+        //
+        // `ch.ops`/`ch.voiced` are keyed by SESSION, but a person can be signed
+        // in on several devices and a MODE is applied to just one of those
+        // sessions. Taking the flags from whichever session was enumerated first
+        // made the prefix depend on hash order: the same op rendered with or
+        // without `@` from one NAMES to the next, and disagreed with the
+        // permission checks, which resolve by DID. Union the sessions, then apply
+        // the same DID authority the remote-member branch below already uses.
+        let session_dids = &session_dids_snapshot;
+        let mut folded: Vec<(String, bool, bool)> = Vec::new();
+        for s in member_sessions.iter() {
+            let Some(n) = nicks.get_nick(s) else { continue };
+            let is_op = ops.contains(s)
+                || session_dids.get(s).is_some_and(|d| {
+                    ch_did_authority
+                        .as_ref()
+                        .is_some_and(|(founder, did_ops)| {
+                            founder.as_deref() == Some(d.as_str()) || did_ops.contains(d)
+                        })
+                });
+            let is_voiced = voiced.contains(s);
+            let nick_lower = n.to_lowercase();
+            if seen_nicks.insert(nick_lower.clone()) {
+                folded.push((n.to_string(), is_op, is_voiced));
+            } else if let Some(e) = folded
+                .iter_mut()
+                .find(|(existing, _, _)| existing.to_lowercase() == nick_lower)
+            {
+                e.1 |= is_op;
+                e.2 |= is_voiced;
+            }
+        }
+        let mut list: Vec<String> = folded
+            .into_iter()
+            .map(|(n, is_op, is_voiced)| {
+                let prefix = if multi_prefix {
+                    let mut p = String::new();
+                    if is_op {
+                        p.push('@');
                     }
-                    let prefix = if multi_prefix {
-                        let mut p = String::new();
-                        if ops.contains(s) {
-                            p.push('@');
-                        }
-                        if voiced.contains(s) {
-                            p.push('+');
-                        }
-                        p
-                    } else if ops.contains(s) {
-                        "@".to_string()
-                    } else if voiced.contains(s) {
-                        "+".to_string()
-                    } else {
-                        String::new()
-                    };
-                    Some(format!("{prefix}{n}"))
-                })
+                    if is_voiced {
+                        p.push('+');
+                    }
+                    p
+                } else if is_op {
+                    "@".to_string()
+                } else if is_voiced {
+                    "+".to_string()
+                } else {
+                    String::new()
+                };
+                format!("{prefix}{n}")
             })
             .collect();
         let channels_lock = state.channels.lock();
@@ -2060,3 +2123,68 @@ pub(super) fn handle_list(
 }
 
 // ── WHO command ─────────────────────────────────────────────────────
+
+/// Membership modes a JOIN must announce, in stable order.
+///
+/// Every mode the join path *grants* has to be announced, or clients' member
+/// lists silently disagree with the server. Two ways that used to break:
+/// a policy role of "voice" inserted into `ch.voiced` and was never announced at
+/// all, and the old if/else-if chain announced at most one mode, so a member who
+/// was both opped and voiced lost the `+v`.
+pub(super) fn auto_modes_for(is_op: bool, is_halfop: bool, is_voiced: bool) -> Vec<&'static str> {
+    let mut modes = Vec::new();
+    if is_op {
+        modes.push("o");
+    }
+    if is_halfop {
+        modes.push("h");
+    }
+    if is_voiced {
+        modes.push("v");
+    }
+    modes
+}
+
+#[cfg(test)]
+mod auto_mode_tests {
+    //! Which membership modes a JOIN must announce.
+    //!
+    //! Granting a mode without announcing it leaves every client's member list
+    //! disagreeing with the server — the same failure as announcing it in the
+    //! wrong order, just with no message at all to mis-order.
+    use super::auto_modes_for;
+
+    #[test]
+    fn op_is_announced() {
+        assert_eq!(auto_modes_for(true, false, false), vec!["o"]);
+    }
+
+    #[test]
+    fn halfop_is_announced() {
+        assert_eq!(auto_modes_for(false, true, false), vec!["h"]);
+    }
+
+    #[test]
+    fn voice_is_announced() {
+        // A policy role of "voice"/"speaker" inserts into ch.voiced on join, but
+        // the announce path only ever considered op and halfop — so a voiced
+        // member was granted voice that nobody, including them, was told about.
+        // In a +m channel that is the difference between being able to speak and
+        // silently appearing unable to.
+        assert_eq!(auto_modes_for(false, false, true), vec!["v"]);
+    }
+
+    #[test]
+    fn combined_grants_are_all_announced() {
+        // The old else-if chain announced at most one mode, so an op who was also
+        // voiced lost the +v.
+        assert_eq!(auto_modes_for(true, false, true), vec!["o", "v"]);
+        assert_eq!(auto_modes_for(false, true, true), vec!["h", "v"]);
+        assert_eq!(auto_modes_for(true, true, true), vec!["o", "h", "v"]);
+    }
+
+    #[test]
+    fn a_plain_member_announces_nothing() {
+        assert!(auto_modes_for(false, false, false).is_empty());
+    }
+}

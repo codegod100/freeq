@@ -6,11 +6,24 @@
 <div class="container">
 <h1>Blog</h1>
 <p>Engineering notes and essays from the freeq project. <a href="/blog/feed.xml">RSS</a></p>
+{% if from_atproto %}
+<p style="color:var(--fg3);font-size:.85rem;line-height:1.6;margin-top:-.5rem">
+  These posts are AT Protocol records in the author's own repository. This page
+  reads them the same way any other client could.
+</p>
+{% endif %}
 <table>
 {% for post in posts %}
 <tr>
   <td style="white-space:nowrap;color:var(--fg3);width:120px">{{ post.date }}</td>
-  <td><a href="/blog/{{ post.slug }}/" style="font-weight:600">{{ post.title }}</a></td>
+  <td>
+    <a href="/blog/{{ post.slug }}/" style="font-weight:600">{{ post.title }}</a>
+    {% if post.description %}
+      <div style="color:var(--fg3);font-size:.85rem;line-height:1.5;margin-top:.15rem">
+        {{ post.description[:160] }}{% if post.description|length > 160 %}…{% endif %}
+      </div>
+    {% endif %}
+  </td>
 </tr>
 {% endfor %}
 </table>
