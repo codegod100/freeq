@@ -143,7 +143,10 @@ fn with_live_security_headers(
   |> http_response.set_header("referrer-policy", "strict-origin-when-cross-origin")
 }
 
-fn enhance_live_html(body: String) -> String {
+fn enhance_live_html(body: String, client_js: String) -> String {
+  // Bust browser cache when the embedded client script changes (length is a
+  // cheap fingerprint; content edits always change size for this blob).
+  let js_v = int.to_string(string.length(client_js))
   body
   |> string.replace(
     "</head>",
@@ -151,10 +154,14 @@ fn enhance_live_html(body: String) -> String {
       <> "<meta name=\"color-scheme\" content=\"dark\">"
       <> "<link rel=\"icon\" href=\"/favicon.png?v=2\" type=\"image/png\" sizes=\"48x48\">"
       <> "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png?v=2\" sizes=\"180x180\">"
-      <> "<link rel=\"stylesheet\" href=\"/assets/app.css\">"
+      <> "<link rel=\"stylesheet\" href=\"/assets/app.css?v="
+      <> js_v
+      <> "\">"
       <> "<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">"
       <> "<script type=\"module\" src=\"/assets/av_call.js\"></script>"
-      <> "<script type=\"module\" src=\"/assets/lightspeed.js\"></script>"
+      <> "<script type=\"module\" src=\"/assets/lightspeed.js?v="
+      <> js_v
+      <> "\"></script>"
       <> "</head>",
   )
   |> string.replace("<title>Lightspeed</title>", "<title>freeq · web4</title>")
@@ -245,7 +252,7 @@ fn handle_request(
                   case req.method {
                     gleam_http.Get ->
                       case string.starts_with(req.path, "/chat/") {
-                        True -> live_html_response(req)
+                        True -> live_html_response(req, client_js)
                         False -> call_endpoint(req, port, css, client_js)
                       }
                     _ ->
@@ -535,7 +542,9 @@ fn call_endpoint(
             Ok(body) ->
               response
               |> http_response.set_body(
-                mist.Bytes(bytes_tree.from_string(enhance_live_html(body))),
+                mist.Bytes(
+                  bytes_tree.from_string(enhance_live_html(body, client_js)),
+                ),
               )
               |> with_live_security_headers
             Error(_) -> response
@@ -549,6 +558,7 @@ fn call_endpoint(
 
 fn live_html_response(
   req: http_request.Request(mist.Connection),
+  client_js: String,
 ) -> http_response.Response(mist.ResponseData) {
   let path = chat_path(req.path)
   let sid = cookie_session.ensure_id(req)
@@ -563,7 +573,7 @@ fn live_html_response(
     <> " data-ls-version=\"1\" data-ls-patch-stream-version=\"1\">"
     <> inner
     <> "</main></body></html>"
-  let body = enhance_live_html(shell)
+  let body = enhance_live_html(shell, client_js)
   let resp =
     http_response.new(200)
     |> http_response.set_header("content-type", "text/html; charset=utf-8")
@@ -1357,6 +1367,8 @@ function clearStickPoll() {
  * Keep re-clamping to the true bottom while stick/jump intent is on.
  * Layout (avatars, embeds, fonts) often grows after the first scrollToEnd,
  * leaving a gap with a stale FAB hide — this closes that gap.
+ * Always clamp (not only when outside nearBottom slack): growth of ~80-100px
+ * sits inside the slack and would otherwise never re-scroll.
  */
 function startStickPoll(ms) {
   const duration = typeof ms === 'number' ? ms : 3500;
@@ -1369,6 +1381,10 @@ function startStickPoll(ms) {
     }
     if (Date.now() >= end) {
       clearStickPoll();
+      // Final clamp so late growth after the last tick is closed.
+      if (stickToBottom || isJumpLocked() || isChannelStickLocked()) {
+        scrollMessagesToEnd();
+      }
       updateJumpBottomUi();
       return;
     }
@@ -1379,13 +1395,11 @@ function startStickPoll(ms) {
     }
     const el = messagesEl();
     if (!el) return;
-    if (!nearBottom(el)) {
-      scrollMessagesToEnd();
-      if (nearBottom(el)) {
-        stickToBottom = true;
-        newMsgCount = 0;
-        lastBottomMsgid = lastMessageId(el);
-      }
+    scrollMessagesToEnd();
+    if (nearBottom(el)) {
+      stickToBottom = true;
+      newMsgCount = 0;
+      lastBottomMsgid = lastMessageId(el);
     }
     updateJumpBottomUi();
   }, 100);
