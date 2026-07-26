@@ -8,4 +8,8 @@ enum Log {
     static let ui = os.Logger(subsystem: "at.freeq.macos", category: "ui")
     static let media = os.Logger(subsystem: "at.freeq.macos", category: "media")
     static let profile = os.Logger(subsystem: "at.freeq.macos", category: "profile")
+    /// Member-list pipeline (JOIN / NAMES / namesEnd). Logged at `notice` so it
+    /// persists in the system log without a debug build:
+    ///   log stream --predicate 'subsystem == "at.freeq.macos" AND category == "roster"'
+    static let roster = os.Logger(subsystem: "at.freeq.macos", category: "roster")
 }

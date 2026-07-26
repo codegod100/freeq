@@ -4,7 +4,13 @@ import SwiftUI
 struct DetailPanel: View {
     @Environment(AppState.self) private var appState
 
-    private var channel: ChannelState? { appState.activeChannelState }
+    private var channel: ChannelState? {
+        let c = appState.activeChannelState
+        Log.roster.notice("""
+            PANEL active=\(self.appState.activeChannel ?? "nil", privacy: .public)             resolved=\(c?.name ?? "nil", privacy: .public)             members=\(c?.members.count ?? -1)
+            """)
+        return c
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,9 +39,17 @@ struct MemberListView: View {
 
     private var filtered: [MemberInfo] {
         let base = channel.uniqueMembers(resolveDid: { ProfileCache.shared.did(for: $0) })
-        if searchText.isEmpty { return base }
-        let q = searchText.lowercased()
-        return base.filter { $0.nick.lowercased().contains(q) }
+        let result: [MemberInfo]
+        if searchText.isEmpty {
+            result = base
+        } else {
+            let q = searchText.lowercased()
+            result = base.filter { $0.nick.lowercased().contains(q) }
+        }
+        Log.roster.notice("""
+            VIEW channel=\(self.channel.name, privacy: .public)             rawMembers=\(self.channel.members.count)             afterUnique=\(base.count) afterFilter=\(result.count)             search='\(self.searchText, privacy: .public)'             nicks=\(result.prefix(8).map { ($0.isOp ? "@" : "") + $0.nick }.joined(separator: ","), privacy: .public)
+            """)
+        return result
     }
 
     var body: some View {
