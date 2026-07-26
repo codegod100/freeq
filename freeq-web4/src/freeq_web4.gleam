@@ -2495,15 +2495,54 @@ function onKeyDown(ev) {
   applyTabMatch(input, wordStart, after, tabCycle);
 }
 
+let reconnectAttempt = 0;
+let reconnectTimer = 0;
+let connecting = false;
+
 function connect() {
-  socket = new WebSocket(wsUrl());
-  socket.addEventListener('open', () => ROOT.classList.add('ls-connected'));
-  socket.addEventListener('message', (ev) => onFrame(String(ev.data)));
-  socket.addEventListener('close', () => {
-    ROOT.classList.remove('ls-connected');
-    setTimeout(connect, 1200);
+  // Single-flight + backoff: tight reconnect loops storm the BFF and
+  // surface as Invalid-frame-header / 1006 under proxy load.
+  if (connecting) return;
+  if (socket && (socket.readyState === 0 || socket.readyState === 1)) return;
+  connecting = true;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = 0;
+  }
+  let ws;
+  try {
+    ws = new WebSocket(wsUrl());
+  } catch (_) {
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
+  socket = ws;
+  ws.addEventListener('open', () => {
+    connecting = false;
+    reconnectAttempt = 0;
+    ROOT.classList.add('ls-connected');
   });
-  socket.addEventListener('error', () => { try { socket.close(); } catch (_) {} });
+  ws.addEventListener('message', (ev) => onFrame(String(ev.data)));
+  ws.addEventListener('close', () => {
+    connecting = false;
+    ROOT.classList.remove('ls-connected');
+    scheduleReconnect();
+  });
+  ws.addEventListener('error', () => {
+    connecting = false;
+    try { ws.close(); } catch (_) {}
+  });
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  const attempt = Math.min(reconnectAttempt++, 6);
+  const delay = Math.min(1200 * Math.pow(1.6, attempt), 15000);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = 0;
+    connect();
+  }, delay);
 }
 
 // ── Image upload (+ button, paste, optional drop) — freeq-web2 parity ──

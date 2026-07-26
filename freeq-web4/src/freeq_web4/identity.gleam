@@ -44,10 +44,33 @@ pub type LoginDisposition {
 /// Attempts a refresh when access is near expiry so a valid session survives
 /// overnight without forcing OAuth. On terminal refresh failure → `Stale`
 /// (and the caller should clear disk so `/login` does not bounce forever).
+///
+/// **Do not call from WebSocket `on_init`** — refresh is a network round-trip
+/// and will stall the upgrade (browser: Invalid frame header / 1006).
+/// Use `peek_credentials` there; call this from bootstrap / ensure_upstream.
 pub fn resolve_credentials(session_id: String) -> Credentials {
   case session_store.load(session_id) {
     Error(_) -> NoCredentials
     Ok(session) -> classify_session(session)
+  }
+}
+
+/// Disk-only load (no HTTP). Safe for WebSocket mount / on_init.
+///
+/// Expired access still returns `Valid` when a refresh token exists so IRC
+/// can open and `ensure_upstream` can refresh; without RT → `Stale`.
+pub fn peek_credentials(session_id: String) -> Credentials {
+  case session_store.load(session_id) {
+    Error(_) -> NoCredentials
+    Ok(session) ->
+      case oauth.access_still_fresh(session, 120) {
+        True -> Valid(session)
+        False ->
+          case session.refresh_token {
+            Some(rt) if rt != "" -> Valid(session)
+            _ -> Stale(session, "access expired, no refresh token")
+          }
+      }
   }
 }
 

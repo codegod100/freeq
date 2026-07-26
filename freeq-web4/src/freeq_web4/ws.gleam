@@ -112,22 +112,19 @@ pub fn mount(
   // history (#freeq) before the new IRC connection finishes SASL.
   let model =
     live.with_api_bearer(model, session_store.load_api_bearer(session_id))
-  // Classify disk OAuth via the credentials machine (refresh if needed).
-  // Stale sessions are cleared so /login no longer bounce-loops as “signed in”.
-  let credentials = identity.resolve_credentials(session_id)
-  let credentials = case credentials {
-    identity.Stale(_, _) -> {
-      session_store.remove(session_id)
-      identity.NoCredentials
-    }
-    identity.Valid(s) -> {
-      identity.persist_if_valid(session_id, credentials)
-      identity.Valid(s)
-    }
-    identity.NoCredentials -> identity.NoCredentials
+  // Disk-only credential peek — NEVER network-refresh here.
+  // `on_init` must return immediately after 101 or Mist/proxy leave the
+  // browser with "Invalid frame header" / unclean 1006 (OAuth refresh to
+  // bsky.social was blocking the WS process start).
+  // Full classify + refresh runs in `ensure_upstream` after bootstrap.
+  let oauth = case session_store.load(session_id) {
+    Ok(s) -> Some(s)
+    Error(_) -> None
   }
-  let oauth = identity.oauth_for_upstream(credentials)
-  let next_id = identity.from_credentials(credentials)
+  let next_id = case oauth {
+    Some(s) -> identity.AwaitingSasl(s.handle, s.did)
+    None -> identity.Guest
+  }
   let #(model, _) = live.apply(model, live.SetIdentity(next_id))
   let session =
     Session(
