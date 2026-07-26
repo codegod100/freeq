@@ -449,7 +449,19 @@ fn apply_rest_channel_open(
   case session.model.channel {
     Some(current) ->
       case same_channel(current, channel) {
-        False -> #(session, [])
+        False -> {
+          // User already left this channel — keep the finished body in the
+          // page cache so a quick return is an instant hit (no second REST).
+          // No client Diff needed (sidebar/messages unchanged for current view).
+          let model =
+            live.cache_rest_channel_page(
+              session.model,
+              channel,
+              rows,
+              topic,
+            )
+          #(Session(..session, model: model), [])
+        }
         True -> {
           let before = session.model
           // Cache-hit opens send empty rows + AV only — never wipe restored
@@ -479,7 +491,12 @@ fn apply_rest_channel_open(
           finish(session, before, session.model)
         }
       }
-    None -> #(session, [])
+    // Directory / System: still cache so re-open is instant.
+    None -> {
+      let model =
+        live.cache_rest_channel_page(session.model, channel, rows, topic)
+      #(Session(..session, model: model), [])
+    }
   }
 }
 
@@ -598,19 +615,26 @@ fn apply_upstream(
       session_store.save_api_bearer(session.session_id, bearer)
       let #(m, _) = live.apply(before, live.SetApiBearer(bearer))
       // Bootstrap often fetched history before SASL (guest / stale bearer).
-      // Private rooms (#freeq) 403 without a valid API-BEARER, and IRC
-      // chathistory is suppressed — re-fetch once the bearer lands (web3
-      // auth_history_backfill). Embed warmup is scheduled inside backfill.
-      let session = backfill_channel_history(
-        Session(..session, model: m),
-        Some(bearer),
-      )
+      // Private rooms (#freeq) 403 without a valid API-BEARER and leave an
+      // empty pane — re-fetch once the bearer lands. If we already have rows
+      // (public channel guest fetch), skip the second REST remount; only
+      // re-hydrate reaction chips via CHATHISTORY.
+      let need_backfill = case m.messages, m.history_loading {
+        [], _ -> True
+        _, True -> True
+        _, _ -> False
+      }
+      let session = case need_backfill {
+        True ->
+          backfill_channel_history(Session(..session, model: m), Some(bearer))
+        False -> Session(..session, model: m)
+      }
       let m = session.model
-      // REST still omits +freeq.at/reactions; re-request CHATHISTORY after
-      // the authorized body lands so chips survive refresh/SASL.
-      case session.upstream, m.channel {
-        Some(handle), Some(ch) -> request_chathistory(handle, ch)
-        _, _ -> Nil
+      // REST still omits +freeq.at/reactions; request CHATHISTORY once the
+      // body is present (or after backfill just filled it).
+      case session.upstream, m.channel, m.history_loading {
+        Some(handle), Some(ch), False -> request_chathistory(handle, ch)
+        _, _, _ -> Nil
       }
       // Navigate/join often runs FetchActiveCall before SASL finishes; private
       // rooms (e.g. #freeq) 403 without the bearer. Re-probe once it lands.
@@ -731,10 +755,12 @@ fn rejoin_and_names(session: Session) -> Session {
           }
         }
       })
-      // Hydrate reactions for the channel in view (REST body already loaded).
-      case session.model.channel {
-        Some(ch) -> request_chathistory(handle, ch)
-        None -> Nil
+      // Only hydrate reactions once the REST body is on the model. Early
+      // CHATHISTORY (while history_loading) has nothing to attach to and
+      // races a second request from apply_rest_channel_open — double paint.
+      case session.model.history_loading, session.model.channel {
+        False, Some(ch) -> request_chathistory(handle, ch)
+        _, _ -> Nil
       }
       session
     }
@@ -749,11 +775,11 @@ fn post_sasl_rejoin(session: Session) -> Session {
         upstream.send(handle, "JOIN " <> ch <> "\r\n")
         upstream.send(handle, "NAMES " <> ch <> "\r\n")
       })
-      // Post-SASL REST backfill may have just replaced the pane — re-request
-      // CHATHISTORY so +freeq.at/reactions lands on the new rows.
-      case session.model.channel {
-        Some(ch) -> request_chathistory(handle, ch)
-        None -> Nil
+      // Same gate as rejoin_and_names: wait for body before reaction hydrate.
+      // ApiBearer backfill re-requests CHATHISTORY after it lands rows.
+      case session.model.history_loading, session.model.channel {
+        False, Some(ch) -> request_chathistory(handle, ch)
+        _, _ -> Nil
       }
       session
     }

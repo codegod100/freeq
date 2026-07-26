@@ -338,6 +338,16 @@ pub fn path_channel_mount_test() {
   assert model.view == live.Channel
   assert model.channel == Some("#freeq")
   assert model.my_channels == ["#freeq"]
+  // Deep-link first paint shows the loading spinner (not a blank pane).
+  assert model.history_loading == True
+  let html = live.messages_region_for_test(model)
+  assert string.contains(html, "Loading messages")
+  assert string.contains(html, "data-history-loading=\"1\"")
+}
+
+pub fn path_index_mount_not_history_loading_test() {
+  let model = live.mount_model("/chat")
+  assert model.history_loading == False
 }
 
 pub fn path_system_mount_test() {
@@ -2009,6 +2019,59 @@ pub fn channel_page_cache_dropped_on_part_test() {
   let #(reopen, _) = live.apply(after_part, live.OpenChannel("freeq"))
   assert reopen.history_loading == True
   assert reopen.messages == []
+}
+
+pub fn stash_skips_while_history_loading_test() {
+  // Live rows during an in-flight open must not become a sticky incomplete cache.
+  let model = live.mount_model("/chat/freeq")
+  assert model.history_loading == True
+  let #(model, _) =
+    live.apply(
+      model,
+      live.PushLine("@msgid=live1 :bob!b@h PRIVMSG #freeq :early"),
+    )
+  assert list.length(model.messages) == 1
+  assert model.history_loading == True
+  // Navigate away while still loading — must not stash the partial pane.
+  let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
+  let #(back, _) = live.apply(on_dev, live.OpenChannel("freeq"))
+  // Cold load again (no incomplete cache hit).
+  assert back.history_loading == True
+  assert back.messages == []
+}
+
+pub fn cache_rest_channel_page_restores_on_return_test() {
+  // Async REST finished after the user left the channel — still usable later.
+  let model = live.mount_model("/chat")
+  let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "late rest",
+      Some("mid-late"),
+      Some(10),
+      None,
+      dict.new(),
+    )
+  // Simulate host applying a stale RestChannelOpen for #freeq while on #dev.
+  let model =
+    live.cache_rest_channel_page(on_dev, "#freeq", [row], "topic freeq")
+  let #(back, effect) = live.apply(model, live.OpenChannel("freeq"))
+  assert back.history_loading == False
+  assert list.length(back.messages) == 1
+  let assert Ok(first) = list.first(back.messages)
+  assert first.text == "late rest"
+  assert back.topic == "topic freeq"
+  let assert live.EnsureUpstream(_, _) = effect
+}
+
+pub fn cache_rest_channel_page_skips_empty_test() {
+  let model = live.mount_model("/chat")
+  let next = live.cache_rest_channel_page(model, "#freeq", [], "t")
+  // Empty body must not create a cache entry.
+  let #(open, _) = live.apply(next, live.OpenChannel("freeq"))
+  assert open.history_loading == True
+  assert open.messages == []
 }
 
 pub fn open_channel_same_channel_is_noop_test() {

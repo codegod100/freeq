@@ -359,6 +359,12 @@ fn mount(
     Some(ch) -> [ch]
     None -> []
   }
+  // Channel deep-links need the spinner on first paint (SSR + WS mount).
+  // Bootstrap/async REST used to leave an empty pane until the first Diff.
+  let history_loading = case view, channel {
+    Channel, Some(_) -> True
+    _, _ -> False
+  }
   let model =
     Model(
       view: view,
@@ -392,7 +398,7 @@ fn mount(
       av_token: None,
       react_picker_msgid: None,
       editing_topic: False,
-      history_loading: False,
+      history_loading: history_loading,
       history_exhausted: False,
       search_open: False,
       search_query: "",
@@ -2250,12 +2256,13 @@ fn channel_key(ch: String) -> String {
 
 /// Save the active channel's messages/members/topic into `channel_pages`.
 ///
-/// Skips empty in-flight loads (history still spinning) so a fast A→B switch
-/// does not cache a blank pane that would stick on return.
+/// Never stash while the initial REST open is still in flight — even if a
+/// live PRIVMSG already landed. Caching that partial pane would make the
+/// return visit a cache hit with no REST and permanently missing history.
 fn stash_current_page(model: Model) -> Model {
   case model.view, model.channel {
     Channel, Some(ch) ->
-      case model.history_loading && model.messages == [] {
+      case model.history_loading {
         True -> model
         False ->
           put_channel_page(
@@ -2270,6 +2277,54 @@ fn stash_current_page(model: Model) -> Model {
           )
       }
     _, _ -> model
+  }
+}
+
+/// Store a finished REST history fetch into the page cache (viewed or not).
+///
+/// Used when the user navigated away before async open returned — so coming
+/// back is an instant cache hit instead of a second cold load.
+/// Empty bodies are not cached (private 403 / probe-only) so the next open
+/// still cold-loads instead of sticking on a blank "exhausted" pane.
+pub fn cache_rest_channel_page(
+  model: Model,
+  channel: String,
+  rows: List(render.Row),
+  topic: String,
+) -> Model {
+  case rows {
+    [] -> model
+    _ -> {
+      let rows = link_preview.attach_many_cache_only(rows)
+      let existing = get_channel_page(model, channel)
+      // Prefer live rows that arrived while we were away (appended into cache).
+      let messages = case existing {
+        Some(page) -> merge_history_rows(rows, page.messages)
+        None -> rows
+      }
+      let members = case existing {
+        Some(page) -> page.members
+        None -> []
+      }
+      let topic = case topic {
+        "" ->
+          case existing {
+            Some(page) -> page.topic
+            None -> ""
+          }
+        t -> t
+      }
+      put_channel_page(
+        model,
+        channel,
+        ChannelPage(
+          messages: messages,
+          members: members,
+          topic: topic,
+          history_exhausted: list.length(rows) < history_page_size,
+        ),
+      )
+    }
   }
 }
 
