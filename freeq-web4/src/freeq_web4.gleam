@@ -14,6 +14,7 @@ import freeq_web4/cookie_session
 import freeq_web4/live
 import freeq_web4/rest
 import freeq_web4/session_store
+import freeq_web4/upload
 import freeq_web4/ws
 import gleam/bit_array
 import gleam/bytes_tree
@@ -201,6 +202,8 @@ fn handle_request(
         "application/javascript; charset=utf-8",
       )
       |> http_response.set_body(mist.Bytes(bytes_tree.from_string(av_js)))
+
+    "/upload", gleam_http.Post, False -> upload.handle(req)
 
     _, _, False ->
       case auth.handle(req) {
@@ -545,6 +548,7 @@ fn echo_banner(port: Int) -> Nil {
   io_println("  GET  /auth/callback   OAuth callback")
   io_println("  WS   /live            lightspeed protocol")
   io_println("  GET  /health          ok")
+  io_println("  POST /upload          image upload proxy")
   io_println("  GET  /api/v1/sessions/:id   AV roster proxy")
   io_println("  GET  /av/assets/*     MoQ asset proxy")
   io_println("  upstream " <> config.upstream_ws())
@@ -1082,9 +1086,233 @@ function connect() {
   socket.addEventListener('error', () => { try { socket.close(); } catch (_) {} });
 }
 
+// ── Image upload (+ button, paste, optional drop) — freeq-web2 parity ──
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+let uploadObjectUrl = null;
+let uploading = false;
+
+function authDid() {
+  const form = document.getElementById('send-form');
+  if (form && form.dataset.authDid && form.dataset.authDid.startsWith('did:')) {
+    return form.dataset.authDid;
+  }
+  const handle = document.getElementById('user-handle');
+  if (handle && handle.classList.contains('signed-in') && handle.title && handle.title.startsWith('did:')) {
+    return handle.title;
+  }
+  return '';
+}
+
+function channelName() {
+  const form = document.getElementById('send-form');
+  if (!form) return '';
+  const raw = (form.dataset.channel || '').trim();
+  if (!raw) return '';
+  return raw.startsWith('#') ? raw : '#' + raw;
+}
+
+function clearUploadPreview() {
+  if (uploadObjectUrl) {
+    try { URL.revokeObjectURL(uploadObjectUrl); } catch (_) {}
+    uploadObjectUrl = null;
+  }
+  const preview = document.getElementById('upload-preview');
+  const previewImg = document.getElementById('upload-preview-img');
+  const previewName = document.getElementById('upload-preview-name');
+  const previewStatus = document.getElementById('upload-preview-status');
+  const fileInput = document.getElementById('file-input');
+  const attachBtn = document.getElementById('attach-btn');
+  if (preview) preview.hidden = true;
+  if (previewImg) {
+    previewImg.removeAttribute('src');
+    previewImg.hidden = false;
+  }
+  if (previewName) previewName.textContent = '';
+  if (previewStatus) {
+    previewStatus.textContent = '';
+    previewStatus.classList.remove('error');
+  }
+  if (fileInput) fileInput.value = '';
+  uploading = false;
+  if (attachBtn) attachBtn.disabled = false;
+}
+
+function showUploadPreview(file, statusText) {
+  const preview = document.getElementById('upload-preview');
+  const previewImg = document.getElementById('upload-preview-img');
+  const previewName = document.getElementById('upload-preview-name');
+  const previewStatus = document.getElementById('upload-preview-status');
+  if (!preview) return;
+  if (uploadObjectUrl) {
+    try { URL.revokeObjectURL(uploadObjectUrl); } catch (_) {}
+    uploadObjectUrl = null;
+  }
+  if (file && file.type && file.type.startsWith('image/') && file.size > 0) {
+    uploadObjectUrl = URL.createObjectURL(file);
+  }
+  if (previewImg) {
+    if (uploadObjectUrl) {
+      previewImg.src = uploadObjectUrl;
+      previewImg.hidden = false;
+    } else {
+      previewImg.removeAttribute('src');
+      previewImg.hidden = true;
+    }
+  }
+  if (previewName) previewName.textContent = (file && file.name) || 'image';
+  if (previewStatus) {
+    previewStatus.textContent = statusText || '';
+    previewStatus.classList.remove('error');
+  }
+  preview.hidden = false;
+}
+
+function setUploadStatus(text, isError) {
+  const previewStatus = document.getElementById('upload-preview-status');
+  if (!previewStatus) return;
+  previewStatus.textContent = text || '';
+  previewStatus.classList.toggle('error', !!isError);
+}
+
+function sendUrlMessage(url) {
+  const input = composeInput();
+  if (!input) return;
+  const caption = (input.value || '').trim();
+  input.value = caption ? caption + ' ' + url : url;
+  const form = document.getElementById('send-form');
+  if (!form) return;
+  if (typeof form.requestSubmit === 'function') form.requestSubmit();
+  else form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+}
+
+async function uploadFile(file) {
+  if (!file || uploading) return;
+  const attachBtn = document.getElementById('attach-btn');
+  if (!authDid().startsWith('did:')) {
+    showUploadPreview(file, 'Sign in to upload images');
+    setUploadStatus('Sign in to upload images', true);
+    return;
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    showUploadPreview(file, 'File too large (max 10MB)');
+    setUploadStatus('File too large (max 10MB)', true);
+    return;
+  }
+  if (file.type && !file.type.startsWith('image/')) {
+    showUploadPreview(file, 'Unsupported type: ' + file.type);
+    setUploadStatus('Unsupported type: ' + file.type, true);
+    return;
+  }
+  uploading = true;
+  if (attachBtn) attachBtn.disabled = true;
+  showUploadPreview(file, 'Uploading…');
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name || 'screenshot.png');
+    const ch = channelName();
+    if (ch) fd.append('channel', ch);
+    const input = composeInput();
+    const caption = input ? (input.value || '').trim() : '';
+    if (caption) fd.append('alt', caption);
+    const res = await fetch('/upload', {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+    });
+    let data = {};
+    try { data = await res.json(); }
+    catch (_) {
+      try { data = { error: await res.text() }; } catch (__) { data = {}; }
+    }
+    if (!res.ok) {
+      throw new Error(data.error || data.message || ('Upload failed (' + res.status + ')'));
+    }
+    if (!data.url) throw new Error('Upload succeeded but no URL returned');
+    setUploadStatus('Sending…', false);
+    sendUrlMessage(data.url);
+    clearUploadPreview();
+  } catch (e) {
+    console.error('upload', e);
+    setUploadStatus((e && e.message) || 'Upload failed', true);
+    uploading = false;
+    if (attachBtn) attachBtn.disabled = false;
+  }
+}
+
+function onAttachClick(ev) {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('#attach-btn') : null;
+  if (!btn || !ROOT.contains(btn)) return;
+  ev.preventDefault();
+  if (!authDid().startsWith('did:')) {
+    showUploadPreview(null, 'Sign in to upload images');
+    const previewName = document.getElementById('upload-preview-name');
+    if (previewName) previewName.textContent = 'Upload';
+    setUploadStatus('Sign in to upload images', true);
+    return;
+  }
+  const fileInput = document.getElementById('file-input');
+  if (fileInput) fileInput.click();
+}
+
+function onFileChange(ev) {
+  const input = ev.target;
+  if (!input || input.id !== 'file-input') return;
+  const file = input.files && input.files[0];
+  if (file) uploadFile(file);
+}
+
+function onPaste(ev) {
+  const items = ev.clipboardData && ev.clipboardData.items;
+  if (!items) return;
+  // Image paste anywhere in the chat shell (compose, messages, main column).
+  const t = ev.target;
+  if (t && t.closest && !t.closest('#freeq-chat, #app')) return;
+  for (const item of items) {
+    if (item.kind === 'file' && (!item.type || item.type.startsWith('image/'))) {
+      const file = item.getAsFile();
+      if (file) {
+        ev.preventDefault();
+        uploadFile(file);
+        return;
+      }
+    }
+  }
+}
+
+function onDragOver(ev) {
+  if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) {
+    const t = ev.target;
+    if (t && t.closest && t.closest('#send-bar, #compose-stack, #messages, .chat-main')) {
+      ev.preventDefault();
+    }
+  }
+}
+
+function onDrop(ev) {
+  const t = ev.target;
+  if (!t || !t.closest || !t.closest('#send-bar, #compose-stack, #messages, .chat-main')) return;
+  if (!ev.dataTransfer || !ev.dataTransfer.files || !ev.dataTransfer.files.length) return;
+  ev.preventDefault();
+  const file = ev.dataTransfer.files[0];
+  if (file) uploadFile(file);
+}
+
+function onPreviewCancel(ev) {
+  const btn = ev.target && ev.target.closest ? ev.target.closest('#upload-preview-cancel') : null;
+  if (!btn || !ROOT.contains(btn)) return;
+  ev.preventDefault();
+  clearUploadPreview();
+}
+
 ROOT.addEventListener('click', onClick);
+ROOT.addEventListener('click', onAttachClick);
+ROOT.addEventListener('click', onPreviewCancel);
+ROOT.addEventListener('change', onFileChange);
 ROOT.addEventListener('submit', onSubmit);
 ROOT.addEventListener('keydown', onKeyDown);
+ROOT.addEventListener('paste', onPaste);
+ROOT.addEventListener('dragover', onDragOver);
+ROOT.addEventListener('drop', onDrop);
 window.addEventListener('popstate', onPopState);
 // Align dataset with the real URL (SSR sets data-ls-route; keep them matched).
 ROOT.dataset.lsRoute = location.pathname || ROOT.dataset.lsRoute || '/chat';
@@ -1092,6 +1320,6 @@ ROOT.dataset.lsRoute = location.pathname || ROOT.dataset.lsRoute || '/chat';
 focusCompose();
 queueMicrotask(focusCompose);
 connect();
-window.__freeq = { pushEvent, pushPath };
+window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview };
 "
 }

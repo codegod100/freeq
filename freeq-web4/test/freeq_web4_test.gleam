@@ -9,6 +9,7 @@ import freeq_web4/irc/render
 import freeq_web4/live
 import freeq_web4/rest
 import freeq_web4/session_store
+import freeq_web4/upload
 import gleam/bit_array
 import gleam/json
 import gleam/list
@@ -134,6 +135,37 @@ pub fn is_image_url_test() {
   assert !render.is_image_url("https://example.com/video.mp4")
 }
 
+pub fn upload_multipart_encode_test() {
+  let body =
+    upload.encode_multipart_for_test(
+      bit_array.from_string("PNGDATA"),
+      "shot.png",
+      "image/png",
+      "did:plc:test",
+      "#freeq",
+      "alt text",
+      "BOUND",
+    )
+  let assert Ok(text) = bit_array.to_string(body)
+  assert string.contains(text, "name=\"did\"")
+  assert string.contains(text, "did:plc:test")
+  assert string.contains(text, "name=\"channel\"")
+  assert string.contains(text, "#freeq")
+  assert string.contains(text, "name=\"alt\"")
+  assert string.contains(text, "filename=\"shot.png\"")
+  assert string.contains(text, "Content-Type: image/png")
+  assert string.contains(text, "PNGDATA")
+  assert string.contains(text, "--BOUND--")
+}
+
+pub fn compose_has_attach_controls_test() {
+  let html = live.initial_html("/chat/freeq")
+  assert string.contains(html, "id=\"attach-btn\"")
+  assert string.contains(html, "id=\"file-input\"")
+  assert string.contains(html, "id=\"upload-preview\"")
+  assert string.contains(html, "paste images")
+}
+
 pub fn path_index_mount_test() {
   let model = live.mount_model("/chat")
   assert model.view == live.Index
@@ -159,6 +191,34 @@ pub fn with_my_channels_test() {
   let restored = live.with_my_channels(model, ["#dev", "#test"])
   assert restored.my_channels == ["#dev", "#test"]
   assert restored.view == live.Index
+}
+
+pub fn with_api_bearer_test() {
+  let model = live.mount_model("/chat/freeq")
+  assert model.api_bearer == None
+  assert model.authenticated == False
+  let restored = live.with_api_bearer(model, Some("tok-abc"))
+  // Bearer restored for REST; SASL still owns `authenticated`.
+  assert restored.api_bearer == Some("tok-abc")
+  assert restored.authenticated == False
+}
+
+pub fn merge_history_rows_test() {
+  let rest = [
+    render.history_row("alice!a@h", "a", Some("m1"), Some(1)),
+    render.history_row("bob!b@h", "b", Some("m2"), Some(2)),
+  ]
+  let live_only = [
+    render.history_row("bob!b@h", "b", Some("m2"), Some(2)),
+    render.history_row("carol!c@h", "c", Some("m3"), Some(3)),
+  ]
+  let merged = live.merge_history_rows(rest, live_only)
+  assert list.length(merged) == 3
+  assert list.map(merged, fn(r) { r.msgid })
+    == [Some("m1"), Some("m2"), Some("m3")]
+  // Empty REST must not clobber live rows (failed private-channel fetch).
+  assert live.merge_history_rows([], live_only) == live_only
+  assert live.merge_history_rows(rest, []) == rest
 }
 
 pub fn session_channels_persist_test() {

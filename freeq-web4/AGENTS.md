@@ -68,7 +68,8 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [ ] Message edit/delete UI
 - [ ] DMs + E2EE
 - [ ] Link embeds / preview cache
-- [ ] Upload proxy / PWA
+- [x] Image paste / attach button + upload proxy (`POST /upload`)
+- [ ] PWA
 
 ## Idioms
 

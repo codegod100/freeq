@@ -72,6 +72,10 @@ pub fn mount(
   let my = live.merge_my_channels(model.my_channels, persisted)
   let model = live.with_my_channels(model, my)
   session_store.save_channels(session_id, my)
+  // Prior API-BEARER (if still accepted) lets bootstrap load private-channel
+  // history (#freeq) before the new IRC connection finishes SASL.
+  let model =
+    live.with_api_bearer(model, session_store.load_api_bearer(session_id))
   let oauth = case session_store.load(session_id) {
     Ok(s) -> Some(s)
     Error(_) -> None
@@ -292,6 +296,29 @@ fn apply_active_call_probe(session: Session, channel: String) -> Session {
   }
 }
 
+/// Re-fetch REST history for the viewed channel and merge with any live rows.
+/// No-op when not on a channel view.
+fn backfill_channel_history(
+  model: live.Model,
+  bearer: Option(String),
+) -> live.Model {
+  case model.channel {
+    None -> model
+    Some(ch) -> {
+      let rows = rest.fetch_history(ch, 50, bearer)
+      let merged = live.merge_history_rows(rows, model.messages)
+      let #(model, _) = live.apply(model, live.SetHistory(merged))
+      // Topic for private rooms is also often empty until we are authorized.
+      let topic = case model.topic {
+        "" -> rest.resolve_topic(model.all_channels, ch)
+        t -> t
+      }
+      let #(model, _) = live.apply(model, live.SetTopicText(topic))
+      model
+    }
+  }
+}
+
 fn apply_upstream(
   session: Session,
   ev: upstream.Event,
@@ -331,6 +358,11 @@ fn apply_upstream(
     upstream.ApiBearer(bearer) -> {
       session_store.save_api_bearer(session.session_id, bearer)
       let #(m, _) = live.apply(before, live.SetApiBearer(bearer))
+      // Bootstrap often fetched history before SASL (guest / stale bearer).
+      // Private rooms (#freeq) 403 without a valid API-BEARER, and IRC
+      // chathistory is suppressed — re-fetch once the bearer lands (web3
+      // auth_history_backfill).
+      let m = backfill_channel_history(m, Some(bearer))
       // Navigate/join often runs FetchActiveCall before SASL finishes; private
       // rooms (e.g. #freeq) 403 without the bearer. Re-probe once it lands.
       case m.av_active, m.channel {

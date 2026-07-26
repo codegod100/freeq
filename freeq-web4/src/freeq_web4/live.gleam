@@ -1466,16 +1466,37 @@ fn messages_region(model: Model) -> String {
 }
 
 fn compose_region(model: Model) -> String {
-  // IDs match app.css (#send-bar / #send-form) — same shell as freeq-web3.
-  // No value attr: draft is client-owned so message patches never wipe it.
-  "<div id=\"send-bar\" data-ls-region=\"compose\">"
-  <> "<form id=\"send-form\" data-ls-submit=\"send\">"
+  // IDs match app.css / freeq-web2 (#send-bar, #attach-btn, #upload-preview).
+  // No value attr on the text input: draft is client-owned so message patches
+  // never wipe it. Image paste/upload is handled client-side (POST /upload).
+  let ch = option.unwrap(model.channel, "")
+  let auth_did = case model.authenticated {
+    True -> model.auth_did
+    False -> ""
+  }
+  "<div id=\"compose-stack\" data-ls-region=\"compose\">"
+  <> "<div id=\"upload-preview\" class=\"upload-preview\" hidden>"
+  <> "<img id=\"upload-preview-img\" alt=\"preview\" />"
+  <> "<div class=\"upload-preview-meta\">"
+  <> "<span id=\"upload-preview-name\"></span>"
+  <> "<span id=\"upload-preview-status\"></span>"
+  <> "</div>"
+  <> "<button type=\"button\" id=\"upload-preview-cancel\" class=\"btn-link\" title=\"Cancel\">×</button>"
+  <> "</div>"
+  <> "<div id=\"send-bar\">"
+  <> "<input type=\"file\" id=\"file-input\" accept=\"image/*,image/png,image/jpeg,image/gif,image/webp\" hidden />"
+  <> "<button type=\"button\" id=\"attach-btn\" class=\"attach-btn\" title=\"Upload screenshot or image\" aria-label=\"Upload image\">+</button>"
+  <> "<form id=\"send-form\" data-ls-submit=\"send\" data-channel=\""
+  <> render.escape_html(ch)
+  <> "\" data-auth-did=\""
+  <> render.escape_html(auth_did)
+  <> "\">"
   <> "<input id=\"message-input\" type=\"text\" name=\"msg\" placeholder=\"Message "
-  <> render.escape_html(option.unwrap(model.channel, ""))
-  <> "\" autocomplete=\"off\" autofocus />"
+  <> render.escape_html(ch)
+  <> "… (paste images)\" autocomplete=\"off\" autofocus />"
   <> "<button type=\"submit\">Send</button>"
   <> "</form>"
-  <> "</div>"
+  <> "</div></div>"
 }
 
 fn message_html(row: render.Row) -> String {
@@ -1588,10 +1609,55 @@ pub fn with_my_channels(model: Model, channels: List(String)) -> Model {
   Model(..model, my_channels: channels)
 }
 
+/// Restore a previously persisted freeq-server API-BEARER without flipping
+/// `authenticated` (SASL still has to succeed on the wire).
+pub fn with_api_bearer(model: Model, bearer: Option(String)) -> Model {
+  Model(..model, api_bearer: bearer)
+}
+
 /// Merge path-seeded channels with a persisted list (path first, then rest).
 pub fn merge_my_channels(
   seed: List(String),
   persisted: List(String),
 ) -> List(String) {
   list.fold(persisted, seed, list_unique_append)
+}
+
+/// Merge REST history with any live rows already on the model.
+///
+/// REST is the chronological base; live-only rows (msgid not in REST) are
+/// appended so a post-SASL backfill does not drop messages that arrived
+/// while the first anonymous fetch was empty.
+pub fn merge_history_rows(
+  rest_rows: List(render.Row),
+  live_rows: List(render.Row),
+) -> List(render.Row) {
+  case rest_rows {
+    [] -> live_rows
+    _ ->
+      list.fold(live_rows, rest_rows, fn(acc, row) {
+        case row_msgid_known(acc, row) {
+          True -> acc
+          False -> list.append(acc, [row])
+        }
+      })
+  }
+}
+
+fn row_msgid_known(rows: List(render.Row), row: render.Row) -> Bool {
+  case row.msgid {
+    Some(id) ->
+      list.any(rows, fn(r) {
+        case r.msgid {
+          Some(existing) -> existing == id
+          None -> r.id == id
+        }
+      })
+    None ->
+      // No msgid: match on stable row id when present.
+      case row.id {
+        "" -> False
+        id -> list.any(rows, fn(r) { r.id == id })
+      }
+  }
 }
