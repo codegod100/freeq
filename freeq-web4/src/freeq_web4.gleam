@@ -1322,9 +1322,37 @@ let lastBottomMsgid = '';
 let jumpLockUntil = 0;
 let jumpBottomTimers = [];
 let ignoreScrollEvents = false;
+// data-channel on #messages — detect stream switches (web3 ChatScroll parity).
+let lastMessagesChannel = null;
+let scrollSoonTimer = 0;
 
 function messagesEl() {
   return document.getElementById('messages');
+}
+
+function messagesChannelKey(el) {
+  if (!el) return '';
+  return el.dataset.channel || '';
+}
+
+/** Reset stick/FAB state when the open channel (or system buffer) changes. */
+function resetScrollForChannelSwitch(seekingMessage) {
+  clearLoadOlderPending();
+  hideHistoryLoading(messagesEl());
+  newMsgCount = 0;
+  lastBottomMsgid = '';
+  jumpLockUntil = 0;
+  clearJumpBottomTimers();
+  if (scrollSoonTimer) {
+    clearTimeout(scrollSoonTimer);
+    scrollSoonTimer = 0;
+  }
+  if (seekingMessage) {
+    stickToBottom = false;
+  } else {
+    stickToBottom = true;
+  }
+  updateJumpBottomUi();
 }
 
 function jumpBottomEl() {
@@ -1473,6 +1501,31 @@ function scrollMessagesToEnd() {
     // scroll events are sync in modern browsers; clear on next task too.
     ignoreScrollEvents = false;
   }
+}
+
+/**
+ * After channel switch / history paint, height can lag a frame or two
+ * (date seps, embeds, fonts). Re-assert bottom like freeq-web3 scrollToBottomSoon.
+ */
+function scrollMessagesToEndSoon() {
+  stickToBottom = true;
+  scrollMessagesToEnd();
+  if (scrollSoonTimer) clearTimeout(scrollSoonTimer);
+  requestAnimationFrame(() => {
+    scrollMessagesToEnd();
+    requestAnimationFrame(() => {
+      scrollMessagesToEnd();
+      scrollSoonTimer = setTimeout(() => {
+        scrollMessagesToEnd();
+        lastBottomMsgid = lastMessageId(messagesEl());
+        if (nearBottom(messagesEl())) {
+          stickToBottom = true;
+          newMsgCount = 0;
+        }
+        updateJumpBottomUi();
+      }, 80);
+    });
+  });
 }
 
 function clearJumpBottomTimers() {
@@ -1680,12 +1733,21 @@ function onFrame(text) {
     const force = pendingComposeFocus;
     pendingComposeFocus = false;
     const msgsBefore = messagesEl();
+    const chBefore = messagesChannelKey(msgsBefore);
     // Preserve viewport when the user is reading history (not stuck to bottom).
+    // Discarded on channel switch so we never restore the previous stream's offset.
     let savedScroll = null;
     if (msgsBefore && !stickToBottom) {
       savedScroll = { h: msgsBefore.scrollHeight, t: msgsBefore.scrollTop };
     }
-    applyPatches(fields[2] || '');
+    // Morph can fire scroll with scrollTop=0 and flip stickToBottom off —
+    // ignore while applying so channel-switch intent survives.
+    ignoreScrollEvents = true;
+    try {
+      applyPatches(fields[2] || '');
+    } finally {
+      ignoreScrollEvents = false;
+    }
     syncUnreadTitle();
     // autofocus only runs on initial HTML parse; re-focus when compose
     // appears after join/open, and restore after morph/send.
@@ -1707,17 +1769,30 @@ function onFrame(text) {
       restoreSearch(searchSnap, false);
     }
     const msgs = messagesEl();
+    const chAfter = messagesChannelKey(msgs);
+    const channelChanged = chBefore !== chAfter;
+    if (channelChanged) {
+      lastMessagesChannel = chAfter;
+    }
     if (msgs) {
       // Server may ask us to land on a msgid (search jump / reply).
       if (msgs.dataset.scrollToMsgid) {
         pendingScrollTo = msgs.dataset.scrollToMsgid;
         stickToBottom = false;
       }
+      if (channelChanged) {
+        // New stream: jump to latest unless we are seeking a specific msgid.
+        resetScrollForChannelSwitch(!!pendingScrollTo);
+        savedScroll = null;
+      }
       if (pendingScrollTo) {
         // Do not yank back to bottom while seeking a target.
         stickToBottom = false;
-      } else if (savedScroll) {
+      } else if (savedScroll && !channelChanged) {
         msgs.scrollTop = msgs.scrollHeight - savedScroll.h + savedScroll.t;
+      } else if (channelChanged) {
+        // Full history paint may lag a frame — re-assert bottom (web3 soon).
+        scrollMessagesToEndSoon();
       } else if (stickToBottom) {
         scrollMessagesToEnd();
       }
@@ -1730,14 +1805,17 @@ function onFrame(text) {
       bindMessagesScroll();
       // Still at the top after prepend? load the next page if more remain.
       // Skip auto-load-older while seeking a jump target (FetchAround owns that).
+      // Also skip right after a channel switch (we force-scrolled to bottom).
       if (
         !pendingScrollTo &&
+        !channelChanged &&
         msgs.scrollTop <= 48 &&
         msgs.dataset.historyLoading !== '1'
       ) {
         requestLoadOlder(msgs);
       }
     } else {
+      if (channelChanged) lastMessagesChannel = chAfter;
       clearLoadOlderPending();
     }
     hydrateReplyBadges();
@@ -1747,7 +1825,9 @@ function onFrame(text) {
     const tBeforeSep = msgsAfter ? msgsAfter.scrollTop : 0;
     localizeTimes();
     if (msgsAfter && !pendingScrollTo) {
-      if (stickToBottom) {
+      if (channelChanged) {
+        scrollMessagesToEndSoon();
+      } else if (stickToBottom) {
         scrollMessagesToEnd();
       } else {
         const grew = msgsAfter.scrollHeight - hBeforeSep;
@@ -1922,14 +2002,10 @@ function onClick(ev) {
     }
   }
   // New channel → jump to latest when the history patch lands.
+  // data-channel on the messages region also detects the switch (popstate,
+  // programatic open); this sets intent early so the first paint sticks.
   if (name === 'open' || name === 'join' || name === 'go_index' || name === 'part') {
-    stickToBottom = true;
-    jumpLockUntil = 0;
-    loadOlderPending = false;
-    newMsgCount = 0;
-    lastBottomMsgid = '';
-    clearJumpBottomTimers();
-    updateJumpBottomUi();
+    resetScrollForChannelSwitch(false);
   }
   const payload = el.getAttribute('data-ls-payload') || '';
   pushEvent(name, payload);
@@ -1946,12 +2022,7 @@ function onSubmit(ev) {
     const path = channelPathFromInput(input && input.value);
     if (path) pushPath(path);
     pendingComposeFocus = true;
-    stickToBottom = true;
-    jumpLockUntil = 0;
-    loadOlderPending = false;
-    newMsgCount = 0;
-    lastBottomMsgid = '';
-    updateJumpBottomUi();
+    resetScrollForChannelSwitch(false);
   }
   pushEvent(name, formPayload(form));
   if (name === 'send' || form.id === 'send-form') {
@@ -1969,6 +2040,9 @@ function onSubmit(ev) {
 function onPopState() {
   const path = location.pathname || '/chat';
   ROOT.dataset.lsRoute = path;
+  // History navigation is a channel switch — land on latest (unless a
+  // search jump sets data-scroll-to-msgid on the next paint).
+  resetScrollForChannelSwitch(false);
   if (path === '/chat' || path === '/chat/' || path === '/') {
     pushEvent('go_index', '');
     return;
@@ -2423,8 +2497,9 @@ bindMessagesScroll();
 {
   const el = messagesEl();
   if (el) {
+    lastMessagesChannel = messagesChannelKey(el);
     stickToBottom = true;
-    scrollMessagesToEnd();
+    scrollMessagesToEndSoon();
     lastBottomMsgid = lastMessageId(el);
   }
   updateJumpBottomUi();

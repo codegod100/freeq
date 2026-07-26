@@ -1836,8 +1836,16 @@ pub fn messages_region_is_only_messages_node_test() {
   let html = live.messages_region_for_test(model)
   assert string.contains(html, "id=\"messages\"")
   assert string.contains(html, "data-ls-region=\"messages\"")
+  // Client uses data-channel to force scroll-to-bottom on stream switch.
+  assert string.contains(html, "data-channel=\"freeq\"")
   assert !string.contains(html, "messages-shell")
   assert !string.contains(html, "jump-bottom")
+}
+
+pub fn messages_region_system_data_channel_test() {
+  let model = live.mount_model("/chat/system")
+  let html = live.messages_region_for_test(model)
+  assert string.contains(html, "data-channel=\"system\"")
 }
 
 pub fn history_loading_html_test() {

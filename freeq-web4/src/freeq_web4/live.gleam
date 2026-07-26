@@ -3353,8 +3353,17 @@ fn messages_region(model: Model) -> String {
     "" -> ""
     mid -> " data-scroll-to-msgid=\"" <> render.escape_html(mid) <> "\""
   }
+  // Bare channel (or "system") so the client can detect stream switches and
+  // force scroll-to-bottom — same role as freeq-web3 ChatScroll data-channel.
+  let channel_attr = case model.view, model.channel {
+    System, _ -> system_key
+    Channel, Some(ch) -> render.bare_channel(ch)
+    _, _ -> ""
+  }
   "<div id=\"messages\" class=\"messages\" data-ls-region=\"messages\""
-  <> " data-history-loading=\""
+  <> " data-channel=\""
+  <> render.escape_html(channel_attr)
+  <> "\" data-history-loading=\""
   <> loading
   <> "\" data-history-exhausted=\""
   <> exhausted
