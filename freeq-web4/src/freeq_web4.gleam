@@ -1329,6 +1329,9 @@ let scrollSoonTimer = 0;
 let scrollSoonGen = 0;
 // Longer reassert after stream switch: avatars / embeds / fonts keep growing.
 let channelStickUntil = 0;
+// Poll while stick intent is on — catches late layout growth (avatars/fonts)
+// that does not fire a Lightspeed patch or scroll event.
+let stickPollTimer = 0;
 
 function messagesEl() {
   return document.getElementById('messages');
@@ -1343,10 +1346,58 @@ function isChannelStickLocked() {
   return Date.now() < channelStickUntil;
 }
 
+function clearStickPoll() {
+  if (stickPollTimer) {
+    clearInterval(stickPollTimer);
+    stickPollTimer = 0;
+  }
+}
+
+/**
+ * Keep re-clamping to the true bottom while stick/jump intent is on.
+ * Layout (avatars, embeds, fonts) often grows after the first scrollToEnd,
+ * leaving a gap with a stale FAB hide — this closes that gap.
+ */
+function startStickPoll(ms) {
+  const duration = typeof ms === 'number' ? ms : 3500;
+  const end = Date.now() + duration;
+  clearStickPoll();
+  stickPollTimer = setInterval(() => {
+    if (pendingScrollTo) {
+      clearStickPoll();
+      return;
+    }
+    if (Date.now() >= end) {
+      clearStickPoll();
+      updateJumpBottomUi();
+      return;
+    }
+    if (!stickToBottom && !isJumpLocked() && !isChannelStickLocked()) {
+      clearStickPoll();
+      updateJumpBottomUi();
+      return;
+    }
+    const el = messagesEl();
+    if (!el) return;
+    if (!nearBottom(el)) {
+      scrollMessagesToEnd();
+      if (nearBottom(el)) {
+        stickToBottom = true;
+        newMsgCount = 0;
+        lastBottomMsgid = lastMessageId(el);
+      }
+    }
+    updateJumpBottomUi();
+  }, 100);
+}
+
 /** Keep bottom while stick intent is on (media load / late layout). */
 function maybeStickScrollToEnd() {
   if (pendingScrollTo) return;
-  if (!stickToBottom && !isJumpLocked() && !isChannelStickLocked()) return;
+  if (!stickToBottom && !isJumpLocked() && !isChannelStickLocked()) {
+    updateJumpBottomUi();
+    return;
+  }
   scrollMessagesToEnd();
   const el = messagesEl();
   if (el && nearBottom(el)) {
@@ -1373,10 +1424,12 @@ function resetScrollForChannelSwitch(seekingMessage) {
   if (seekingMessage) {
     stickToBottom = false;
     channelStickUntil = 0;
+    clearStickPoll();
   } else {
     stickToBottom = true;
     // Hold stick through avatar/embed/font settle after stream replace.
-    channelStickUntil = Date.now() + 2000;
+    channelStickUntil = Date.now() + 2500;
+    startStickPoll(3500);
   }
   updateJumpBottomUi();
 }
@@ -1446,8 +1499,8 @@ function ensureJumpBottomDom() {
 
 function nearBottom(el) {
   if (!el) return true;
-  // Slack for subpixel + short flicks; still shows FAB after ~1 line scroll.
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  // Slack for subpixel + short flicks + late avatar/font growth (~1-2 lines).
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 }
 
 /** Newest message row id in #messages (last .row[data-msgid] child). */
@@ -1532,13 +1585,13 @@ function scrollMessagesToEnd() {
 /**
  * After channel switch / history paint, height can lag (date seps, embeds,
  * fonts, avatars). Re-assert bottom like freeq-web3 scrollToBottomSoon, with
- * a longer tail so late media growth does not leave the pane mid-stream.
+ * a longer tail + stick poll so late media growth does not leave a gap.
  */
 function scrollMessagesToEndSoon() {
   stickToBottom = true;
-  if (!isChannelStickLocked()) {
-    channelStickUntil = Date.now() + 1200;
-  }
+  // Extend settle window; do not shorten an existing longer lock.
+  channelStickUntil = Math.max(channelStickUntil, Date.now() + 2500);
+  startStickPoll(3500);
   const gen = ++scrollSoonGen;
   scrollMessagesToEnd();
   if (scrollSoonTimer) {
@@ -1563,7 +1616,7 @@ function scrollMessagesToEndSoon() {
       reassert();
       // Staggered tail — freeq-web3 only does 80ms; avatars need longer.
       if (gen !== scrollSoonGen) return;
-      const times = [50, 120, 250, 500, 900, 1500];
+      const times = [50, 120, 250, 500, 900, 1600, 2800];
       let i = 0;
       const tick = () => {
         if (gen !== scrollSoonGen) {
@@ -1595,6 +1648,9 @@ function jumpToBottom() {
   newMsgCount = 0;
   // Hide FAB immediately; keep locked while we force-scroll (tall history).
   jumpLockUntil = Date.now() + 900;
+  // Late avatar/font growth after a manual jump — same gap as channel open.
+  channelStickUntil = Math.max(channelStickUntil, Date.now() + 1500);
+  startStickPoll(2500);
   updateJumpBottomUi();
   clearJumpBottomTimers();
   scrollMessagesToEnd();
@@ -1716,7 +1772,7 @@ function onMessagesScroll() {
   // During channel-switch / history-fill settle, morph often leaves scrollTop
   // at 0 on a tall stream (looks not-at-bottom). That is not user intent —
   // only treat as unstick when the user has scrolled into the middle.
-  if (isChannelStickLocked() && stickToBottom && !atBottom) {
+  if ((isChannelStickLocked() || isJumpLocked()) && stickToBottom && !atBottom) {
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
     const midish = el.scrollTop > 120 && dist > 200;
     if (!midish) {
@@ -1724,13 +1780,18 @@ function onMessagesScroll() {
       updateJumpBottomUi();
       return;
     }
+    // Clear settle locks so the stick poll stops yanking.
+    channelStickUntil = 0;
+    clearStickPoll();
   }
   stickToBottom = atBottom;
   if (atBottom) {
     newMsgCount = 0;
     lastBottomMsgid = lastMessageId(el);
-    // User returned to bottom — no need to keep forcing.
-    if (isChannelStickLocked()) channelStickUntil = 0;
+  } else {
+    // User left the bottom — stop any settle poll immediately.
+    clearStickPoll();
+    channelStickUntil = 0;
   }
   updateJumpBottomUi();
   if (!atBottom && el.scrollTop <= 48) requestLoadOlder(el);
@@ -1907,13 +1968,10 @@ function onFrame(text) {
         // history + avatars (#freeq).
         scrollMessagesToEndSoon();
       } else if (stickToBottom || isChannelStickLocked()) {
+        // One clamp only — restarting scrollMessagesToEndSoon on every
+        // avatar/react patch fights the user and restarts timers forever.
         stickToBottom = true;
-        // Still settling after open: keep the multi-frame reassert chain.
-        if (isChannelStickLocked()) {
-          scrollMessagesToEndSoon();
-        } else {
-          scrollMessagesToEnd();
-        }
+        scrollMessagesToEnd();
       }
       // Server finished the older-page fetch (or still loading async).
       if (msgs.dataset.historyLoading === '1') {
@@ -1950,11 +2008,7 @@ function onFrame(text) {
         scrollMessagesToEndSoon();
       } else if (stickToBottom || isChannelStickLocked()) {
         stickToBottom = true;
-        if (isChannelStickLocked()) {
-          scrollMessagesToEndSoon();
-        } else {
-          scrollMessagesToEnd();
-        }
+        scrollMessagesToEnd();
       } else {
         const grew = msgsAfter.scrollHeight - hBeforeSep;
         if (grew > 0) msgsAfter.scrollTop = tBeforeSep + grew;
