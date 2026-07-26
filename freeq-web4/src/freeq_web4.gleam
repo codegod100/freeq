@@ -1569,10 +1569,18 @@ function updateJumpBottomUi() {
     btn.hidden = true;
     btn.setAttribute('hidden', '');
   }
+  const nextLabel = jumpBottomLabel();
   const label = btn.querySelector('.jump-bottom-label');
-  if (label) label.textContent = jumpBottomLabel();
-  btn.classList.toggle('has-new', newMsgCount > 0);
-  btn.setAttribute('aria-label', jumpBottomLabel());
+  // Stick poll runs at 100ms — skip DOM writes when nothing changed (avoids
+  // thrashing layout / MutationObservers during channel settle).
+  if (label && label.textContent !== nextLabel) label.textContent = nextLabel;
+  const wantNew = newMsgCount > 0;
+  if (btn.classList.contains('has-new') !== wantNew) {
+    btn.classList.toggle('has-new', wantNew);
+  }
+  if (btn.getAttribute('aria-label') !== nextLabel) {
+    btn.setAttribute('aria-label', nextLabel);
+  }
   bindJumpBottomButton(btn);
 }
 

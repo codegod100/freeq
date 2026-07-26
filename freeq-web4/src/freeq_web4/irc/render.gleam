@@ -379,6 +379,55 @@ pub fn ping_token(line: String) -> Option(String) {
   }
 }
 
+/// IRCv3 `BATCH` open / close (message-tags batching).
+///
+/// freeq-server wraps CHATHISTORY replay in `BATCH +ref chathistory …` …
+/// `BATCH -ref`. The Live session host suppresses per-line Diffs while a
+/// batch is open and paints once on close (reaction hydration used to remount
+/// `#messages` once per PRIVMSG).
+pub type BatchControl {
+  BatchOpen(ref: String, kind: String)
+  BatchClose(ref: String)
+}
+
+/// Parse `BATCH +ref [type …]` / `BATCH -ref`, or `None` if not a BATCH frame.
+pub fn parse_batch_control(line: String) -> Option(BatchControl) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  let rest = strip_server_prefix(rest)
+  case string.split(rest, " ") {
+    ["BATCH", marker, ..rest_parts] -> {
+      let marker = string.trim(marker)
+      case string.starts_with(marker, "+") {
+        True -> {
+          let ref = string.drop_start(marker, 1)
+          case ref {
+            "" -> None
+            r -> {
+              let kind = case rest_parts {
+                [k, ..] -> string.lowercase(string.trim(k))
+                [] -> ""
+              }
+              Some(BatchOpen(r, kind))
+            }
+          }
+        }
+        False ->
+          case string.starts_with(marker, "-") {
+            True -> {
+              let ref = string.drop_start(marker, 1)
+              case ref {
+                "" -> None
+                r -> Some(BatchClose(r))
+              }
+            }
+            False -> None
+          }
+      }
+    }
+    _ -> None
+  }
+}
+
 fn strip_server_prefix(line: String) -> String {
   case string.starts_with(line, ":") {
     False -> line

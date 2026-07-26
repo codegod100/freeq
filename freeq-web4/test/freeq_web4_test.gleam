@@ -1733,6 +1733,51 @@ pub fn chathistory_batch_hydrates_reactions_test() {
   assert dict.get(updated.reactions, "🔥") == Ok(["bob"])
 }
 
+pub fn parse_batch_control_test() {
+  let assert Some(render.BatchOpen("hist01", "chathistory")) =
+    render.parse_batch_control(":irc.freeq.at BATCH +hist01 chathistory #test")
+  let assert Some(render.BatchClose("hist01")) =
+    render.parse_batch_control("BATCH -hist01")
+  let assert Some(render.BatchOpen("ml1", "draft/multiline")) =
+    render.parse_batch_control(
+      "@time=2024-01-01T00:00:00.000Z :n!u@h BATCH +ml1 draft/multiline #c",
+    )
+  assert render.parse_batch_control(":eve!e@h PRIVMSG #c :hi") == None
+  assert render.parse_batch_control("PING :x") == None
+}
+
+/// Many CHATHISTORY reaction lines change the model once; plan_patches is a
+/// single messages-region replace (session host flushes one Diff on BATCH -).
+pub fn chathistory_reaction_batch_one_messages_patch_test() {
+  let model = live.mount_model("/chat/freeq")
+  let rows = [
+    render.history_row("a!a@h", "one", Some("m1"), Some(1), None, dict.new()),
+    render.history_row("b!b@h", "two", Some("m2"), Some(2), None, dict.new()),
+    render.history_row("c!c@h", "three", Some("m3"), Some(3), None, dict.new()),
+  ]
+  let before = live.apply(model, live.SetHistory(rows)).0
+  let after =
+    list.fold(
+      [
+        "@batch=h1;msgid=m1;+freeq.at/reactions=👍:x :a!a@h PRIVMSG #freeq :one",
+        "@batch=h1;msgid=m2;+freeq.at/reactions=🔥:y :b!b@h PRIVMSG #freeq :two",
+        "@batch=h1;msgid=m3;+freeq.at/reactions=🎉:z :c!c@h PRIVMSG #freeq :three",
+      ],
+      before,
+      fn(m, line) { live.apply(m, live.PushLine(line)).0 },
+    )
+  let patches = live.plan_patches(before, after)
+  let msg_patches =
+    list.filter(patches, fn(p) {
+      case p {
+        diff.Replace(target:, ..) -> string.contains(target, "messages")
+        _ -> False
+      }
+    })
+  // One region replace for the whole hydrate set — not one per reaction line.
+  assert list.length(msg_patches) == 1
+}
+
 pub fn chathistory_latest_line_test() {
   let line = render.chathistory_latest_line("freeq", 50)
   assert string.contains(line, "CHATHISTORY LATEST #freeq * 50")

@@ -72,6 +72,12 @@ pub type Session {
     /// `push_selector` maps them to `UpstreamEvent`. Do not create a relay
     /// process for this subject — only the owner can receive on it.
     events: Subject(upstream.Event),
+    /// Nested IRCv3 `BATCH` depth. While > 0, IRC line model updates are
+    /// applied without Diff frames; one Diff flushes when depth returns to 0.
+    /// Stops CHATHISTORY reaction hydration from remounting `#messages` N times.
+    irc_batch_depth: Int,
+    /// Model snapshot at outermost BATCH open — `plan_patches` baseline.
+    irc_batch_before: Option(live.Model),
   )
 }
 
@@ -126,6 +132,8 @@ pub fn mount(
       oauth: oauth,
       self_subject: self_subject,
       events: process.new_subject(),
+      irc_batch_depth: 0,
+      irc_batch_before: None,
     )
 
   #(session, [protocol.encode(protocol.hello())])
@@ -548,7 +556,62 @@ fn apply_upstream(
     }
     _ -> session
   }
-  finish(session, before, session.model)
+  // IRCv3 BATCH: apply every line to the model, but emit at most one Diff
+  // when the outermost batch closes (CHATHISTORY reaction hydrate, multiline).
+  case ev {
+    upstream.Line(line) -> finish_irc_line(session, before, line)
+    _ -> finish(session, before, session.model)
+  }
+}
+
+/// Diff policy for one IRC line: suppress while nested in BATCH, flush on close.
+fn finish_irc_line(
+  session: Session,
+  line_before: live.Model,
+  line: String,
+) -> #(Session, List(String)) {
+  case render.parse_batch_control(line) {
+    Some(render.BatchOpen(_, _)) -> {
+      let session = case session.irc_batch_depth {
+        0 ->
+          Session(
+            ..session,
+            irc_batch_depth: 1,
+            // Snapshot before this open (and any prior lines already applied
+            // this tick live in `session.model` after apply).
+            irc_batch_before: Some(line_before),
+          )
+        n -> Session(..session, irc_batch_depth: n + 1)
+      }
+      // No Diff for BATCH + itself.
+      #(session, [])
+    }
+    Some(render.BatchClose(_)) -> {
+      // Orphan `-` (depth already 0) still flushes any pending snapshot.
+      let depth = case session.irc_batch_depth {
+        n if n > 0 -> n - 1
+        _ -> 0
+      }
+      case depth > 0 {
+        True -> #(Session(..session, irc_batch_depth: depth), [])
+        False -> {
+          let paint_before = case session.irc_batch_before {
+            Some(m) -> m
+            None -> line_before
+          }
+          let session =
+            Session(..session, irc_batch_depth: 0, irc_batch_before: None)
+          finish(session, paint_before, session.model)
+        }
+      }
+    }
+    None ->
+      case session.irc_batch_depth > 0 {
+        // Inside batch: model already updated; wait for BATCH -.
+        True -> #(session, [])
+        False -> finish(session, line_before, session.model)
+      }
+  }
 }
 
 fn rejoin_and_names(session: Session) -> Session {
