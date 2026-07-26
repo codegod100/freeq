@@ -11,6 +11,7 @@ import freeq_web4/rest
 import freeq_web4/session_store
 import freeq_web4/upload
 import gleam/bit_array
+import gleam/dict
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -89,12 +90,50 @@ pub fn parse_tags_test() {
   assert tags != []
 }
 
+pub fn parse_reply_parent_test() {
+  let line =
+    "@msgid=child1;+reply=parent1 :bob!b@h PRIVMSG #freeq :this is a reply"
+  let assert Some(row) = render.parse_message_line(line, None)
+  assert row.parent == Some("parent1")
+  assert row.msgid == Some("child1")
+  assert row.text == "this is a reply"
+}
+
 pub fn history_row_test() {
-  let row = render.history_row("alice!a@h", "scrollback", Some("mid1"), Some(0))
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "scrollback",
+      Some("mid1"),
+      Some(0),
+      None,
+      dict.new(),
+    )
   assert row.kind == render.Msg
   assert row.nick == Some("alice")
   assert row.msgid == Some("mid1")
   assert row.text == "scrollback"
+  assert row.parent == None
+  assert row.reactions == dict.new()
+}
+
+pub fn history_row_with_parent_test() {
+  let row =
+    render.history_row(
+      "bob!b@h",
+      "reply body",
+      Some("child"),
+      Some(0),
+      Some("parent"),
+      dict.new(),
+    )
+  assert row.parent == Some("parent")
+  assert row.msgid == Some("child")
+}
+
+pub fn preview_text_test() {
+  assert render.preview_text("  hello   world  ") == "hello world"
+  assert string.length(render.preview_text(string.repeat("x", 100))) == 81
 }
 
 pub fn linkify_plain_text_test() {
@@ -119,6 +158,38 @@ pub fn linkify_strips_trailing_punct_test() {
   assert string.ends_with(out, ".")
   assert string.contains(out, "class=\"msg-img-url\"")
   assert string.contains(out, "class=\"msg-img-link\"")
+}
+
+pub fn linkify_at_uri_test() {
+  let uri =
+    "at://did:plc:z72i7hdynmk6r22z27h6tvur/app.bsky.feed.post/3k2yihcrp6f2c"
+  let out = render.linkify_html("see " <> uri <> " ok")
+  assert string.contains(out, "href=\"https://atproto." <> uri <> "\"")
+  assert string.contains(out, ">" <> uri <> "</a>")
+  assert string.contains(out, "target=\"_blank\"")
+  assert string.contains(out, "rel=\"noopener noreferrer\"")
+  assert string.starts_with(out, "see ")
+  assert string.ends_with(out, " ok")
+}
+
+pub fn linkify_at_uri_strips_trailing_punct_test() {
+  let uri = "at://alice.bsky.social/app.bsky.feed.post/3abc"
+  let out = render.linkify_html("ref " <> uri <> ".")
+  assert string.contains(out, "href=\"https://atproto." <> uri <> "\"")
+  assert string.ends_with(out, ".")
+  assert !string.contains(out, uri <> ".</a>")
+}
+
+pub fn linkify_at_and_https_mixed_test() {
+  let out =
+    render.linkify_html(
+      "a https://ex.com b at://did:plc:x/app.bsky.feed.post/y c",
+    )
+  assert string.contains(out, "href=\"https://ex.com\"")
+  assert string.contains(
+    out,
+    "href=\"https://atproto.at://did:plc:x/app.bsky.feed.post/y\"",
+  )
 }
 
 pub fn is_image_url_test() {
@@ -205,12 +276,12 @@ pub fn with_api_bearer_test() {
 
 pub fn merge_history_rows_test() {
   let rest = [
-    render.history_row("alice!a@h", "a", Some("m1"), Some(1)),
-    render.history_row("bob!b@h", "b", Some("m2"), Some(2)),
+    render.history_row("alice!a@h", "a", Some("m1"), Some(1), None, dict.new()),
+    render.history_row("bob!b@h", "b", Some("m2"), Some(2), None, dict.new()),
   ]
   let live_only = [
-    render.history_row("bob!b@h", "b", Some("m2"), Some(2)),
-    render.history_row("carol!c@h", "c", Some("m3"), Some(3)),
+    render.history_row("bob!b@h", "b", Some("m2"), Some(2), None, dict.new()),
+    render.history_row("carol!c@h", "c", Some("m3"), Some(3), None, dict.new()),
   ]
   let merged = live.merge_history_rows(rest, live_only)
   assert list.length(merged) == 3
@@ -268,6 +339,72 @@ pub fn send_builds_privmsg_test() {
     _ -> panic as "expected IrcSend"
   }
   assert string.contains(line, "PRIVMSG #freeq :hello")
+}
+
+pub fn start_reply_sets_banner_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "original body",
+      Some("parent1"),
+      Some(0),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let #(next, _) = live.apply(model, live.StartReply("parent1"))
+  assert next.reply_to == Some("parent1")
+  assert next.reply_preview_nick == "alice"
+  assert next.reply_preview_text == "original body"
+}
+
+pub fn cancel_reply_clears_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.StartReply("mid-x")).0
+  assert model.reply_to == Some("mid-x")
+  let #(next, _) = live.apply(model, live.CancelReply)
+  assert next.reply_to == None
+  assert next.reply_preview_nick == ""
+  assert next.reply_preview_text == ""
+}
+
+pub fn send_reply_builds_tagged_privmsg_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "hi",
+      Some("parent1"),
+      Some(0),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let model = live.apply(model, live.StartReply("parent1")).0
+  let #(next, effect) = live.apply(model, live.Send("this is a reply"))
+  let assert live.IrcSend([line]) = effect
+  assert string.contains(line, "@+reply=parent1")
+  assert string.contains(line, "PRIVMSG #freeq :this is a reply")
+  // Reply mode clears after send.
+  assert next.reply_to == None
+  assert next.reply_preview_nick == ""
+}
+
+pub fn open_channel_clears_reply_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.StartReply("mid1")).0
+  assert model.reply_to == Some("mid1")
+  let #(next, _) = live.apply(model, live.OpenChannel("dev"))
+  assert next.reply_to == None
+  assert next.channel == Some("#dev")
+}
+
+pub fn channel_shell_has_reply_controls_test() {
+  let html = live.initial_html("/chat/freeq")
+  // Compose stack is present; reply banner appears only when replying.
+  assert string.contains(html, "data-ls-region=\"compose\"")
+  assert !string.contains(html, "id=\"reply-banner\"")
 }
 
 pub fn decode_channels_null_topic_test() {
@@ -681,6 +818,210 @@ pub fn is_353_bundled_366_test() {
   assert render.is_353(line) == True
   assert render.channel_from_353(line) == Some("#freeq")
   assert list.length(render.parse_353_members(line)) >= 1
+}
+
+// ── Reactions ────────────────────────────────────────────────────────────────
+
+pub fn parse_reactions_tag_test() {
+  let map = render.parse_reactions_tag("👍:alice,bob;❤️:carol")
+  assert dict.get(map, "👍") == Ok(["alice", "bob"])
+  assert dict.get(map, "❤️") == Ok(["carol"])
+  assert render.parse_reactions_tag("") == dict.new()
+  assert render.parse_reactions_tag("notacolon;:no_emoji;👍:") == dict.new()
+}
+
+pub fn parse_tagmsg_reaction_add_test() {
+  let line = "@+react=👍;+reply=msg123 :bob!b@h TAGMSG #freeq"
+  let assert Some(#(msgid, emoji, nick, added, ch)) =
+    render.parse_tagmsg_reaction(line)
+  assert msgid == "msg123"
+  assert emoji == "👍"
+  assert nick == "bob"
+  assert added == True
+  assert ch == "#freeq"
+}
+
+pub fn parse_tagmsg_reaction_remove_test() {
+  let line = "@+freeq.at/unreact=❤️;+reply=msg99 :alice!a@h TAGMSG #freeq"
+  let assert Some(#(msgid, emoji, nick, added, ch)) =
+    render.parse_tagmsg_reaction(line)
+  assert msgid == "msg99"
+  assert emoji == "❤️"
+  assert nick == "alice"
+  assert added == False
+  assert ch == "#freeq"
+}
+
+pub fn parse_tagmsg_reaction_draft_react_test() {
+  let line = "@+draft/react=🔥;+reply=m1 :carol!c@h TAGMSG #dev"
+  let assert Some(#(msgid, emoji, _, added, ch)) =
+    render.parse_tagmsg_reaction(line)
+  assert msgid == "m1"
+  assert emoji == "🔥"
+  assert added == True
+  assert ch == "#dev"
+}
+
+pub fn apply_reaction_map_test() {
+  let empty = dict.new()
+  let one = render.apply_reaction_map(empty, "👍", "alice", True)
+  assert dict.get(one, "👍") == Ok(["alice"])
+  // Idempotent add
+  let still = render.apply_reaction_map(one, "👍", "alice", True)
+  assert dict.get(still, "👍") == Ok(["alice"])
+  let two = render.apply_reaction_map(one, "👍", "bob", True)
+  assert dict.get(two, "👍") == Ok(["alice", "bob"])
+  let back = render.apply_reaction_map(two, "👍", "alice", False)
+  assert dict.get(back, "👍") == Ok(["bob"])
+  let gone = render.apply_reaction_map(back, "👍", "bob", False)
+  assert gone == dict.new()
+}
+
+pub fn react_line_test() {
+  let add = render.react_line("#freeq", "msg1", "👍", True)
+  assert string.contains(add, "+react=👍")
+  assert string.contains(add, "+reply=msg1")
+  assert string.contains(add, "TAGMSG #freeq")
+  let rem = render.react_line("freeq", "msg1", "❤️", False)
+  assert string.contains(rem, "+freeq.at/unreact=❤️")
+  assert string.contains(rem, "+reply=msg1")
+}
+
+pub fn history_row_with_reactions_test() {
+  let rx = render.parse_reactions_tag("👍:alice")
+  let row =
+    render.history_row("bob!b@h", "hi", Some("m1"), Some(0), None, rx)
+  assert dict.get(row.reactions, "👍") == Ok(["alice"])
+}
+
+pub fn toggle_reaction_sends_tagmsg_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row("alice!a@h", "hello", Some("mid1"), Some(0), None, dict.new())
+  let model = live.apply(model, live.SetHistory([row])).0
+  let #(next, effect) = live.apply(model, live.ToggleReaction("mid1", "👍"))
+  let assert live.IrcSend([line]) = effect
+  assert string.contains(line, "+react=👍")
+  assert string.contains(line, "+reply=mid1")
+  // Optimistic local chip
+  let assert Ok(updated) = list.find(next.messages, fn(r) { r.msgid == Some("mid1") })
+  assert dict.get(updated.reactions, "👍") == Ok([model.nick])
+  // Toggle again removes
+  let #(next2, effect2) = live.apply(next, live.ToggleReaction("mid1", "👍"))
+  let assert live.IrcSend([line2]) = effect2
+  assert string.contains(line2, "+freeq.at/unreact=👍")
+  let assert Ok(updated2) =
+    list.find(next2.messages, fn(r) { r.msgid == Some("mid1") })
+  assert updated2.reactions == dict.new()
+}
+
+pub fn live_reaction_tagmsg_updates_row_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row("alice!a@h", "hello", Some("mid1"), Some(0), None, dict.new())
+  let model = live.apply(model, live.SetHistory([row])).0
+  let line = "@+react=🎉;+reply=mid1 :bob!b@h TAGMSG #freeq"
+  let #(next, _) = live.apply(model, live.PushLine(line))
+  let assert Ok(updated) = list.find(next.messages, fn(r) { r.msgid == Some("mid1") })
+  assert dict.get(updated.reactions, "🎉") == Ok(["bob"])
+}
+
+pub fn channel_shell_has_react_picker_region_test() {
+  let html = live.initial_html("/chat/freeq")
+  assert string.contains(html, "data-ls-region=\"react-picker\"")
+}
+
+pub fn parse_history_reactions_from_batch_test() {
+  let line =
+    "@batch=h1;msgid=mid1;+freeq.at/reactions=👍:alice,bob :alice!a@h PRIVMSG #freeq :hi"
+  // Batch lines are not chat rows…
+  assert render.parse_message_line(line, None) == None
+  // …but still expose reaction tallies for hydration.
+  let assert Some(#(msgid, rx)) = render.parse_history_reactions(line)
+  assert msgid == "mid1"
+  assert dict.get(rx, "👍") == Ok(["alice", "bob"])
+}
+
+pub fn history_decode_includes_reactions_tag_test() {
+  let body =
+    "[{\"sender\":\"alice\",\"text\":\"hi\",\"msgid\":\"m1\",\"timestamp\":1,\"tags\":{\"+freeq.at/reactions\":\"🎉:bob\"}}]"
+  let rows = rest.parse_history_json(body)
+  assert list.length(rows) == 1
+  let assert Ok(row) = list.first(rows)
+  assert dict.get(row.reactions, "🎉") == Ok(["bob"])
+}
+
+pub fn merge_history_preserves_live_reactions_test() {
+  let rest_row =
+    render.history_row("alice!a@h", "hi", Some("m1"), Some(1), None, dict.new())
+  let live_rx = render.parse_reactions_tag("👍:carol")
+  let live_row =
+    render.history_row("alice!a@h", "hi", Some("m1"), Some(1), None, live_rx)
+  let merged = live.merge_history_rows([rest_row], [live_row])
+  assert list.length(merged) == 1
+  let assert Ok(row) = list.first(merged)
+  assert dict.get(row.reactions, "👍") == Ok(["carol"])
+}
+
+pub fn chathistory_batch_hydrates_reactions_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row("alice!a@h", "hello", Some("mid1"), Some(0), None, dict.new())
+  let model = live.apply(model, live.SetHistory([row])).0
+  let line =
+    "@batch=hist01;msgid=mid1;+freeq.at/reactions=🔥:bob :alice!a@h PRIVMSG #freeq :hello"
+  let #(next, _) = live.apply(model, live.PushLine(line))
+  let assert Ok(updated) =
+    list.find(next.messages, fn(r) { r.msgid == Some("mid1") })
+  assert dict.get(updated.reactions, "🔥") == Ok(["bob"])
+}
+
+pub fn chathistory_latest_line_test() {
+  let line = render.chathistory_latest_line("freeq", 50)
+  assert string.contains(line, "CHATHISTORY LATEST #freeq * 50")
+  assert string.ends_with(string.trim_end(line), "\r\n")
+    || string.contains(line, "\r\n")
+}
+
+pub fn set_history_preserves_prior_reactions_test() {
+  // Simulate: CHATHISTORY hydrated chips, then REST SetHistory without tags.
+  let model = live.mount_model("/chat/freeq")
+  let with_rx =
+    render.history_row(
+      "alice!a@h",
+      "hello",
+      Some("mid1"),
+      Some(0),
+      None,
+      render.parse_reactions_tag("👍:bob"),
+    )
+  let model = live.apply(model, live.SetHistory([with_rx])).0
+  let rest_plain =
+    render.history_row("alice!a@h", "hello", Some("mid1"), Some(0), None, dict.new())
+  let #(next, _) = live.apply(model, live.SetHistory([rest_plain]))
+  let assert Ok(row) = list.find(next.messages, fn(r) { r.msgid == Some("mid1") })
+  assert dict.get(row.reactions, "👍") == Ok(["bob"])
+}
+
+pub fn chathistory_replaces_stale_optimistic_test() {
+  // Authoritative CHATHISTORY tallies replace (not union) so removed reactors
+  // do not stick around from optimistic local state.
+  let model = live.mount_model("/chat/freeq")
+  let stale =
+    render.history_row(
+      "alice!a@h",
+      "hello",
+      Some("mid1"),
+      Some(0),
+      None,
+      render.parse_reactions_tag("👍:guest,bob"),
+    )
+  let model = live.apply(model, live.SetHistory([stale])).0
+  let line =
+    "@batch=h1;msgid=mid1;+freeq.at/reactions=👍:bob :alice!a@h PRIVMSG #freeq :hello"
+  let #(next, _) = live.apply(model, live.PushLine(line))
+  let assert Ok(row) = list.find(next.messages, fn(r) { r.msgid == Some("mid1") })
+  assert dict.get(row.reactions, "👍") == Ok(["bob"])
 }
 
 // ── AV call TAGMSG ───────────────────────────────────────────────────────────

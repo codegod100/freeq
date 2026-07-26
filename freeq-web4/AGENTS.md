@@ -4,6 +4,26 @@ Gleam Lightspeed LiveView port of `freeq-web3`. See `../freeq-web3/AGENTS.md`
 for the Phoenix BFF this was ported from, and `../freeq-web2/AGENTS.md` for
 the Rails/StimulusReflex origin.
 
+## Scope (agents)
+
+**Do not edit `freeq-server` (or other upstream packages) while working on this
+client.** freeq-web4 is a BFF/client that talks to freeq-server over IRC
+WebSocket + REST; treat the server as an external dependency.
+
+| In scope | Out of scope |
+|----------|----------------|
+| `freeq-web4/**` | `freeq-server/**` |
+| Client-side workarounds for server gaps | Protocol/API changes in freeq-server |
+| Parsing/adapting tags the server already sends | New freeq-server endpoints, DB, or REST shape |
+
+If a feature truly needs a server change: **stop**, document the gap (tag
+missing from REST history, etc.), and only touch freeq-server in a **dedicated
+server task** — never as a drive-by while implementing web4 UI/protocol
+handling.
+
+Same rule applies to sibling clients (`freeq-web2`, `freeq-web3`, `freeq-app`,
+`freeq-webui`, native apps): client work stays in that client tree.
+
 ## Build
 
 Workspace-sibling. From `freeq-web4/`:
@@ -64,7 +84,7 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [x] AT Protocol OAuth + SASL ATPROTO-CHALLENGE
 - [x] Voice/video AV calls (TAGMSG signaling + MoQ media panel)
 - [ ] Encrypted session store + multi-tab registry
-- [ ] Reactions (TAGMSG +react / unreact)
+- [x] Reactions (TAGMSG +react / unreact)
 - [ ] Message edit/delete UI
 - [ ] DMs + E2EE
 - [ ] Link embeds / preview cache

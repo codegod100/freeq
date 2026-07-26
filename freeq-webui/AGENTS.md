@@ -2,6 +2,14 @@
 
 Topcoat BFF web UI for freeq. Connects to freeq-server over WSS + REST.
 
+## Scope (agents)
+
+**Do not edit `freeq-server` while working on this client.** freeq-webui is a
+BFF that speaks WSS + REST to freeq-server; treat the server as an external
+dependency. Stay in `freeq-webui/**`. Client-side workarounds for server gaps
+are fine; drive-by protocol/API/DB changes in freeq-server are not — those
+belong in a dedicated server task only.
+
 ## Build
 
 Workspace member. From repo root:

@@ -4,6 +4,7 @@
 
 import freeq_web4/config
 import freeq_web4/irc/render
+import gleam/dict
 import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
@@ -182,13 +183,28 @@ fn decode_history(body: String) -> List(render.Row) {
       None,
       decode.optional(decode.int),
     )
-    decode.success(#(sender, text, msgid, ts))
+    use tags <- decode.optional_field(
+      "tags",
+      dict.new(),
+      decode.dict(decode.string, decode.string),
+    )
+    decode.success(#(sender, text, msgid, ts, tags))
   }
   case json.parse(body, decode.list(decoder)) {
     Ok(rows) ->
       list.map(rows, fn(row) {
-        let #(sender, text, msgid, ts) = row
-        render.history_row(sender, text, msgid, ts)
+        let #(sender, text, msgid, ts, tags) = row
+        let tag_list = dict.to_list(tags)
+        let parent = render.reply_parent(tag_list)
+        let reactions = case dict.get(tags, "+freeq.at/reactions") {
+          Ok(raw) -> render.parse_reactions_tag(raw)
+          Error(_) ->
+            case dict.get(tags, "freeq.at/reactions") {
+              Ok(raw) -> render.parse_reactions_tag(raw)
+              Error(_) -> dict.new()
+            }
+        }
+        render.history_row(sender, text, msgid, ts, parent, reactions)
       })
     Error(_) -> []
   }
@@ -202,6 +218,11 @@ pub fn channel_count(channels: List(ChannelInfo)) -> Int {
 /// Decode channel list JSON (exported for unit tests).
 pub fn parse_channels_json(body: String) -> List(ChannelInfo) {
   decode_channels(body)
+}
+
+/// Decode history message list JSON (exported for unit tests).
+pub fn parse_history_json(body: String) -> List(render.Row) {
+  decode_history(body)
 }
 
 // ── AV sessions ──────────────────────────────────────────────────────────────

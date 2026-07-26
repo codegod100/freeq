@@ -831,6 +831,63 @@ function restoreCompose(snap, forceFocus) {
 
 let pendingComposeFocus = false;
 
+function scrollToMessage(msgid) {
+  const mid = String(msgid || '');
+  if (!mid) return;
+  const root = document.getElementById('messages') || ROOT;
+  let row = null;
+  try {
+    row = root.querySelector('[data-msgid=\"' + CSS.escape(mid) + '\"]');
+  } catch (_) {
+    // Strip chars that would break the attribute selector.
+    const safe = mid.split('\"').join('').split('\\\\').join('');
+    row = root.querySelector('[data-msgid=\"' + safe + '\"]');
+  }
+  if (!row) return;
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  row.classList.add('highlight');
+  setTimeout(() => row.classList.remove('highlight'), 1200);
+}
+
+// Fill reply badges whose parent nick/text was missing when the server
+// rendered (parent not yet in history / out of window).
+function hydrateReplyBadges() {
+  const root = document.getElementById('messages');
+  if (!root) return;
+  root.querySelectorAll('.reply-badge[data-reply-to]').forEach((badge) => {
+    const mid = badge.getAttribute('data-reply-to');
+    if (!mid) return;
+    const nickEl = badge.querySelector('.reply-nick');
+    const textEl = badge.querySelector('.reply-text');
+    const needsNick =
+      !nickEl || !nickEl.textContent || nickEl.textContent === 'message';
+    const needsText = !textEl || !textEl.textContent;
+    if (!needsNick && !needsText) return;
+    let parent = null;
+    try {
+      parent = root.querySelector('[data-msgid=\"' + CSS.escape(mid) + '\"]');
+    } catch (_) {
+      parent = null;
+    }
+    if (!parent) return;
+    if (needsNick && nickEl && parent.dataset.nick) {
+      nickEl.textContent = parent.dataset.nick;
+    }
+    if (parent.dataset.text) {
+      const t = parent.dataset.text.replace(/\\s+/g, ' ').trim();
+      const snippet = t.length > 80 ? t.slice(0, 80) + '…' : t;
+      if (textEl) {
+        textEl.textContent = snippet;
+      } else if (needsText && snippet) {
+        const span = document.createElement('span');
+        span.className = 'reply-text';
+        span.textContent = snippet;
+        badge.appendChild(span);
+      }
+    }
+  });
+}
+
 function onFrame(text) {
   const fields = splitFields(text);
   const tag = fields[0];
@@ -850,6 +907,7 @@ function onFrame(text) {
     restoreCompose(snap, force || (!hadCompose && hasCompose));
     const msgs = document.getElementById('messages');
     if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    hydrateReplyBadges();
     try { if (window.__freeqAv && window.__freeqAv.sync) window.__freeqAv.sync(); } catch (_) {}
     return;
   }
@@ -905,6 +963,16 @@ function onClick(ev) {
     return;
   }
 
+  // Reply chip: jump to the original message in the stream.
+  const badge = ev.target && ev.target.closest
+    ? ev.target.closest('.reply-badge[data-reply-to]')
+    : null;
+  if (badge && ROOT.contains(badge)) {
+    ev.preventDefault();
+    scrollToMessage(badge.getAttribute('data-reply-to') || '');
+    return;
+  }
+
   const el = ev.target && ev.target.closest ? ev.target.closest('[data-ls-click]') : null;
   if (!el || !ROOT.contains(el)) return;
   const href = el.tagName === 'A' ? el.getAttribute('href') : null;
@@ -925,9 +993,11 @@ function onClick(ev) {
     const li = el.closest('li');
     if (li && li.classList.contains('active')) pushPath('/chat');
   }
-  // Channel open steals focus to the link; re-grab compose after the diff
-  // (same as web3 focus_compose on navigate).
-  if (name === 'open') pendingComposeFocus = true;
+  // Channel open / reply steals focus; re-grab compose after the diff
+  // (same as web3 focus_compose on navigate / reply).
+  if (name === 'open' || name === 'reply' || name === 'cancel_reply') {
+    pendingComposeFocus = true;
+  }
   const payload = el.getAttribute('data-ls-payload') || '';
   pushEvent(name, payload);
 }
@@ -1021,6 +1091,17 @@ function onKeyDown(ev) {
   if (!t || t.tagName !== 'INPUT') return;
   if (t.name !== 'msg' && t.id !== 'message-input') return;
   if (!ROOT.contains(t)) return;
+
+  // Escape cancels compose-side reply mode (banner).
+  if (ev.key === 'Escape') {
+    if (document.getElementById('reply-banner')) {
+      ev.preventDefault();
+      pendingComposeFocus = true;
+      pushEvent('cancel_reply', '');
+    }
+    tabCycle = null;
+    return;
+  }
 
   if (ev.key !== 'Tab') {
     if (tabCycle && ev.key !== 'Shift') tabCycle = null;
@@ -1319,7 +1400,8 @@ ROOT.dataset.lsRoute = location.pathname || ROOT.dataset.lsRoute || '/chat';
 // Grab chat input on SSR channel pages (autofocus is flaky with module scripts).
 focusCompose();
 queueMicrotask(focusCompose);
+hydrateReplyBadges();
 connect();
-window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview };
+window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview, scrollToMessage };
 "
 }

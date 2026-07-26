@@ -11,6 +11,19 @@
 
 ---
 
+## Client vs freeq-server (agents)
+
+When working on a **client** or BFF (`freeq-web4`, `freeq-web3`, `freeq-web2`,
+`freeq-webui`, `freeq-app`, TUI, native apps, SDK consumers):
+
+- **Do not edit `freeq-server/**`** as part of that work.
+- Treat freeq-server as an external dependency (IRC + REST as deployed).
+- Prefer client-side adapters/workarounds for missing tags or REST fields.
+- Server protocol/API/DB changes only in a **dedicated freeq-server task**,
+  never as a drive-by while implementing client UI.
+
+See each client's `AGENTS.md` § Scope for the same rule.
+
 ## Version control (agents)
 
 This repo is **colocated jj + git**. Agents should use **`jj`** for day-to-day

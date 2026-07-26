@@ -9,6 +9,7 @@ import freeq_web4/irc/render
 import freeq_web4/rest
 import gleam/bit_array
 import gleam/crypto
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -57,6 +58,12 @@ pub type Model {
     messages: List(render.Row),
     members: List(render.Member),
     compose: String,
+    /// Parent msgid when composing a reply (`@+reply=` on send).
+    reply_to: Option(String),
+    /// Banner nick for the message being replied to.
+    reply_preview_nick: String,
+    /// Banner snippet for the message being replied to.
+    reply_preview_text: String,
     status: String,
     /// Last error / system banner.
     flash: String,
@@ -81,6 +88,8 @@ pub type Model {
     av_instance: String,
     /// MoQ JWT from directed `+freeq.at/av-token` TAGMSG.
     av_token: Option(String),
+    /// Open emoji picker target msgid (`None` = closed).
+    react_picker_msgid: Option(String),
   )
 }
 
@@ -95,6 +104,10 @@ pub type Assigns {
 pub type Msg {
   /// Browser: submit compose form.
   Send(text: String)
+  /// Browser: start replying to a message (msgid).
+  StartReply(msgid: String)
+  /// Browser: cancel reply compose mode.
+  CancelReply
   /// Browser: join channel form.
   Join(raw: String)
   /// Browser: part a channel.
@@ -137,6 +150,12 @@ pub type Msg {
   AvRoster(count: Int)
   /// Server: REST probe found (or cleared) an active call on a channel.
   AvProbe(channel: String, call: Option(rest.ActiveCall))
+  /// Browser: open emoji picker for a message.
+  OpenReactPicker(msgid: String)
+  /// Browser: close emoji picker.
+  CloseReactPicker
+  /// Browser: toggle reaction on a message (add if not mine, else remove).
+  ToggleReaction(msgid: String, emoji: String)
   /// No-op / ignored.
   Nop
 }
@@ -216,6 +235,9 @@ fn mount(
       messages: [],
       members: [],
       compose: "",
+      reply_to: None,
+      reply_preview_nick: "",
+      reply_preview_text: "",
       status: "connecting…",
       flash: "",
       authenticated: False,
@@ -231,6 +253,7 @@ fn mount(
       av_camera: False,
       av_instance: generate_av_instance(),
       av_token: None,
+      react_picker_msgid: None,
     )
   helpers.no_effect(model)
 }
@@ -260,12 +283,33 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         _, Some(ch) -> {
           let line = case string.starts_with(text, "/") {
             True -> string.drop_start(text, 1) <> "\r\n"
-            False -> "PRIVMSG " <> ch <> " :" <> text <> "\r\n"
+            False -> privmsg_line(ch, text, model.reply_to)
           }
-          #(Model(..model, compose: "", flash: ""), IrcSend([line]))
+          #(clear_reply(Model(..model, compose: "", flash: "")), IrcSend([line]))
         }
       }
     }
+
+    StartReply(msgid) -> {
+      let msgid = string.trim(msgid)
+      case msgid == "" {
+        True -> #(model, NoEffect)
+        False -> {
+          let #(nick, text) = message_preview(model.messages, msgid)
+          #(
+            Model(
+              ..model,
+              reply_to: Some(msgid),
+              reply_preview_nick: nick,
+              reply_preview_text: render.preview_text(text),
+            ),
+            NoEffect,
+          )
+        }
+      }
+    }
+
+    CancelReply -> #(clear_reply(model), NoEffect)
 
     Join(raw) -> {
       let ch = render.canonical_channel(raw)
@@ -278,38 +322,44 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           let topic = rest.topic_for(model.all_channels, ch)
           let model = case model.av_active {
             True ->
-              Model(
-                ..model,
-                view: Channel,
-                channel: Some(ch),
-                my_channels: my,
-                messages: [],
-                members: [],
-                topic: topic,
-                flash: "",
-                av_channel: case model.av_channel {
-                  Some(_) -> model.av_channel
-                  None -> model.channel
-                },
+              clear_reply(
+                Model(
+                  ..model,
+                  view: Channel,
+                  channel: Some(ch),
+                  my_channels: my,
+                  messages: [],
+                  members: [],
+                  topic: topic,
+                  flash: "",
+                  react_picker_msgid: None,
+                  av_channel: case model.av_channel {
+                    Some(_) -> model.av_channel
+                    None -> model.channel
+                  },
+                ),
               )
             False ->
-              Model(
-                ..model,
-                view: Channel,
-                channel: Some(ch),
-                my_channels: my,
-                messages: [],
-                members: [],
-                topic: topic,
-                flash: "",
-                av_call_present: False,
-                av_session_id: None,
-                av_channel: None,
-                av_participant_count: 0,
-                av_muted: False,
-                av_camera: False,
-                av_instance: generate_av_instance(),
-                av_token: None,
+              clear_reply(
+                Model(
+                  ..model,
+                  view: Channel,
+                  channel: Some(ch),
+                  my_channels: my,
+                  messages: [],
+                  members: [],
+                  topic: topic,
+                  flash: "",
+                  av_call_present: False,
+                  av_session_id: None,
+                  av_channel: None,
+                  av_participant_count: 0,
+                  av_muted: False,
+                  av_camera: False,
+                  av_instance: generate_av_instance(),
+                  av_token: None,
+                  react_picker_msgid: None,
+                ),
               )
           }
           #(
@@ -336,14 +386,17 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       }
       let model = case leaving_current {
         True ->
-          Model(
-            ..model,
-            view: Index,
-            channel: None,
-            my_channels: my,
-            messages: [],
-            members: [],
-            topic: "",
+          clear_reply(
+            Model(
+              ..model,
+              view: Index,
+              channel: None,
+              my_channels: my,
+              messages: [],
+              members: [],
+              topic: "",
+              react_picker_msgid: None,
+            ),
           )
         False -> Model(..model, my_channels: my)
       }
@@ -353,13 +406,16 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     GoIndex ->
       // Keep AV state — browsing the directory must not leave the call.
       #(
-        Model(
-          ..model,
-          view: Index,
-          channel: None,
-          messages: [],
-          members: [],
-          topic: "",
+        clear_reply(
+          Model(
+            ..model,
+            view: Index,
+            channel: None,
+            messages: [],
+            members: [],
+            topic: "",
+            react_picker_msgid: None,
+          ),
         ),
         FetchChannels,
       )
@@ -372,38 +428,44 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       let topic = rest.topic_for(model.all_channels, ch)
       let model = case model.av_active {
         True ->
-          Model(
-            ..model,
-            view: Channel,
-            channel: Some(ch),
-            my_channels: my,
-            messages: [],
-            members: [],
-            topic: topic,
-            flash: "",
-            av_channel: case model.av_channel {
-              Some(_) -> model.av_channel
-              None -> model.channel
-            },
+          clear_reply(
+            Model(
+              ..model,
+              view: Channel,
+              channel: Some(ch),
+              my_channels: my,
+              messages: [],
+              members: [],
+              topic: topic,
+              flash: "",
+              react_picker_msgid: None,
+              av_channel: case model.av_channel {
+                Some(_) -> model.av_channel
+                None -> model.channel
+              },
+            ),
           )
         False ->
-          Model(
-            ..model,
-            view: Channel,
-            channel: Some(ch),
-            my_channels: my,
-            messages: [],
-            members: [],
-            topic: topic,
-            flash: "",
-            av_call_present: False,
-            av_session_id: None,
-            av_channel: None,
-            av_participant_count: 0,
-            av_muted: False,
-            av_camera: False,
-            av_instance: generate_av_instance(),
-            av_token: None,
+          clear_reply(
+            Model(
+              ..model,
+              view: Channel,
+              channel: Some(ch),
+              my_channels: my,
+              messages: [],
+              members: [],
+              topic: topic,
+              flash: "",
+              av_call_present: False,
+              av_session_id: None,
+              av_channel: None,
+              av_participant_count: 0,
+              av_muted: False,
+              av_camera: False,
+              av_instance: generate_av_instance(),
+              av_token: None,
+              react_picker_msgid: None,
+            ),
           )
       }
       #(
@@ -432,7 +494,9 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
 
     PushLine(line) -> apply_line(model, line)
 
-    SetHistory(rows) -> #(Model(..model, messages: rows), NoEffect)
+    // Prefer apply_rest_history at call sites; raw SetHistory still merges
+    // reaction tallies so REST never clobbers chips already on the model.
+    SetHistory(rows) -> #(apply_rest_history(model, rows), NoEffect)
 
     SetAllChannels(chs) -> #(Model(..model, all_channels: chs), NoEffect)
 
@@ -470,7 +534,99 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         False -> #(model, NoEffect)
       }
     AvProbe(channel, call) -> apply_av_probe(model, channel, call)
+
+    OpenReactPicker(msgid) ->
+      case string.trim(msgid) {
+        "" -> #(model, NoEffect)
+        mid -> #(Model(..model, react_picker_msgid: Some(mid)), NoEffect)
+      }
+
+    CloseReactPicker -> #(Model(..model, react_picker_msgid: None), NoEffect)
+
+    ToggleReaction(msgid, emoji) -> toggle_reaction(model, msgid, emoji)
   }
+}
+
+fn toggle_reaction(
+  model: Model,
+  msgid: String,
+  emoji: String,
+) -> #(Model, Effect) {
+  let msgid = string.trim(msgid)
+  let emoji = string.trim(emoji)
+  case msgid == "" || emoji == "", model.channel {
+    True, _ -> #(Model(..model, react_picker_msgid: None), NoEffect)
+    _, None -> #(Model(..model, react_picker_msgid: None), NoEffect)
+    _, Some(ch) -> {
+      let aliases = my_reaction_aliases(model)
+      let nicks = reaction_nicks_for(model.messages, msgid, emoji)
+      let mine = nick_in_aliases(nicks, aliases)
+      let added = !mine
+      let messages =
+        apply_reaction_to_messages(
+          model.messages,
+          msgid,
+          emoji,
+          model.nick,
+          added,
+        )
+      let line = render.react_line(ch, msgid, emoji, added)
+      #(
+        Model(..model, messages: messages, react_picker_msgid: None),
+        IrcSend([line]),
+      )
+    }
+  }
+}
+
+fn my_reaction_aliases(model: Model) -> List(String) {
+  [model.nick, model.auth_handle]
+  |> list.filter(fn(n) { string.trim(n) != "" })
+  |> list.map(string.lowercase)
+  |> list.unique
+}
+
+fn nick_in_aliases(nicks: List(String), aliases: List(String)) -> Bool {
+  list.any(nicks, fn(n) { list.contains(aliases, string.lowercase(n)) })
+}
+
+fn reaction_nicks_for(
+  messages: List(render.Row),
+  msgid: String,
+  emoji: String,
+) -> List(String) {
+  case list.find(messages, fn(r) { r.msgid == Some(msgid) }) {
+    Ok(row) ->
+      case dict.get(row.reactions, emoji) {
+        Ok(ns) -> ns
+        Error(_) -> []
+      }
+    Error(_) -> []
+  }
+}
+
+fn apply_reaction_to_messages(
+  messages: List(render.Row),
+  msgid: String,
+  emoji: String,
+  nick: String,
+  added: Bool,
+) -> List(render.Row) {
+  list.map(messages, fn(row) {
+    case row.msgid {
+      Some(m) if m == msgid ->
+        render.Row(
+          ..row,
+          reactions: render.apply_reaction_map(
+            row.reactions,
+            emoji,
+            nick,
+            added,
+          ),
+        )
+      _ -> row
+    }
+  })
 }
 
 fn av_start_or_join(model: Model) -> #(Model, Effect) {
@@ -623,7 +779,27 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
     _ ->
       case render.parse_av_state_tagmsg(line) {
         Some(av) -> apply_av_state(model, av)
-        None -> apply_line_chat(model, line)
+        None ->
+          case render.parse_tagmsg_reaction(line) {
+            Some(#(msgid, emoji, nick, added, ch)) ->
+              case model.channel {
+                Some(c) if c == ch -> #(
+                  Model(
+                    ..model,
+                    messages: apply_reaction_to_messages(
+                      model.messages,
+                      msgid,
+                      emoji,
+                      nick,
+                      added,
+                    ),
+                  ),
+                  NoEffect,
+                )
+                _ -> #(model, NoEffect)
+              }
+            None -> apply_line_chat(model, line)
+          }
       }
   }
 }
@@ -809,7 +985,23 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                       let messages = append_capped(model.messages, row, 400)
                       #(Model(..model, messages: messages), NoEffect)
                     }
-                    None -> #(model, NoEffect)
+                    None ->
+                      // CHATHISTORY batch lines are skipped as rows, but still
+                      // carry +freeq.at/reactions — hydrate matching REST rows.
+                      case render.parse_history_reactions(line) {
+                        Some(#(msgid, reactions)) -> #(
+                          Model(
+                            ..model,
+                            messages: hydrate_reactions(
+                              model.messages,
+                              msgid,
+                              reactions,
+                            ),
+                          ),
+                          NoEffect,
+                        )
+                        None -> #(model, NoEffect)
+                      }
                   }
               }
           }
@@ -933,6 +1125,15 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
         Ok(Send(text))
       })
     }),
+    stateful.route("reply", fn(e) {
+      event.decode_form(e, "reply", fn(data) {
+        use msgid <- result.try(form.require(data, "msgid"))
+        Ok(StartReply(msgid))
+      })
+    }),
+    stateful.route("cancel_reply", fn(e) {
+      event.decode_unit(e, "cancel_reply", CancelReply)
+    }),
     stateful.route("join", fn(e) {
       event.decode_form(e, "join", fn(data) {
         use ch <- result.try(form.require(data, "channel"))
@@ -984,6 +1185,22 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
         }
       })
     }),
+    stateful.route("open_react_picker", fn(e) {
+      event.decode_form(e, "open_react_picker", fn(data) {
+        use msgid <- result.try(form.require(data, "msgid"))
+        Ok(OpenReactPicker(msgid))
+      })
+    }),
+    stateful.route("close_react_picker", fn(e) {
+      event.decode_unit(e, "close_react_picker", CloseReactPicker)
+    }),
+    stateful.route("toggle_reaction", fn(e) {
+      event.decode_form(e, "toggle_reaction", fn(data) {
+        use msgid <- result.try(form.require(data, "msgid"))
+        use emoji <- result.try(form.require(data, "emoji"))
+        Ok(ToggleReaction(msgid, emoji))
+      })
+    }),
   ]
 }
 
@@ -1011,6 +1228,8 @@ pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
       // AV panel is a sibling of main so directory browse keeps the call.
       let acc = maybe_region(before, after, "av", av_region, acc)
       let acc = maybe_region(before, after, "members", members_region, acc)
+      let acc =
+        maybe_region(before, after, "react-picker", react_picker_region, acc)
       list.reverse(acc)
     }
   }
@@ -1053,7 +1272,34 @@ fn shell(model: Model) -> String {
   <> av_region(model)
   <> "</div>"
   <> members_region(model)
-  <> "</div></div>"
+  <> "</div>"
+  <> react_picker_region(model)
+  <> "</div>"
+}
+
+fn react_picker_region(model: Model) -> String {
+  case model.react_picker_msgid {
+    None ->
+      "<div data-ls-region=\"react-picker\" class=\"react-picker-host\"></div>"
+    Some(msgid) -> {
+      let buttons =
+        list.map(render.react_emojis(), fn(emoji) {
+          "<button type=\"button\" data-ls-click=\"toggle_reaction\" data-ls-payload=\"msgid="
+          <> render.escape_html(msgid)
+          <> "&emoji="
+          <> render.escape_html(emoji)
+          <> "\">"
+          <> emoji
+          <> "</button>"
+        })
+        |> string.concat
+      "<div data-ls-region=\"react-picker\" class=\"react-picker-host\">"
+      <> "<div id=\"react-picker-backdrop\" class=\"react-picker-backdrop\" data-ls-click=\"close_react_picker\"></div>"
+      <> "<div id=\"react-picker\" class=\"open\" role=\"menu\" aria-label=\"React with emoji\">"
+      <> buttons
+      <> "</div></div>"
+    }
+  }
 }
 
 fn nav_region(model: Model) -> String {
@@ -1457,12 +1703,29 @@ fn flash_region(model: Model) -> String {
 }
 
 fn messages_region(model: Model) -> String {
+  let lookup = parent_lookup_from_rows(model.messages)
+  let aliases = my_reaction_aliases(model)
   let msgs =
-    list.map(model.messages, message_html)
+    list.map(model.messages, fn(row) { message_html(row, lookup, aliases) })
     |> string.concat
   "<div id=\"messages\" class=\"messages\" data-ls-region=\"messages\">"
   <> msgs
   <> "</div>"
+}
+
+/// msgid → {nick, text} so reply badges can quote the original in-channel.
+fn parent_lookup_from_rows(
+  rows: List(render.Row),
+) -> Dict(String, #(String, String)) {
+  list.fold(rows, dict.new(), fn(acc, row) {
+    case row.msgid, row.nick {
+      Some(mid), Some(nick) if mid != "" ->
+        dict.insert(acc, mid, #(nick, row.text))
+      Some(mid), None if mid != "" ->
+        dict.insert(acc, mid, #("", row.text))
+      _, _ -> acc
+    }
+  })
 }
 
 fn compose_region(model: Model) -> String {
@@ -1474,6 +1737,7 @@ fn compose_region(model: Model) -> String {
     True -> model.auth_did
     False -> ""
   }
+  let banner = reply_banner_html(model)
   "<div id=\"compose-stack\" data-ls-region=\"compose\">"
   <> "<div id=\"upload-preview\" class=\"upload-preview\" hidden>"
   <> "<img id=\"upload-preview-img\" alt=\"preview\" />"
@@ -1483,6 +1747,7 @@ fn compose_region(model: Model) -> String {
   <> "</div>"
   <> "<button type=\"button\" id=\"upload-preview-cancel\" class=\"btn-link\" title=\"Cancel\">×</button>"
   <> "</div>"
+  <> banner
   <> "<div id=\"send-bar\">"
   <> "<input type=\"file\" id=\"file-input\" accept=\"image/*,image/png,image/jpeg,image/gif,image/webp\" hidden />"
   <> "<button type=\"button\" id=\"attach-btn\" class=\"attach-btn\" title=\"Upload screenshot or image\" aria-label=\"Upload image\">+</button>"
@@ -1499,7 +1764,37 @@ fn compose_region(model: Model) -> String {
   <> "</div></div>"
 }
 
-fn message_html(row: render.Row) -> String {
+fn reply_banner_html(model: Model) -> String {
+  case model.view, model.reply_to {
+    Channel, Some(mid) if mid != "" -> {
+      let nick = case model.reply_preview_nick {
+        "" -> "message"
+        n -> n
+      }
+      let text_span = case model.reply_preview_text {
+        "" -> ""
+        t ->
+          "<span class=\"reply-banner-text\">"
+          <> render.escape_html(t)
+          <> "</span>"
+      }
+      "<div id=\"reply-banner\" class=\"reply-banner\">"
+      <> "<span class=\"reply-banner-label\">Replying to "
+      <> render.escape_html(nick)
+      <> "</span>"
+      <> text_span
+      <> "<button type=\"button\" class=\"reply-banner-cancel\" title=\"Cancel\" data-ls-click=\"cancel_reply\">×</button>"
+      <> "</div>"
+    }
+    _, _ -> ""
+  }
+}
+
+fn message_html(
+  row: render.Row,
+  lookup: Dict(String, #(String, String)),
+  aliases: List(String),
+) -> String {
   // Match freeq-web3 row shape: 2-column grid `.ts` | `.body` (nick inline).
   let kind = render.kind_class(row.kind)
   let nick = case row.nick {
@@ -1519,6 +1814,14 @@ fn message_html(row: render.Row) -> String {
     Some(n) -> " data-nick=\"" <> render.escape_html(n) <> "\""
     None -> ""
   }
+  let data_text = case row.kind {
+    render.Msg | render.Notice ->
+      " data-text=\"" <> render.escape_html(row.text) <> "\""
+    _ -> ""
+  }
+  let badge = reply_badge_html(row, lookup)
+  let reactions = reactions_html(row, aliases)
+  let reply_btn = reply_btn_html(row)
   "<div class=\"row "
   <> kind
   <> own
@@ -1526,14 +1829,100 @@ fn message_html(row: render.Row) -> String {
   <> render.escape_html(option.unwrap(row.msgid, row.id))
   <> "\""
   <> data_nick
+  <> data_text
   <> ">"
   <> "<span class=\"ts\">"
   <> render.escape_html(row.time_label)
   <> "</span>"
   <> "<span class=\"body\">"
+  <> badge
   <> nick
   <> render.linkify_html(row.text)
+  <> reactions
+  <> reply_btn
   <> "</span></div>"
+}
+
+/// Hover reply control — starts compose-side `@+reply=` mode.
+fn reply_btn_html(row: render.Row) -> String {
+  case row.kind, row.msgid {
+    render.Msg, Some(mid) if mid != "" ->
+      "<button type=\"button\" class=\"reply-btn\" title=\"Reply\" data-ls-click=\"reply\" data-ls-payload=\"msgid="
+      <> render.escape_html(mid)
+      <> "\">↩</button>"
+    _, _ -> ""
+  }
+}
+
+fn reactions_html(row: render.Row, aliases: List(String)) -> String {
+  case row.kind, row.msgid {
+    render.Msg, Some(msgid) if msgid != "" -> {
+      let chips =
+        list.map(render.reaction_entries(row.reactions), fn(entry) {
+          let #(emoji, nicks) = entry
+          let mine = case nick_in_aliases(nicks, aliases) {
+            True -> " mine"
+            False -> ""
+          }
+          let title =
+            nicks
+            |> string.join(", ")
+            |> render.escape_html
+          "<button type=\"button\" class=\"reaction-chip"
+          <> mine
+          <> "\" title=\""
+          <> title
+          <> "\" data-ls-click=\"toggle_reaction\" data-ls-payload=\"msgid="
+          <> render.escape_html(msgid)
+          <> "&emoji="
+          <> render.escape_html(emoji)
+          <> "\">"
+          <> render.escape_html(render.reaction_chip_label(emoji, nicks))
+          <> "</button>"
+        })
+        |> string.concat
+      "<span class=\"reactions\">"
+      <> chips
+      <> "<button type=\"button\" class=\"react-btn\" title=\"React\" data-ls-click=\"open_react_picker\" data-ls-payload=\"msgid="
+      <> render.escape_html(msgid)
+      <> "\">+</button></span>"
+    }
+    _, _ -> ""
+  }
+}
+
+/// Inline quote of the parent message on replies (freeq-web2 / web3 parity).
+fn reply_badge_html(
+  row: render.Row,
+  lookup: Dict(String, #(String, String)),
+) -> String {
+  case row.kind, row.parent {
+    render.Msg, Some(parent) if parent != "" -> {
+      let #(parent_nick, parent_text) = case dict.get(lookup, parent) {
+        Ok(#(n, t)) -> #(n, t)
+        Error(_) -> #("", "")
+      }
+      let nick_label = case parent_nick {
+        "" -> "message"
+        n -> n
+      }
+      let text_span = case parent_text {
+        "" -> ""
+        t ->
+          "<span class=\"reply-text\">"
+          <> render.escape_html(render.preview_text(t))
+          <> "</span>"
+      }
+      "<button type=\"button\" class=\"reply-badge\" data-reply-to=\""
+      <> render.escape_html(parent)
+      <> "\" title=\"Jump to original\">↪ <span class=\"reply-nick\">"
+      <> render.escape_html(nick_label)
+      <> "</span>"
+      <> text_span
+      <> "</button>"
+    }
+    _, _ -> ""
+  }
 }
 
 fn members_region(model: Model) -> String {
@@ -1628,6 +2017,10 @@ pub fn merge_my_channels(
 /// REST is the chronological base; live-only rows (msgid not in REST) are
 /// appended so a post-SASL backfill does not drop messages that arrived
 /// while the first anonymous fetch was empty.
+///
+/// When a msgid exists in both, reaction tallies are unioned so live TAGMSG /
+/// CHATHISTORY hydration is not wiped by a later REST backfill that still
+/// lacks `+freeq.at/reactions` (older freeq-server).
 pub fn merge_history_rows(
   rest_rows: List(render.Row),
   live_rows: List(render.Row),
@@ -1637,11 +2030,62 @@ pub fn merge_history_rows(
     _ ->
       list.fold(live_rows, rest_rows, fn(acc, row) {
         case row_msgid_known(acc, row) {
-          True -> acc
+          True -> union_reactions_into(acc, row)
           False -> list.append(acc, [row])
         }
       })
   }
+}
+
+/// Copy/union reactions from `live` onto the matching msgid row in `rows`.
+fn union_reactions_into(
+  rows: List(render.Row),
+  live: render.Row,
+) -> List(render.Row) {
+  case live.msgid {
+    None -> rows
+    Some(mid) ->
+      list.map(rows, fn(r) {
+        case r.msgid {
+          Some(id) if id == mid ->
+            render.Row(
+              ..r,
+              reactions: render.merge_reaction_dicts(
+                r.reactions,
+                live.reactions,
+              ),
+            )
+          _ -> r
+        }
+      })
+  }
+}
+
+/// Apply server-attached reaction tallies to a row already in the stream.
+///
+/// CHATHISTORY tallies are authoritative for that msgid — **replace**, do not
+/// union (union would keep optimistic chips after a remote unreact).
+fn hydrate_reactions(
+  messages: List(render.Row),
+  msgid: String,
+  reactions: Dict(String, List(String)),
+) -> List(render.Row) {
+  list.map(messages, fn(row) {
+    case row.msgid {
+      Some(m) if m == msgid -> render.Row(..row, reactions: reactions)
+      _ -> row
+    }
+  })
+}
+
+/// REST history as base, preserving any reaction tallies already on the model
+/// (live TAGMSG / prior CHATHISTORY) for matching msgids.
+pub fn apply_rest_history(
+  model: Model,
+  rest_rows: List(render.Row),
+) -> Model {
+  let merged = merge_history_rows(rest_rows, model.messages)
+  Model(..model, messages: merged)
 }
 
 fn row_msgid_known(rows: List(render.Row), row: render.Row) -> Bool {
@@ -1659,5 +2103,48 @@ fn row_msgid_known(rows: List(render.Row), row: render.Row) -> Bool {
         "" -> False
         id -> list.any(rows, fn(r) { r.id == id })
       }
+  }
+}
+
+/// Drop compose-side reply target + banner fields.
+fn clear_reply(model: Model) -> Model {
+  Model(
+    ..model,
+    reply_to: None,
+    reply_preview_nick: "",
+    reply_preview_text: "",
+  )
+}
+
+/// Build a channel PRIVMSG, optionally tagged with `@+reply=<msgid>`.
+fn privmsg_line(channel: String, text: String, reply_to: Option(String)) -> String {
+  case reply_to {
+    Some(mid) if mid != "" ->
+      "@+reply="
+      <> render.escape_tag_value(mid)
+      <> " PRIVMSG "
+      <> channel
+      <> " :"
+      <> text
+      <> "\r\n"
+    _ -> "PRIVMSG " <> channel <> " :" <> text <> "\r\n"
+  }
+}
+
+/// Look up nick + body for a msgid (for the reply banner).
+fn message_preview(
+  rows: List(render.Row),
+  msgid: String,
+) -> #(String, String) {
+  case
+    list.find(rows, fn(r) {
+      case r.msgid {
+        Some(id) -> id == msgid
+        None -> r.id == msgid
+      }
+    })
+  {
+    Ok(row) -> #(option.unwrap(row.nick, ""), row.text)
+    Error(_) -> #("message", "")
   }
 }

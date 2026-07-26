@@ -3,6 +3,14 @@
 StimulusReflex + CableReady port of `freeq-webui`. See `../freeq-webui/AGENTS.md`
 for the original Rust/Topcoat BFF this was ported from.
 
+## Scope (agents)
+
+**Do not edit `freeq-server` while working on this client.** freeq-web2 is a
+BFF that speaks IRC WebSocket + REST to freeq-server; treat the server as an
+external dependency. Stay in `freeq-web2/**`. Client-side workarounds for
+server gaps are fine; drive-by protocol/API/DB changes in freeq-server are
+not — those belong in a dedicated server task only.
+
 ## Deploy to freeq.boxd (required)
 
 **Any change you make under `freeq-web2/` must be deployed to `freeq.boxd`

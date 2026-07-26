@@ -4,6 +4,14 @@ Phoenix LiveView port of `freeq-web2`. See `../freeq-web2/AGENTS.md` for the
 Rails/StimulusReflex BFF this was ported from, and `../freeq-webui/AGENTS.md`
 for the original Rust/Topcoat implementation.
 
+## Scope (agents)
+
+**Do not edit `freeq-server` while working on this client.** freeq-web3 is a
+BFF that speaks IRC WebSocket + REST to freeq-server; treat the server as an
+external dependency. Stay in `freeq-web3/**`. Client-side workarounds for
+server gaps are fine; drive-by protocol/API/DB changes in freeq-server are
+not — those belong in a dedicated server task only.
+
 ## Build
 
 Workspace-sibling. From `freeq-web3/`:

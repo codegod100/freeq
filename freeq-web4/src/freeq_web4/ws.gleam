@@ -125,6 +125,7 @@ fn bootstrap(session: Session) -> Session {
       let extras = list.filter(session.model.my_channels, fn(c) { c != ch })
       let session = ensure_upstream(session, ch, extras)
       let bearer = session.model.api_bearer
+      // REST body first; CHATHISTORY (on Ready / after_join) fills reactions.
       let history = rest.fetch_history(ch, 50, bearer)
       let #(model, _) = live.apply(session.model, live.SetHistory(history))
       // Public list + per-channel topic endpoint (private rooms like #freeq
@@ -257,6 +258,8 @@ fn apply_client_event(
 fn after_join(session: Session) -> Session {
   case session.model.channel {
     Some(ch) -> {
+      // REST body first (no +freeq.at/reactions). Then CHATHISTORY attaches
+      // tallies onto matching msgids via parse_history_reactions.
       let history = rest.fetch_history(ch, 50, session.model.api_bearer)
       let #(model, _) = live.apply(session.model, live.SetHistory(history))
       // Seed nav topic from public list + REST fallback. IRC 332 still
@@ -272,6 +275,8 @@ fn after_join(session: Session) -> Session {
           upstream.send(handle, "NAMES " <> ch <> "\r\n")
           // Explicit TOPIC query when already joined (no 332 on re-JOIN).
           upstream.send(handle, "TOPIC " <> ch <> "\r\n")
+          // Reaction tallies ride CHATHISTORY (not REST) — request after body.
+          request_chathistory(handle, ch)
         }
         None -> Nil
       }
@@ -279,6 +284,15 @@ fn after_join(session: Session) -> Session {
       apply_active_call_probe(session, ch)
     }
     None -> session
+  }
+}
+
+/// Ask freeq-server for recent PRIVMSGs with `+freeq.at/reactions` tags.
+fn request_chathistory(handle: upstream.Handle, channel: String) -> Nil {
+  case channel == "" || channel == "#" {
+    True -> Nil
+    False ->
+      upstream.send(handle, render.chathistory_latest_line(channel, 50))
   }
 }
 
@@ -363,6 +377,12 @@ fn apply_upstream(
       // chathistory is suppressed — re-fetch once the bearer lands (web3
       // auth_history_backfill).
       let m = backfill_channel_history(m, Some(bearer))
+      // REST still omits +freeq.at/reactions; re-request CHATHISTORY after
+      // the authorized body lands so chips survive refresh/SASL.
+      case session.upstream, m.channel {
+        Some(handle), Some(ch) -> request_chathistory(handle, ch)
+        _, _ -> Nil
+      }
       // Navigate/join often runs FetchActiveCall before SASL finishes; private
       // rooms (e.g. #freeq) 403 without the bearer. Re-probe once it lands.
       case m.av_active, m.channel {
@@ -427,6 +447,11 @@ fn rejoin_and_names(session: Session) -> Session {
           }
         }
       })
+      // Hydrate reactions for the channel in view (REST body already loaded).
+      case session.model.channel {
+        Some(ch) -> request_chathistory(handle, ch)
+        None -> Nil
+      }
       session
     }
   }
@@ -440,6 +465,12 @@ fn post_sasl_rejoin(session: Session) -> Session {
         upstream.send(handle, "JOIN " <> ch <> "\r\n")
         upstream.send(handle, "NAMES " <> ch <> "\r\n")
       })
+      // Post-SASL REST backfill may have just replaced the pane — re-request
+      // CHATHISTORY so +freeq.at/reactions lands on the new rows.
+      case session.model.channel {
+        Some(ch) -> request_chathistory(handle, ch)
+        None -> Nil
+      }
       session
     }
   }
@@ -557,7 +588,13 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
 
     live.FetchHistory(channel) -> {
       let rows = rest.fetch_history(channel, 50, session.model.api_bearer)
+      // SetHistory merges reaction tallies with any live/CHATHISTORY state.
       let #(model, _) = live.apply(session.model, live.SetHistory(rows))
+      // After REST body, request CHATHISTORY so chips reappear on refresh.
+      case session.upstream {
+        Some(handle) -> request_chathistory(handle, channel)
+        None -> Nil
+      }
       Session(..session, model: model)
     }
 

@@ -3,6 +3,7 @@
 //// Pure functions: channel names, IRC tags, message lines, history rows,
 //// nick colours, member lists, topic changes.
 
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -38,6 +39,8 @@ pub type Row {
     color: String,
     parent: Option(String),
     account: Option(String),
+    /// emoji → reactor nicks (from `+freeq.at/reactions` or live TAGMSG).
+    reactions: Dict(String, List(String)),
   )
 }
 
@@ -374,14 +377,49 @@ fn nick_matches(nick: String, own: Option(String)) -> Bool {
   }
 }
 
-fn reply_parent(tags: List(#(String, String))) -> Option(String) {
+/// Parent msgid from IRCv3 reply tags (`+reply` / `reply` / `draft/reply`).
+pub fn reply_parent(tags: List(#(String, String))) -> Option(String) {
   case tag_get(tags, "+reply") {
-    Some(v) -> Some(v)
+    Some(v) -> non_empty(v)
     None ->
       case tag_get(tags, "reply") {
-        Some(v) -> Some(v)
-        None -> tag_get(tags, "draft/reply")
+        Some(v) -> non_empty(v)
+        None ->
+          case tag_get(tags, "draft/reply") {
+            Some(v) -> non_empty(v)
+            None -> None
+          }
       }
+  }
+}
+
+fn non_empty(s: String) -> Option(String) {
+  case string.trim(s) {
+    "" -> None
+    t -> Some(t)
+  }
+}
+
+/// Collapse whitespace and cap length for reply-badge / banner snippets.
+pub fn preview_text(text: String) -> String {
+  let collapsed =
+    text
+    |> string.replace("\n", " ")
+    |> string.replace("\r", " ")
+    |> string.replace("\t", " ")
+    |> collapse_spaces
+    |> string.trim
+  case string.length(collapsed) > 80 {
+    True -> string.slice(collapsed, 0, 80) <> "…"
+    False -> collapsed
+  }
+}
+
+fn collapse_spaces(s: String) -> String {
+  // Repeated passes for runs of spaces left by whitespace replacement.
+  case string.contains(s, "  ") {
+    True -> collapse_spaces(string.replace(s, "  ", " "))
+    False -> s
   }
 }
 
@@ -398,10 +436,53 @@ pub fn parse_message_line(
   // IRCv3 chathistory arrives inside BATCH with a `batch=` tag. freeq-web4
   // already loads history via REST — rendering the batch again doubles the
   // stream and scrambles chronology. Live traffic is untagged.
+  // Reaction tallies on batch lines are recovered via `parse_history_reactions`.
   case tag_get(tags, "batch") {
     Some(_) -> None
     None -> parse_message_line_body(tags, rest, own_nick)
   }
+}
+
+/// Extract `msgid` + `+freeq.at/reactions` from a PRIVMSG line, including
+/// CHATHISTORY `batch=` lines that `parse_message_line` otherwise skips.
+///
+/// Used to hydrate REST-loaded rows with server-persisted tallies without
+/// re-inserting history as live messages.
+pub fn parse_history_reactions(
+  line: String,
+) -> Option(#(String, Dict(String, List(String)))) {
+  let #(tags, _rest) = parse_irc_tags(string.trim_end(line))
+  case tag_get(tags, "+freeq.at/reactions") {
+    None | Some("") -> None
+    Some(raw) -> {
+      let reactions = parse_reactions_tag(raw)
+      case dict.size(reactions) {
+        0 -> None
+        _ -> {
+          let msgid = case tag_get(tags, "+draft/edit") {
+            Some(e) if e != "" -> Some(e)
+            _ -> tag_get(tags, "msgid")
+          }
+          case msgid {
+            Some(mid) if mid != "" -> Some(#(mid, reactions))
+            _ -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+/// Union two reaction maps (emoji → nicks), case-insensitive nick de-dupe.
+pub fn merge_reaction_dicts(
+  base: Dict(String, List(String)),
+  extra: Dict(String, List(String)),
+) -> Dict(String, List(String)) {
+  dict.fold(extra, base, fn(acc, emoji, nicks) {
+    list.fold(nicks, acc, fn(acc2, nick) {
+      apply_reaction_map(acc2, emoji, nick, True)
+    })
+  })
 }
 
 fn parse_message_line_body(
@@ -447,6 +528,10 @@ fn parse_message_line_body(
                 |> drop_leading_colon
               let color = nick_color_class(nick)
               let id = option.unwrap(effective_msgid, unique_id())
+              let reactions = case tag_get(tags, "+freeq.at/reactions") {
+                Some(raw) -> parse_reactions_tag(raw)
+                None -> dict.new()
+              }
               Some(
                 Row(
                   id: id,
@@ -462,6 +547,7 @@ fn parse_message_line_body(
                     Some(a) -> Some(a)
                     None -> tag_get(tags, "+account")
                   },
+                  reactions: reactions,
                 ),
               )
             }
@@ -477,6 +563,7 @@ fn parse_message_line_body(
                 color: nick_color_class(nick),
                 parent: None,
                 account: None,
+                reactions: dict.new(),
               ))
             ["PART", ..] ->
               Some(Row(
@@ -490,6 +577,7 @@ fn parse_message_line_body(
                 color: nick_color_class(nick),
                 parent: None,
                 account: None,
+                reactions: dict.new(),
               ))
             ["QUIT", ..] ->
               Some(Row(
@@ -503,6 +591,7 @@ fn parse_message_line_body(
                 color: nick_color_class(nick),
                 parent: None,
                 account: None,
+                reactions: dict.new(),
               ))
             // CAP / numerics / BATCH / MODE / TOPIC / etc. — not chat rows.
             _ -> None
@@ -544,12 +633,16 @@ fn drop_leading_colon(s: String) -> String {
 /// Convert a REST history message JSON object into a row.
 ///
 /// Expects decoded dynamic fields already as a string map-like list of pairs
-/// from the REST client (`sender`, `text`, `msgid`, `timestamp`).
+/// from the REST client (`sender`, `text`, `msgid`, `timestamp`, optional
+/// `parent` from tags `+reply` / `reply` / `draft/reply`, optional
+/// `reactions` from `+freeq.at/reactions`).
 pub fn history_row(
   sender: String,
   text: String,
   msgid: Option(String),
   timestamp_unix: Option(Int),
+  parent: Option(String),
+  reactions: Dict(String, List(String)),
 ) -> Row {
   let nick = case string.split_once(sender, "!") {
     Ok(#(n, _)) -> n
@@ -572,9 +665,172 @@ pub fn history_row(
     time_label: time,
     own: False,
     color: nick_color_class(nick),
-    parent: None,
+    parent: parent,
     account: None,
+    reactions: reactions,
   )
+}
+
+/// Parse server-persisted reaction tallies: `👍:alice,bob;❤️:carol`.
+pub fn parse_reactions_tag(value: String) -> Dict(String, List(String)) {
+  case string.trim(value) {
+    "" -> dict.new()
+    v ->
+      string.split(v, ";")
+      |> list.fold(dict.new(), fn(acc, group) {
+        case string.split_once(group, ":") {
+          Ok(#(emoji, nicks)) if emoji != "" -> {
+            let nick_list =
+              string.split(nicks, ",")
+              |> list.filter(fn(n) { string.trim(n) != "" })
+            case nick_list {
+              [] -> acc
+              _ -> dict.insert(acc, emoji, nick_list)
+            }
+          }
+          _ -> acc
+        }
+      })
+  }
+}
+
+/// Live reaction TAGMSG: `+react` / `+draft/react` add, `+freeq.at/unreact` remove.
+///
+/// Returns `#(msgid, emoji, nick, added, channel)`.
+pub fn parse_tagmsg_reaction(
+  line: String,
+) -> Option(#(String, String, String, Bool, String)) {
+  let #(tags, after) = parse_irc_tags(string.trim_end(line))
+  let emoji_added = case tag_get(tags, "+react") {
+    Some(e) if e != "" -> Some(#(e, True))
+    _ ->
+      case tag_get(tags, "+draft/react") {
+        Some(e) if e != "" -> Some(#(e, True))
+        _ ->
+          case tag_get(tags, "+freeq.at/unreact") {
+            Some(e) if e != "" -> Some(#(e, False))
+            _ -> None
+          }
+      }
+  }
+  case emoji_added, tag_get(tags, "+reply") {
+    Some(#(emoji, added)), Some(msgid) ->
+      case string.trim(msgid) {
+        "" -> None
+        mid -> {
+          let rest = case string.starts_with(after, ":") {
+            True -> string.drop_start(after, 1)
+            False -> after
+          }
+          let parts = string.split(rest, " ")
+          case parts {
+            [prefix, cmd, ch, ..] ->
+              case string.uppercase(cmd) == "TAGMSG" {
+                False -> None
+                True -> {
+                  let nick = case string.split_once(prefix, "!") {
+                    Ok(#(n, _)) -> n
+                    Error(_) -> prefix
+                  }
+                  let channel =
+                    ch
+                    |> drop_leading_colon
+                    |> canonical_channel
+                  Some(#(mid, emoji, nick, added, channel))
+                }
+              }
+            _ -> None
+          }
+        }
+      }
+    _, _ -> None
+  }
+}
+
+/// Add or remove a nick under an emoji key (idempotent).
+pub fn apply_reaction_map(
+  reactions: Dict(String, List(String)),
+  emoji: String,
+  nick: String,
+  added: Bool,
+) -> Dict(String, List(String)) {
+  let nick_l = string.lowercase(nick)
+  let nicks = case dict.get(reactions, emoji) {
+    Ok(ns) -> ns
+    Error(_) -> []
+  }
+  let nicks = case added {
+    True ->
+      case list.any(nicks, fn(n) { string.lowercase(n) == nick_l }) {
+        True -> nicks
+        False -> list.append(nicks, [nick])
+      }
+    False -> list.filter(nicks, fn(n) { string.lowercase(n) != nick_l })
+  }
+  case nicks {
+    [] -> dict.delete(reactions, emoji)
+    _ -> dict.insert(reactions, emoji, nicks)
+  }
+}
+
+/// Stable emoji → nicks entries for chip rendering (sorted by emoji).
+pub fn reaction_entries(
+  reactions: Dict(String, List(String)),
+) -> List(#(String, List(String))) {
+  dict.to_list(reactions)
+  |> list.filter(fn(pair) {
+    let #(_, nicks) = pair
+    nicks != []
+  })
+  |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+}
+
+/// Chip label: emoji alone, or `emoji N` when multiple reactors.
+pub fn reaction_chip_label(emoji: String, nicks: List(String)) -> String {
+  case list.length(nicks) {
+    n if n <= 1 -> emoji
+    n -> emoji <> " " <> int.to_string(n)
+  }
+}
+
+/// Default reaction palette (freeq-web2 / web3 parity).
+pub fn react_emojis() -> List(String) {
+  ["👍", "❤️", "😂", "🎉", "🔥", "👀", "💯", "✨"]
+}
+
+/// Client → server: add or remove a reaction via TAGMSG.
+pub fn react_line(
+  channel: String,
+  msgid: String,
+  emoji: String,
+  added: Bool,
+) -> String {
+  let ch = canonical_channel(channel)
+  let tag = case added {
+    True -> "+react"
+    False -> "+freeq.at/unreact"
+  }
+  let tags =
+    tag
+    <> "="
+    <> escape_tag_value(emoji)
+    <> ";+reply="
+    <> escape_tag_value(msgid)
+  "@" <> tags <> " TAGMSG " <> ch <> "\r\n"
+}
+
+/// Request latest N messages (IRCv3 draft/chathistory). freeq-server attaches
+/// `+freeq.at/reactions` on the batch PRIVMSGs — used to hydrate REST history.
+pub fn chathistory_latest_line(channel: String, count: Int) -> String {
+  let n = case count > 0 {
+    True -> count
+    False -> 50
+  }
+  "CHATHISTORY LATEST "
+  <> canonical_channel(channel)
+  <> " * "
+  <> int.to_string(n)
+  <> "\r\n"
 }
 
 /// Whether the line is RPL_NAMREPLY (353).
@@ -950,10 +1206,13 @@ pub fn escape_html(s: String) -> String {
   |> string.replace("\"", "&quot;")
 }
 
-/// Escape message text and turn http(s) URLs into clickable anchors.
+/// Escape message text and turn http(s) / `at://` URIs into clickable anchors.
 ///
 /// Direct image URLs (file extension, freeq media, bsky CDN) also get an
 /// inline preview — freeq-web2 / freeq-web3 parity.
+///
+/// AT Protocol URIs (`at://…`) link to the Taproot record explorer at
+/// atproto.at (prefix `https://atproto.` → `https://atproto.at://…`).
 pub fn linkify_html(text: String) -> String {
   text
   |> escape_html
@@ -1004,29 +1263,56 @@ fn linkify_loop(rest: String, acc: String) -> String {
   }
 }
 
-/// Earliest `http://` or `https://` in `rest` → `#(before, scheme, after)`.
+/// Earliest `http://`, `https://`, or `at://` in `rest` →
+/// `#(before, scheme, after)`.
 fn next_url_split(rest: String) -> Option(#(String, String, String)) {
-  let https = string.split_once(rest, "https://")
-  let http = string.split_once(rest, "http://")
-  case https, http {
-    Ok(#(pre_s, after_s)), Ok(#(pre_h, after_h)) ->
-      case string.length(pre_s) <= string.length(pre_h) {
-        True -> Some(#(pre_s, "https://", after_s))
-        False ->
-          // `http://` match may be the start of `https://` (same offset).
-          case string.starts_with(after_h, "s://") {
-            True -> Some(#(pre_s, "https://", after_s))
-            False -> Some(#(pre_h, "http://", after_h))
-          }
-      }
-    Ok(#(pre, after)), Error(_) -> Some(#(pre, "https://", after))
-    Error(_), Ok(#(pre, after)) ->
+  let https = split_scheme(rest, "https://")
+  let http = case split_scheme(rest, "http://") {
+    // `http://` match may be the start of `https://` (same offset).
+    Some(#(pre, after)) ->
       case string.starts_with(after, "s://") {
         True -> None
-        False -> Some(#(pre, "http://", after))
+        False -> Some(#(pre, after))
       }
-    Error(_), Error(_) -> None
+    None -> None
   }
+  let at = split_scheme(rest, "at://")
+  earliest_scheme([
+    #(https, "https://"),
+    #(http, "http://"),
+    #(at, "at://"),
+  ])
+}
+
+fn split_scheme(
+  rest: String,
+  scheme: String,
+) -> Option(#(String, String)) {
+  case string.split_once(rest, scheme) {
+    Ok(#(pre, after)) -> Some(#(pre, after))
+    Error(_) -> None
+  }
+}
+
+/// Among candidate scheme hits, pick the one with the shortest `before` prefix.
+fn earliest_scheme(
+  candidates: List(#(Option(#(String, String)), String)),
+) -> Option(#(String, String, String)) {
+  list.fold(candidates, None, fn(best, candidate) {
+    let #(hit, scheme) = candidate
+    case hit {
+      None -> best
+      Some(#(pre, after)) ->
+        case best {
+          None -> Some(#(pre, scheme, after))
+          Some(#(best_pre, _, _)) ->
+            case string.length(pre) < string.length(best_pre) {
+              True -> Some(#(pre, scheme, after))
+              False -> best
+            }
+        }
+    }
+  })
 }
 
 /// Consume until whitespace or `<` (web2 end-of-URL markers).
@@ -1071,26 +1357,34 @@ fn is_url_trailing_punct(g: String) -> Bool {
 }
 
 fn link_anchor(url: String) -> String {
-  case is_image_url(url) {
+  case string.starts_with(url, "at://") {
+    // Taproot explorer: prefix `https://atproto.` → `https://atproto.at://…`
     True ->
-      "<a href=\""
-      <> url
-      <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"msg-img-url\">"
-      <> url
-      <> "</a>"
-      <> "<a href=\""
-      <> url
-      <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"msg-img-link\">"
-      <> "<img src=\""
-      <> url
-      <> "\" alt=\"\" class=\"msg-img\" loading=\"lazy\" referrerpolicy=\"no-referrer\"></a>"
+      anchor_tag("https://atproto." <> url, url, "")
     False ->
-      "<a href=\""
-      <> url
-      <> "\" target=\"_blank\" rel=\"noopener noreferrer\">"
-      <> url
-      <> "</a>"
+      case is_image_url(url) {
+        True ->
+          anchor_tag(url, url, " class=\"msg-img-url\"")
+          <> anchor_tag(
+            url,
+            "<img src=\""
+              <> url
+              <> "\" alt=\"\" class=\"msg-img\" loading=\"lazy\" referrerpolicy=\"no-referrer\">",
+            " class=\"msg-img-link\"",
+          )
+        False -> anchor_tag(url, url, "")
+      }
   }
+}
+
+fn anchor_tag(href: String, body: String, extra_attrs: String) -> String {
+  "<a href=\""
+  <> href
+  <> "\" target=\"_blank\" rel=\"noopener noreferrer\""
+  <> extra_attrs
+  <> ">"
+  <> body
+  <> "</a>"
 }
 
 // ── AV call TAGMSG (control plane) ───────────────────────────────────────────
