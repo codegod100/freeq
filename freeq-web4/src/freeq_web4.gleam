@@ -1714,7 +1714,7 @@ function onMessagesScroll() {
   // Geometry drives both stick and FAB (freeq-app MessageList parity).
   const atBottom = nearBottom(el);
   // During channel-switch / history-fill settle, morph often leaves scrollTop
-  // at 0 on a tall stream (looks "not at bottom"). That is not user intent —
+  // at 0 on a tall stream (looks not-at-bottom). That is not user intent —
   // only treat as unstick when the user has scrolled into the middle.
   if (isChannelStickLocked() && stickToBottom && !atBottom) {
     const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
