@@ -8,6 +8,7 @@ import freeq_web4/config
 import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/ls_form
+import freeq_web4/profiles
 import freeq_web4/rest
 import gleam/bit_array
 import gleam/crypto
@@ -123,6 +124,11 @@ pub type Model {
     /// System buffer: connection status, server notices, non-channel rows.
     /// Persists across navigation (unlike per-channel `messages`).
     system_messages: List(render.Row),
+    /// lowercase nick → AT DID (from account-tag, extended-join, self SASL).
+    nick_dids: Dict(String, String),
+    /// DID → Bluesky avatar URL (fetched async via public AppView API).
+    /// Empty string means "resolved, no avatar" so we do not re-fetch.
+    avatars: Dict(String, String),
   )
 }
 
@@ -235,6 +241,8 @@ pub type Msg {
   ToggleReaction(msgid: String, emoji: String)
   /// Server: async link-preview resolve finished for a row.
   PatchEmbed(row_id: String, embed: render.Embed)
+  /// Server: AT profile avatar resolve finished (`url` may be empty = no avatar).
+  PatchAvatar(did: String, url: String)
   /// Browser: open channel message search modal.
   OpenSearch
   /// Browser: close search modal (Esc / backdrop / result click).
@@ -281,6 +289,8 @@ pub type Effect {
   StopUpstream
   /// Background-resolve Open Graph / YouTube / Bluesky cards for these rows.
   ResolveEmbeds(List(render.Row))
+  /// Background-fetch ATProto avatars for these DIDs (skips already-cached).
+  ResolveAvatars(List(String))
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -371,6 +381,8 @@ fn mount(
       scroll_to_msgid: None,
       unread: dict.new(),
       system_messages: [],
+      nick_dids: dict.new(),
+      avatars: dict.new(),
     )
   helpers.no_effect(model)
 }
@@ -658,6 +670,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     SetHistory(rows) -> {
       let rows = link_preview.attach_many_cache_only(rows)
       let next = apply_rest_history(model, rows)
+      let next = learn_accounts_from_rows(next, next.messages)
       let next =
         Model(
           ..next,
@@ -665,7 +678,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           // Full page means more may exist above; short page is the top.
           history_exhausted: list.length(rows) < history_page_size,
         )
-      #(next, ResolveEmbeds(next.messages))
+      #(next, media_warmup_effect(next, next.messages))
     }
 
     LoadOlder -> {
@@ -700,7 +713,8 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           history_loading: False,
           history_exhausted: list.length(older) < history_page_size,
         )
-      #(next, ResolveEmbeds(older))
+      let next = learn_accounts_from_rows(next, older)
+      #(next, media_warmup_effect(next, older))
     }
 
     PatchEmbed(row_id, embed) -> #(
@@ -711,25 +725,48 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       NoEffect,
     )
 
+    PatchAvatar(did, url) -> {
+      // `did` here is any actor key (DID or handle). Store under the given
+      // key; multi-key fan-out happens in the session host after profile fetch.
+      let key = string.trim(did)
+      case key {
+        "" -> #(model, NoEffect)
+        k -> #(
+          Model(..model, avatars: dict.insert(model.avatars, k, url)),
+          NoEffect,
+        )
+      }
+    }
+
     SetAllChannels(chs) -> #(Model(..model, all_channels: chs), NoEffect)
 
     SetTopicText(topic) -> #(Model(..model, topic: topic), NoEffect)
 
     SetFlash(flash) -> #(Model(..model, flash: flash), NoEffect)
 
-    SetAuth(authenticated, handle, did) -> #(
-      Model(
-        ..model,
-        authenticated: authenticated,
-        auth_handle: handle,
-        auth_did: did,
-        nick: case authenticated && handle != "" {
-          True -> render.sanitize_nick(handle)
-          False -> model.nick
-        },
-      ),
-      NoEffect,
-    )
+    SetAuth(authenticated, handle, did) -> {
+      let nick = case authenticated && handle != "" {
+        True -> render.sanitize_nick(handle)
+        False -> model.nick
+      }
+      let next =
+        Model(
+          ..model,
+          authenticated: authenticated,
+          auth_handle: handle,
+          auth_did: did,
+          nick: nick,
+        )
+      let next = case authenticated, did {
+        True, d if d != "" -> learn_nick_did(next, nick, d)
+        _, _ -> next
+      }
+      let effect = case authenticated, did {
+        True, d if d != "" -> ResolveAvatars([d])
+        _, _ -> NoEffect
+      }
+      #(next, effect)
+    }
 
     SetApiBearer(bearer) -> #(
       Model(..model, api_bearer: Some(bearer), authenticated: True),
@@ -880,7 +917,8 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           // Opening a window around an old hit — more history may exist above.
           history_exhausted: list.length(rows) < history_page_size,
         )
-      #(next, ResolveEmbeds(rows))
+      let next = learn_accounts_from_rows(next, rows)
+      #(next, media_warmup_effect(next, rows))
     }
 
     ClearScrollTo -> #(Model(..model, scroll_to_msgid: None), NoEffect)
@@ -1847,7 +1885,10 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
             Some(ch), Some(c) if ch == c -> {
               let members =
                 merge_members(model.members, render.parse_353_members(line))
-              #(Model(..model, members: members), NoEffect)
+              let next = Model(..model, members: members)
+              // NAMES has no DIDs; handle-like nicks (chadfowler.com) still
+              // resolve via the public AppView API.
+              #(next, avatars_effect(pending_avatar_dids(next)))
             }
             _, _ -> #(model, NoEffect)
           }
@@ -1900,9 +1941,13 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                   }
                 }
                 None ->
-                  case render.parse_member_change(line) {
-                    Some(#("join", nick, Some(ch))) -> {
+                  case render.parse_member_change_ex(line) {
+                    Some(#("join", nick, Some(ch), join_account)) -> {
                       let viewing = viewing_channel(model, ch)
+                      let model = case join_account {
+                        Some(did) -> learn_nick_did(model, nick, did)
+                        None -> model
+                      }
                       let model = case viewing {
                         True ->
                           Model(
@@ -1915,10 +1960,20 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                                 halfop: False,
                                 voice: False,
                                 color: render.nick_color_class(nick),
+                                did: join_account,
                               ),
                             ),
                           )
                         False -> model
+                      }
+                      // DID from extended-join, else handle-like nick.
+                      let avatar_effect = case join_account {
+                        Some(did) -> ResolveAvatars([did])
+                        None ->
+                          case profiles.looks_like_actor(nick) {
+                            True -> ResolveAvatars([nick])
+                            False -> NoEffect
+                          }
                       }
                       case viewing {
                         True ->
@@ -1934,14 +1989,14 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                                   400,
                                 ),
                               ),
-                              NoEffect,
+                              avatar_effect,
                             )
-                            None -> #(model, NoEffect)
+                            None -> #(model, avatar_effect)
                           }
-                        False -> #(model, NoEffect)
+                        False -> #(model, avatar_effect)
                       }
                     }
-                    Some(#("part", nick, Some(ch))) -> {
+                    Some(#("part", nick, Some(ch), _)) -> {
                       let viewing = viewing_channel(model, ch)
                       let model = case viewing {
                         True ->
@@ -1974,7 +2029,7 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                         False -> #(model, NoEffect)
                       }
                     }
-                    Some(#("quit", nick, _)) -> {
+                    Some(#("quit", nick, _, _)) -> {
                       let was_member =
                         list.any(model.members, fn(m) {
                           string.lowercase(m.nick) == string.lowercase(nick)
@@ -2007,11 +2062,12 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                         False -> #(model, NoEffect)
                       }
                     }
-                    Some(#("nick", old, Some(new))) -> {
+                    Some(#("nick", old, Some(new), _)) -> {
                       let was_member =
                         list.any(model.members, fn(m) {
                           string.lowercase(m.nick) == string.lowercase(old)
                         })
+                      let model = rename_nick_did(model, old, new)
                       let model =
                         Model(
                           ..model,
@@ -2129,6 +2185,7 @@ fn apply_chat_row(
     Some(t), Some(c) -> channels_equal(t, c)
     _, _ -> False
   }
+  let model = learn_account_from_row(model, row)
   case viewing {
     True -> {
       // Fast path: cache-only embed; network resolve off-session.
@@ -2136,22 +2193,22 @@ fn apply_chat_row(
       let messages = append_capped(model.messages, row, 400)
       let model =
         live_search_maybe_add(Model(..model, messages: messages), row)
-      let effect = case link_preview.needs_resolve(row) {
-        True -> ResolveEmbeds([row])
-        False -> NoEffect
-      }
-      #(model, effect)
+      #(model, media_warmup_effect(model, [row]))
     }
     False -> {
+      let effect = case row_dids([row], model) {
+        [] -> NoEffect
+        dids -> ResolveAvatars(dids)
+      }
       case target {
-        Some(ch) -> #(maybe_bump_unread(model, ch, row), NoEffect)
+        Some(ch) -> #(maybe_bump_unread(model, ch, row), effect)
         // Server notices / directed NOTICE / non-channel targets → System tab.
         None -> #(
           Model(
             ..model,
             system_messages: append_capped(model.system_messages, row, 500),
           ),
-          NoEffect,
+          effect,
         )
       }
     }
@@ -2240,6 +2297,193 @@ fn merge_members(
   list.fold(incoming, existing, fn(acc, m) { upsert_member(acc, m) })
 }
 
+/// Learn nick→DID bindings and schedule avatar fetches for a batch of rows.
+fn learn_accounts_from_rows(model: Model, rows: List(render.Row)) -> Model {
+  list.fold(rows, model, learn_account_from_row)
+}
+
+fn learn_account_from_row(model: Model, row: render.Row) -> Model {
+  case row.account, row.nick {
+    Some(did), Some(nick) -> learn_nick_did(model, nick, did)
+    _, _ -> model
+  }
+}
+
+fn learn_nick_did(model: Model, nick: String, did: String) -> Model {
+  case render.normalize_account(did) {
+    None -> model
+    Some(d) -> {
+      let key = string.lowercase(nick)
+      let nick_dids = dict.insert(model.nick_dids, key, d)
+      let members =
+        list.map(model.members, fn(m) {
+          case string.lowercase(m.nick) == key {
+            True ->
+              case m.did {
+                Some(_) -> m
+                None -> render.Member(..m, did: Some(d))
+              }
+            False -> m
+          }
+        })
+      Model(..model, nick_dids: nick_dids, members: members)
+    }
+  }
+}
+
+fn rename_nick_did(model: Model, old: String, new: String) -> Model {
+  let old_key = string.lowercase(old)
+  let new_key = string.lowercase(new)
+  case dict.get(model.nick_dids, old_key) {
+    Error(_) -> model
+    Ok(did) -> {
+      let nick_dids =
+        model.nick_dids
+        |> dict.delete(old_key)
+        |> dict.insert(new_key, did)
+      Model(..model, nick_dids: nick_dids)
+    }
+  }
+}
+
+/// DIDs from rows that still need an avatar fetch.
+pub fn pending_avatar_dids(model: Model) -> List(String) {
+  row_dids(model.messages, model)
+  |> list.append(member_dids(model))
+  |> list.unique
+  |> list.filter(fn(did) {
+    case dict.get(model.avatars, did) {
+      Ok(_) -> False
+      Error(_) -> True
+    }
+  })
+}
+
+fn member_dids(model: Model) -> List(String) {
+  list.filter_map(model.members, fn(m) {
+    case resolve_nick_did(model, m.nick) {
+      Some(d) -> Ok(d)
+      None -> Error(Nil)
+    }
+  })
+}
+
+fn row_dids(rows: List(render.Row), model: Model) -> List(String) {
+  list.filter_map(rows, fn(row) {
+    case resolve_row_did(model, row) {
+      Some(d) -> Ok(d)
+      None -> Error(Nil)
+    }
+  })
+}
+
+/// Actor key for avatar cache: DID preferred, else handle-like nick.
+fn resolve_row_did(model: Model, row: render.Row) -> Option(String) {
+  case row.account {
+    Some(a) -> render.normalize_account(a)
+    None ->
+      case row.nick {
+        Some(n) -> resolve_nick_did(model, n)
+        None -> None
+      }
+  }
+}
+
+fn resolve_nick_did(model: Model, nick: String) -> Option(String) {
+  let key = string.lowercase(nick)
+  case dict.get(model.nick_dids, key) {
+    Ok(d) -> Some(d)
+    Error(_) ->
+      case key == string.lowercase(model.nick), model.auth_did {
+        True, d if d != "" -> Some(d)
+        _, _ ->
+          // freeq nicks from handles keep the domain (e.g. chadfowler.com).
+          // Look up the avatar cache by that handle even without account-tag.
+          case profiles.looks_like_actor(nick) {
+            True -> Some(nick)
+            False ->
+              // Case-insensitive handle hit in the avatar map (after fetch).
+              case avatar_key_hit(model, nick) {
+                True -> Some(nick)
+                False -> None
+              }
+          }
+      }
+  }
+}
+
+fn avatar_key_hit(model: Model, key: String) -> Bool {
+  case dict.get(model.avatars, key) {
+    Ok(_) -> True
+    Error(_) ->
+      dict.to_list(model.avatars)
+      |> list.any(fn(pair) {
+        string.lowercase(pair.0) == string.lowercase(key)
+      })
+  }
+}
+
+fn resolve_avatar_url(model: Model, did: Option(String)) -> Option(String) {
+  case did {
+    None -> None
+    Some(d) ->
+      case dict.get(model.avatars, d) {
+        Ok("") -> None
+        Ok(url) -> Some(url)
+        Error(_) ->
+          // Handle/DID case-insensitive fallback.
+          case
+            list.find(dict.to_list(model.avatars), fn(pair) {
+              string.lowercase(pair.0) == string.lowercase(d)
+            })
+          {
+            Ok(#(_, "")) -> None
+            Ok(#(_, url)) -> Some(url)
+            Error(_) -> None
+          }
+      }
+  }
+}
+
+fn avatars_effect(dids: List(String)) -> Effect {
+  case dids {
+    [] -> NoEffect
+    _ -> ResolveAvatars(dids)
+  }
+}
+
+/// Prefer ResolveEmbeds when links need work; always attach avatar DIDs.
+fn media_warmup_effect(model: Model, rows: List(render.Row)) -> Effect {
+  let dids =
+    row_dids(rows, model)
+    |> list.filter(fn(did) {
+      case dict.get(model.avatars, did) {
+        Ok(_) -> False
+        Error(_) -> True
+      }
+    })
+  let need_embed = list.any(rows, link_preview.needs_resolve)
+  case need_embed, dids {
+    True, _ -> ResolveEmbeds(rows)
+    False, [] -> NoEffect
+    False, _ -> ResolveAvatars(dids)
+  }
+}
+
+/// DIDs carried on embed-warmup rows (host schedules avatars alongside cards).
+pub fn avatar_dids_for_rows(
+  model: Model,
+  rows: List(render.Row),
+) -> List(String) {
+  row_dids(rows, model)
+  |> list.filter(fn(did) {
+    case dict.get(model.avatars, did) {
+      Ok(_) -> False
+      Error(_) -> True
+    }
+  })
+}
+
 fn upsert_member(
   members: List(render.Member),
   member: render.Member,
@@ -2248,7 +2492,15 @@ fn upsert_member(
     True ->
       list.map(members, fn(m) {
         case m.nick == member.nick {
-          True -> member
+          True -> {
+            // Preserve richer DID when the incoming snapshot lacks one.
+            let did = case member.did, m.did {
+              Some(d), _ -> Some(d)
+              None, Some(d) -> Some(d)
+              None, None -> None
+            }
+            render.Member(..member, did: did)
+          }
           False -> m
         }
       })
@@ -3334,7 +3586,7 @@ fn messages_region(model: Model) -> String {
   let my_nick = model.nick
   let msgs =
     list.map(rows, fn(row) {
-      message_html(row, lookup, aliases, scroll_mid, my_nick)
+      message_html(model, row, lookup, aliases, scroll_mid, my_nick)
     })
     |> string.concat
   let loading = case model.view, model.history_loading {
@@ -3536,13 +3788,14 @@ fn reply_banner_html(model: Model) -> String {
 }
 
 fn message_html(
+  model: Model,
   row: render.Row,
   lookup: Dict(String, #(String, String)),
   aliases: List(String),
   scroll_mid: String,
   my_nick: String,
 ) -> String {
-  // Match freeq-web3 row shape: 2-column grid `.ts` | `.body` (nick inline).
+  // Match freeq-web3 row shape + avatar column: `.ts` | `.avatar` | `.body`.
   let kind = render.kind_class(row.kind)
   let nick = case row.nick {
     Some(n) ->
@@ -3615,6 +3868,7 @@ fn message_html(
     Some(sec) -> " data-ts=\"" <> int.to_string(sec) <> "\""
     None -> ""
   }
+  let avatar = row_avatar_html(model, row)
   "<div class=\"row "
   <> kind
   <> own
@@ -3631,6 +3885,7 @@ fn message_html(
   <> ">"
   <> render.escape_html(row.time_label)
   <> "</span>"
+  <> avatar
   <> "<span class=\"body\">"
   <> body_inner
   <> "</span>"
@@ -3639,6 +3894,48 @@ fn message_html(
     False -> link_embed_html(row.embed)
   }
   <> "</div>"
+}
+
+fn row_avatar_html(model: Model, row: render.Row) -> String {
+  case row.kind, row.nick {
+    render.Msg, Some(nick) | render.Notice, Some(nick) -> {
+      let did = resolve_row_did(model, row)
+      let url = resolve_avatar_url(model, did)
+      avatar_html(nick, row.color, url, "msg-avatar")
+    }
+    _, _ -> "<span class=\"msg-avatar msg-avatar-empty\" aria-hidden=\"true\"></span>"
+  }
+}
+
+fn avatar_html(
+  nick: String,
+  color: String,
+  url: Option(String),
+  class: String,
+) -> String {
+  case url {
+    Some(src) ->
+      "<img class=\""
+      <> class
+      <> "\" src=\""
+      <> render.escape_html(src)
+      <> "\" alt=\"\" loading=\"lazy\" referrerpolicy=\"no-referrer\" title=\""
+      <> render.escape_html(nick)
+      <> "\">"
+    None -> {
+      // Generated gradient SVG (data-URI) — matches photo avatars in size/shape.
+      let src = profiles.fallback_avatar_data_uri(nick, color)
+      "<img class=\""
+      <> class
+      <> " "
+      <> class
+      <> "-generated\" src=\""
+      <> src
+      <> "\" alt=\"\" width=\"32\" height=\"32\" title=\""
+      <> render.escape_html(nick)
+      <> "\" aria-hidden=\"true\">"
+    }
+  }
 }
 
 /// Open Graph / YouTube / Bluesky card under the message body (web3 parity).
@@ -3660,7 +3957,7 @@ fn link_embed_html(embed: Option(render.Embed)) -> String {
       <> render.escape_html(e.href)
       <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"link-embed"
       <> kind_class
-      <> "\" style=\"grid-column: 2\">"
+      <> "\" style=\"grid-column: 3\">"
       <> inner
       <> "</a>"
     }
@@ -3937,9 +4234,17 @@ fn members_region(model: Model) -> String {
               c -> "pfx " <> c
             }
             // data-nick drives Tab complete; prefix is display-only.
+            let did = case m.did {
+              Some(d) -> Some(d)
+              None -> resolve_nick_did(model, m.nick)
+            }
+            let url = resolve_avatar_url(model, did)
+            let av = avatar_html(m.nick, m.color, url, "member-avatar")
             "<div class=\"member\" data-nick=\""
             <> render.escape_html(m.nick)
-            <> "\"><span class=\""
+            <> "\">"
+            <> av
+            <> "<span class=\""
             <> pfx_cls
             <> "\">"
             <> render.escape_html(pfx)

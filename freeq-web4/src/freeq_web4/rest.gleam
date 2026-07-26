@@ -4,7 +4,7 @@
 
 import freeq_web4/config
 import freeq_web4/irc/render
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
@@ -272,7 +272,17 @@ fn decode_history(body: String) -> List(render.Row) {
                 Error(_) -> dict.new()
               }
           }
-          let base = render.history_row(sender, text, msgid, ts, parent, reactions)
+          let account = account_from_history_tags(tags)
+          let base =
+            render.history_row_with_account(
+              sender,
+              text,
+              msgid,
+              ts,
+              parent,
+              reactions,
+              account,
+            )
           #(base, replaces)
         })
       render.collapse_history_edits(pairs)
@@ -294,6 +304,18 @@ pub fn parse_channels_json(body: String) -> List(ChannelInfo) {
 /// Decode history message list JSON (exported for unit tests).
 pub fn parse_history_json(body: String) -> List(render.Row) {
   decode_history(body)
+}
+
+/// Sender DID from REST history tags (`account` / `+account`).
+fn account_from_history_tags(tags: Dict(String, String)) -> Option(String) {
+  case dict.get(tags, "account") {
+    Ok(a) -> render.normalize_account(a)
+    Error(_) ->
+      case dict.get(tags, "+account") {
+        Ok(a) -> render.normalize_account(a)
+        Error(_) -> None
+      }
+  }
 }
 
 // ── AV sessions ──────────────────────────────────────────────────────────────

@@ -10,6 +10,7 @@ import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/live
 import freeq_web4/ls_form
+import freeq_web4/profiles
 import freeq_web4/rest
 import freeq_web4/session_store
 import freeq_web4/upload
@@ -1071,6 +1072,7 @@ pub fn topic_edit_op_only_test() {
           halfop: False,
           voice: False,
           color: "n1",
+          did: None,
         ),
       ],
     )
@@ -1088,6 +1090,7 @@ pub fn topic_edit_op_only_test() {
           halfop: False,
           voice: False,
           color: "n1",
+          did: None,
         ),
       ],
     )
@@ -1111,6 +1114,7 @@ pub fn topic_edit_op_only_test() {
             halfop: True,
             voice: False,
             color: "n1",
+            did: None,
           ),
         ],
       ),
@@ -1148,6 +1152,7 @@ pub fn topic_edit_route_and_nav_test() {
           halfop: False,
           voice: False,
           color: "n1",
+          did: None,
         ),
       ],
     )
@@ -1377,6 +1382,7 @@ pub fn sort_members_rank_test() {
       halfop: False,
       voice: False,
       color: "n1",
+      did: None,
     ),
     render.Member(
       nick: "alice",
@@ -1384,6 +1390,7 @@ pub fn sort_members_rank_test() {
       halfop: False,
       voice: False,
       color: "n1",
+      did: None,
     ),
     render.Member(
       nick: "bob",
@@ -1391,6 +1398,7 @@ pub fn sort_members_rank_test() {
       halfop: False,
       voice: True,
       color: "n1",
+      did: None,
     ),
     render.Member(
       nick: "half",
@@ -1398,6 +1406,7 @@ pub fn sort_members_rank_test() {
       halfop: True,
       voice: False,
       color: "n1",
+      did: None,
     ),
   ]
   let sorted = render.sort_members(members)
@@ -1424,6 +1433,7 @@ pub fn parse_mode_change_test() {
           halfop: False,
           voice: False,
           color: "n1",
+          did: None,
         ),
         render.Member(
           nick: "bob",
@@ -1431,6 +1441,7 @@ pub fn parse_mode_change_test() {
           halfop: False,
           voice: False,
           color: "n1",
+          did: None,
         ),
       ],
       ops,
@@ -1519,6 +1530,7 @@ pub fn members_prefix_helpers_test() {
       halfop: False,
       voice: False,
       color: "n1",
+      did: None,
     )
   let bob =
     render.Member(
@@ -1527,6 +1539,7 @@ pub fn members_prefix_helpers_test() {
       halfop: False,
       voice: True,
       color: "n2",
+      did: None,
     )
   assert render.member_prefix_char(alice) == "@"
   assert render.member_prefix_class(alice) == "op"
@@ -2547,4 +2560,202 @@ pub fn unread_case_insensitive_test() {
   assert live.total_unread(next) == 1
   let #(opened, _) = live.apply(next, live.OpenChannel("DEV"))
   assert live.unread_count(opened, "#dev") == 0
+}
+
+pub fn parse_account_tag_on_privmsg_test() {
+  let line =
+    "@account=did:plc:alice;msgid=01ABC :alice!a@h PRIVMSG #freeq :hello"
+  let assert Some(row) = render.parse_message_line(line, None)
+  assert row.account == Some("did:plc:alice")
+  assert row.text == "hello"
+}
+
+pub fn parse_extended_join_account_test() {
+  let line = ":alice!u@h JOIN #freeq did:plc:alice :Alice Smith"
+  let assert Some(#("join", "alice", Some("#freeq"), Some("did:plc:alice"))) =
+    render.parse_member_change_ex(line)
+  let guest = ":bob!u@h JOIN #freeq * :Bob"
+  let assert Some(#("join", "bob", Some("#freeq"), None)) =
+    render.parse_member_change_ex(guest)
+}
+
+pub fn history_json_carries_account_test() {
+  let body =
+    "[{\"sender\":\"alice!a@h\",\"text\":\"hi\",\"msgid\":\"m1\",\"timestamp\":1,\"tags\":{\"account\":\"did:plc:alice\"}}]"
+  let rows = rest.parse_history_json(body)
+  let assert [row] = rows
+  assert row.account == Some("did:plc:alice")
+  assert row.nick == Some("alice")
+}
+
+pub fn channel_avatars_show_atproto_when_cached_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row_with_account(
+      "alice!a@h",
+      "hello",
+      Some("m1"),
+      Some(1),
+      None,
+      dict.new(),
+      Some("did:plc:alice"),
+    )
+  let #(with_hist, effect) = live.apply(model, live.SetHistory([row]))
+  // History with account should schedule avatar resolve.
+  let dids_ok = case effect {
+    live.ResolveAvatars(dids) -> list.contains(dids, "did:plc:alice")
+    live.ResolveEmbeds(_) -> True
+    _ -> False
+  }
+  assert dids_ok
+  // After cache fill, messages region uses the AT avatar URL.
+  let filled =
+    live.apply(
+      with_hist,
+      live.PatchAvatar("did:plc:alice", "https://cdn.bsky.app/img/avatar.jpg"),
+    ).0
+  let html = live.messages_region_for_test(filled)
+  assert string.contains(html, "msg-avatar")
+  assert string.contains(html, "https://cdn.bsky.app/img/avatar.jpg")
+  // Guests still get initials fallback.
+  let guest =
+    render.history_row("bob!b@h", "yo", Some("m2"), Some(2), None, dict.new())
+  let with_guest = live.apply(filled, live.PrependHistory([guest])).0
+  let html2 = live.messages_region_for_test(with_guest)
+  assert string.contains(html2, "msg-avatar-generated")
+  assert string.contains(html2, "data:image/svg+xml")
+}
+
+pub fn member_list_shows_avatar_after_join_did_test() {
+  let model = live.mount_model("/chat/freeq")
+  let #(joined, effect) =
+    live.apply(
+      model,
+      live.PushLine(":alice!u@h JOIN #freeq did:plc:alice :Alice"),
+    )
+  let dids_ok = case effect {
+    live.ResolveAvatars(dids) -> list.contains(dids, "did:plc:alice")
+    _ -> False
+  }
+  assert dids_ok
+  let with_av =
+    live.apply(
+      joined,
+      live.PatchAvatar("did:plc:alice", "https://cdn.bsky.app/alice.png"),
+    ).0
+  let patches = live.plan_patches(joined, with_av)
+  let htmls =
+    list.map(patches, fn(p) {
+      case p {
+        diff.Replace(_, html) -> html
+        _ -> ""
+      }
+    })
+    |> string.concat
+  assert string.contains(htmls, "member-avatar")
+  assert string.contains(htmls, "https://cdn.bsky.app/alice.png")
+}
+
+pub fn nick_initial_test() {
+  assert profiles.nick_initial("alice") == "A"
+  assert profiles.nick_initial("") == "?"
+}
+
+pub fn fallback_avatar_data_uri_test() {
+  let uri = profiles.fallback_avatar_data_uri("alice", "n1")
+  assert string.starts_with(uri, "data:image/svg+xml")
+  assert string.contains(uri, "svg")
+  // Flat solid fill (no gradients).
+  assert string.contains(uri, "7ab7ff")
+  assert !string.contains(uri, "linearGradient")
+  // Stable for same nick/color.
+  assert profiles.fallback_avatar_data_uri("alice", "n1") == uri
+  // Different initial for different nick.
+  assert profiles.fallback_avatar_data_uri("bob", "n1") != uri
+}
+
+pub fn member_list_uses_generated_avatar_for_guests_test() {
+  let model = live.mount_model("/chat/freeq")
+  let line = ":irc.freeq.at 353 me = #freeq :alice bob"
+  let #(next, _) = live.apply(model, live.PushLine(line))
+  let html =
+    live.plan_patches(model, next)
+    |> list.map(fn(p) {
+      case p {
+        diff.Replace(_, h) -> h
+        _ -> ""
+      }
+    })
+    |> string.concat
+  // Guest fallbacks are img data-URIs, not bare letter spans.
+  assert string.contains(html, "member-avatar-generated")
+  assert string.contains(html, "data:image/svg+xml")
+}
+
+pub fn handle_like_nick_schedules_avatar_without_account_test() {
+  // Authed freeq users often keep their handle as the IRC nick
+  // (chadfowler.com). Even without an account-tag, we should fetch by handle.
+  assert profiles.looks_like_actor("chadfowler.com")
+  assert !profiles.looks_like_actor("alice")
+
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "chadfowler.com!u@h",
+      "hello",
+      Some("m1"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  assert row.account == None
+  assert row.nick == Some("chadfowler.com")
+
+  let #(with_hist, effect) = live.apply(model, live.SetHistory([row]))
+  let dids_ok = case effect {
+    live.ResolveAvatars(dids) -> list.contains(dids, "chadfowler.com")
+    live.ResolveEmbeds(_) ->
+      list.contains(
+        live.avatar_dids_for_rows(with_hist, [row]),
+        "chadfowler.com",
+      )
+    _ -> False
+  }
+  assert dids_ok
+
+  // Cache under handle (as the session host does after profile fetch).
+  let filled =
+    live.apply(
+      with_hist,
+      live.PatchAvatar(
+        "chadfowler.com",
+        "https://cdn.bsky.app/img/avatar/plain/did:plc:x/abc",
+      ),
+    ).0
+  // Also under DID — lookup by either key should work after multi-key store.
+  let filled =
+    live.apply(
+      filled,
+      live.PatchAvatar(
+        "did:plc:4qsyxmnsblo4luuycm3572bq",
+        "https://cdn.bsky.app/img/avatar/plain/did:plc:x/abc",
+      ),
+    ).0
+  let html = live.messages_region_for_test(filled)
+  assert string.contains(html, "msg-avatar")
+  assert string.contains(html, "cdn.bsky.app")
+  assert !string.contains(html, "msg-avatar-fallback")
+}
+
+pub fn names_list_schedules_handle_avatars_test() {
+  let model = live.mount_model("/chat/freeq")
+  // RPL_NAMREPLY with a handle-like nick and a plain guest.
+  let line = ":irc.freeq.at 353 me = #freeq :chadfowler.com alice"
+  let #(next, effect) = live.apply(model, live.PushLine(line))
+  let dids_ok = case effect {
+    live.ResolveAvatars(dids) -> list.contains(dids, "chadfowler.com")
+    _ -> False
+  }
+  assert dids_ok
+  assert list.any(next.members, fn(m) { m.nick == "chadfowler.com" })
 }

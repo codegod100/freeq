@@ -93,8 +93,17 @@ pub type Row {
 }
 
 /// Channel roster entry from 353 / JOIN / MODE (+o/+h/+v).
+///
+/// `did` is filled from extended-join / account-tag learning when known.
 pub type Member {
-  Member(nick: String, op: Bool, halfop: Bool, voice: Bool, color: String)
+  Member(
+    nick: String,
+    op: Bool,
+    halfop: Bool,
+    voice: Bool,
+    color: String,
+    did: Option(String),
+  )
 }
 
 /// One privilege change from a channel MODE line: mode letter, adding?, target nick.
@@ -864,7 +873,7 @@ fn drop_leading_colon(s: String) -> String {
 /// Expects decoded dynamic fields already as a string map-like list of pairs
 /// from the REST client (`sender`, `text`, `msgid`, `timestamp`, optional
 /// `parent` from tags `+reply` / `reply` / `draft/reply`, optional
-/// `reactions` from `+freeq.at/reactions`).
+/// `reactions` from `+freeq.at/reactions`, optional `account` DID).
 pub fn history_row(
   sender: String,
   text: String,
@@ -872,6 +881,27 @@ pub fn history_row(
   timestamp_unix: Option(Int),
   parent: Option(String),
   reactions: Dict(String, List(String)),
+) -> Row {
+  history_row_with_account(
+    sender,
+    text,
+    msgid,
+    timestamp_unix,
+    parent,
+    reactions,
+    None,
+  )
+}
+
+/// Like `history_row` but with an explicit sender DID (`account` tag).
+pub fn history_row_with_account(
+  sender: String,
+  text: String,
+  msgid: Option(String),
+  timestamp_unix: Option(Int),
+  parent: Option(String),
+  reactions: Dict(String, List(String)),
+  account: Option(String),
 ) -> Row {
   let nick = case string.split_once(sender, "!") {
     Ok(#(n, _)) -> n
@@ -893,7 +923,7 @@ pub fn history_row(
     own: False,
     color: nick_color_class(nick),
     parent: parent,
-    account: None,
+    account: account,
     reactions: reactions,
     embed: None,
     edited: False,
@@ -1302,6 +1332,7 @@ fn parse_member_token(token: String) -> Member {
     halfop: halfop,
     voice: voice,
     color: nick_color_class(nick),
+    did: None,
   )
 }
 
@@ -1405,6 +1436,7 @@ fn apply_one_mode(
               halfop: False,
               voice: False,
               color: nick_color_class(target),
+              did: None,
             )
           let entry = case mode {
             "o" -> Member(..base, op: adding)
@@ -1559,6 +1591,19 @@ fn parse_mode_ops(modestring: String, args: List(String)) -> List(ModeOp) {
 pub fn parse_member_change(
   line: String,
 ) -> Option(#(String, String, Option(String))) {
+  case parse_member_change_ex(line) {
+    Some(#(kind, nick, ch, _account)) -> Some(#(kind, nick, ch))
+    None -> None
+  }
+}
+
+/// Like `parse_member_change` but also returns extended-join account (DID).
+///
+/// Extended-join shape: `JOIN #chan did:plc:… :Real Name` or `JOIN #chan * :…`.
+/// Account is `None` when missing, `*`, or a trailing realname (`:…`).
+pub fn parse_member_change_ex(
+  line: String,
+) -> Option(#(String, String, Option(String), Option(String))) {
   let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
   case string.starts_with(rest, ":") {
     False -> None
@@ -1572,26 +1617,67 @@ pub fn parse_member_change(
             Error(_) -> prefix
           }
           case string.split(cmd_args, " ") {
-            ["JOIN", chan, ..] ->
+            ["JOIN", chan, ..rest] ->
               Some(#(
                 "join",
                 nick,
                 Some(canonical_channel(drop_leading_colon(chan))),
+                join_account_param(rest),
               ))
             ["PART", chan, ..] ->
               Some(#(
                 "part",
                 nick,
                 Some(canonical_channel(drop_leading_colon(chan))),
+                None,
               ))
-            ["QUIT", ..] -> Some(#("quit", nick, None))
+            ["QUIT", ..] -> Some(#("quit", nick, None, None))
             ["NICK", new_nick, ..] ->
-              Some(#("nick", nick, Some(drop_leading_colon(new_nick))))
+              Some(#(
+                "nick",
+                nick,
+                Some(drop_leading_colon(new_nick)),
+                None,
+              ))
             _ -> None
           }
         }
       }
     }
+  }
+}
+
+/// Extended-join account token: skip `*` and realname (`:…`).
+fn join_account_param(rest: List(String)) -> Option(String) {
+  case rest {
+    [] -> None
+    [first, ..] -> {
+      case first {
+        "" | "*" -> None
+        a ->
+          case string.starts_with(a, ":") {
+            True -> None
+            False -> Some(a)
+          }
+      }
+    }
+  }
+}
+
+/// Extract `account` tag value from an IRC tags list (or `+account`).
+pub fn account_from_tags(tags: List(#(String, String))) -> Option(String) {
+  case tag_get(tags, "account") {
+    Some(a) -> Some(a)
+    None -> tag_get(tags, "+account")
+  }
+}
+
+/// Account / DID string suitable for avatar lookup (`did:…` preferred).
+pub fn normalize_account(raw: String) -> Option(String) {
+  let s = string.trim(raw)
+  case s == "" || s == "*" {
+    True -> None
+    False -> Some(s)
   }
 }
 

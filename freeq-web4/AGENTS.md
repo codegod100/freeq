@@ -24,6 +24,32 @@ handling.
 Same rule applies to sibling clients (`freeq-web2`, `freeq-web3`, `freeq-app`,
 `freeq-webui`, native apps): client work stays in that client tree.
 
+
+## Deploy to freeq.boxd
+
+https://freeq.boxd.sh runs freeq-web4. The VM cannot pull from your laptop
+(NAT); deploy rsyncs the tree and rebuilds on-box via `nix develop`.
+
+```bash
+# commit (if dirty) + rsync + gleam deps + restart + point proxy at :4004
+nu freeq-web4/script/deploy-boxd.nu -m "Your message"
+
+# leave freeq-web3 running (side-by-side debug)
+nu freeq-web4/script/deploy-boxd.nu --keep-web3 --no-commit
+```
+
+| | |
+|--|--|
+| Host | SSH `freeq.boxd` → freeq.boxd.sh (user `boxd`) |
+| App dir | `/home/boxd/freeq-web4` |
+| Service | `systemctl --user restart freeq-web4` |
+| Public URL | `https://freeq.boxd.sh` |
+| Port | `4004` (proxy target) |
+| Upstream IRC | `wss://irc.freeq.at/irc` (production freeq-server) |
+
+Do **not** overwrite remote `freeq-web4.env` or `/home/boxd/data/web4-*`.
+After deploy, smoke-check `/health` and `/chat`.
+
 ## Build
 
 Workspace-sibling. From `freeq-web4/`:

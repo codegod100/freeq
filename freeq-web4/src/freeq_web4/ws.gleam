@@ -11,6 +11,7 @@ import freeq_web4/irc/render
 import freeq_web4/irc/upstream
 import freeq_web4/link_preview
 import freeq_web4/live
+import freeq_web4/profiles
 import freeq_web4/rest
 import freeq_web4/session_store
 import gleam/erlang/process.{type Subject}
@@ -41,6 +42,8 @@ pub type Push {
   )
   /// Background link-preview resolve finished for one message row.
   MessageEmbed(row_id: String, embed: render.Embed)
+  /// Background AT profile avatar resolve finished for a DID.
+  AvatarReady(did: String, url: String)
 }
 
 /// One connected LiveView browser session: model, IRC upstream, OAuth.
@@ -227,6 +230,11 @@ pub fn handle_push(session: Session, push: Push) -> #(Session, List(String)) {
     MessageEmbed(row_id, embed) -> {
       let before = session.model
       let #(model, _) = live.apply(before, live.PatchEmbed(row_id, embed))
+      finish(session, before, model)
+    }
+    AvatarReady(did, url) -> {
+      let before = session.model
+      let #(model, _) = live.apply(before, live.PatchAvatar(did, url))
       finish(session, before, model)
     }
   }
@@ -747,6 +755,14 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
 
     live.ResolveEmbeds(rows) -> {
       schedule_preview_warmup(session.self_subject, rows)
+      // Avatars ride the same warmup path as cards (history / live links).
+      let dids = live.avatar_dids_for_rows(session.model, rows)
+      schedule_avatar_fetch(session.self_subject, dids)
+      session
+    }
+
+    live.ResolveAvatars(dids) -> {
+      schedule_avatar_fetch(session.self_subject, dids)
       session
     }
   }
@@ -772,6 +788,39 @@ fn schedule_preview_warmup(
               Some(embed) ->
                 process.send(subject, MessageEmbed(row.id, embed))
               None -> Nil
+            }
+          })
+        })
+      Nil
+    }
+  }
+}
+
+/// Fetch ATProto profile avatars off the Live session process.
+///
+/// On success, stores the avatar under the query key **and** the resolved
+/// DID/handle so `chadfowler.com` (nick) and `did:plc:…` (account tag) share
+/// one profile fetch.
+fn schedule_avatar_fetch(subject: Subject(Push), dids: List(String)) -> Nil {
+  let pending =
+    dids
+    |> list.filter(fn(d) { string.trim(d) != "" })
+    |> list.unique
+    |> list.take(40)
+  case pending {
+    [] -> Nil
+    _ -> {
+      let _ =
+        process.spawn_unlinked(fn() {
+          list.each(pending, fn(actor) {
+            case profiles.fetch_profile(actor) {
+              Some(profile) -> {
+                let url = profile.avatar
+                list.each(profiles.avatar_cache_keys(actor, profile), fn(key) {
+                  process.send(subject, AvatarReady(key, url))
+                })
+              }
+              None -> process.send(subject, AvatarReady(actor, ""))
             }
           })
         })
