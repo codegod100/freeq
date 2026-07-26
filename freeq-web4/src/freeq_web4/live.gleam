@@ -241,8 +241,12 @@ pub type Msg {
   ToggleReaction(msgid: String, emoji: String)
   /// Server: async link-preview resolve finished for a row.
   PatchEmbed(row_id: String, embed: render.Embed)
+  /// Server: several link-preview resolves finished (one Diff for the batch).
+  PatchEmbeds(List(#(String, render.Embed)))
   /// Server: AT profile avatar resolve finished (`url` may be empty = no avatar).
   PatchAvatar(did: String, url: String)
+  /// Server: several avatar resolves finished (one Diff for the batch).
+  PatchAvatars(List(#(String, String)))
   /// Browser: open channel message search modal.
   OpenSearch
   /// Browser: close search modal (Esc / backdrop / result click).
@@ -491,77 +495,8 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           let ch = render.canonical_channel(raw)
           case ch == "#" || ch == "" {
             True -> #(model, NoEffect)
-            False -> {
-              let my = list_unique_append(model.my_channels, ch)
-              // Seed from directory when present (#test); host REST fills private
-              // rooms (#freeq) and IRC 332 may refine further.
-              let topic = rest.topic_for(model.all_channels, ch)
-              let model = case model.av_active {
-                True ->
-                  clear_unread(
-                    clear_search(clear_reply(
-                      Model(
-                        ..model,
-                        view: Channel,
-                        channel: Some(ch),
-                        my_channels: my,
-                        messages: [],
-                        members: [],
-                        topic: topic,
-                        flash: "",
-                        react_picker_msgid: None,
-                        editing_topic: False,
-                        history_loading: False,
-                        history_exhausted: False,
-                        av_channel: case model.av_channel {
-                          Some(_) -> model.av_channel
-                          None -> model.channel
-                        },
-                      ),
-                    )),
-                    ch,
-                  )
-                False ->
-                  clear_unread(
-                    clear_search(clear_reply(
-                      Model(
-                        ..model,
-                        view: Channel,
-                        channel: Some(ch),
-                        my_channels: my,
-                        messages: [],
-                        members: [],
-                        topic: topic,
-                        flash: "",
-                        av_call_present: False,
-                        av_session_id: None,
-                        av_channel: None,
-                        av_participant_count: 0,
-                        av_muted: False,
-                        av_camera: False,
-                        av_instance: generate_av_instance(),
-                        av_token: None,
-                        react_picker_msgid: None,
-                        editing_topic: False,
-                        history_loading: False,
-                        history_exhausted: False,
-                      ),
-                    )),
-                    ch,
-                  )
-              }
-              #(
-                model,
-                multi_effect([
-                  EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
-                  // JOIN + NAMES: re-open of an already-joined channel still refreshes
-                  // the userlist (some servers skip 353 on redundant JOIN).
-                  IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
-                  FetchHistory(ch),
-                  FetchActiveCall(ch),
-                ]),
-              )
-            }
+            // Same single-paint path as sidebar open (after_join fills history).
+            False -> open_channel(model, ch)
           }
         }
       }
@@ -725,6 +660,15 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       NoEffect,
     )
 
+    PatchEmbeds(pairs) -> {
+      let messages =
+        list.fold(pairs, model.messages, fn(msgs, pair) {
+          let #(row_id, embed) = pair
+          patch_row_embed(msgs, row_id, embed)
+        })
+      #(Model(..model, messages: messages), NoEffect)
+    }
+
     PatchAvatar(did, url) -> {
       // `did` here is any actor key (DID or handle). Store under the given
       // key; multi-key fan-out happens in the session host after profile fetch.
@@ -736,6 +680,20 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           NoEffect,
         )
       }
+    }
+
+    // One Diff for a whole profile-warmup batch (open channel / history page).
+    PatchAvatars(pairs) -> {
+      let avatars =
+        list.fold(pairs, model.avatars, fn(acc, pair) {
+          let #(did, url) = pair
+          let key = string.trim(did)
+          case key {
+            "" -> acc
+            k -> dict.insert(acc, k, url)
+          }
+        })
+      #(Model(..model, avatars: avatars), NoEffect)
     }
 
     SetAllChannels(chs) -> #(Model(..model, all_channels: chs), NoEffect)
@@ -954,6 +912,10 @@ fn open_system(model: Model) -> #(Model, Effect) {
 }
 
 /// Open a real IRC channel (JOIN + history + optional AV probe).
+///
+/// Model is prepared here; the session host's `after_join` loads REST history
+/// **before** the first Diff so the client gets one paint (not empty→fill).
+/// EnsureUpstream is the only effect — JOIN/NAMES/history/AV run in after_join.
 fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
   let ch = render.canonical_channel(bare)
   let my = list_unique_append(model.my_channels, ch)
@@ -969,13 +931,15 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
             view: Channel,
             channel: Some(ch),
             my_channels: my,
+            // Cleared only in the model snapshot; after_join fills history
+            // before plan_patches so the browser never sees an empty pane.
             messages: [],
             members: [],
             topic: topic,
             flash: "",
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: False,
+            history_loading: True,
             history_exhausted: False,
             av_channel: case model.av_channel {
               Some(_) -> model.av_channel
@@ -1007,22 +971,15 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
             av_token: None,
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: False,
+            history_loading: True,
             history_exhausted: False,
           ),
         )),
         ch,
       )
   }
-  #(
-    model,
-    multi_effect([
-      EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
-      IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
-      FetchHistory(ch),
-      FetchActiveCall(ch),
-    ]),
-  )
+  // Host: EnsureUpstream + after_join (history, JOIN, NAMES, AV) → one Diff.
+  #(model, EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })))
 }
 
 /// Append a local system status line (capped).
@@ -1711,17 +1668,6 @@ fn av_actor_is_self(model: Model, actor: String) -> Bool {
         |> list.map(string.lowercase)
       list.contains(candidates, a)
     }
-  }
-}
-
-/// Collapse a list of effects into one (session host expands multi).
-/// Prefer EnsureUpstream so the host opens IRC; after_join sends JOIN + history.
-/// FetchActiveCall is applied by the host after join when present.
-fn multi_effect(effects: List(Effect)) -> Effect {
-  case effects {
-    [EnsureUpstream(p, e), ..] -> EnsureUpstream(p, e)
-    [other, ..] -> other
-    [] -> NoEffect
   }
 }
 

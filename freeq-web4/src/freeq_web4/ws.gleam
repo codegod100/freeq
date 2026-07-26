@@ -42,8 +42,17 @@ pub type Push {
   )
   /// Background link-preview resolve finished for one message row.
   MessageEmbed(row_id: String, embed: render.Embed)
+  /// Several link-preview resolves finished (one Diff, not N morphs).
+  MessageEmbeds(List(#(String, render.Embed)))
   /// Background AT profile avatar resolve finished for a DID.
   AvatarReady(did: String, url: String)
+  /// Several avatar resolves finished (one Diff after channel open / history).
+  AvatarsReady(List(#(String, String)))
+  /// Embeds + avatars from one history warmup (single Diff after open).
+  MediaReady(
+    embeds: List(#(String, render.Embed)),
+    avatars: List(#(String, String)),
+  )
 }
 
 /// One connected LiveView browser session: model, IRC upstream, OAuth.
@@ -232,10 +241,53 @@ pub fn handle_push(session: Session, push: Push) -> #(Session, List(String)) {
       let #(model, _) = live.apply(before, live.PatchEmbed(row_id, embed))
       finish(session, before, model)
     }
+    MessageEmbeds(pairs) -> {
+      let before = session.model
+      case pairs {
+        [] -> #(session, [])
+        _ -> {
+          let #(model, _) = live.apply(before, live.PatchEmbeds(pairs))
+          finish(session, before, model)
+        }
+      }
+    }
     AvatarReady(did, url) -> {
       let before = session.model
       let #(model, _) = live.apply(before, live.PatchAvatar(did, url))
       finish(session, before, model)
+    }
+    AvatarsReady(pairs) -> {
+      let before = session.model
+      case pairs {
+        [] -> #(session, [])
+        _ -> {
+          let #(model, _) = live.apply(before, live.PatchAvatars(pairs))
+          finish(session, before, model)
+        }
+      }
+    }
+    MediaReady(embeds, avatars) -> {
+      let before = session.model
+      case embeds, avatars {
+        [], [] -> #(session, [])
+        _, _ -> {
+          let model = case embeds {
+            [] -> before
+            pairs -> {
+              let #(m, _) = live.apply(before, live.PatchEmbeds(pairs))
+              m
+            }
+          }
+          let model = case avatars {
+            [] -> model
+            pairs -> {
+              let #(m, _) = live.apply(model, live.PatchAvatars(pairs))
+              m
+            }
+          }
+          finish(session, before, model)
+        }
+      }
     }
   }
 }
@@ -754,10 +806,9 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
     }
 
     live.ResolveEmbeds(rows) -> {
-      schedule_preview_warmup(session.self_subject, rows)
-      // Avatars ride the same warmup path as cards (history / live links).
+      // One background job → one Diff (embeds + avatars together).
       let dids = live.avatar_dids_for_rows(session.model, rows)
-      schedule_avatar_fetch(session.self_subject, dids)
+      schedule_media_warmup(session.self_subject, rows, dids)
       session
     }
 
@@ -768,65 +819,91 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
   }
 }
 
-/// Resolve uncached link previews off the Live session process.
-fn schedule_preview_warmup(
-  subject: Subject(Push),
-  rows: List(render.Row),
-) -> Nil {
-  let pending =
-    rows
-    |> list.filter(link_preview.needs_resolve)
-    |> list.take(30)
+/// Fetch ATProto profile avatars off the Live session process.
+///
+/// On success, stores the avatar under the query key **and** the resolved
+/// DID/handle so `chadfowler.com` (nick) and `did:plc:…` (account tag) share
+/// one profile fetch.
+///
+/// Sends **one** `AvatarsReady` for the whole batch (not one Diff per DID)
+/// so channel open is history paint + one avatar paint, not N morphs.
+fn schedule_avatar_fetch(subject: Subject(Push), dids: List(String)) -> Nil {
+  let pending = pending_avatar_actors(dids)
   case pending {
     [] -> Nil
     _ -> {
       let _ =
         process.spawn_unlinked(fn() {
-          list.each(pending, fn(row) {
-            let full = link_preview.attach(row)
-            case full.embed {
-              Some(embed) ->
-                process.send(subject, MessageEmbed(row.id, embed))
-              None -> Nil
-            }
-          })
+          let pairs = collect_avatars(pending)
+          case pairs {
+            [] -> Nil
+            _ -> process.send(subject, AvatarsReady(pairs))
+          }
         })
       Nil
     }
   }
 }
 
-/// Fetch ATProto profile avatars off the Live session process.
-///
-/// On success, stores the avatar under the query key **and** the resolved
-/// DID/handle so `chadfowler.com` (nick) and `did:plc:…` (account tag) share
-/// one profile fetch.
-fn schedule_avatar_fetch(subject: Subject(Push), dids: List(String)) -> Nil {
-  let pending =
-    dids
-    |> list.filter(fn(d) { string.trim(d) != "" })
-    |> list.unique
-    |> list.take(40)
-  case pending {
-    [] -> Nil
-    _ -> {
+/// History / open warmup: resolve embeds + avatars in one job → one Diff.
+fn schedule_media_warmup(
+  subject: Subject(Push),
+  rows: List(render.Row),
+  dids: List(String),
+) -> Nil {
+  let embed_rows =
+    rows
+    |> list.filter(link_preview.needs_resolve)
+    |> list.take(30)
+  let actors = pending_avatar_actors(dids)
+  case embed_rows, actors {
+    [], [] -> Nil
+    _, _ -> {
       let _ =
         process.spawn_unlinked(fn() {
-          list.each(pending, fn(actor) {
-            case profiles.fetch_profile(actor) {
-              Some(profile) -> {
-                let url = profile.avatar
-                list.each(profiles.avatar_cache_keys(actor, profile), fn(key) {
-                  process.send(subject, AvatarReady(key, url))
-                })
-              }
-              None -> process.send(subject, AvatarReady(actor, ""))
-            }
-          })
+          let embeds = collect_embeds(embed_rows)
+          let avatars = collect_avatars(actors)
+          case embeds, avatars {
+            [], [] -> Nil
+            _, _ -> process.send(subject, MediaReady(embeds, avatars))
+          }
         })
       Nil
     }
   }
+}
+
+fn pending_avatar_actors(dids: List(String)) -> List(String) {
+  dids
+  |> list.filter(fn(d) { string.trim(d) != "" })
+  |> list.unique
+  |> list.take(40)
+}
+
+fn collect_embeds(
+  rows: List(render.Row),
+) -> List(#(String, render.Embed)) {
+  list.filter_map(rows, fn(row) {
+    let full = link_preview.attach(row)
+    case full.embed {
+      Some(embed) -> Ok(#(row.id, embed))
+      None -> Error(Nil)
+    }
+  })
+}
+
+fn collect_avatars(actors: List(String)) -> List(#(String, String)) {
+  list.flat_map(actors, fn(actor) {
+    case profiles.fetch_profile(actor) {
+      Some(profile) -> {
+        let url = profile.avatar
+        list.map(profiles.avatar_cache_keys(actor, profile), fn(key) {
+          #(key, url)
+        })
+      }
+      None -> [#(actor, "")]
+    }
+  })
 }
 
 fn ensure_upstream(
