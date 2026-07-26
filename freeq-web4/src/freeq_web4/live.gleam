@@ -52,6 +52,20 @@ pub type WsLabel {
   WsReady
 }
 
+/// Snapshot of a channel's chat shell so switching back is instant (no REST).
+///
+/// Live PRIVMSG for non-viewed channels append here when present, so return
+/// visits include traffic that arrived while elsewhere. Dropped on PART.
+pub type ChannelPage {
+  ChannelPage(
+    messages: List(render.Row),
+    members: List(render.Member),
+    topic: String,
+    /// No older REST page left (scroll-up exhausted).
+    history_exhausted: Bool,
+  )
+}
+
 /// Full server-side state for one LiveView socket (channel shell + AV).
 pub type Model {
   Model(
@@ -129,6 +143,9 @@ pub type Model {
     /// DID → Bluesky avatar URL (fetched async via public AppView API).
     /// Empty string means "resolved, no avatar" so we do not re-fetch.
     avatars: Dict(String, String),
+    /// Per-channel page cache (`channel_key` → snapshot). Flip between joined
+    /// channels without re-fetching REST history.
+    channel_pages: Dict(String, ChannelPage),
   )
 }
 
@@ -387,6 +404,7 @@ fn mount(
       system_messages: [],
       nick_dids: dict.new(),
       avatars: dict.new(),
+      channel_pages: dict.new(),
     )
   helpers.no_effect(model)
 }
@@ -505,8 +523,10 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     Part(raw) -> {
       let ch = render.canonical_channel(raw)
       let my = list.filter(model.my_channels, fn(c) { c != ch })
+      // Drop cached page so re-join reloads fresh history.
+      let model = drop_channel_page(Model(..model, my_channels: my), ch)
       let leaving_current = case model.channel {
-        Some(c) -> c == ch
+        Some(c) -> channels_equal(c, ch)
         None -> False
       }
       let model = case leaving_current {
@@ -517,7 +537,6 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
                 ..model,
                 view: Index,
                 channel: None,
-                my_channels: my,
                 messages: [],
                 members: [],
                 topic: "",
@@ -529,13 +548,15 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
             )),
             ch,
           )
-        False -> clear_unread(Model(..model, my_channels: my), ch)
+        False -> clear_unread(model, ch)
       }
       #(model, IrcSend(["PART " <> ch <> "\r\n"]))
     }
 
-    GoIndex ->
+    GoIndex -> {
       // Keep AV state — browsing the directory must not leave the call.
+      // Stash the active channel page so returning is instant.
+      let model = stash_current_page(model)
       #(
         clear_search(clear_reply(
           Model(
@@ -553,6 +574,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         )),
         FetchChannels,
       )
+    }
 
     OpenSystem -> open_system(model)
 
@@ -891,6 +913,7 @@ fn is_system_key(raw: String) -> Bool {
 
 /// Open the System status buffer (no IRC JOIN, no REST history).
 fn open_system(model: Model) -> #(Model, Effect) {
+  let model = stash_current_page(model)
   #(
     clear_search(clear_reply(
       Model(
@@ -913,15 +936,46 @@ fn open_system(model: Model) -> #(Model, Effect) {
 
 /// Open a real IRC channel (JOIN + history + optional AV probe).
 ///
-/// Model is prepared immediately (`history_loading`, empty messages) so the
-/// session host can Diff the channel switch without waiting on REST. Host
-/// `after_join` fires JOIN/NAMES/TOPIC and schedules async history/AV fill.
+/// Stashes the previous channel page, then either restores a cached page
+/// (instant flip, no REST) or prepares an empty pane with `history_loading`
+/// so the session host can Diff immediately. Host `after_join` always runs
+/// JOIN/NAMES/TOPIC; REST history is only scheduled on a cache miss.
 fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
   let ch = render.canonical_channel(bare)
+  // Same channel already open — no-op (avoid wipe + re-fetch).
+  let already =
+    case model.view, model.channel {
+      Channel, Some(c) -> channels_equal(c, ch)
+      _, _ -> False
+    }
+  case already {
+    True -> #(model, NoEffect)
+    False -> open_channel_navigate(model, ch)
+  }
+}
+
+fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
+  let model = stash_current_page(model)
   let my = list_unique_append(model.my_channels, ch)
-  // Seed from directory when present (#test); host REST fills private
-  // rooms (#freeq) and IRC 332 may refine further.
-  let topic = rest.topic_for(model.all_channels, ch)
+  let dir_topic = rest.topic_for(model.all_channels, ch)
+  let cached = get_channel_page(model, ch)
+
+  let #(messages, members, topic, history_loading, history_exhausted) = case
+    cached
+  {
+    Some(page) -> #(
+      page.messages,
+      page.members,
+      case page.topic {
+        "" -> dir_topic
+        t -> t
+      },
+      False,
+      page.history_exhausted,
+    )
+    None -> #([], [], dir_topic, True, False)
+  }
+
   let model = case model.av_active {
     True ->
       clear_unread(
@@ -931,15 +985,14 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
             view: Channel,
             channel: Some(ch),
             my_channels: my,
-            // Empty pane + spinner until async RestChannelOpen lands.
-            messages: [],
-            members: [],
+            messages: messages,
+            members: members,
             topic: topic,
             flash: "",
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: True,
-            history_exhausted: False,
+            history_loading: history_loading,
+            history_exhausted: history_exhausted,
             av_channel: case model.av_channel {
               Some(_) -> model.av_channel
               None -> model.channel
@@ -956,8 +1009,8 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
             view: Channel,
             channel: Some(ch),
             my_channels: my,
-            messages: [],
-            members: [],
+            messages: messages,
+            members: members,
             topic: topic,
             flash: "",
             av_call_present: False,
@@ -970,14 +1023,14 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
             av_token: None,
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: True,
-            history_exhausted: False,
+            history_loading: history_loading,
+            history_exhausted: history_exhausted,
           ),
         )),
         ch,
       )
   }
-  // Host: EnsureUpstream + after_join (async history/AV, IRC JOIN/NAMES).
+  // Host: EnsureUpstream + after_join (IRC JOIN/NAMES; REST only if loading).
   #(model, EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })))
 }
 
@@ -1697,7 +1750,17 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
                   apply_delete_to_model(model, msgid),
                   NoEffect,
                 )
-                _ -> #(model, NoEffect)
+                _ -> #(
+                  map_channel_page_messages(model, ch, fn(msgs) {
+                    list.map(msgs, fn(r) {
+                      case r.msgid == Some(msgid) {
+                        True -> render.mark_row_deleted(r)
+                        False -> r
+                      }
+                    })
+                  }),
+                  NoEffect,
+                )
               }
             None ->
               case render.parse_tagmsg_reaction(line) {
@@ -1716,7 +1779,18 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
                       ),
                       NoEffect,
                     )
-                    _ -> #(model, NoEffect)
+                    _ -> #(
+                      map_channel_page_messages(model, ch, fn(msgs) {
+                        apply_reaction_to_messages(
+                          msgs,
+                          msgid,
+                          emoji,
+                          nick,
+                          added,
+                        )
+                      }),
+                      NoEffect,
+                    )
                   }
                 None -> apply_line_chat(model, line)
               }
@@ -1807,7 +1881,7 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
       let viewing = viewing_channel(model, ch)
       let model = case viewing {
         True -> Model(..model, topic: topic)
-        False -> model
+        False -> update_channel_page_topic(model, ch, topic)
       }
       // Live TOPIC (not 332 RPL on join) → meta in the stream.
       case viewing && string.contains(line, " TOPIC ") {
@@ -2119,7 +2193,8 @@ fn topic_setter_nick(line: String) -> Option(String) {
 }
 
 /// Live PRIVMSG/NOTICE: append when viewing that channel; otherwise bump
-/// sidebar unread (joined channels only, not own echoes / presence rows).
+/// sidebar unread (joined channels only, not own echoes / presence rows) and
+/// append into the per-channel page cache when we have one.
 fn apply_chat_row(
   model: Model,
   line: String,
@@ -2146,7 +2221,11 @@ fn apply_chat_row(
         dids -> ResolveAvatars(dids)
       }
       case target {
-        Some(ch) -> #(maybe_bump_unread(model, ch, row), effect)
+        Some(ch) -> {
+          let row = link_preview.attach_cache_only(row)
+          let model = append_to_channel_page(model, ch, row)
+          #(maybe_bump_unread(model, ch, row), effect)
+        }
         // Server notices / directed NOTICE / non-channel targets → System tab.
         None -> #(
           Model(
@@ -2167,6 +2246,109 @@ fn channels_equal(a: String, b: String) -> Bool {
 
 fn channel_key(ch: String) -> String {
   string.lowercase(render.canonical_channel(ch))
+}
+
+/// Save the active channel's messages/members/topic into `channel_pages`.
+///
+/// Skips empty in-flight loads (history still spinning) so a fast A→B switch
+/// does not cache a blank pane that would stick on return.
+fn stash_current_page(model: Model) -> Model {
+  case model.view, model.channel {
+    Channel, Some(ch) ->
+      case model.history_loading && model.messages == [] {
+        True -> model
+        False ->
+          put_channel_page(
+            model,
+            ch,
+            ChannelPage(
+              messages: model.messages,
+              members: model.members,
+              topic: model.topic,
+              history_exhausted: model.history_exhausted,
+            ),
+          )
+      }
+    _, _ -> model
+  }
+}
+
+fn get_channel_page(model: Model, channel: String) -> Option(ChannelPage) {
+  dict.get(model.channel_pages, channel_key(channel))
+  |> option.from_result
+}
+
+fn put_channel_page(
+  model: Model,
+  channel: String,
+  page: ChannelPage,
+) -> Model {
+  Model(
+    ..model,
+    channel_pages: dict.insert(
+      model.channel_pages,
+      channel_key(channel),
+      page,
+    ),
+  )
+}
+
+fn drop_channel_page(model: Model, channel: String) -> Model {
+  let key = channel_key(channel)
+  let pages =
+    dict.drop(
+      model.channel_pages,
+      dict.keys(model.channel_pages)
+        |> list.filter(fn(k) { channel_key(k) == key }),
+    )
+  Model(..model, channel_pages: pages)
+}
+
+/// Append a live row into a cached page (only if that channel is already cached).
+fn append_to_channel_page(
+  model: Model,
+  channel: String,
+  row: render.Row,
+) -> Model {
+  case get_channel_page(model, channel) {
+    None -> model
+    Some(page) ->
+      put_channel_page(
+        model,
+        channel,
+        ChannelPage(
+          ..page,
+          messages: append_capped(page.messages, row, 400),
+        ),
+      )
+  }
+}
+
+fn update_channel_page_topic(
+  model: Model,
+  channel: String,
+  topic: String,
+) -> Model {
+  case get_channel_page(model, channel) {
+    None -> model
+    Some(page) -> put_channel_page(model, channel, ChannelPage(..page, topic: topic))
+  }
+}
+
+fn map_channel_page_messages(
+  model: Model,
+  channel: String,
+  map_fn: fn(List(render.Row)) -> List(render.Row),
+) -> Model {
+  case get_channel_page(model, channel) {
+    None -> model
+    Some(page) ->
+      put_channel_page(
+        model,
+        channel,
+        ChannelPage(..page, messages: map_fn(page.messages)),
+      )
+  }
 }
 
 fn in_my_channels(model: Model, channel: String) -> Bool {

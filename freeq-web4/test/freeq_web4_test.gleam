@@ -1924,6 +1924,111 @@ pub fn open_channel_shows_loading_messages_label_test() {
   assert string.contains(html, "data-history-loading=\"1\"")
 }
 
+pub fn channel_page_cache_restores_on_switch_test() {
+  // Visit #freeq, load history, switch to #dev, switch back — no re-fetch.
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "cached hello",
+      Some("mid-cache-1"),
+      Some(100),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  assert list.length(model.messages) == 1
+  assert model.history_loading == False
+
+  let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
+  assert on_dev.channel == Some("#dev")
+  // First visit to #dev is still a cold load.
+  assert on_dev.history_loading == True
+  assert on_dev.messages == []
+
+  let #(back, effect) = live.apply(on_dev, live.OpenChannel("freeq"))
+  assert back.channel == Some("#freeq")
+  assert back.history_loading == False
+  assert list.length(back.messages) == 1
+  let assert Ok(first) = list.first(back.messages)
+  assert first.text == "cached hello"
+  // Still EnsureUpstream so JOIN/NAMES refresh, but host skips REST when
+  // history_loading is false.
+  let assert live.EnsureUpstream(_, _) = effect
+}
+
+pub fn channel_page_cache_appends_background_live_test() {
+  // Live traffic on a cached-but-not-viewed channel shows up when we return.
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#dev"])
+  let seed =
+    render.history_row(
+      "alice!a@h",
+      "seed",
+      Some("mid-seed"),
+      Some(50),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([seed])).0
+  // Leave freeq → stash; open dev (cold).
+  let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
+  // Background message for freeq while viewing dev.
+  let #(on_dev, _) =
+    live.apply(
+      on_dev,
+      live.PushLine("@msgid=bg1 :bob!b@h PRIVMSG #freeq :while away"),
+    )
+  assert live.unread_count(on_dev, "#freeq") == 1
+
+  let #(back, _) = live.apply(on_dev, live.OpenChannel("freeq"))
+  assert back.history_loading == False
+  assert list.length(back.messages) == 2
+  let assert Ok(last) = list.last(back.messages)
+  assert last.text == "while away"
+  assert live.unread_count(back, "#freeq") == 0
+}
+
+pub fn channel_page_cache_dropped_on_part_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "bye",
+      Some("mid-part"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  // Stash freeq by navigating away, then part it.
+  let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
+  let #(after_part, _) = live.apply(on_dev, live.Part("#freeq"))
+  // Re-open freeq must cold-load (cache was dropped with PART).
+  let #(reopen, _) = live.apply(after_part, live.OpenChannel("freeq"))
+  assert reopen.history_loading == True
+  assert reopen.messages == []
+}
+
+pub fn open_channel_same_channel_is_noop_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "stay",
+      Some("mid-noop"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let #(same, effect) = live.apply(model, live.OpenChannel("freeq"))
+  assert same.messages == model.messages
+  assert same.history_loading == False
+  let assert live.NoEffect = effect
+}
+
 pub fn set_history_preserves_prior_reactions_test() {
   // Simulate: CHATHISTORY hydrated chips, then REST SetHistory without tags.
   let model = live.mount_model("/chat/freeq")

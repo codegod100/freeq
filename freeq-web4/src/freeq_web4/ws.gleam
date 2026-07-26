@@ -354,6 +354,8 @@ fn after_join(session: Session) -> Session {
       // IRC first so membership / topic / NAMES start immediately. REST
       // history + AV probe run off-process so the channel-switch Diff is not
       // blocked on HTTP (was the main multi-second lag on navigate).
+      // Cache hits restore messages already — skip REST, still CHATHISTORY
+      // for reaction tags and optionally re-probe AV.
       case session.upstream {
         Some(handle) -> {
           // JOIN for membership. NAMES always refreshes the People panel —
@@ -363,16 +365,49 @@ fn after_join(session: Session) -> Session {
           upstream.send(handle, "NAMES " <> ch <> "\r\n")
           // Explicit TOPIC query when already joined (no 332 on re-JOIN).
           upstream.send(handle, "TOPIC " <> ch <> "\r\n")
-          // CHATHISTORY after REST body lands (see apply_rest_channel_open) so
-          // reaction tags attach to rows that already exist.
+          case session.model.history_loading {
+            // Cache hit: rows already on the model — hydrate reactions now.
+            False -> request_chathistory(handle, ch)
+            // Cache miss: CHATHISTORY after REST body (apply_rest_channel_open).
+            True -> Nil
+          }
         }
         None -> Nil
       }
-      schedule_channel_open_rest(session, ch)
+      case session.model.history_loading {
+        True -> schedule_channel_open_rest(session, ch)
+        False ->
+          // Cached page: light AV probe only (no history re-fetch).
+          case session.model.av_active {
+            True -> Nil
+            False -> schedule_av_probe_only(session, ch)
+          }
+      }
       session
     }
     None -> session
   }
+}
+
+/// Background AV call probe without re-fetching history (cache-hit path).
+fn schedule_av_probe_only(session: Session, channel: String) -> Nil {
+  let subject = session.self_subject
+  let bearer = session.model.api_bearer
+  let ch = channel
+  let _ =
+    process.spawn_unlinked(fn() {
+      let call = rest.probe_active_call(ch, bearer)
+      process.send(
+        subject,
+        RestChannelOpen(
+          channel: ch,
+          rows: [],
+          topic: "",
+          av_call: Some(call),
+        ),
+      )
+    })
+  Nil
 }
 
 /// Background REST for channel open: history body, topic fallback, AV probe.
@@ -417,7 +452,13 @@ fn apply_rest_channel_open(
         False -> #(session, [])
         True -> {
           let before = session.model
-          let #(model, effect) = live.apply(before, live.SetHistory(rows))
+          // Cache-hit opens send empty rows + AV only — never wipe restored
+          // messages or flip history_exhausted from a dummy SetHistory([]).
+          let need_history = before.history_loading
+          let #(model, effect) = case need_history {
+            True -> live.apply(before, live.SetHistory(rows))
+            False -> #(before, live.NoEffect)
+          }
           // Prefer REST topic when we have one; keep directory/IRC seed otherwise.
           let #(model, _) = case topic {
             "" -> #(model, live.NoEffect)
@@ -427,10 +468,11 @@ fn apply_rest_channel_open(
             None -> #(model, live.NoEffect)
             Some(call) -> live.apply(model, live.AvProbe(channel, call))
           }
-          // Reaction tallies ride CHATHISTORY (not REST) — request after body.
-          case session.upstream {
-            Some(handle) -> request_chathistory(handle, channel)
-            None -> Nil
+          // Reaction tallies ride CHATHISTORY (not REST) — after first body.
+          // Cache hits already requested CHATHISTORY in after_join.
+          case need_history, session.upstream {
+            True, Some(handle) -> request_chathistory(handle, channel)
+            _, _ -> Nil
           }
           let session = Session(..session, model: model)
           let session = run_effect(session, effect)
