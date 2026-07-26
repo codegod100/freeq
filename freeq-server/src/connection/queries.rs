@@ -328,6 +328,8 @@ pub(super) fn handle_whois(
     // they are or what they can do there. Uses the same folded, DID-aware answer
     // as NAMES and WHO so all three agree.
     {
+        // Snapshot and release before taking `channels`; never hold two of
+        // these at once (see the lock-order note in channel.rs::handle_names).
         let dids_snapshot = state.session_dids.lock().clone();
         let target_did = dids_snapshot.get(&target_session).cloned();
         let channels = state.channels.lock();
@@ -410,6 +412,9 @@ pub(super) fn handle_who(
 
     if target.starts_with('#') || target.starts_with('&') {
         let channel = normalize_channel(target);
+        // Snapshot before taking channels/nick_to_session — see the lock-order
+        // note in channel.rs::handle_names.
+        let dids_snapshot = state.session_dids.lock().clone();
         let channels = state.channels.lock();
         if let Some(ch) = channels.get(&channel) {
             let n2s = state.nick_to_session.lock();
@@ -418,7 +423,6 @@ pub(super) fn handle_who(
             // One row per PERSON, not per socket. Group this channel's sessions
             // by nick first: a user signed in on two devices was emitted twice,
             // with whichever flags each socket happened to carry.
-            let dids_snapshot = state.session_dids.lock().clone();
             let mut by_nick: Vec<(String, Vec<String>)> = Vec::new();
             for session in &ch.members {
                 let Some(n) = n2s.get_nick(session) else { continue };

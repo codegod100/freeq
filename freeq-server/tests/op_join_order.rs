@@ -43,6 +43,10 @@ async fn start() -> (SocketAddr, tokio::task::JoinHandle<anyhow::Result<()>>) {
 struct C {
     reader: BufReader<TcpStream>,
     writer: TcpStream,
+    /// Lines `rx` skipped past. Registration-time traffic (the synthesised
+    /// attach JOIN/353/366 for a second device) arrives before 001, so without
+    /// this it would be silently discarded while waiting for the welcome.
+    seen: Vec<String>,
 }
 
 impl C {
@@ -53,7 +57,7 @@ impl C {
         let s = TcpStream::connect(addr).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).ok();
         let w = s.try_clone().unwrap();
-        let mut c = Self { reader: BufReader::new(s), writer: w };
+        let mut c = Self { reader: BufReader::new(s), writer: w, seen: Vec::new() };
         c.tx("CAP LS 302");
         c.tx(&format!("NICK {nick}"));
         c.tx(&format!("USER {nick} 0 * :test"));
@@ -76,7 +80,7 @@ impl C {
         let s = TcpStream::connect(addr).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).ok();
         let w = s.try_clone().unwrap();
-        let mut c = Self { reader: BufReader::new(s), writer: w };
+        let mut c = Self { reader: BufReader::new(s), writer: w, seen: Vec::new() };
         c.tx("CAP LS 302");
         c.tx(&format!("NICK {nick}"));
         c.tx(&format!("USER {nick} 0 * :test"));
@@ -115,6 +119,7 @@ impl C {
                     if p(&l) {
                         return l;
                     }
+                    self.seen.push(l);
                 }
                 Err(e) => panic!("{what}: {e}"),
             }
@@ -702,5 +707,440 @@ async fn whois_lists_channels_for_a_local_user() {
     })
     .await
     .unwrap();
+    server.abort();
+}
+
+// ── Op powers from a second device ───────────────────────────────────────────
+//
+// Permission checks read the session-keyed `ch.ops`, but a MODE lands on one
+// session. Some checks already fall back to `did_ops` (delete does); most read
+// the set directly. Each of these exercises one op power from the device the
+// mode did NOT land on.
+
+/// Set up: alice founds `channel`, bob joins on two devices, alice ops bob.
+/// Returns (alice, bob_device_a, bob_device_b).
+fn multi_device_op(addr: SocketAddr, channel: &str) -> (C, C, C) {
+    let (mut alice, _) = C::sasl(addr, "alice");
+    alice.tx(&format!("JOIN {channel}"));
+    alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+    let key = PrivateKey::generate_ed25519();
+    let did = format!("did:key:{}", key.public_key_multibase());
+    let secret = key.secret_bytes();
+    let mut bob_a = C::sasl_with(addr, "bob", &did, key);
+    bob_a.tx(&format!("JOIN {channel}"));
+    bob_a.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob A joined");
+    let mut bob_b =
+        C::sasl_with(addr, "bob", &did, PrivateKey::ed25519_from_bytes(&secret).unwrap());
+    bob_b.drain(400);
+
+    alice.tx(&format!("MODE {channel} +o bob"));
+    alice.rx(|l| l.contains("+o") && l.contains("bob"), "bob opped");
+    alice.drain(300);
+    bob_a.drain(300);
+    bob_b.drain(300);
+    (alice, bob_a, bob_b)
+}
+
+/// +m: only ops/halfops/voiced may speak. An op's second device must not be
+/// silenced — this is the one that loses a person's messages outright.
+#[tokio::test]
+async fn op_can_speak_from_a_second_device_in_a_moderated_channel() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, mut bob_a, mut bob_b) = multi_device_op(addr, "#modspeak");
+        alice.tx("MODE #modspeak +m");
+        alice.rx(|l| l.contains("+m"), "moderated");
+        alice.drain(200);
+
+        bob_b.tx("PRIVMSG #modspeak :from my other laptop");
+        let seen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            alice.rx(
+                |l| l.contains("PRIVMSG") && l.contains("other laptop"),
+                "alice receives it",
+            )
+        }));
+        assert!(
+            seen.is_ok(),
+            "bob is an op but +m silenced his second device — the message never \
+             reached the channel"
+        );
+
+        alice.tx("QUIT");
+        bob_a.tx("QUIT");
+        bob_b.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// +t: only ops may set the topic.
+#[tokio::test]
+async fn op_can_set_topic_from_a_second_device() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, mut bob_a, mut bob_b) = multi_device_op(addr, "#topicdev");
+        alice.tx("MODE #topicdev +t");
+        alice.rx(|l| l.contains("+t"), "topic locked");
+        alice.drain(200);
+
+        bob_b.tx("TOPIC #topicdev :set from device B");
+        let reply = bob_b.rx(
+            |l| {
+                let n = l.split_whitespace().nth(1);
+                n == Some("482") || l.contains("TOPIC")
+            },
+            "topic result",
+        );
+        assert!(
+            !reply.split_whitespace().nth(1).is_some_and(|n| n == "482"),
+            "bob is an op but his second device was refused TOPIC in a +t channel: {reply}"
+        );
+
+        alice.tx("QUIT");
+        bob_a.tx("QUIT");
+        bob_b.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// KICK is op-only.
+#[tokio::test]
+async fn op_can_kick_from_a_second_device() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, mut bob_a, mut bob_b) = multi_device_op(addr, "#kickdev");
+        let (mut carol, _) = C::sasl(addr, "carol");
+        carol.tx("JOIN #kickdev");
+        carol.rx(|l| l.split_whitespace().nth(1) == Some("366"), "carol joined");
+        bob_b.drain(300);
+
+        bob_b.tx("KICK #kickdev carol :bye");
+        let reply = bob_b.rx(
+            |l| {
+                let n = l.split_whitespace().nth(1);
+                n == Some("482") || l.contains("KICK")
+            },
+            "kick result",
+        );
+        assert!(
+            !reply.split_whitespace().nth(1).is_some_and(|n| n == "482"),
+            "bob is an op but his second device was refused KICK: {reply}"
+        );
+
+        alice.tx("QUIT");
+        bob_a.tx("QUIT");
+        bob_b.tx("QUIT");
+        carol.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// The member list a device is handed when it attaches to an existing session's
+/// channels must show the same prefixes as NAMES.
+#[tokio::test]
+async fn attaching_device_sees_correct_prefixes() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #attachpfx");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+        let key = PrivateKey::generate_ed25519();
+        let did = format!("did:key:{}", key.public_key_multibase());
+        let secret = key.secret_bytes();
+        let mut bob_a = C::sasl_with(addr, "bob", &did, key);
+        bob_a.tx("JOIN #attachpfx");
+        bob_a.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob A joined");
+        alice.tx("MODE #attachpfx +o bob");
+        alice.rx(|l| l.contains("+o"), "bob opped");
+
+        // Second device attaches; the synthesised join carries a member list.
+        let mut bob_b =
+            C::sasl_with(addr, "bob", &did, PrivateKey::ed25519_from_bytes(&secret).unwrap());
+        bob_b.drain(400);
+        // The attach happens during registration, so its 353 arrives before 001.
+        let names = bob_b
+            .seen
+            .iter()
+            .find(|l| l.split_whitespace().nth(1) == Some("353") && l.contains("attachpfx"))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!(
+                    "no 353 for #attachpfx in the attach preamble:\n  {}",
+                    bob_b.seen.join("\n  ")
+                )
+            });
+        assert!(
+            names.contains("@bob"),
+            "the attaching device was told bob is a plain member, but he is an op: {names}"
+        );
+
+        alice.tx("QUIT");
+        bob_a.tx("QUIT");
+        bob_b.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// The attach member list must fold OTHER people's sessions too.
+///
+/// The previous test passes because the attaching device gets opped itself, so
+/// either session renders `@`. The untested case is a *different* member who is
+/// multi-device: the attach list reads the session-keyed `ch.ops` per session, so
+/// whichever of carol's sockets is enumerated first decides whether she appears
+/// as an op to the newly-attached device.
+#[tokio::test]
+async fn attach_list_folds_other_members_sessions() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #attachfold");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+        // Carol: four devices, opped once.
+        let ckey = PrivateKey::generate_ed25519();
+        let cdid = format!("did:key:{}", ckey.public_key_multibase());
+        let csecret = ckey.secret_bytes();
+        let mut carol = C::sasl_with(addr, "carol", &cdid, ckey);
+        carol.tx("JOIN #attachfold");
+        carol.rx(|l| l.split_whitespace().nth(1) == Some("366"), "carol joined");
+        let mut carol_extra: Vec<C> = (0..3)
+            .map(|_| {
+                let mut c = C::sasl_with(
+                    addr, "carol", &cdid,
+                    PrivateKey::ed25519_from_bytes(&csecret).unwrap(),
+                );
+                c.drain(250);
+                c
+            })
+            .collect();
+        alice.tx("MODE #attachfold +o carol");
+        alice.rx(|l| l.contains("+o") && l.contains("carol"), "carol opped");
+        alice.drain(200);
+
+        // Bob joins on device A, then attaches device B; the attach list must
+        // describe carol correctly.
+        let bkey = PrivateKey::generate_ed25519();
+        let bdid = format!("did:key:{}", bkey.public_key_multibase());
+        let bsecret = bkey.secret_bytes();
+        let mut bob_a = C::sasl_with(addr, "bob", &bdid, bkey);
+        bob_a.tx("JOIN #attachfold");
+        bob_a.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob A joined");
+        let mut bob_b =
+            C::sasl_with(addr, "bob", &bdid, PrivateKey::ed25519_from_bytes(&bsecret).unwrap());
+        bob_b.drain(400);
+
+        let names = bob_b
+            .seen
+            .iter()
+            .find(|l| l.split_whitespace().nth(1) == Some("353") && l.contains("attachfold"))
+            .cloned()
+            .unwrap_or_else(|| {
+                panic!("no 353 in the attach preamble:\n  {}", bob_b.seen.join("\n  "))
+            });
+        assert!(
+            names.contains("@carol"),
+            "carol is an op on four devices but the attaching device was told she \
+             is a plain member: {names}"
+        );
+
+        alice.tx("QUIT");
+        carol.tx("QUIT");
+        bob_a.tx("QUIT");
+        bob_b.tx("QUIT");
+        for c in carol_extra.iter_mut() {
+            c.tx("QUIT");
+        }
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// The invariant that ties rendering to permissions: if the member list says
+/// someone is an op, every one of their devices must be able to act as one.
+///
+/// Joining a channel that exists but has no members auto-ops the joiner "to
+/// prevent orphaned channels". That grant goes into the session-keyed `ch.ops`
+/// only — `did_ops` is not updated, and the founder is someone else — so the op
+/// exists on exactly one socket. NAMES renders `@`, but permission checks that
+/// resolve by DID see nothing.
+#[tokio::test]
+async fn a_rendered_op_can_act_as_op_from_any_device() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        // Alice creates the channel and leaves, so it exists with no members.
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #orphan");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+        alice.tx("PART #orphan");
+        alice.drain(300);
+
+        // Bob joins the empty channel on device A and is auto-opped.
+        let key = PrivateKey::generate_ed25519();
+        let did = format!("did:key:{}", key.public_key_multibase());
+        let secret = key.secret_bytes();
+        let mut bob_a = C::sasl_with(addr, "bob", &did, key);
+        bob_a.tx("JOIN #orphan");
+        bob_a.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob A joined");
+        let mut bob_b =
+            C::sasl_with(addr, "bob", &did, PrivateKey::ed25519_from_bytes(&secret).unwrap());
+        bob_b.drain(400);
+
+        // What the member list claims.
+        bob_a.tx("NAMES #orphan");
+        let names = bob_a.rx(|l| l.split_whitespace().nth(1) == Some("353"), "names");
+        let rendered_op = names.contains("@bob");
+
+        // What the server will actually allow, from the other device.
+        bob_b.tx("TOPIC #orphan :from device B");
+        let reply = bob_b.rx(
+            |l| {
+                let n = l.split_whitespace().nth(1);
+                n == Some("482") || l.contains("TOPIC")
+            },
+            "topic result",
+        );
+        let allowed = !reply.split_whitespace().nth(1).is_some_and(|n| n == "482");
+
+        assert_eq!(
+            rendered_op, allowed,
+            "the member list and the permission check disagree.\n  \
+             NAMES says op: {rendered_op} ({names})\n  \
+             device B allowed: {allowed} ({reply})"
+        );
+
+        alice.tx("QUIT");
+        bob_a.tx("QUIT");
+        bob_b.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// NAMES must not wedge when it races registration.
+///
+/// This is the regression test for a deadlock I shipped: `handle_names` took
+/// `nick_to_session` and then `session_dids`, while `attach_same_did` holds
+/// `session_dids` and then takes `nick_to_session`. AB/BA — a NAMES concurrent
+/// with a registration wedged both tasks forever.
+///
+/// The symptom is nasty because it doesn't look like a hang: the client is in
+/// the channel and keeps receiving messages, because those are written to its
+/// socket by *other* tasks. Only the member list never arrives. So the test
+/// asserts NAMES still completes while registrations churn alongside it.
+#[tokio::test]
+async fn names_completes_while_registrations_churn() {
+    let (addr, server) = start().await;
+    let done = tokio::task::spawn_blocking(move || {
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #race");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+        // Churn: sessions registering and attaching against the same channel.
+        let churn = std::thread::spawn(move || {
+            for i in 0..12 {
+                let key = PrivateKey::generate_ed25519();
+                let did = format!("did:key:{}", key.public_key_multibase());
+                let secret = key.secret_bytes();
+                let mut a = C::sasl_with(addr, &format!("churn{i}"), &did, key);
+                a.tx("JOIN #race");
+                a.drain(60);
+                // A second device for the same DID exercises attach_same_did,
+                // which is the half that holds session_dids first.
+                let mut b = C::sasl_with(
+                    addr, &format!("churn{i}"), &did,
+                    PrivateKey::ed25519_from_bytes(&secret).unwrap(),
+                );
+                b.drain(60);
+                a.tx("QUIT");
+                b.tx("QUIT");
+            }
+        });
+
+        // Hammer NAMES throughout. Any deadlock shows up as a read timeout.
+        for round in 0..25 {
+            alice.tx("NAMES #race");
+            alice.rx(
+                |l| l.split_whitespace().nth(1) == Some("366"),
+                &format!("NAMES completed (round {round})"),
+            );
+        }
+        churn.join().unwrap();
+        alice.tx("QUIT");
+    });
+
+    // Belt and braces: fail loudly rather than hanging the suite forever.
+    match tokio::time::timeout(std::time::Duration::from_secs(60), done).await {
+        Ok(r) => r.unwrap(),
+        Err(_) => panic!("NAMES/registration deadlocked: neither side completed in 60s"),
+    }
+    server.abort();
+}
+
+/// A JOIN racing a WHO must not wedge.
+///
+/// `handle_join` held `nick_to_session` and then took `channels`; `WHO` takes
+/// `channels` and then `nick_to_session`. AB/BA. The client symptom is not an
+/// obvious hang: the server has already added the member and broadcast the JOIN,
+/// so messages keep arriving, and only the 353/366 go missing — a channel you are
+/// visibly in with nobody in the member list.
+#[tokio::test]
+async fn join_racing_who_still_delivers_the_member_list() {
+    let (addr, server) = start().await;
+    let done = tokio::task::spawn_blocking(move || {
+        // A populated channel, so both paths have real work to do.
+        let (mut host, _) = C::sasl(addr, "host");
+        host.tx("JOIN #joinrace");
+        host.rx(|l| l.split_whitespace().nth(1) == Some("366"), "host joined");
+        let mut squatters: Vec<C> = (0..6)
+            .map(|i| {
+                let (mut c, _) = C::sasl(addr, &format!("squat{i}"));
+                c.tx("JOIN #joinrace");
+                c.rx(|l| l.split_whitespace().nth(1) == Some("366"), "squatter joined");
+                c
+            })
+            .collect();
+
+        // Hammer WHO from one side …
+        let who = std::thread::spawn(move || {
+            for _ in 0..40 {
+                host.tx("WHO #joinrace");
+                host.rx(|l| l.split_whitespace().nth(1) == Some("315"), "WHO completed");
+            }
+            host
+        });
+
+        // … while fresh clients join from the other. Each must get its 366.
+        for i in 0..14 {
+            let (mut j, _) = C::sasl(addr, &format!("joiner{i}"));
+            j.tx("JOIN #joinrace");
+            j.rx(
+                |l| l.split_whitespace().nth(1) == Some("366"),
+                "joiner received its member list",
+            );
+            j.tx("QUIT");
+        }
+
+        let mut host = who.join().unwrap();
+        host.tx("QUIT");
+        for c in squatters.iter_mut() {
+            c.tx("QUIT");
+        }
+    });
+
+    match tokio::time::timeout(std::time::Duration::from_secs(60), done).await {
+        Ok(r) => r.unwrap(),
+        Err(_) => panic!("JOIN/WHO deadlocked: no member list within 60s"),
+    }
     server.abort();
 }

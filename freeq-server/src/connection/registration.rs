@@ -329,6 +329,13 @@ pub(super) fn attach_same_did(
             .collect()
     };
 
+    // Snapshot session→DID once, before any channel or nick lock.
+    //
+    // LOCK ORDER: this function holds `session_dids` while taking
+    // `nick_to_session` (above), so any path that grabs them the other way round
+    // is an AB/BA deadlock. Snapshot once here and hold nothing later.
+    let dids_snapshot = state.session_dids.lock().clone();
+
     // Add this session to those channels (silently — no JOIN broadcast)
     {
         let mut channels = state.channels.lock();
@@ -377,22 +384,42 @@ pub(super) fn attach_same_did(
             let nts = state.nick_to_session.lock();
             let mut names: Vec<String> = Vec::new();
             let mut seen_nicks = std::collections::HashSet::new();
+            // Group this channel's sessions by nick before deciding prefixes.
+            // Reading the session-keyed sets per session made the answer depend
+            // on which of a multi-device member's sockets came first in hash
+            // order, so an op could be announced to an attaching device as a
+            // plain member. Same folded, DID-aware answer as NAMES/WHO/WHOIS.
+            let mut grouped: Vec<(String, Vec<String>)> = Vec::new();
             for member_sid in &ch.members {
-                if let Some(member_nick) = nts.get_nick(member_sid) {
-                    let nick_lower = member_nick.to_lowercase();
-                    if seen_nicks.contains(&nick_lower) {
-                        continue;
+                let Some(member_nick) = nts.get_nick(member_sid) else {
+                    continue;
+                };
+                let nick_lower = member_nick.to_lowercase();
+                match grouped.iter_mut().find(|(k, _)| k.to_lowercase() == nick_lower) {
+                    Some((_, sids)) => sids.push(member_sid.clone()),
+                    None => {
+                        seen_nicks.insert(nick_lower);
+                        grouped.push((member_nick.to_string(), vec![member_sid.clone()]));
                     }
-                    seen_nicks.insert(nick_lower);
-                    let prefix = if ch.ops.contains(member_sid) {
-                        "@"
-                    } else if ch.voiced.contains(member_sid) {
-                        "+"
-                    } else {
-                        ""
-                    };
-                    names.push(format!("{prefix}{member_nick}"));
                 }
+            }
+            for (member_nick, sids) in &grouped {
+                let (is_op, is_voiced) = super::helpers::folded_membership(
+                    sids,
+                    &ch.ops,
+                    &ch.voiced,
+                    ch.founder_did.as_deref(),
+                    &ch.did_ops,
+                    &dids_snapshot,
+                );
+                let prefix = if is_op {
+                    "@"
+                } else if is_voiced {
+                    "+"
+                } else {
+                    ""
+                };
+                names.push(format!("{prefix}{member_nick}"));
             }
             drop(channels);
             let names_str = names.join(" ");

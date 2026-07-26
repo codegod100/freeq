@@ -704,6 +704,17 @@ pub(super) fn handle_join(
                 "NAMES: all members resolved to empty list!"
             );
         }
+        // Release `nick_to_session` before touching `channels` again.
+        //
+        // LOCK ORDER: this held nick_to_session and then took channels, while
+        // WHO (queries.rs) takes channels and then nick_to_session. That is an
+        // AB/BA deadlock, and a JOIN racing a WHO wedged both. It does not look
+        // like a hang from the client's side: the server has already inserted
+        // the member and broadcast the JOIN, so messages keep arriving — only
+        // the 353/366 never come, leaving a channel you are demonstrably in with
+        // an empty member list.
+        drop(nicks);
+
         // Remote members from S2S peers (with @ prefix if op on home server or DID-based)
         let channels_lock = state.channels.lock();
         let ch_state = channels_lock.get(channel);
@@ -1968,6 +1979,16 @@ pub(super) fn handle_names(
     let nick = conn.nick_or_star();
     let multi_prefix = state.cap_multi_prefix.lock().contains(session_id);
 
+    // Snapshot session→DID FIRST and release the lock immediately.
+    //
+    // LOCK ORDER: registration holds `session_dids` and then takes
+    // `nick_to_session`. Taking them in the opposite order here (as this did
+    // when it first gained DID awareness) is an AB/BA deadlock: a NAMES racing
+    // a registration wedges both. The visible symptom is a client that joins,
+    // receives messages — those are written by other tasks — and never gets a
+    // member list. Hold at most one of these at a time.
+    let session_dids_snapshot = state.session_dids.lock().clone();
+
     let nick_list: Vec<String> = {
         let channels = state.channels.lock();
         let (member_sessions, remote_members, ops, voiced) = match channels.get(channel) {
@@ -1996,7 +2017,7 @@ pub(super) fn handle_names(
         // without `@` from one NAMES to the next, and disagreed with the
         // permission checks, which resolve by DID. Union the sessions, then apply
         // the same DID authority the remote-member branch below already uses.
-        let session_dids = state.session_dids.lock();
+        let session_dids = &session_dids_snapshot;
         let mut folded: Vec<(String, bool, bool)> = Vec::new();
         for s in member_sessions.iter() {
             let Some(n) = nicks.get_nick(s) else { continue };
@@ -2020,7 +2041,6 @@ pub(super) fn handle_names(
                 e.2 |= is_voiced;
             }
         }
-        drop(session_dids);
         let mut list: Vec<String> = folded
             .into_iter()
             .map(|(n, is_op, is_voiced)| {
