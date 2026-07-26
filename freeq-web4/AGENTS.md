@@ -86,7 +86,8 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [x] Voice/video AV calls (TAGMSG signaling + MoQ media panel)
 - [ ] Encrypted session store + multi-tab registry
 - [x] Reactions (TAGMSG +react / unreact)
-- [ ] Message edit/delete UI
+- [x] Message edit UI (`+draft/edit`, hover ✎, ArrowUp, (edited) badge)
+- [x] Message delete UI (`+draft/delete` TAGMSG from edit banner, soft placeholder)
 - [ ] DMs + E2EE
 - [x] Link embeds / preview cache
 - [x] Image paste / attach button + upload proxy (`POST /upload`)

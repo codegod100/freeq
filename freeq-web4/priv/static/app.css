@@ -889,7 +889,8 @@ body {
     max-width: 280px;
     min-width: 0;
 }
-.reply-btn {
+.reply-btn,
+.edit-btn {
     opacity: 0;
     border: 0;
     background: transparent;
@@ -902,11 +903,52 @@ body {
     vertical-align: baseline;
 }
 #messages .msg:hover .reply-btn,
-#messages .row:hover .reply-btn {
+#messages .row:hover .reply-btn,
+#messages .msg:hover .edit-btn,
+#messages .row:hover .edit-btn {
     opacity: 1;
 }
 .reply-btn:hover {
     color: #7ab7ff;
+}
+.edit-btn:hover {
+    color: #f0c674;
+}
+.msg-edited {
+    margin-left: 0.35em;
+    font-size: 0.7rem;
+    color: var(--muted);
+    opacity: 0.85;
+    font-weight: 400;
+    user-select: none;
+}
+.reply-banner[data-mode="edit"] .reply-banner-label {
+    color: #f0c674;
+}
+/* Delete lives on the edit banner (not a per-message hover icon). */
+.reply-banner-delete {
+    border: 0;
+    background: transparent;
+    color: #f87171;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    padding: 0 0.4rem;
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+.reply-banner-delete:hover {
+    color: #fca5a5;
+    text-decoration: underline;
+}
+#messages .row.deleted .body,
+#messages .msg.deleted .body {
+    font-style: italic;
+    color: var(--muted);
+    opacity: 0.75;
+}
+.msg-deleted-label {
+    font-size: 0.85em;
 }
 /* Brief highlight when jumping to a search hit / replied-to message. */
 #messages .msg.highlight,
@@ -1126,6 +1168,10 @@ body {
     font-size: 1rem;
     margin-left: auto;
     flex: 0 0 auto;
+}
+/* When Delete is present on the edit bar, pack both actions on the right. */
+.reply-banner[data-mode="edit"] .reply-banner-cancel {
+    margin-left: 0;
 }
 .reply-banner-cancel:hover {
     color: #fff;

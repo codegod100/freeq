@@ -676,6 +676,254 @@ pub fn send_reply_builds_tagged_privmsg_test() {
   assert next.reply_preview_nick == ""
 }
 
+pub fn start_edit_sets_banner_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "guest!g@h",
+      "typo message",
+      Some("editme"),
+      Some(0),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let #(next, _) = live.apply(model, live.StartEdit("editme"))
+  assert next.edit_to == Some("editme")
+  assert next.reply_to == None
+  assert next.compose == "typo message"
+  assert next.reply_preview_text == "typo message"
+}
+
+pub fn send_edit_builds_draft_edit_privmsg_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "guest!g@h",
+      "old text",
+      Some("m-edit"),
+      Some(0),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let model = live.apply(model, live.StartEdit("m-edit")).0
+  let #(next, effect) = live.apply(model, live.Send("fixed text"))
+  let assert live.IrcSend([line]) = effect
+  assert string.contains(line, "@+draft/edit=m-edit")
+  assert string.contains(line, "PRIVMSG #freeq :fixed text")
+  assert !string.contains(line, "+reply=")
+  assert next.edit_to == None
+  assert next.compose == ""
+}
+
+pub fn cancel_edit_clears_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.StartEdit("mid-x")).0
+  assert model.edit_to == Some("mid-x")
+  let #(next, _) = live.apply(model, live.CancelReply)
+  assert next.edit_to == None
+  assert next.compose == ""
+}
+
+pub fn parse_draft_edit_keeps_original_msgid_test() {
+  let line =
+    "@msgid=new1;+draft/edit=orig1 :alice!a@h PRIVMSG #freeq :fixed typo"
+  let assert Some(row) = render.parse_message_line(line, Some("bob"))
+  assert row.msgid == Some("orig1")
+  assert row.text == "fixed typo"
+  assert row.edited == True
+}
+
+pub fn live_edit_updates_existing_row_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetNick("alice")).0
+  let orig =
+    "@msgid=orig1 :alice!a@h PRIVMSG #freeq :first draft"
+  let model = live.apply(model, live.PushLine(orig)).0
+  assert list.length(model.messages) == 1
+  let edit =
+    "@msgid=edit1;+draft/edit=orig1 :alice!a@h PRIVMSG #freeq :second draft"
+  let next = live.apply(model, live.PushLine(edit)).0
+  // Still one row; text replaced in place.
+  assert list.length(next.messages) == 1
+  let assert Ok(row) = list.first(next.messages)
+  assert row.msgid == Some("orig1")
+  assert row.text == "second draft"
+  assert row.edited == True
+}
+
+pub fn collapse_history_edits_test() {
+  let orig =
+    render.history_row(
+      "alice!a@h",
+      "v1",
+      Some("m0"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let edit =
+    render.history_row(
+      "alice!a@h",
+      "v2",
+      Some("e1"),
+      Some(2),
+      None,
+      dict.new(),
+    )
+  let collapsed =
+    render.collapse_history_edits([#(orig, None), #(edit, Some("m0"))])
+  assert list.length(collapsed) == 1
+  let assert Ok(row) = list.first(collapsed)
+  assert row.msgid == Some("m0")
+  assert row.text == "v2"
+  assert row.edited == True
+}
+
+pub fn channel_shell_has_edit_controls_for_own_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetNick("alice")).0
+  let row =
+    render.Row(
+      ..render.history_row(
+        "alice!a@h",
+        "mine",
+        Some("own1"),
+        Some(0),
+        None,
+        dict.new(),
+      ),
+      own: True,
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let html = live.messages_region_for_test(model)
+  assert string.contains(html, "data-ls-click=\"edit\"")
+  assert string.contains(html, "class=\"edit-btn\"")
+  // Delete is on the edit banner, not a per-message hover icon.
+  assert !string.contains(html, "class=\"delete-btn\"")
+}
+
+pub fn edit_banner_has_delete_control_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "guest!g@h",
+      "typo",
+      Some("m-del"),
+      Some(0),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let model = live.apply(model, live.StartEdit("m-del")).0
+  assert model.edit_to == Some("m-del")
+  let html = live.compose_region_for_test(model)
+  assert string.contains(html, "id=\"reply-banner\"")
+  assert string.contains(html, "data-mode=\"edit\"")
+  assert string.contains(html, "data-ls-click=\"delete\"")
+  assert string.contains(html, "class=\"reply-banner-delete\"")
+  assert string.contains(html, "msgid=m-del")
+  assert string.contains(html, "Delete")
+}
+
+pub fn delete_line_test() {
+  let line = render.delete_line("#freeq", "msg99")
+  assert string.contains(line, "@+draft/delete=msg99")
+  assert string.contains(line, "TAGMSG #freeq")
+}
+
+pub fn parse_tagmsg_delete_test() {
+  let line = "@+draft/delete=orig1 :alice!a@h TAGMSG #freeq"
+  let assert Some(#(mid, nick, ch)) = render.parse_tagmsg_delete(line)
+  assert mid == "orig1"
+  assert nick == "alice"
+  assert ch == "#freeq"
+}
+
+pub fn delete_message_sends_tagmsg_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetNick("alice")).0
+  let row =
+    render.Row(
+      ..render.history_row(
+        "alice!a@h",
+        "bye",
+        Some("del1"),
+        Some(0),
+        None,
+        dict.new(),
+      ),
+      own: True,
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let #(next, effect) = live.apply(model, live.DeleteMessage("del1"))
+  let assert live.IrcSend([line]) = effect
+  assert string.contains(line, "+draft/delete=del1")
+  assert string.contains(line, "TAGMSG #freeq")
+  let assert Ok(row) = list.first(next.messages)
+  assert row.deleted == True
+  assert string.contains(
+    live.messages_region_for_test(next),
+    "Message from alice deleted",
+  )
+}
+
+pub fn live_delete_tagmsg_marks_row_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetNick("alice")).0
+  let orig = "@msgid=orig1 :alice!a@h PRIVMSG #freeq :secret"
+  let model = live.apply(model, live.PushLine(orig)).0
+  let del = "@+draft/delete=orig1 :alice!a@h TAGMSG #freeq"
+  let next = live.apply(model, live.PushLine(del)).0
+  assert list.length(next.messages) == 1
+  let assert Ok(row) = list.first(next.messages)
+  assert row.deleted == True
+  assert row.msgid == Some("orig1")
+}
+
+pub fn edit_after_delete_stays_deleted_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetNick("alice")).0
+  let orig = "@msgid=orig1 :alice!a@h PRIVMSG #freeq :secret"
+  let model = live.apply(model, live.PushLine(orig)).0
+  let model =
+    live.apply(
+      model,
+      live.PushLine("@+draft/delete=orig1 :alice!a@h TAGMSG #freeq"),
+    ).0
+  let next =
+    live.apply(
+      model,
+      live.PushLine(
+        "@msgid=e1;+draft/edit=orig1 :alice!a@h PRIVMSG #freeq :revived",
+      ),
+    ).0
+  let assert Ok(row) = list.first(next.messages)
+  assert row.deleted == True
+  assert row.text == ""
+}
+
+pub fn delete_cancels_edit_compose_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "guest!g@h",
+      "oops",
+      Some("m1"),
+      Some(0),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let model = live.apply(model, live.StartEdit("m1")).0
+  assert model.edit_to == Some("m1")
+  let next = live.apply(model, live.DeleteMessage("m1")).0
+  assert next.edit_to == None
+  let assert Ok(r) = list.first(next.messages)
+  assert r.deleted == True
+}
+
 pub fn open_channel_clears_reply_test() {
   let model = live.mount_model("/chat/freeq")
   let model = live.apply(model, live.StartReply("mid1")).0
@@ -2024,7 +2272,7 @@ pub fn live_message_updates_open_search_test() {
   // Simulate REST empty first.
   let model =
     live.apply(model, live.SetSearchResults("needle", [], "No messages found")).0
-  assert list.length(model.search_results) == 0
+  assert model.search_results == []
   // Live PRIVMSG matching the query should land in the hit list.
   let line = "@msgid=live1 :alice!a@h PRIVMSG #freeq :found a needle here"
   let #(next, _) = live.apply(model, live.PushLine(line))

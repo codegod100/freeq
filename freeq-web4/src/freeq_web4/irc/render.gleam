@@ -87,6 +87,8 @@ pub type Row {
     embed: Option(Embed),
     /// True after a `+draft/edit` / REST `replaces_msgid` update landed.
     edited: Bool,
+    /// Soft-deleted via `+draft/delete` (placeholder row stays for continuity).
+    deleted: Bool,
   )
 }
 
@@ -420,6 +422,7 @@ pub fn system_row(text: String) -> Row {
     reactions: dict.new(),
     embed: None,
     edited: False,
+    deleted: False,
   )
 }
 
@@ -753,6 +756,7 @@ fn parse_message_line_body(
                   reactions: reactions,
                   embed: None,
                   edited: is_edit,
+                  deleted: False,
                 ),
               )
             }
@@ -772,6 +776,7 @@ fn parse_message_line_body(
                 reactions: dict.new(),
                 embed: None,
                 edited: False,
+                deleted: False,
               ))
             ["PART", ..] ->
               Some(Row(
@@ -789,6 +794,7 @@ fn parse_message_line_body(
                 reactions: dict.new(),
                 embed: None,
                 edited: False,
+                deleted: False,
               ))
             ["QUIT", ..] ->
               Some(Row(
@@ -806,6 +812,7 @@ fn parse_message_line_body(
                 reactions: dict.new(),
                 embed: None,
                 edited: False,
+                deleted: False,
               ))
             // CAP / numerics / BATCH / MODE / TOPIC / etc. — not chat rows.
             _ -> None
@@ -890,16 +897,35 @@ pub fn history_row(
     reactions: reactions,
     embed: None,
     edited: False,
+    deleted: False,
   )
 }
 
 /// Mark a row as an applied edit of `original` (identity stays on original msgid).
+///
+/// Edits do not revive a soft-deleted message.
 pub fn apply_edit_to_row(row: Row, new_text: String) -> Row {
-  let text = case string.trim(new_text) {
-    "" -> "[message cleared]"
-    t -> t
+  case row.deleted {
+    True -> row
+    False -> {
+      let text = case string.trim(new_text) {
+        "" -> "[message cleared]"
+        t -> t
+      }
+      Row(..row, text: text, edited: True)
+    }
   }
-  Row(..row, text: text, edited: True)
+}
+
+/// Soft-delete a row in place (keep msgid for continuity / scroll targets).
+pub fn mark_row_deleted(row: Row) -> Row {
+  Row(
+    ..row,
+    deleted: True,
+    text: "",
+    reactions: dict.new(),
+    embed: None,
+  )
 }
 
 /// Collapse REST history rows that carry `replaces_msgid` into their originals.
@@ -909,19 +935,20 @@ pub fn apply_edit_to_row(row: Row, new_text: String) -> Row {
 pub fn collapse_history_edits(
   rows: List(#(Row, Option(String))),
 ) -> List(Row) {
-  list.fold(rows, [], fn(acc, pair) {
+  let empty: List(Row) = []
+  list.fold(rows, empty, fn(acc, pair) {
     let #(row, replaces) = pair
     case replaces {
       Some(orig) if orig != "" ->
-        case list.find(acc, fn(r) { r.msgid == Some(orig) }) {
-          Ok(_) ->
+        case list.any(acc, fn(r) { r.msgid == Some(orig) }) {
+          True ->
             list.map(acc, fn(r) {
               case r.msgid {
                 Some(m) if m == orig -> apply_edit_to_row(r, row.text)
                 _ -> r
               }
             })
-          Error(_) -> {
+          False -> {
             // Orphan edit (original outside the page): show as that msgid.
             let collapsed =
               Row(
@@ -1095,6 +1122,57 @@ pub fn react_line(
     <> ";+reply="
     <> escape_tag_value(msgid)
   "@" <> tags <> " TAGMSG " <> ch <> "\r\n"
+}
+
+/// Client → server: soft-delete a message (`@+draft/delete=<msgid> TAGMSG`).
+pub fn delete_line(channel: String, msgid: String) -> String {
+  let ch = canonical_channel(channel)
+  "@+draft/delete="
+  <> escape_tag_value(msgid)
+  <> " TAGMSG "
+  <> ch
+  <> "\r\n"
+}
+
+/// Live delete TAGMSG: `+draft/delete=<msgid>`.
+///
+/// Returns `#(msgid, deleter_nick, channel)`.
+pub fn parse_tagmsg_delete(
+  line: String,
+) -> Option(#(String, String, String)) {
+  let #(tags, after) = parse_irc_tags(string.trim_end(line))
+  case tag_get(tags, "+draft/delete") {
+    Some(mid) ->
+      case string.trim(mid) {
+        "" -> None
+        msgid -> {
+          let rest = case string.starts_with(after, ":") {
+            True -> string.drop_start(after, 1)
+            False -> after
+          }
+          let parts = string.split(rest, " ")
+          case parts {
+            [prefix, cmd, ch, ..] ->
+              case string.uppercase(cmd) == "TAGMSG" {
+                False -> None
+                True -> {
+                  let nick = case string.split_once(prefix, "!") {
+                    Ok(#(n, _)) -> n
+                    Error(_) -> prefix
+                  }
+                  let channel =
+                    ch
+                    |> drop_leading_colon
+                    |> canonical_channel
+                  Some(#(msgid, nick, channel))
+                }
+              }
+            _ -> None
+          }
+        }
+      }
+    None -> None
+  }
 }
 
 /// Request latest N messages (IRCv3 draft/chathistory). freeq-server attaches

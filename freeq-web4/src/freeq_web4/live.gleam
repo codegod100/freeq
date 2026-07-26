@@ -171,6 +171,8 @@ pub type Msg {
   StartReply(msgid: String)
   /// Browser: start editing own message (msgid).
   StartEdit(msgid: String)
+  /// Browser: soft-delete own message (`+draft/delete` TAGMSG).
+  DeleteMessage(msgid: String)
   /// Browser: cancel reply / edit compose mode.
   CancelReply
   /// Browser: join channel form.
@@ -444,9 +446,10 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
 
     StartEdit(msgid) -> {
       let msgid = string.trim(msgid)
-      case msgid == "" {
-        True -> #(model, NoEffect)
-        False -> {
+      case msgid == "", message_is_deleted(model.messages, msgid) {
+        True, _ -> #(model, NoEffect)
+        _, True -> #(model, NoEffect)
+        False, False -> {
           let #(_nick, text) = message_preview(model.messages, msgid)
           #(
             Model(
@@ -463,6 +466,8 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         }
       }
     }
+
+    DeleteMessage(msgid) -> delete_message(model, msgid)
 
     CancelReply -> #(clear_reply(model), NoEffect)
 
@@ -1534,8 +1539,9 @@ fn apply_reaction_to_messages(
   added: Bool,
 ) -> List(render.Row) {
   list.map(messages, fn(row) {
-    case row.msgid {
-      Some(m) if m == msgid ->
+    case row.deleted, row.msgid {
+      True, _ -> row
+      False, Some(m) if m == msgid ->
         render.Row(
           ..row,
           reactions: render.apply_reaction_map(
@@ -1545,7 +1551,7 @@ fn apply_reaction_to_messages(
             added,
           ),
         )
-      _ -> row
+      _, _ -> row
     }
   })
 }
@@ -1701,25 +1707,36 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
       case render.parse_av_state_tagmsg(line) {
         Some(av) -> apply_av_state(model, av)
         None ->
-          case render.parse_tagmsg_reaction(line) {
-            Some(#(msgid, emoji, nick, added, ch)) ->
+          case render.parse_tagmsg_delete(line) {
+            Some(#(msgid, _nick, ch)) ->
               case model.channel {
                 Some(c) if c == ch -> #(
-                  Model(
-                    ..model,
-                    messages: apply_reaction_to_messages(
-                      model.messages,
-                      msgid,
-                      emoji,
-                      nick,
-                      added,
-                    ),
-                  ),
+                  apply_delete_to_model(model, msgid),
                   NoEffect,
                 )
                 _ -> #(model, NoEffect)
               }
-            None -> apply_line_chat(model, line)
+            None ->
+              case render.parse_tagmsg_reaction(line) {
+                Some(#(msgid, emoji, nick, added, ch)) ->
+                  case model.channel {
+                    Some(c) if c == ch -> #(
+                      Model(
+                        ..model,
+                        messages: apply_reaction_to_messages(
+                          model.messages,
+                          msgid,
+                          emoji,
+                          nick,
+                          added,
+                        ),
+                      ),
+                      NoEffect,
+                    )
+                    _ -> #(model, NoEffect)
+                  }
+                None -> apply_line_chat(model, line)
+              }
           }
       }
   }
@@ -2244,20 +2261,70 @@ fn append_capped(
   row: render.Row,
   cap: Int,
 ) -> List(render.Row) {
-  // Skip IRC chathistory / echo duplicates when msgid already present.
-  let already = case row.msgid {
+  // Same msgid: update in place when text/edit changes (live `+draft/edit`).
+  // Pure echoes (identical text, not an edit) are skipped.
+  // Soft-deleted rows stay deleted (edits / echoes must not revive them).
+  case row.msgid {
     Some(id) ->
-      list.any(rows, fn(r) {
-        case r.msgid {
-          Some(existing) -> existing == id
-          None -> r.id == id
+      case
+        list.find(rows, fn(r) {
+          case r.msgid {
+            Some(existing) -> existing == id
+            None -> r.id == id
+          }
+        })
+      {
+        Ok(existing) ->
+          case existing.deleted {
+            True -> rows
+            False ->
+              case existing.text == row.text && !row.edited {
+                True -> rows
+                False ->
+                  list.map(rows, fn(r) {
+                    case r.msgid {
+                      Some(m) if m == id ->
+                        case r.deleted {
+                          True -> r
+                          False ->
+                            render.Row(
+                              ..r,
+                              text: case string.trim(row.text) {
+                                "" if row.edited -> "[message cleared]"
+                                _ -> row.text
+                              },
+                              edited: r.edited
+                                || row.edited
+                                || r.text != row.text,
+                              reactions: case dict.size(row.reactions) {
+                                0 -> r.reactions
+                                _ ->
+                                  render.merge_reaction_dicts(
+                                    r.reactions,
+                                    row.reactions,
+                                  )
+                              },
+                              embed: case row.embed {
+                                Some(e) -> Some(e)
+                                None -> r.embed
+                              },
+                            )
+                        }
+                      _ -> r
+                    }
+                  })
+              }
+          }
+        Error(_) -> {
+          let rows = list.append(rows, [row])
+          let n = list.length(rows)
+          case n > cap {
+            True -> list.drop(rows, n - cap)
+            False -> rows
+          }
         }
-      })
-    None -> False
-  }
-  case already {
-    True -> rows
-    False -> {
+      }
+    None -> {
       let rows = list.append(rows, [row])
       let n = list.length(rows)
       case n > cap {
@@ -2344,6 +2411,18 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
       event.decode_form(e, "reply", fn(data) {
         use msgid <- result.try(ls_form.require(data, "msgid"))
         Ok(StartReply(msgid))
+      })
+    }),
+    stateful.route("edit", fn(e) {
+      event.decode_form(e, "edit", fn(data) {
+        use msgid <- result.try(ls_form.require(data, "msgid"))
+        Ok(StartEdit(msgid))
+      })
+    }),
+    stateful.route("delete", fn(e) {
+      event.decode_form(e, "delete", fn(data) {
+        use msgid <- result.try(ls_form.require(data, "msgid"))
+        Ok(DeleteMessage(msgid))
       })
     }),
     stateful.route("cancel_reply", fn(e) {
@@ -3227,6 +3306,11 @@ pub fn messages_region_for_test(model: Model) -> String {
   messages_region(model)
 }
 
+/// Compose stack (banner + send bar) for unit tests.
+pub fn compose_region_for_test(model: Model) -> String {
+  compose_region(model)
+}
+
 fn messages_region(model: Model) -> String {
   let rows = case model.view {
     System -> model.system_messages
@@ -3247,9 +3331,10 @@ fn messages_region(model: Model) -> String {
       <> "</div>"
     _, _ -> ""
   }
+  let my_nick = model.nick
   let msgs =
     list.map(rows, fn(row) {
-      message_html(row, lookup, aliases, scroll_mid)
+      message_html(row, lookup, aliases, scroll_mid, my_nick)
     })
     |> string.concat
   let loading = case model.view, model.history_loading {
@@ -3348,11 +3433,27 @@ fn compose_region(model: Model) -> String {
     True -> system_key
     False -> ch
   }
+  let compose_mode = case model.edit_to, model.reply_to {
+    Some(mid), _ if mid != "" -> "edit"
+    _, Some(mid) if mid != "" -> "reply"
+    _, _ -> ""
+  }
+  let prefill_attr = case model.edit_to, model.compose {
+    Some(mid), text if mid != "" && text != "" ->
+      " data-compose-prefill=\"" <> render.escape_html(text) <> "\""
+    _, _ -> ""
+  }
+  let mode_attr = case compose_mode {
+    "" -> ""
+    m -> " data-compose-mode=\"" <> m <> "\""
+  }
   "<div id=\"compose-stack\" data-ls-region=\"compose\""
   <> case system {
     True -> " class=\"system-compose\""
     False -> ""
   }
+  <> mode_attr
+  <> prefill_attr
   <> ">"
   <> case system {
     True -> ""
@@ -3383,8 +3484,25 @@ fn compose_region(model: Model) -> String {
 }
 
 fn reply_banner_html(model: Model) -> String {
-  case model.view, model.reply_to {
-    Channel, Some(mid) if mid != "" -> {
+  case model.view, model.edit_to, model.reply_to {
+    Channel, Some(mid), _ if mid != "" -> {
+      let text_span = case model.reply_preview_text {
+        "" -> ""
+        t ->
+          "<span class=\"reply-banner-text\">"
+          <> render.escape_html(t)
+          <> "</span>"
+      }
+      "<div id=\"reply-banner\" class=\"reply-banner\" data-mode=\"edit\">"
+      <> "<span class=\"reply-banner-label\">Editing message</span>"
+      <> text_span
+      <> "<button type=\"button\" class=\"reply-banner-delete\" title=\"Delete message\" data-ls-click=\"delete\" data-ls-payload=\"msgid="
+      <> render.escape_html(mid)
+      <> "\">Delete</button>"
+      <> "<button type=\"button\" class=\"reply-banner-cancel\" title=\"Cancel\" data-ls-click=\"cancel_reply\">×</button>"
+      <> "</div>"
+    }
+    Channel, None, Some(mid) if mid != "" -> {
       let nick = case model.reply_preview_nick {
         "" -> "message"
         n -> n
@@ -3396,7 +3514,7 @@ fn reply_banner_html(model: Model) -> String {
           <> render.escape_html(t)
           <> "</span>"
       }
-      "<div id=\"reply-banner\" class=\"reply-banner\">"
+      "<div id=\"reply-banner\" class=\"reply-banner\" data-mode=\"reply\">"
       <> "<span class=\"reply-banner-label\">Replying to "
       <> render.escape_html(nick)
       <> "</span>"
@@ -3404,7 +3522,7 @@ fn reply_banner_html(model: Model) -> String {
       <> "<button type=\"button\" class=\"reply-banner-cancel\" title=\"Cancel\" data-ls-click=\"cancel_reply\">×</button>"
       <> "</div>"
     }
-    _, _ -> ""
+    _, _, _ -> ""
   }
 }
 
@@ -3413,6 +3531,7 @@ fn message_html(
   lookup: Dict(String, #(String, String)),
   aliases: List(String),
   scroll_mid: String,
+  my_nick: String,
 ) -> String {
   // Match freeq-web3 row shape: 2-column grid `.ts` | `.body` (nick inline).
   let kind = render.kind_class(row.kind)
@@ -3425,7 +3544,8 @@ fn message_html(
       <> "</span> "
     None -> ""
   }
-  let own = case row.own {
+  let is_own = is_own_row(row, my_nick)
+  let own = case is_own {
     True -> " own"
     False -> ""
   }
@@ -3449,9 +3569,38 @@ fn message_html(
       " data-text=\"" <> render.escape_html(row.text) <> "\""
     _ -> ""
   }
-  let badge = reply_badge_html(row, lookup)
-  let reactions = reactions_html(row, aliases)
-  let reply_btn = reply_btn_html(row)
+  let deleted_cls = case row.deleted {
+    True -> " deleted"
+    False -> ""
+  }
+  let body_inner = case row.deleted {
+    True -> {
+      let who = case row.nick {
+        Some(n) -> render.escape_html(n)
+        None -> "someone"
+      }
+      "<span class=\"msg-deleted-label\">Message from "
+      <> who
+      <> " deleted</span>"
+    }
+    False -> {
+      let badge = reply_badge_html(row, lookup)
+      let reactions = reactions_html(row, aliases)
+      let reply_btn = reply_btn_html(row)
+      let edit_btn = edit_btn_html(row, is_own)
+      let edited_mark = case row.edited {
+        True -> "<span class=\"msg-edited\" title=\"Edited\">(edited)</span>"
+        False -> ""
+      }
+      badge
+      <> nick
+      <> render.linkify_html(row.text)
+      <> edited_mark
+      <> reactions
+      <> reply_btn
+      <> edit_btn
+    }
+  }
   // data-ts = unix seconds so the browser can localize to 12h + day separators.
   let ts_attr = case row.timestamp {
     Some(sec) -> " data-ts=\"" <> int.to_string(sec) <> "\""
@@ -3460,6 +3609,7 @@ fn message_html(
   "<div class=\"row "
   <> kind
   <> own
+  <> deleted_cls
   <> hl
   <> "\" data-msgid=\""
   <> render.escape_html(option.unwrap(row.msgid, row.id))
@@ -3473,13 +3623,12 @@ fn message_html(
   <> render.escape_html(row.time_label)
   <> "</span>"
   <> "<span class=\"body\">"
-  <> badge
-  <> nick
-  <> render.linkify_html(row.text)
-  <> reactions
-  <> reply_btn
+  <> body_inner
   <> "</span>"
-  <> link_embed_html(row.embed)
+  <> case row.deleted {
+    True -> ""
+    False -> link_embed_html(row.embed)
+  }
   <> "</div>"
 }
 
@@ -3604,18 +3753,96 @@ fn bsky_embed_inner(e: render.Embed, b: render.BskyMeta) -> String {
 
 /// Hover reply control — starts compose-side `@+reply=` mode.
 fn reply_btn_html(row: render.Row) -> String {
-  case row.kind, row.msgid {
-    render.Msg, Some(mid) if mid != "" ->
+  case row.deleted, row.kind, row.msgid {
+    False, render.Msg, Some(mid) if mid != "" ->
       "<button type=\"button\" class=\"reply-btn\" title=\"Reply\" data-ls-click=\"reply\" data-ls-payload=\"msgid="
       <> render.escape_html(mid)
       <> "\">↩</button>"
-    _, _ -> ""
+    _, _, _ -> ""
+  }
+}
+
+/// Hover edit control — only on own messages (`@+draft/edit=`).
+fn edit_btn_html(row: render.Row, is_own: Bool) -> String {
+  case is_own, row.deleted, row.kind, row.msgid {
+    True, False, render.Msg, Some(mid) if mid != "" ->
+      "<button type=\"button\" class=\"edit-btn\" title=\"Edit\" data-ls-click=\"edit\" data-ls-payload=\"msgid="
+      <> render.escape_html(mid)
+      <> "\">✎</button>"
+    _, _, _, _ -> ""
+  }
+}
+
+fn is_own_row(row: render.Row, my_nick: String) -> Bool {
+  case row.own {
+    True -> True
+    False ->
+      case row.nick {
+        Some(n) -> string.lowercase(n) == string.lowercase(my_nick)
+        None -> False
+      }
+  }
+}
+
+/// Soft-delete a message: optimistic local mark + upstream TAGMSG.
+fn delete_message(model: Model, msgid: String) -> #(Model, Effect) {
+  let msgid = string.trim(msgid)
+  case msgid == "", model.channel, message_is_deleted(model.messages, msgid) {
+    True, _, _ -> #(model, NoEffect)
+    _, None, _ -> #(model, NoEffect)
+    _, _, True -> #(model, NoEffect)
+    False, Some(ch), False -> {
+      let model = apply_delete_to_model(model, msgid)
+      #(model, IrcSend([render.delete_line(ch, msgid)]))
+    }
+  }
+}
+
+/// Mark msgid deleted and cancel compose if that message was being edited/replied.
+fn apply_delete_to_model(model: Model, msgid: String) -> Model {
+  let messages =
+    list.map(model.messages, fn(row) {
+      case row.msgid {
+        Some(m) if m == msgid -> render.mark_row_deleted(row)
+        _ ->
+          case row.id == msgid {
+            True -> render.mark_row_deleted(row)
+            False -> row
+          }
+      }
+    })
+  let model = Model(..model, messages: messages)
+  let editing_this = case model.edit_to {
+    Some(m) if m == msgid -> True
+    _ -> False
+  }
+  let replying_this = case model.reply_to {
+    Some(m) if m == msgid -> True
+    _ -> False
+  }
+  case editing_this || replying_this {
+    True -> clear_reply(model)
+    False -> model
+  }
+}
+
+fn message_is_deleted(rows: List(render.Row), msgid: String) -> Bool {
+  case msgid == "" {
+    True -> False
+    False ->
+      list.any(rows, fn(r) {
+        case r.msgid {
+          Some(id) if id == msgid -> r.deleted
+          _ -> r.id == msgid && r.deleted
+        }
+      })
   }
 }
 
 fn reactions_html(row: render.Row, aliases: List(String)) -> String {
-  case row.kind, row.msgid {
-    render.Msg, Some(msgid) if msgid != "" -> {
+  case row.deleted, row.kind, row.msgid {
+    True, _, _ -> ""
+    False, render.Msg, Some(msgid) if msgid != "" -> {
       let chips =
         list.map(render.reaction_entries(row.reactions), fn(entry) {
           let #(emoji, nicks) = entry
@@ -3646,7 +3873,7 @@ fn reactions_html(row: render.Row, aliases: List(String)) -> String {
       <> render.escape_html(msgid)
       <> "\">+</button></span>"
     }
-    _, _ -> ""
+    _, _, _ -> ""
   }
 }
 
@@ -3816,6 +4043,7 @@ pub fn prepend_history_rows(
 }
 
 /// Copy/union reactions from `live` onto the matching msgid row in `rows`.
+/// Also prefer a live edit body when REST still has the pre-edit text.
 fn union_reactions_into(
   rows: List(render.Row),
   live: render.Row,
@@ -3826,18 +4054,32 @@ fn union_reactions_into(
       list.map(rows, fn(r) {
         case r.msgid {
           Some(id) if id == mid ->
-            render.Row(
-              ..r,
-              reactions: render.merge_reaction_dicts(
-                r.reactions,
-                live.reactions,
-              ),
-              // Keep a live-resolved embed if REST has none yet.
-              embed: case r.embed {
-                Some(e) -> Some(e)
-                None -> live.embed
-              },
-            )
+            case r.deleted || live.deleted {
+              // Soft-delete wins: never revive a deleted row from history merge.
+              True ->
+                case r.deleted {
+                  True -> r
+                  False -> render.mark_row_deleted(r)
+                }
+              False ->
+                render.Row(
+                  ..r,
+                  text: case live.edited {
+                    True -> live.text
+                    False -> r.text
+                  },
+                  edited: r.edited || live.edited,
+                  reactions: render.merge_reaction_dicts(
+                    r.reactions,
+                    live.reactions,
+                  ),
+                  // Keep a live-resolved embed if REST has none yet.
+                  embed: case r.embed {
+                    Some(e) -> Some(e)
+                    None -> live.embed
+                  },
+                )
+            }
           _ -> r
         }
       })
@@ -3903,13 +4145,25 @@ fn row_msgid_known(rows: List(render.Row), row: render.Row) -> Bool {
   }
 }
 
-/// Drop compose-side reply target + banner fields.
+/// Drop compose-side reply/edit target + banner fields.
+///
+/// Clears `compose` only when leaving edit mode (reply cancel keeps the draft
+/// in the client-owned input; the model draft is unused for replies).
 fn clear_reply(model: Model) -> Model {
+  let was_editing = case model.edit_to {
+    Some(mid) if mid != "" -> True
+    _ -> False
+  }
   Model(
     ..model,
     reply_to: None,
+    edit_to: None,
     reply_preview_nick: "",
     reply_preview_text: "",
+    compose: case was_editing {
+      True -> ""
+      False -> model.compose
+    },
   )
 }
 
@@ -3928,10 +4182,23 @@ fn clear_search(model: Model) -> Model {
 // scroll_to_msgid is intentionally preserved across clear_search so a
 // search-hit jump can close the modal and still land on the target row.
 
-/// Build a channel PRIVMSG, optionally tagged with `@+reply=<msgid>`.
-fn privmsg_line(channel: String, text: String, reply_to: Option(String)) -> String {
-  case reply_to {
-    Some(mid) if mid != "" ->
+/// Build a channel PRIVMSG, optionally tagged with reply or edit.
+fn privmsg_line(
+  channel: String,
+  text: String,
+  reply_to: Option(String),
+  edit_to: Option(String),
+) -> String {
+  case edit_to, reply_to {
+    Some(mid), _ if mid != "" ->
+      "@+draft/edit="
+      <> render.escape_tag_value(mid)
+      <> " PRIVMSG "
+      <> channel
+      <> " :"
+      <> text
+      <> "\r\n"
+    _, Some(mid) if mid != "" ->
       "@+reply="
       <> render.escape_tag_value(mid)
       <> " PRIVMSG "
@@ -3939,7 +4206,7 @@ fn privmsg_line(channel: String, text: String, reply_to: Option(String)) -> Stri
       <> " :"
       <> text
       <> "\r\n"
-    _ -> "PRIVMSG " <> channel <> " :" <> text <> "\r\n"
+    _, _ -> "PRIVMSG " <> channel <> " :" <> text <> "\r\n"
   }
 }
 

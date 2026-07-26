@@ -1014,6 +1014,18 @@ function snapshotCompose() {
 function restoreCompose(snap, forceFocus) {
   const input = composeInput();
   if (!input) return;
+  // One-shot prefill for edit start / edit cancel (do not re-apply on later patches).
+  if (pendingComposePrefill !== null && pendingComposePrefill !== undefined) {
+    const prefill = pendingComposePrefill;
+    pendingComposePrefill = null;
+    input.value = prefill;
+    focusCompose();
+    try {
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    } catch (_) {}
+    return;
+  }
   if (snap) {
     // Region morphs remount nodes; re-apply draft + caret when needed.
     if (input.value !== snap.value) input.value = snap.value;
@@ -1027,6 +1039,8 @@ function restoreCompose(snap, forceFocus) {
 }
 
 let pendingComposeFocus = false;
+/** When set (string), next compose restore uses this draft instead of snapshot. */
+let pendingComposePrefill = null;
 let pendingScrollTo = null;
 let searchDebounceTimer = 0;
 let lastPushedSearchQ = null;
@@ -1880,10 +1894,30 @@ function onClick(ev) {
     const li = el.closest('li');
     if (li && li.classList.contains('active')) pushPath('/chat');
   }
-  // Channel open / reply steals focus; re-grab compose after the diff
+  // Channel open / reply / edit steals focus; re-grab compose after the diff
   // (same as web3 focus_compose on navigate / reply).
-  if (name === 'open' || name === 'reply' || name === 'cancel_reply') {
+  if (name === 'open' || name === 'reply' || name === 'edit' || name === 'cancel_reply') {
     pendingComposeFocus = true;
+  }
+  // Prefill compose from the message row when starting an edit.
+  if (name === 'edit') {
+    const row = el.closest('[data-msgid]');
+    const text = row && row.getAttribute('data-text');
+    pendingComposePrefill = text != null ? text : '';
+  }
+  // Confirm before soft-deleting (freeq-app parity).
+  if (name === 'delete') {
+    if (!window.confirm('Delete this message?')) return;
+  }
+  // Cancelling edit clears the draft; cancelling reply keeps typed text.
+  if (name === 'cancel_reply') {
+    const stack = document.getElementById('compose-stack');
+    const mode = stack && stack.dataset ? stack.dataset.composeMode : '';
+    const banner = document.getElementById('reply-banner');
+    const bannerMode = banner && banner.dataset ? banner.dataset.mode : '';
+    if (mode === 'edit' || bannerMode === 'edit') {
+      pendingComposePrefill = '';
+    }
   }
   // New channel → jump to latest when the history patch lands.
   if (name === 'open' || name === 'join' || name === 'go_index' || name === 'part') {
@@ -2046,15 +2080,39 @@ function onKeyDown(ev) {
 
   if (t.name !== 'msg' && t.id !== 'message-input') return;
 
-  // Escape cancels compose-side reply mode (banner).
+  // Escape cancels compose-side reply / edit mode (banner).
   if (ev.key === 'Escape') {
     if (document.getElementById('reply-banner')) {
       ev.preventDefault();
       pendingComposeFocus = true;
+      const stack = document.getElementById('compose-stack');
+      const mode = stack && stack.dataset ? stack.dataset.composeMode : '';
+      const banner = document.getElementById('reply-banner');
+      const bannerMode = banner && banner.dataset ? banner.dataset.mode : '';
+      if (mode === 'edit' || bannerMode === 'edit') {
+        pendingComposePrefill = '';
+      }
       pushEvent('cancel_reply', '');
     }
     tabCycle = null;
     return;
+  }
+
+  // ArrowUp on empty compose: edit last own message (freeq-app / Slack style).
+  if (ev.key === 'ArrowUp' && !(t.value || '').trim()) {
+    const ownRows = document.querySelectorAll('#messages .row.own.msg[data-msgid], #messages .row.own[data-msgid]');
+    if (ownRows.length) {
+      const last = ownRows[ownRows.length - 1];
+      const mid = last.getAttribute('data-msgid') || '';
+      if (mid) {
+        ev.preventDefault();
+        pendingComposeFocus = true;
+        pendingComposePrefill = last.getAttribute('data-text') || '';
+        pushEvent('edit', 'msgid=' + escapeLsField(mid));
+        tabCycle = null;
+        return;
+      }
+    }
   }
 
   if (ev.key !== 'Tab') {
