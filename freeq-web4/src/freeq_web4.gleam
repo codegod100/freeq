@@ -1391,6 +1391,9 @@ let channelStickUntil = 0;
 // Poll while stick intent is on — catches late layout growth (avatars/fonts)
 // that does not fire a Lightspeed patch or scroll event.
 let stickPollTimer = 0;
+// Cold open: first Diff is spinner-only; wait for REST history fill before
+// the multi-timer scroll cascade so we do not jump twice (empty then body).
+let awaitingHistoryFill = false;
 
 function messagesEl() {
   return document.getElementById('messages');
@@ -1472,7 +1475,8 @@ function maybeStickScrollToEnd() {
 }
 
 /** Reset stick/FAB state when the open channel (or system buffer) changes. */
-function resetScrollForChannelSwitch(seekingMessage) {
+function resetScrollForChannelSwitch(seekingMessage, opts) {
+  const soft = !!(opts && opts.soft);
   clearLoadOlderPending();
   hideHistoryLoading(messagesEl());
   newMsgCount = 0;
@@ -1487,12 +1491,20 @@ function resetScrollForChannelSwitch(seekingMessage) {
   if (seekingMessage) {
     stickToBottom = false;
     channelStickUntil = 0;
+    awaitingHistoryFill = false;
     clearStickPoll();
   } else {
     stickToBottom = true;
-    // Hold stick through avatar/embed/font settle after stream replace.
-    channelStickUntil = Date.now() + 2500;
-    startStickPoll(3500);
+    // Soft = spinner-only cold open: hold stick intent without the multi-timer
+    // cascade (history fill will call scrollMessagesToEndSoon once).
+    if (soft) {
+      channelStickUntil = Date.now() + 4000;
+      // Light poll only — do not reassert-spam while the pane is empty.
+      clearStickPoll();
+    } else {
+      channelStickUntil = Date.now() + 2500;
+      startStickPoll(3500);
+    }
   }
   updateJumpBottomUi();
 }
@@ -2005,9 +2017,15 @@ function onFrame(text) {
     const hasRowsAfter = !!(
       msgs && msgs.querySelector(':scope > .row[data-msgid]')
     );
-    // Same data-channel, empty pane → full history (click #freeq race).
+    // Same data-channel, empty/spinner pane → full history (cold open REST).
     const historyJustFilled =
-      !channelChanged && !hadRowsBefore && hasRowsAfter;
+      !channelChanged && (!hadRowsBefore || awaitingHistoryFill) && hasRowsAfter;
+    // Spinner-only first paint for a new channel (no rows yet).
+    const loadingOnlyPaint =
+      channelChanged &&
+      !hasRowsAfter &&
+      msgs &&
+      msgs.dataset.historyLoading === '1';
     if (channelChanged) {
       lastMessagesChannel = chAfter;
     }
@@ -2016,28 +2034,38 @@ function onFrame(text) {
       if (msgs.dataset.scrollToMsgid) {
         pendingScrollTo = msgs.dataset.scrollToMsgid;
         stickToBottom = false;
+        awaitingHistoryFill = false;
       }
       if (channelChanged) {
-        // New stream: jump to latest unless we are seeking a specific msgid.
-        resetScrollForChannelSwitch(!!pendingScrollTo);
+        // New stream: set stick intent. Soft when spinner-only so we do not
+        // run the multi-timer scroll cascade before REST body lands.
+        resetScrollForChannelSwitch(!!pendingScrollTo, {
+          soft: loadingOnlyPaint && !pendingScrollTo,
+        });
+        awaitingHistoryFill = loadingOnlyPaint && !pendingScrollTo;
         savedScroll = null;
       } else if (historyJustFilled && !pendingScrollTo) {
-        // History REST landed after open's empty paint — treat like a switch.
+        // History REST landed after open's spinner paint — ONE bottom cascade.
         stickToBottom = true;
-        channelStickUntil = Date.now() + 2000;
+        awaitingHistoryFill = false;
         savedScroll = null;
       }
       if (pendingScrollTo) {
         // Do not yank back to bottom while seeking a target.
         stickToBottom = false;
         channelStickUntil = 0;
+        awaitingHistoryFill = false;
       } else if (savedScroll && !channelChanged && !historyJustFilled) {
         msgs.scrollTop = msgs.scrollHeight - savedScroll.h + savedScroll.t;
-      } else if (channelChanged || historyJustFilled) {
-        // Stream replace / first history page lands at top until we force
-        // bottom. Use the longer reassert path — 80ms is not enough for tall
-        // history + avatars (#freeq).
+      } else if (historyJustFilled) {
+        // Contentful first body after cold open — full settle cascade once.
         scrollMessagesToEndSoon();
+      } else if (channelChanged && !awaitingHistoryFill) {
+        // Cache hit / system with rows already — settle cascade once.
+        scrollMessagesToEndSoon();
+      } else if (channelChanged && awaitingHistoryFill) {
+        // Spinner paint only — single clamp, no rAF/timer cascade.
+        scrollMessagesToEnd();
       } else if (stickToBottom || isChannelStickLocked()) {
         // One clamp only — restarting scrollMessagesToEndSoon on every
         // avatar/react patch fights the user and restarts timers forever.
@@ -2058,6 +2086,7 @@ function onFrame(text) {
         !pendingScrollTo &&
         !channelChanged &&
         !historyJustFilled &&
+        !awaitingHistoryFill &&
         msgs.scrollTop <= 48 &&
         msgs.dataset.historyLoading !== '1'
       ) {
@@ -2074,9 +2103,13 @@ function onFrame(text) {
     const tBeforeSep = msgsAfter ? msgsAfter.scrollTop : 0;
     localizeTimes();
     if (msgsAfter && !pendingScrollTo) {
-      if (channelChanged || historyJustFilled) {
-        // Date seps just changed height — keep reasserting (same as paint).
-        scrollMessagesToEndSoon();
+      if (historyJustFilled || (channelChanged && !awaitingHistoryFill)) {
+        // Date seps just grew contentful paint — one clamp (Soon already
+        // running from above; do not restart the cascade).
+        if (stickToBottom || isChannelStickLocked()) scrollMessagesToEnd();
+      } else if (channelChanged && awaitingHistoryFill) {
+        // Still spinner — keep bottom without cascade restart.
+        scrollMessagesToEnd();
       } else if (stickToBottom || isChannelStickLocked()) {
         stickToBottom = true;
         scrollMessagesToEnd();
@@ -2252,11 +2285,13 @@ function onClick(ev) {
       pendingComposePrefill = '';
     }
   }
-  // New channel → jump to latest when the history patch lands.
-  // data-channel on the messages region also detects the switch (popstate,
-  // programatic open); this sets intent early so the first paint sticks.
+  // New channel → stick intent early; cold opens wait for history Diff
+  // before the multi-timer scroll cascade (avoids empty→body double jump).
   if (name === 'open' || name === 'join' || name === 'go_index' || name === 'part') {
-    resetScrollForChannelSwitch(false);
+    const soft = name === 'open' || name === 'join';
+    resetScrollForChannelSwitch(false, { soft: soft });
+    awaitingHistoryFill = soft;
+    if (name === 'go_index' || name === 'part') awaitingHistoryFill = false;
   }
   const payload = el.getAttribute('data-ls-payload') || '';
   pushEvent(name, payload);
@@ -2273,7 +2308,8 @@ function onSubmit(ev) {
     const path = channelPathFromInput(input && input.value);
     if (path) pushPath(path);
     pendingComposeFocus = true;
-    resetScrollForChannelSwitch(false);
+    resetScrollForChannelSwitch(false, { soft: true });
+    awaitingHistoryFill = true;
   }
   pushEvent(name, formPayload(form));
   if (name === 'send' || form.id === 'send-form') {
@@ -2291,9 +2327,11 @@ function onSubmit(ev) {
 function onPopState() {
   const path = location.pathname || '/chat';
   ROOT.dataset.lsRoute = path;
-  // History navigation is a channel switch — land on latest (unless a
-  // search jump sets data-scroll-to-msgid on the next paint).
-  resetScrollForChannelSwitch(false);
+  // History navigation is a channel switch — soft until body lands when
+  // opening a room (same cold-open path as sidebar click).
+  const softRoom = path.indexOf('/chat/') === 0 && path !== '/chat/' && !path.endsWith('/system');
+  resetScrollForChannelSwitch(false, { soft: softRoom });
+  awaitingHistoryFill = softRoom;
   if (path === '/chat' || path === '/chat/' || path === '/') {
     pushEvent('go_index', '');
     return;
