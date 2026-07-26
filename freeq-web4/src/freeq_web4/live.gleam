@@ -5,6 +5,7 @@
 //// Fine-grained region patches keep the shell responsive.
 
 import freeq_web4/config
+import freeq_web4/identity
 import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/ls_form
@@ -91,10 +92,9 @@ pub type Model {
     status: String,
     /// Last error / system banner.
     flash: String,
-    /// AT Protocol identity (after OAuth + SASL).
-    authenticated: Bool,
-    auth_handle: String,
-    auth_did: String,
+    /// AT Protocol wire identity (`Guest` | `AwaitingSasl` | `Bound` | `NeedsReauth`).
+    /// Only `Bound` is signed-in for UI, uploads, and private-channel policy.
+    identity: identity.Identity,
     /// freeq-server session bearer from API-BEARER NOTICE (post-SASL).
     api_bearer: Option(String),
     /// In an AV call (media panel visible).
@@ -235,8 +235,8 @@ pub type Msg {
   SetTopicText(String)
   /// Server: flash/status.
   SetFlash(String)
-  /// Server: OAuth credentials loaded / SASL identity.
-  SetAuth(authenticated: Bool, handle: String, did: String)
+  /// Server: replace identity machine state (mount / SASL / reauth).
+  SetIdentity(identity.Identity)
   /// Server: API-BEARER from freeq-server after SASL.
   SetApiBearer(String)
   /// Browser: start voice call on current channel.
@@ -386,9 +386,7 @@ fn mount(
       reply_preview_text: "",
       status: "connecting…",
       flash: "",
-      authenticated: False,
-      auth_handle: "",
-      auth_did: "",
+      identity: identity.Guest,
       api_bearer: None,
       av_active: False,
       av_call_present: False,
@@ -729,32 +727,37 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
 
     SetFlash(flash) -> #(Model(..model, flash: flash), NoEffect)
 
-    SetAuth(authenticated, handle, did) -> {
-      let nick = case authenticated && handle != "" {
-        True -> render.sanitize_nick(handle)
-        False -> model.nick
+    SetIdentity(next_id) -> {
+      let handle = identity.handle(next_id)
+      let did = identity.did(next_id)
+      let nick = case identity.is_bound(next_id), handle {
+        True, h if h != "" -> render.sanitize_nick(h)
+        _, _ -> model.nick
       }
-      let next =
-        Model(
-          ..model,
-          authenticated: authenticated,
-          auth_handle: handle,
-          auth_did: did,
-          nick: nick,
-        )
-      let next = case authenticated, did {
+      let next = Model(..model, identity: next_id, nick: nick)
+      let next = case identity.is_bound(next_id), did {
         True, d if d != "" -> learn_nick_did(next, nick, d)
         _, _ -> next
       }
-      let effect = case authenticated, did {
+      // Surface phase flash for AwaitingSasl / NeedsReauth; clear on Bound.
+      let next = case identity.status_flash(next_id) {
+        "" ->
+          case next_id {
+            identity.Bound(_, _) -> Model(..next, flash: "")
+            _ -> next
+          }
+        msg -> Model(..next, flash: msg)
+      }
+      let effect = case identity.is_bound(next_id), did {
         True, d if d != "" -> ResolveAvatars([d])
         _, _ -> NoEffect
       }
       #(next, effect)
     }
 
+    // Bearer alone must never flip "signed in" — only SASL Bound does.
     SetApiBearer(bearer) -> #(
-      Model(..model, api_bearer: Some(bearer), authenticated: True),
+      Model(..model, api_bearer: Some(bearer)),
       NoEffect,
     )
 
@@ -1561,7 +1564,7 @@ fn toggle_reaction(
 }
 
 fn my_reaction_aliases(model: Model) -> List(String) {
-  [model.nick, model.auth_handle]
+  [model.nick, identity.handle(model.identity)]
   |> list.filter(fn(n) { string.trim(n) != "" })
   |> list.map(string.lowercase)
   |> list.unique
@@ -1723,7 +1726,7 @@ fn av_actor_is_self(model: Model, actor: String) -> Bool {
     a -> {
       let a = string.lowercase(a)
       let candidates =
-        [model.nick, model.auth_handle]
+        [model.nick, identity.handle(model.identity)]
         |> list.filter(fn(n) { n != "" })
         |> list.map(string.lowercase)
       list.contains(candidates, a)
@@ -1734,7 +1737,7 @@ fn av_actor_is_self(model: Model, actor: String) -> Bool {
 fn apply_line(model: Model, line: String) -> #(Model, Effect) {
   // AV token (directed to us) — preferred MoQ JWT path for guests + SASL.
   let own_nicks =
-    [model.nick, model.auth_handle]
+    [model.nick, identity.handle(model.identity)]
     |> list.filter(fn(n) { n != "" })
   case render.parse_av_token_tagmsg(line, own_nicks) {
     Some(#(sid, token)) if token != "" -> {
@@ -1925,11 +1928,23 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                   <> new_nick
                   <> " — sign in to reclaim your handle",
                 )
+              let handle = identity.handle(model.identity)
+              let did = identity.did(model.identity)
+              let next_id = case handle {
+                "" -> identity.Guest
+                h ->
+                  identity.NeedsReauth(
+                    h,
+                    did,
+                    "nick reassigned to " <> new_nick,
+                  )
+              }
               #(
                 Model(
                   ..model,
+                  identity: next_id,
                   flash: "Signed out of identity — click Sign in to reclaim "
-                    <> case model.auth_handle {
+                    <> case handle {
                       "" -> "your handle"
                       h -> h
                     },
@@ -2651,7 +2666,7 @@ fn resolve_nick_did(model: Model, nick: String) -> Option(String) {
   case dict.get(model.nick_dids, key) {
     Ok(d) -> Some(d)
     Error(_) ->
-      case key == string.lowercase(model.nick), model.auth_did {
+      case key == string.lowercase(model.nick), identity.did(model.identity) {
         True, d if d != "" -> Some(d)
         _, _ ->
           // freeq nicks from handles keep the domain (e.g. chadfowler.com).
@@ -3520,7 +3535,7 @@ fn av_region(model: Model) -> String {
       <> "\" data-camera=\""
       <> bool_attr(model.av_camera)
       <> "\" data-authenticated=\""
-      <> bool_attr(model.authenticated)
+      <> bool_attr(identity.is_bound(model.identity))
       <> "\" data-av-origin=\""
       <> render.escape_html(config.av_origin())
       <> "\">"
@@ -3582,23 +3597,19 @@ fn bool_attr(b: Bool) -> String {
 }
 
 fn auth_badge(model: Model) -> String {
-  case model.authenticated {
-    True -> {
-      let label = case model.auth_handle {
-        "" -> model.nick
-        h -> h
-      }
-      "<span class=\"auth-badge signed-in\" title=\""
-      <> render.escape_html(model.auth_did)
-      <> "\">👤 "
-      <> render.escape_html(label)
-      <> "</span>"
-    }
-    False ->
-      "<span class=\"auth-badge guest\">👤 "
-      <> render.escape_html(model.nick)
-      <> "</span>"
+  let label = identity.display_label(model.identity, model.nick)
+  let class = identity.badge_class(model.identity)
+  let title = case identity.did(model.identity) {
+    "" -> ""
+    d -> " title=\"" <> render.escape_html(d) <> "\""
   }
+  "<span class=\"auth-badge "
+  <> class
+  <> "\""
+  <> title
+  <> ">👤 "
+  <> render.escape_html(label)
+  <> "</span>"
 }
 
 fn sidebar_region(model: Model) -> String {
@@ -3697,30 +3708,27 @@ fn sidebar_region(model: Model) -> String {
 }
 
 fn user_handle_block(model: Model) -> String {
-  case model.authenticated {
-    True -> {
-      let label = case model.auth_handle {
-        "" -> model.nick
-        h -> h
-      }
-      "<div class=\"user-handle signed-in\" id=\"user-handle\" title=\""
-      <> render.escape_html(model.auth_did)
-      <> "\">👤 "
-      <> render.escape_html(label)
-      <> "</div>"
-    }
-    False ->
-      "<div class=\"user-handle guest\" id=\"user-handle\">👤 "
-      <> render.escape_html(model.nick)
-      <> "</div>"
+  let label = identity.display_label(model.identity, model.nick)
+  let class = identity.badge_class(model.identity)
+  let title = case identity.did(model.identity) {
+    "" -> ""
+    d -> " title=\"" <> render.escape_html(d) <> "\""
   }
+  "<div class=\"user-handle "
+  <> class
+  <> "\" id=\"user-handle\""
+  <> title
+  <> ">👤 "
+  <> render.escape_html(label)
+  <> "</div>"
 }
 
 fn auth_action(model: Model) -> String {
-  case model.authenticated {
-    True -> "<a href=\"/logout\" class=\"btn-link\">Sign out</a>"
-    False -> "<a href=\"/login\" class=\"btn-link\">Sign in</a>"
-  }
+  "<a href=\""
+  <> identity.action_href(model.identity)
+  <> "\" class=\"btn-link\">"
+  <> identity.action_label(model.identity)
+  <> "</a>"
 }
 
 fn main_region(model: Model) -> String {
@@ -3944,8 +3952,8 @@ fn compose_region(model: Model) -> String {
     _ -> False
   }
   let ch = option.unwrap(model.channel, "")
-  let auth_did = case model.authenticated {
-    True -> model.auth_did
+  let auth_did = case identity.is_bound(model.identity) {
+    True -> identity.did(model.identity)
     False -> ""
   }
   let banner = reply_banner_html(model)
@@ -4574,9 +4582,14 @@ pub fn with_history_loading(model: Model, loading: Bool) -> Model {
 }
 
 /// Restore a previously persisted freeq-server API-BEARER without flipping
-/// `authenticated` (SASL still has to succeed on the wire).
+/// identity to Bound (SASL still has to succeed on the wire).
 pub fn with_api_bearer(model: Model, bearer: Option(String)) -> Model {
   Model(..model, api_bearer: bearer)
+}
+
+/// Convenience: is this LiveView SASL-bound?
+pub fn is_authenticated(model: Model) -> Bool {
+  identity.is_bound(model.identity)
 }
 
 /// Merge path-seeded channels with a persisted list (path first, then rest).

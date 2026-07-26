@@ -6,6 +6,7 @@ import freeq_web4/atproto/oauth_session.{OAuthSession}
 import freeq_web4/atproto/sasl
 import freeq_web4/atproto/util as atutil
 import freeq_web4/config
+import freeq_web4/identity
 import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/live
@@ -611,11 +612,11 @@ pub fn sidebar_shows_unread_badge_test() {
 pub fn with_api_bearer_test() {
   let model = live.mount_model("/chat/freeq")
   assert model.api_bearer == None
-  assert model.authenticated == False
+  assert live.is_authenticated(model) == False
   let restored = live.with_api_bearer(model, Some("tok-abc"))
-  // Bearer restored for REST; SASL still owns `authenticated`.
+  // Bearer restored for REST; SASL Bound still owns signed-in.
   assert restored.api_bearer == Some("tok-abc")
-  assert restored.authenticated == False
+  assert live.is_authenticated(restored) == False
 }
 
 pub fn merge_history_rows_test() {
@@ -1409,23 +1410,44 @@ pub fn access_still_fresh_jwt_test() {
   assert oauth.access_still_fresh(expired, 120) == False
 }
 
-pub fn set_auth_msg_test() {
+pub fn set_identity_bound_test() {
   let model = live.mount_model("/chat")
   let #(next, _) =
     live.apply(
       model,
-      live.SetAuth(
-        authenticated: True,
-        handle: "alice.bsky.social",
-        did: "did:plc:alice",
-      ),
+      live.SetIdentity(identity.Bound("alice.bsky.social", "did:plc:alice")),
     )
-  assert next.authenticated == True
-  assert next.auth_handle == "alice.bsky.social"
-  assert next.auth_did == "did:plc:alice"
+  assert live.is_authenticated(next) == True
+  assert identity.handle(next.identity) == "alice.bsky.social"
+  assert identity.did(next.identity) == "did:plc:alice"
+  assert identity.badge_class(next.identity) == "signed-in"
   let html = live.initial_html("/chat")
   // SSR shell is guest until LiveView applies auth.
   assert string.contains(html, "Sign in") || string.contains(html, "guest")
+}
+
+pub fn identity_machine_transitions_test() {
+  // Credentials → wire identity.
+  assert identity.from_credentials(identity.NoCredentials) == identity.Guest
+  let awaiting = identity.AwaitingSasl("nandi.uk", "did:plc:n")
+  assert identity.is_bound(awaiting) == False
+  assert identity.badge_class(awaiting) == "pending"
+  let bound = identity.on_sasl_ok(awaiting, "nandi.uk", "did:plc:n")
+  assert bound == identity.Bound("nandi.uk", "did:plc:n")
+  assert identity.is_bound(bound) == True
+  let failed = identity.on_sasl_failed(awaiting, "SASL 904")
+  assert identity.is_bound(failed) == False
+  assert identity.action_href(failed) == "/login?reauth=1"
+  case failed {
+    identity.NeedsReauth("nandi.uk", "did:plc:n", _) -> Nil
+    _ -> panic as "expected NeedsReauth"
+  }
+}
+
+pub fn login_disposition_force_shows_form_test() {
+  // force=True always shows form (no session id → nothing to clear).
+  assert identity.login_disposition("", True) == identity.ShowForm(None)
+  assert identity.login_disposition("", False) == identity.ShowForm(None)
 }
 
 pub fn parse_353_members_test() {

@@ -5,6 +5,7 @@ import freeq_web4/atproto/oauth
 import freeq_web4/atproto/util as atutil
 import freeq_web4/config
 import freeq_web4/cookie_session
+import freeq_web4/identity
 import freeq_web4/pending_oauth_store
 import freeq_web4/session_store
 import gleam/bytes_tree
@@ -41,18 +42,26 @@ fn login_form(
   flash: Option(#(String, String)),
 ) -> response.Response(mist.ResponseData) {
   let sid = cookie_session.ensure_id(req)
-  let flash_html = case flash {
-    None -> ""
-    Some(#("error", msg)) ->
+  // `?reauth=1` / `?force=1` always shows the form and clears dead sessions.
+  let force =
+    query_param(req, "reauth") == "1" || query_param(req, "force") == "1"
+  let disposition = identity.login_disposition(sid, force)
+  let flash_html = case flash, disposition {
+    Some(#("error", msg)), _ ->
       "<div class=\"flash error\">" <> escape(msg) <> "</div>"
-    Some(#("info", msg)) ->
+    Some(#("info", msg)), _ ->
       "<div class=\"flash info\">" <> escape(msg) <> "</div>"
-    Some(#(_, msg)) -> "<div class=\"flash\">" <> escape(msg) <> "</div>"
+    Some(#(_, msg)), _ -> "<div class=\"flash\">" <> escape(msg) <> "</div>"
+    None, identity.ShowForm(Some(msg)) ->
+      "<div class=\"flash error\">" <> escape(msg) <> "</div>"
+    None, identity.ShowForm(None) | None, identity.RedirectChat(_) -> ""
   }
-  // Already signed in?
-  let body = case session_store.load(sid) {
-    Ok(oauth) -> redirect_html("/chat", "Signed in as " <> oauth.handle)
-    Error(_) -> login_html(flash_html)
+  let body = case disposition {
+    // Only bounce when credentials classify as Valid (fresh/refreshed AT).
+    // Stale disk sessions never redirect — that was the login bounce bug.
+    identity.RedirectChat(handle) ->
+      redirect_html("/chat", "Signed in as " <> handle)
+    identity.ShowForm(_) -> login_html(flash_html)
   }
   let resp =
     response.new(200)

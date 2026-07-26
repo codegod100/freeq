@@ -6,8 +6,8 @@
 //// 3. Upstream IRC lines → live.apply(PushLine) → Diff patches
 //// 4. Effects: EnsureUpstream / IrcSend / FetchHistory / FetchChannels
 
-import freeq_web4/atproto/oauth
 import freeq_web4/atproto/oauth_session.{type OAuthSession}
+import freeq_web4/identity
 import freeq_web4/irc/render
 import freeq_web4/irc/upstream
 import freeq_web4/link_preview
@@ -112,25 +112,23 @@ pub fn mount(
   // history (#freeq) before the new IRC connection finishes SASL.
   let model =
     live.with_api_bearer(model, session_store.load_api_bearer(session_id))
-  let oauth = case session_store.load(session_id) {
-    Ok(s) -> Some(s)
-    Error(_) -> None
-  }
-  let model = case oauth {
-    Some(s) -> {
-      let #(m, _) =
-        live.apply(
-          model,
-          live.SetAuth(authenticated: False, handle: s.handle, did: s.did),
-        )
-      // Credentials present — show handle as pending SASL (not yet authenticated
-      // on the wire). Nick will update on Ready/SASL.
-      let #(m, _) =
-        live.apply(m, live.SetFlash("Signing in as " <> s.handle <> "…"))
-      m
+  // Classify disk OAuth via the credentials machine (refresh if needed).
+  // Stale sessions are cleared so /login no longer bounce-loops as “signed in”.
+  let credentials = identity.resolve_credentials(session_id)
+  let credentials = case credentials {
+    identity.Stale(_, _) -> {
+      session_store.remove(session_id)
+      identity.NoCredentials
     }
-    None -> model
+    identity.Valid(s) -> {
+      identity.persist_if_valid(session_id, credentials)
+      identity.Valid(s)
+    }
+    identity.NoCredentials -> identity.NoCredentials
   }
+  let oauth = identity.oauth_for_upstream(credentials)
+  let next_id = identity.from_credentials(credentials)
+  let #(model, _) = live.apply(model, live.SetIdentity(next_id))
   let session =
     Session(
       model: model,
@@ -593,50 +591,31 @@ fn apply_upstream(
     upstream.ConnState(upstream.Disconnected) ->
       live.apply(before, live.SetWs(live.WsDisconnected))
     upstream.Ready(nick) -> live.apply(before, live.SetNick(nick))
-    upstream.Sasl(upstream.SaslPending) ->
-      live.apply(before, live.SetFlash("SASL…"))
+    upstream.Sasl(upstream.SaslPending) -> {
+      let next_id = identity.on_sasl_pending(before.identity)
+      live.apply(before, live.SetIdentity(next_id))
+    }
     upstream.Sasl(upstream.SaslOk) -> {
       let handle = case session.oauth {
         Some(s) -> s.handle
-        None -> before.auth_handle
+        None -> identity.handle(before.identity)
       }
       let did = case session.oauth {
         Some(s) -> s.did
-        None -> before.auth_did
+        None -> identity.did(before.identity)
       }
-      let #(m, _) =
-        live.apply(
-          before,
-          live.SetAuth(authenticated: True, handle: handle, did: did),
-        )
-      live.apply(m, live.SetFlash(""))
+      let next_id = identity.on_sasl_ok(before.identity, handle, did)
+      live.apply(before, live.SetIdentity(next_id))
     }
     upstream.Sasl(upstream.SaslFailed) -> {
-      // Keep handle in auth_handle for the re-login prompt, but never look
-      // signed-in. Private rooms (#freeq) require a real SASL bind.
-      let handle = case session.oauth {
-        Some(s) -> s.handle
-        None -> before.auth_handle
-      }
-      let msg = case handle {
-        "" -> "Sign-in failed — continuing as guest. Click Sign in to retry."
-        h ->
-          "Sign-in failed for "
-          <> h
-          <> " — continuing as guest. Click Sign in to reconnect."
-      }
-      let #(m, _) = live.apply(before, live.SetFlash(msg))
-      let #(m, _) =
-        live.apply(
-          m,
-          live.SetAuth(authenticated: False, handle: handle, did: before.auth_did),
-        )
-      // Surface in System so the banner is not the only signal.
+      // NeedsReauth — never Bound. Private rooms require a real SASL bind.
+      let next_id =
+        identity.on_sasl_failed(before.identity, "SASL authentication failed")
+      let #(m, _) = live.apply(before, live.SetIdentity(next_id))
+      let msg = identity.status_flash(next_id)
       live.apply(
         m,
-        live.PushLine(
-          ":freeq-web4 NOTICE * :" <> msg,
-        ),
+        live.PushLine(":freeq-web4 NOTICE * :" <> msg),
       )
     }
     upstream.ApiBearer(bearer) -> {
@@ -820,7 +799,7 @@ fn handle_join_failure(session: Session, line: String) -> Session {
     None -> session
     Some(#(ch, _numeric, trailing)) -> {
       let needs_policy =
-        session.model.authenticated
+        identity.is_bound(session.model.identity)
         && string.contains(string.lowercase(trailing), "policy acceptance")
       case needs_policy, session.upstream {
         True, Some(handle) -> {
@@ -1131,46 +1110,53 @@ fn ensure_upstream(
   case session.upstream {
     Some(_) -> session
     None -> {
-      // Always re-read disk so a peer tab's refresh-token rotation is picked up
-      // before we open another SASL connection with a dead RT.
-      let oauth = case session_store.load(session.session_id) {
-        Ok(s) -> Some(s)
-        Error(_) -> session.oauth
+      // Re-classify credentials (refresh if needed). Never open SASL with Stale.
+      let credentials = identity.resolve_credentials(session.session_id)
+      let #(credentials, model) = case credentials {
+        identity.Valid(s) -> {
+          identity.persist_if_valid(session.session_id, credentials)
+          logging.log(
+            logging.Info,
+            "OAuth credentials valid for IRC: " <> s.handle,
+          )
+          #(credentials, session.model)
+        }
+        identity.Stale(s, reason) -> {
+          logging.log(
+            logging.Warning,
+            "OAuth stale for "
+              <> s.handle
+              <> ": "
+              <> reason
+              <> " — guest IRC, needs reauth",
+          )
+          session_store.remove(session.session_id)
+          let next_id =
+            identity.NeedsReauth(s.handle, s.did, reason)
+          let #(model, _) =
+            live.apply(session.model, live.SetIdentity(next_id))
+          #(identity.NoCredentials, model)
+        }
+        identity.NoCredentials -> #(identity.NoCredentials, session.model)
       }
-      // Proactive refresh when access is expired — SASL verifies the AT via
-      // PDS getSession; a stale access token fails 904 and leaves the user as
-      // Guest on private channels (#freeq) with silent PRIVMSG drops.
-      let oauth = case oauth {
-        None -> None
+      let oauth = identity.oauth_for_upstream(credentials)
+      // Align LiveView identity with what we will open (AwaitingSasl if Valid).
+      let model = case oauth {
         Some(s) ->
-          case oauth.access_still_fresh(s, 120) {
-            True -> Some(s)
-            False ->
-              case oauth.refresh(s) {
-                Ok(next) -> {
-                  logging.log(
-                    logging.Info,
-                    "OAuth refreshed before IRC for " <> next.handle,
-                  )
-                  session_store.save(session.session_id, next)
-                  Some(next)
-                }
-                Error(reason) -> {
-                  logging.log(
-                    logging.Warning,
-                    "OAuth pre-connect refresh failed for "
-                      <> s.handle
-                      <> ": "
-                      <> reason
-                      <> " — SASL may fail (re-login)",
-                  )
-                  // Keep stale session so SASL can still try / show failure UI.
-                  Some(s)
-                }
-              }
+          case model.identity {
+            identity.Guest | identity.NeedsReauth(_, _, _) -> {
+              let #(m, _) =
+                live.apply(
+                  model,
+                  live.SetIdentity(identity.AwaitingSasl(s.handle, s.did)),
+                )
+              m
+            }
+            identity.AwaitingSasl(_, _) | identity.Bound(_, _) -> model
           }
+        None -> model
       }
-      let session = Session(..session, oauth: oauth)
+      let session = Session(..session, oauth: oauth, model: model)
       let auth = case oauth {
         Some(s) -> upstream.OAuth(s)
         None -> upstream.Guest
