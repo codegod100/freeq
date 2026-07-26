@@ -156,7 +156,7 @@ fn bootstrap(session: Session) -> Session {
   let #(model, _) = live.apply(session.model, live.SetAllChannels(channels))
   let session = Session(..session, model: model)
 
-  case session.model.channel {
+  case live.current_channel(session.model) {
     Some(ch) -> {
       let extras = list.filter(session.model.my_channels, fn(c) { c != ch })
       let session = ensure_upstream(session, ch, extras)
@@ -349,7 +349,7 @@ fn apply_client_event(
 }
 
 fn after_join(session: Session) -> Session {
-  case session.model.channel {
+  case live.current_channel(session.model) {
     Some(ch) -> {
       // IRC first so membership / topic / NAMES start immediately. REST
       // history + AV probe run off-process so the channel-switch Diff is not
@@ -365,7 +365,7 @@ fn after_join(session: Session) -> Session {
           upstream.send(handle, "NAMES " <> ch <> "\r\n")
           // Explicit TOPIC query when already joined (no 332 on re-JOIN).
           upstream.send(handle, "TOPIC " <> ch <> "\r\n")
-          case session.model.history_loading {
+          case live.history_loading(session.model) {
             // Cache hit: rows already on the model — hydrate reactions now.
             False -> request_chathistory(handle, ch)
             // Cache miss: CHATHISTORY after REST body (apply_rest_channel_open).
@@ -374,7 +374,7 @@ fn after_join(session: Session) -> Session {
         }
         None -> Nil
       }
-      case session.model.history_loading {
+      case live.history_loading(session.model) {
         True -> schedule_channel_open_rest(session, ch)
         False ->
           // Cached page: light AV probe only (no history re-fetch).
@@ -446,7 +446,7 @@ fn apply_rest_channel_open(
   topic: String,
   av_call: Option(Option(rest.ActiveCall)),
 ) -> #(Session, List(String)) {
-  case session.model.channel {
+  case live.current_channel(session.model) {
     Some(current) ->
       case same_channel(current, channel) {
         False -> {
@@ -466,7 +466,7 @@ fn apply_rest_channel_open(
           let before = session.model
           // Cache-hit opens send empty rows + AV only — never wipe restored
           // messages or flip history_exhausted from a dummy SetHistory([]).
-          let need_history = before.history_loading
+          let need_history = live.history_loading(before)
           let #(model, effect) = case need_history {
             True -> live.apply(before, live.SetHistory(rows))
             False -> #(before, live.NoEffect)
@@ -557,7 +557,7 @@ fn backfill_channel_history(
   session: Session,
   bearer: Option(String),
 ) -> Session {
-  case session.model.channel {
+  case live.current_channel(session.model) {
     None -> session
     Some(ch) -> {
       let rows = rest.fetch_history(ch, live.history_page_size, bearer, None)
@@ -626,7 +626,7 @@ fn apply_upstream(
       // empty pane — re-fetch once the bearer lands. If we already have rows
       // (public channel guest fetch), skip the second REST remount; only
       // re-hydrate reaction chips via CHATHISTORY.
-      let need_backfill = case m.messages, m.history_loading {
+      let need_backfill = case m.messages, live.history_loading(m) {
         [], _ -> True
         _, True -> True
         _, _ -> False
@@ -639,13 +639,13 @@ fn apply_upstream(
       let m = session.model
       // REST still omits +freeq.at/reactions; request CHATHISTORY once the
       // body is present (or after backfill just filled it).
-      case session.upstream, m.channel, m.history_loading {
+      case session.upstream, live.current_channel(m), live.history_loading(m) {
         Some(handle), Some(ch), False -> request_chathistory(handle, ch)
         _, _, _ -> Nil
       }
       // Navigate/join often runs FetchActiveCall before SASL finishes; private
       // rooms (e.g. #freeq) 403 without the bearer. Re-probe once it lands.
-      case m.av_active, m.channel {
+      case m.av_active, live.current_channel(m) {
         False, Some(ch) -> {
           let call = rest.probe_active_call(ch, Some(bearer))
           live.apply(m, live.AvProbe(ch, call))
@@ -749,7 +749,7 @@ fn rejoin_and_names(session: Session) -> Session {
   case session.upstream {
     None -> session
     Some(handle) -> {
-      let channels = case session.model.channel {
+      let channels = case live.current_channel(session.model) {
         Some(ch) -> [ch, ..list.filter(session.model.my_channels, fn(c) { c != ch })]
         None -> session.model.my_channels
       }
@@ -765,7 +765,7 @@ fn rejoin_and_names(session: Session) -> Session {
       // Only hydrate reactions once the REST body is on the model. Early
       // CHATHISTORY (while history_loading) has nothing to attach to and
       // races a second request from apply_rest_channel_open — double paint.
-      case session.model.history_loading, session.model.channel {
+      case live.history_loading(session.model), live.current_channel(session.model) {
         False, Some(ch) -> request_chathistory(handle, ch)
         _, _ -> Nil
       }
@@ -784,7 +784,7 @@ fn post_sasl_rejoin(session: Session) -> Session {
       })
       // Same gate as rejoin_and_names: wait for body before reaction hydrate.
       // ApiBearer backfill re-requests CHATHISTORY after it lands rows.
-      case session.model.history_loading, session.model.channel {
+      case live.history_loading(session.model), live.current_channel(session.model) {
         False, Some(ch) -> request_chathistory(handle, ch)
         _, _ -> Nil
       }
@@ -880,7 +880,7 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
           session
         }
         None -> {
-          let primary = case session.model.channel {
+          let primary = case live.current_channel(session.model) {
             Some(ch) -> ch
             None ->
               case session.model.my_channels {
@@ -1207,7 +1207,7 @@ pub fn close(session: Session) -> Nil {
     True, Some(handle) -> {
       let ch = case session.model.av_channel {
         Some(c) -> Some(c)
-        None -> session.model.channel
+        None -> live.current_channel(session.model)
       }
       case ch, session.model.av_session_id {
         Some(c), Some(sid) if sid != "" ->

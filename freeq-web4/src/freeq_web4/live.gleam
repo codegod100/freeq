@@ -9,6 +9,7 @@ import freeq_web4/identity
 import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/ls_form
+import freeq_web4/pane
 import freeq_web4/profiles
 import freeq_web4/rest
 import gleam/bit_array
@@ -70,15 +71,17 @@ pub type ChannelPage {
 /// Full server-side state for one LiveView socket (channel shell + AV).
 pub type Model {
   Model(
-    view: View,
-    /// Canonical channel when view == Channel (e.g. `#freeq`).
-    channel: Option(String),
+    /// Navigation + room membership/history machine (`Directory` | `System` | `Room`).
+    pane: pane.Pane,
+    /// Active room topic (empty on Directory/System).
     topic: String,
     nick: String,
     ws: WsLabel,
     my_channels: List(String),
     all_channels: List(rest.ChannelInfo),
+    /// Active room message stream (empty on Directory/System).
     messages: List(render.Row),
+    /// Active room roster.
     members: List(render.Member),
     compose: String,
     /// Parent msgid when composing a reply (`@+reply=` on send).
@@ -116,10 +119,6 @@ pub type Model {
     react_picker_msgid: Option(String),
     /// Nav bar: inline topic editor open.
     editing_topic: Bool,
-    /// REST scroll-up page in flight (client debounces on this too).
-    history_loading: Bool,
-    /// No older REST page left (`before` returned fewer than a full page).
-    history_exhausted: Bool,
     /// Message search modal open (channel-scoped FTS).
     search_open: Bool,
     /// Current search query string (form / results header).
@@ -146,10 +145,30 @@ pub type Model {
     /// Per-channel page cache (`channel_key` → snapshot). Flip between joined
     /// channels without re-fetching REST history.
     channel_pages: Dict(String, ChannelPage),
-    /// Channels we failed to JOIN (key → trailing reason). Blocks PRIVMSG so
-    /// we never silently drop sends when still on the shell after 477/471/….
-    join_errors: Dict(String, String),
   )
+}
+
+/// Derive legacy View tag from the pane machine (patches / tests).
+pub fn view(model: Model) -> View {
+  case model.pane {
+    pane.Directory -> Index
+    pane.System -> System
+    pane.InRoom(_) -> Channel
+  }
+}
+
+/// Active channel name when `pane` is a Room.
+pub fn current_channel(model: Model) -> Option(String) {
+  pane.channel(model.pane)
+}
+
+/// History spinner / page-in-flight from the pane machine.
+pub fn history_loading(model: Model) -> Bool {
+  pane.history_loading(model.pane)
+}
+
+pub fn history_exhausted(model: Model) -> Bool {
+  pane.history_exhausted(model.pane)
 }
 
 /// Page size for initial + scroll-up REST history fetches.
@@ -357,21 +376,15 @@ fn mount(
     "" -> ctx.route
     p -> p
   }
-  let #(view, channel) = path_to_view(path)
-  let my = case channel {
+  // Deep-link Rooms start Loading so first paint shows the spinner.
+  let initial_pane = pane.from_path(path)
+  let my = case pane.channel(initial_pane) {
     Some(ch) -> [ch]
     None -> []
   }
-  // Channel deep-links need the spinner on first paint (SSR + WS mount).
-  // Bootstrap/async REST used to leave an empty pane until the first Diff.
-  let history_loading = case view, channel {
-    Channel, Some(_) -> True
-    _, _ -> False
-  }
   let model =
     Model(
-      view: view,
-      channel: channel,
+      pane: initial_pane,
       topic: "",
       nick: "guest",
       ws: WsDisconnected,
@@ -399,8 +412,6 @@ fn mount(
       av_token: None,
       react_picker_msgid: None,
       editing_topic: False,
-      history_loading: history_loading,
-      history_exhausted: False,
       search_open: False,
       search_query: "",
       search_results: [],
@@ -412,7 +423,6 @@ fn mount(
       nick_dids: dict.new(),
       avatars: dict.new(),
       channel_pages: dict.new(),
-      join_errors: dict.new(),
     )
   helpers.no_effect(model)
 }
@@ -443,7 +453,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
             // Client-side slash commands (join/op/whois/help/…) — freeq-app parity.
             True -> handle_slash_command(model, text)
             False ->
-              case model.view, model.channel {
+              case view(model), current_channel(model) {
                 System, _ -> #(
                   Model(
                     ..model,
@@ -528,7 +538,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       let my = list.filter(model.my_channels, fn(c) { c != ch })
       // Drop cached page so re-join reloads fresh history.
       let model = drop_channel_page(Model(..model, my_channels: my), ch)
-      let leaving_current = case model.channel {
+      let leaving_current = case current_channel(model) {
         Some(c) -> channels_equal(c, ch)
         None -> False
       }
@@ -538,15 +548,12 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
             clear_search(clear_reply(
               Model(
                 ..model,
-                view: Index,
-                channel: None,
+                pane: pane.directory(),
                 messages: [],
                 members: [],
                 topic: "",
                 react_picker_msgid: None,
                 editing_topic: False,
-                history_loading: False,
-                history_exhausted: False,
               ),
             )),
             ch,
@@ -564,15 +571,12 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         clear_search(clear_reply(
           Model(
             ..model,
-            view: Index,
-            channel: None,
+            pane: pane.directory(),
             messages: [],
             members: [],
             topic: "",
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: False,
-            history_exhausted: False,
           ),
         )),
         FetchChannels,
@@ -590,7 +594,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
 
     SetTopic(raw) -> {
       let topic = string.trim(raw)
-      case model.channel, can_edit_topic(model) {
+      case current_channel(model), can_edit_topic(model) {
         Some(ch), True -> #(
           Model(..model, topic: topic, editing_topic: False),
           IrcSend(["TOPIC " <> ch <> " :" <> topic <> "\r\n"]),
@@ -631,21 +635,17 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       let rows = link_preview.attach_many_cache_only(rows)
       let next = apply_rest_history(model, rows)
       let next = learn_accounts_from_rows(next, next.messages)
+      let exhausted = list.length(rows) < history_page_size
       let next =
-        Model(
-          ..next,
-          history_loading: False,
-          // Full page means more may exist above; short page is the top.
-          history_exhausted: list.length(rows) < history_page_size,
-        )
+        Model(..next, pane: pane.history_ready(next.pane, exhausted))
       #(next, media_warmup_effect(next, next.messages))
     }
 
     LoadOlder -> {
       case
-        model.history_loading,
-        model.history_exhausted,
-        model.channel,
+        history_loading(model),
+        history_exhausted(model),
+        current_channel(model),
         render.oldest_timestamp(model.messages)
       {
         True, _, _, _ -> #(model, NoEffect)
@@ -653,11 +653,11 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
         _, _, None, _ -> #(model, NoEffect)
         _, _, _, None -> #(
           // Nothing to page with (no REST ts yet) — stop spinning forever.
-          Model(..model, history_exhausted: True),
+          Model(..model, pane: pane.history_mark_exhausted(model.pane)),
           NoEffect,
         )
         _, _, Some(ch), Some(before) -> #(
-          Model(..model, history_loading: True),
+          Model(..model, pane: pane.history_start_older(model.pane)),
           FetchOlderHistory(ch, before),
         )
       }
@@ -666,12 +666,12 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     PrependHistory(older) -> {
       let older = link_preview.attach_many_cache_only(older)
       let merged = prepend_history_rows(older, model.messages)
+      let exhausted = list.length(older) < history_page_size
       let next =
         Model(
           ..model,
           messages: merged,
-          history_loading: False,
-          history_exhausted: list.length(older) < history_page_size,
+          pane: pane.history_older_done(model.pane, exhausted),
         )
       let next = learn_accounts_from_rows(next, older)
       #(next, media_warmup_effect(next, older))
@@ -784,7 +784,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     ToggleReaction(msgid, emoji) -> toggle_reaction(model, msgid, emoji)
 
     OpenSearch ->
-      case model.view, model.channel {
+      case view(model), current_channel(model) {
         Channel, Some(_) -> {
           let q = string.trim(model.search_query)
           case string.length(q) < search_min_chars {
@@ -805,7 +805,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
                 search_status: "Searching…",
                 search_results: local_search_hits(model.messages, q),
               ),
-              case model.channel {
+              case current_channel(model) {
                 Some(ch) -> FetchSearch(ch, q)
                 None -> NoEffect
               },
@@ -824,7 +824,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       // Keep raw query for the client-owned input; trim only for FTS / status.
       let raw = query
       let query = string.trim(query)
-      case model.channel {
+      case current_channel(model) {
         None -> #(
           Model(
             ..model,
@@ -897,13 +897,12 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     MergeAroundHistory(rows) -> {
       let rows = link_preview.attach_many_cache_only(rows)
       let merged = merge_rows_chronological(model.messages, rows)
+      let exhausted = list.length(rows) < history_page_size
       let next =
         Model(
           ..model,
           messages: merged,
-          history_loading: False,
-          // Opening a window around an old hit — more history may exist above.
-          history_exhausted: list.length(rows) < history_page_size,
+          pane: pane.history_ready(model.pane, exhausted),
         )
       let next = learn_accounts_from_rows(next, rows)
       #(next, media_warmup_effect(next, rows))
@@ -926,16 +925,13 @@ fn open_system(model: Model) -> #(Model, Effect) {
     clear_search(clear_reply(
       Model(
         ..model,
-        view: System,
-        channel: None,
+        pane: pane.system(),
         messages: [],
         members: [],
         topic: "",
         flash: "",
         react_picker_msgid: None,
         editing_topic: False,
-        history_loading: False,
-        history_exhausted: True,
       ),
     )),
     NoEffect,
@@ -945,32 +941,27 @@ fn open_system(model: Model) -> #(Model, Effect) {
 /// Open a real IRC channel (JOIN + history + optional AV probe).
 ///
 /// Stashes the previous channel page, then either restores a cached page
-/// (instant flip, no REST) or prepares an empty pane with `history_loading`
+/// (instant flip, no REST) or prepares an empty pane with history Loading
 /// so the session host can Diff immediately. Host `after_join` always runs
 /// JOIN/NAMES/TOPIC; REST history is only scheduled on a cache miss.
 fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
   let ch = render.canonical_channel(bare)
   // Same channel already open — no-op (avoid wipe + re-fetch).
-  let already =
-    case model.view, model.channel {
-      Channel, Some(c) -> channels_equal(c, ch)
-      _, _ -> False
-    }
-  case already {
+  case pane.same_room(model.pane, ch) {
     True -> #(model, NoEffect)
     False -> open_channel_navigate(model, ch)
   }
 }
 
 fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
+  // Capture previous channel before stash for AV handoff.
+  let prev_channel = current_channel(model)
   let model = stash_current_page(model)
   let my = list_unique_append(model.my_channels, ch)
   let dir_topic = rest.topic_for(model.all_channels, ch)
   let cached = get_channel_page(model, ch)
 
-  let #(messages, members, topic, history_loading, history_exhausted) = case
-    cached
-  {
+  let #(messages, members, topic, next_pane) = case cached {
     Some(page) -> #(
       page.messages,
       page.members,
@@ -978,10 +969,9 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
         "" -> dir_topic
         t -> t
       },
-      False,
-      page.history_exhausted,
+      pane.open_cached(ch, page.history_exhausted),
     )
-    None -> #([], [], dir_topic, True, False)
+    None -> #([], [], dir_topic, pane.open_cold(ch))
   }
 
   let model = case model.av_active {
@@ -990,8 +980,7 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
         clear_search(clear_reply(
           Model(
             ..model,
-            view: Channel,
-            channel: Some(ch),
+            pane: next_pane,
             my_channels: my,
             messages: messages,
             members: members,
@@ -999,11 +988,9 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
             flash: "",
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: history_loading,
-            history_exhausted: history_exhausted,
             av_channel: case model.av_channel {
               Some(_) -> model.av_channel
-              None -> model.channel
+              None -> prev_channel
             },
           ),
         )),
@@ -1014,8 +1001,7 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
         clear_search(clear_reply(
           Model(
             ..model,
-            view: Channel,
-            channel: Some(ch),
+            pane: next_pane,
             my_channels: my,
             messages: messages,
             members: members,
@@ -1031,16 +1017,11 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
             av_token: None,
             react_picker_msgid: None,
             editing_topic: False,
-            history_loading: history_loading,
-            history_exhausted: history_exhausted,
           ),
         )),
         ch,
       )
   }
-  // Clear a prior join block so this open can re-attempt JOIN (e.g. after
-  // sign-in). Fresh 477/404 will re-insert into join_errors.
-  let model = clear_join_error(model, ch)
   // Host: EnsureUpstream + after_join (IRC JOIN/NAMES; REST only if loading).
   #(model, EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })))
 }
@@ -1064,7 +1045,7 @@ fn handle_slash_command(model: Model, text: String) -> #(Model, Effect) {
   let cmd = string.lowercase(cmd_raw)
   let model = Model(..model, compose: "", flash: "")
   let model = append_system_message(model, "» /" <> string.trim(rest))
-  let current = option.unwrap(model.channel, "")
+  let current = option.unwrap(current_channel(model), "")
 
   case cmd {
     "help" | "commands" -> #(append_help(model), NoEffect)
@@ -1399,9 +1380,9 @@ fn jump_to_msg(
       case message_in_list(model.messages, msgid) {
         True -> #(model, NoEffect)
         False ->
-          case model.channel, ts {
+          case current_channel(model), ts {
             Some(ch), Some(t) if t > 0 -> #(
-              Model(..model, history_loading: True),
+              Model(..model, pane: pane.history_start_older(model.pane)),
               // `before` is exclusive: t+1 includes the hit at timestamp t.
               FetchAround(ch, t + 1),
             )
@@ -1409,11 +1390,11 @@ fn jump_to_msg(
               // No ts — page upward from current oldest (client may retry).
               case render.oldest_timestamp(model.messages) {
                 Some(before) -> #(
-                  Model(..model, history_loading: True),
+                  Model(..model, pane: pane.history_start_older(model.pane)),
                   FetchOlderHistory(ch, before),
                 )
                 None -> #(
-                  Model(..model, history_loading: True),
+                  Model(..model, pane: pane.open_cold(ch)),
                   FetchHistory(ch),
                 )
               }
@@ -1538,7 +1519,7 @@ fn toggle_reaction(
 ) -> #(Model, Effect) {
   let msgid = string.trim(msgid)
   let emoji = string.trim(emoji)
-  case msgid == "" || emoji == "", model.channel {
+  case msgid == "" || emoji == "", current_channel(model) {
     True, _ -> #(Model(..model, react_picker_msgid: None), NoEffect)
     _, None -> #(Model(..model, react_picker_msgid: None), NoEffect)
     _, Some(ch) -> {
@@ -1618,7 +1599,7 @@ fn av_start_or_join(model: Model) -> #(Model, Effect) {
   case model.av_active {
     True -> #(model, NoEffect)
     False ->
-      case model.channel {
+      case current_channel(model) {
         None -> #(Model(..model, flash: "Join a channel first"), NoEffect)
         Some(ch) -> {
           let instance = model.av_instance
@@ -1647,7 +1628,7 @@ fn av_start_or_join(model: Model) -> #(Model, Effect) {
 fn av_leave(model: Model) -> #(Model, Effect) {
   let ch = case model.av_channel {
     Some(c) -> Some(c)
-    None -> model.channel
+    None -> current_channel(model)
   }
   let line = case ch, model.av_session_id {
     Some(c), Some(sid) if sid != "" ->
@@ -1682,7 +1663,7 @@ fn apply_av_probe(
     True -> #(model, NoEffect)
     False -> {
       let ch = render.canonical_channel(channel)
-      let viewing = case model.channel {
+      let viewing = case current_channel(model) {
         Some(c) -> c == ch
         None -> False
       }
@@ -1756,7 +1737,7 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
         None ->
           case render.parse_tagmsg_delete(line) {
             Some(#(msgid, _nick, ch)) ->
-              case model.channel {
+              case current_channel(model) {
                 Some(c) if c == ch -> #(
                   apply_delete_to_model(model, msgid),
                   NoEffect,
@@ -1776,7 +1757,7 @@ fn apply_line(model: Model, line: String) -> #(Model, Effect) {
             None ->
               case render.parse_tagmsg_reaction(line) {
                 Some(#(msgid, emoji, nick, added, ch)) ->
-                  case model.channel {
+                  case current_channel(model) {
                     Some(c) if c == ch -> #(
                       Model(
                         ..model,
@@ -1822,7 +1803,7 @@ fn apply_av_state(model: Model, av: render.AvState) -> #(Model, Effect) {
       Some(c) -> c == ch
       None -> False
     }
-  let view_channel = case model.channel {
+  let view_channel = case current_channel(model) {
     Some(c) -> c == ch
     None -> False
   }
@@ -1910,7 +1891,7 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
           #(
             Model(
               ..model,
-              flash: send_blocked_flash(ch, trailing),
+              flash: pane.send_blocked_flash(ch, trailing),
             )
               |> append_system_message(
                 "Cannot send to " <> ch <> ": " <> trailing,
@@ -1981,13 +1962,14 @@ fn apply_line_chat_body(model: Model, line: String) -> #(Model, Effect) {
       }
     }
     None ->
-      // Member roster 353 — proof we are in the channel (clear join error).
+      // Member roster 353 — proof we are in the channel (Joined).
       case render.is_353(line) {
         True ->
           case render.channel_from_353(line) {
             Some(ch) -> {
-              let model = clear_join_error(model, ch)
-              case model.channel {
+              let model =
+                Model(..model, pane: pane.mark_joined(model.pane, ch))
+              case current_channel(model) {
                 Some(c) if ch == c -> {
                   let members =
                     merge_members(
@@ -2056,9 +2038,9 @@ fn apply_line_chat_body(model: Model, line: String) -> #(Model, Effect) {
                   case render.parse_member_change_ex(line) {
                     Some(#("join", nick, Some(ch), join_account)) -> {
                       let viewing = viewing_channel(model, ch)
-                      // Any JOIN (self or peer presence) for a channel we open
-                      // clears a prior 477/404 block — 353 also clears.
-                      let model = clear_join_error(model, ch)
+                      // Self/peer JOIN confirms membership for the active room.
+                      let model =
+                        Model(..model, pane: pane.mark_joined(model.pane, ch))
                       let model = case join_account {
                         Some(did) -> learn_nick_did(model, nick, did)
                         None -> model
@@ -2256,7 +2238,7 @@ fn apply_line_chat_body(model: Model, line: String) -> #(Model, Effect) {
 }
 
 fn viewing_channel(model: Model, ch: String) -> Bool {
-  case model.channel {
+  case current_channel(model) {
     Some(c) -> channels_equal(c, ch)
     None -> False
   }
@@ -2297,7 +2279,7 @@ fn apply_chat_row(
   row: render.Row,
 ) -> #(Model, Effect) {
   let target = render.message_target_channel(line)
-  let viewing = case target, model.channel {
+  let viewing = case target, current_channel(model) {
     Some(t), Some(c) -> channels_equal(t, c)
     _, _ -> False
   }
@@ -2350,9 +2332,9 @@ fn channel_key(ch: String) -> String {
 /// live PRIVMSG already landed. Caching that partial pane would make the
 /// return visit a cache hit with no REST and permanently missing history.
 fn stash_current_page(model: Model) -> Model {
-  case model.view, model.channel {
+  case view(model), current_channel(model) {
     Channel, Some(ch) ->
-      case model.history_loading {
+      case history_loading(model) {
         True -> model
         False ->
           put_channel_page(
@@ -2362,7 +2344,7 @@ fn stash_current_page(model: Model) -> Model {
               messages: model.messages,
               members: model.members,
               topic: model.topic,
-              history_exhausted: model.history_exhausted,
+              history_exhausted: history_exhausted(model),
             ),
           )
       }
@@ -2866,37 +2848,10 @@ fn list_unique_append(xs: List(String), x: String) -> List(String) {
   }
 }
 
-fn path_to_view(path: String) -> #(View, Option(String)) {
-  let path = case string.ends_with(path, "/") && string.length(path) > 1 {
-    True -> string.drop_end(path, 1)
-    False -> path
-  }
-  case path {
-    "/" | "/chat" | "" -> #(Index, None)
-    "/chat/system" -> #(System, None)
-    _ ->
-      case string.starts_with(path, "/chat/") {
-        True -> {
-          let bare = string.drop_start(path, 6)
-          case bare == "", is_system_key(bare) {
-            True, _ -> #(Index, None)
-            _, True -> #(System, None)
-            False, False -> #(Channel, Some(render.canonical_channel(bare)))
-          }
-        }
-        False -> #(Index, None)
-      }
-  }
-}
-
 /// Browser path for the current view (`/chat`, `/chat/system`, or `/chat/freeq`).
 /// Used by the client to keep the address bar in sync with LiveView state.
 pub fn path_for_model(model: Model) -> String {
-  case model.view, model.channel {
-    System, _ -> system_path()
-    Channel, Some(ch) -> channel_path(ch)
-    _, _ -> "/chat"
-  }
+  pane.browser_path(model.pane)
 }
 
 /// `/chat/<bare>` for a channel name (with or without `#`).
@@ -3075,7 +3030,7 @@ pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
       // Channel / System chat: patch messages (and compose on Channel) so
       // the compose input is not remounted on every PRIVMSG.
       // Index, or view switches: replace the whole main region.
-      let acc = case before.view, after.view {
+      let acc = case view(before), view(after) {
         Channel, Channel -> {
           let acc = maybe_region(before, after, "flash", flash_region, acc)
           let acc =
@@ -3196,7 +3151,7 @@ fn search_region(model: Model) -> String {
 /// Search box — client owns the draft (no `value`); only channel placeholder
 /// comes from the model so typing does not remount the input.
 fn search_form_region(model: Model) -> String {
-  let ch = option.unwrap(model.channel, "")
+  let ch = option.unwrap(current_channel(model), "")
   "<div data-ls-region=\"search-form\">"
   <> "<form id=\"search-form\" class=\"search-form\" data-ls-submit=\"search\">"
   <> "<svg class=\"search-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\">"
@@ -3272,7 +3227,7 @@ fn search_hit_html(row: render.Row) -> String {
 }
 
 fn nav_region(model: Model) -> String {
-  let channel_label = case model.view, model.channel {
+  let channel_label = case view(model), current_channel(model) {
     Index, _ -> "channels"
     System, _ -> "System"
     Channel, Some(ch) -> ch
@@ -3286,7 +3241,7 @@ fn nav_region(model: Model) -> String {
     WsReady -> " connected"
     _ -> ""
   }
-  let search_btn = case model.view {
+  let search_btn = case view(model) {
     Channel ->
       "<button type=\"button\" class=\"nav-search-btn\" data-ls-click=\"open_search\" title=\"Search messages (Ctrl+F)\" aria-label=\"Search messages\">"
       <> "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\">"
@@ -3295,7 +3250,7 @@ fn nav_region(model: Model) -> String {
       <> "</svg></button>"
     Index | System -> ""
   }
-  let people_btn = case model.view {
+  let people_btn = case view(model) {
     Channel ->
       "<button type=\"button\" class=\"mobile-btn\" data-drawer=\"members\" aria-label=\"People\">"
       <> "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\">"
@@ -3306,7 +3261,7 @@ fn nav_region(model: Model) -> String {
       <> "</svg></button>"
     Index | System -> ""
   }
-  let topic_ui = case model.view {
+  let topic_ui = case view(model) {
     Index | System -> ""
     Channel ->
       case model.editing_topic {
@@ -3407,7 +3362,7 @@ fn can_edit_topic(model: Model) -> Bool {
 }
 
 fn av_call_button(model: Model) -> String {
-  let show = case model.view {
+  let show = case view(model) {
     Channel -> True
     Index | System -> model.av_active
   }
@@ -3431,7 +3386,7 @@ fn av_call_button(model: Model) -> String {
       }
       let call_ch = case model.av_channel {
         Some(c) -> c
-        None -> option.unwrap(model.channel, "")
+        None -> option.unwrap(current_channel(model), "")
       }
       let title = case model.av_active, model.av_call_present {
         True, _ ->
@@ -3487,7 +3442,7 @@ fn av_region(model: Model) -> String {
     True -> {
       let call_ch = case model.av_channel {
         Some(c) -> c
-        None -> option.unwrap(model.channel, "")
+        None -> option.unwrap(current_channel(model), "")
       }
       let session = option.unwrap(model.av_session_id, "")
       let token = option.unwrap(model.av_token, "")
@@ -3613,11 +3568,11 @@ fn auth_badge(model: Model) -> String {
 }
 
 fn sidebar_region(model: Model) -> String {
-  let system_active = case model.view {
+  let system_active = case view(model) {
     System -> " active"
     _ -> ""
   }
-  let system_dot = case model.view, model.system_messages {
+  let system_dot = case view(model), model.system_messages {
     System, _ -> ""
     _, [] -> ""
     _, _ -> "<span class=\"system-dot\" aria-hidden=\"true\"></span>"
@@ -3642,7 +3597,7 @@ fn sidebar_region(model: Model) -> String {
       let bare = render.bare_channel(ch)
       let n = unread_count(model, ch)
       let has_unread = n > 0
-      let active = case model.view, model.channel {
+      let active = case view(model), current_channel(model) {
         Channel, Some(c) if c == ch -> " active"
         _, _ -> ""
       }
@@ -3732,7 +3687,7 @@ fn auth_action(model: Model) -> String {
 }
 
 fn main_region(model: Model) -> String {
-  case model.view {
+  case view(model) {
     Index -> index_main(model)
     Channel -> channel_main(model)
     System -> system_main(model)
@@ -3829,13 +3784,13 @@ pub fn compose_region_for_test(model: Model) -> String {
 }
 
 fn messages_region(model: Model) -> String {
-  let rows = case model.view {
+  let rows = case view(model) {
     System -> model.system_messages
     _ -> model.messages
   }
   let lookup = parent_lookup_from_rows(rows)
   let aliases = my_reaction_aliases(model)
-  let loader = case model.view, model.history_loading {
+  let loader = case view(model), history_loading(model) {
     Channel, True ->
       case model.messages {
         // Channel switch / bootstrap: empty stream waiting on REST.
@@ -3846,7 +3801,7 @@ fn messages_region(model: Model) -> String {
     _, _ -> ""
   }
   let scroll_mid = option.unwrap(model.scroll_to_msgid, "")
-  let empty = case model.view, rows {
+  let empty = case view(model), rows {
     System, [] ->
       "<div class=\"empty-state system-empty\">"
       <> "<div class=\"empty-state-title\">System</div>"
@@ -3860,14 +3815,14 @@ fn messages_region(model: Model) -> String {
       message_html(model, row, lookup, aliases, scroll_mid, my_nick)
     })
     |> string.concat
-  let loading = case model.view, model.history_loading {
+  let loading = case view(model), history_loading(model) {
     Channel, True -> "1"
     _, _ -> "0"
   }
-  let exhausted = case model.view {
+  let exhausted = case view(model) {
     System -> "1"
     _ ->
-      case model.history_exhausted {
+      case history_exhausted(model) {
         True -> "1"
         False -> "0"
       }
@@ -3878,7 +3833,7 @@ fn messages_region(model: Model) -> String {
   }
   // Bare channel (or "system") so the client can detect stream switches and
   // force scroll-to-bottom — same role as freeq-web3 ChatScroll data-channel.
-  let channel_attr = case model.view, model.channel {
+  let channel_attr = case view(model), current_channel(model) {
     System, _ -> system_key
     Channel, Some(ch) -> render.bare_channel(ch)
     _, _ -> ""
@@ -3947,11 +3902,11 @@ fn compose_region(model: Model) -> String {
   // IDs match app.css / freeq-web2 (#send-bar, #attach-btn, #upload-preview).
   // No value attr on the text input: draft is client-owned so message patches
   // never wipe it. Image paste/upload is handled client-side (POST /upload).
-  let system = case model.view {
+  let system = case view(model) {
     System -> True
     _ -> False
   }
-  let ch = option.unwrap(model.channel, "")
+  let ch = option.unwrap(current_channel(model), "")
   let auth_did = case identity.is_bound(model.identity) {
     True -> identity.did(model.identity)
     False -> ""
@@ -4023,7 +3978,7 @@ fn compose_region(model: Model) -> String {
 }
 
 fn reply_banner_html(model: Model) -> String {
-  case model.view, model.edit_to, model.reply_to {
+  case view(model), model.edit_to, model.reply_to {
     Channel, Some(mid), _ if mid != "" -> {
       let text_span = case model.reply_preview_text {
         "" -> ""
@@ -4371,7 +4326,7 @@ fn is_own_row(row: render.Row, my_nick: String) -> Bool {
 /// Soft-delete a message: optimistic local mark + upstream TAGMSG.
 fn delete_message(model: Model, msgid: String) -> #(Model, Effect) {
   let msgid = string.trim(msgid)
-  case msgid == "", model.channel, message_is_deleted(model.messages, msgid) {
+  case msgid == "", current_channel(model), message_is_deleted(model.messages, msgid) {
     True, _, _ -> #(model, NoEffect)
     _, None, _ -> #(model, NoEffect)
     _, _, True -> #(model, NoEffect)
@@ -4496,7 +4451,7 @@ fn reply_badge_html(
 }
 
 fn members_region(model: Model) -> String {
-  case model.view {
+  case view(model) {
     Index | System ->
       "<aside id=\"member-panel\" data-ls-region=\"members\" class=\"hidden\"></aside>"
     Channel -> {
@@ -4578,7 +4533,22 @@ pub fn with_my_channels(model: Model, channels: List(String)) -> Model {
 
 /// Mark the messages pane as loading (bootstrap / open before REST returns).
 pub fn with_history_loading(model: Model, loading: Bool) -> Model {
-  Model(..model, history_loading: loading)
+  case loading, current_channel(model) {
+    True, Some(ch) ->
+      case pane.history_cold_loading(model.pane) {
+        True -> model
+        False -> Model(..model, pane: pane.open_cold(ch))
+      }
+    True, None -> model
+    False, _ ->
+      Model(
+        ..model,
+        pane: pane.history_ready(
+          model.pane,
+          pane.history_exhausted(model.pane),
+        ),
+      )
+  }
 }
 
 /// Restore a previously persisted freeq-server API-BEARER without flipping
@@ -4793,11 +4763,11 @@ fn send_to_channel(
 ) -> #(Model, Effect) {
   case model.ws {
     WsReady ->
-      case join_error_for(model, ch) {
+      case pane.send_block_reason(model.pane) {
         Some(reason) -> #(
           Model(
             ..model,
-            flash: send_blocked_flash(ch, reason),
+            flash: pane.send_blocked_flash(ch, reason),
           ),
           NoEffect,
         )
@@ -4818,41 +4788,11 @@ fn send_to_channel(
   }
 }
 
-fn send_blocked_flash(ch: String, reason: String) -> String {
-  let reason = string.trim(reason)
-  case reason {
-    "" -> "Not in " <> ch <> " — cannot send"
-    r ->
-      case string.contains(string.lowercase(r), "authentication") {
-        True ->
-          "Cannot send to "
-          <> ch
-          <> " — sign in required ("
-          <> r
-          <> ")"
-        False -> "Cannot send to " <> ch <> " — " <> r
-      }
-  }
-}
-
-fn join_error_for(model: Model, ch: String) -> Option(String) {
-  dict.get(model.join_errors, channel_key(ch))
-  |> option.from_result
-}
-
 fn record_join_error(model: Model, ch: String, reason: String) -> Model {
-  Model(
-    ..model,
-    join_errors: dict.insert(model.join_errors, channel_key(ch), reason),
-  )
+  Model(..model, pane: pane.mark_blocked(model.pane, ch, reason))
 }
 
-fn clear_join_error(model: Model, ch: String) -> Model {
-  Model(
-    ..model,
-    join_errors: dict.delete(model.join_errors, channel_key(ch)),
-  )
-}
+
 
 /// Build a channel PRIVMSG, optionally tagged with reply or edit.
 fn privmsg_line(

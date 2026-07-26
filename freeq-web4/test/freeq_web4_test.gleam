@@ -11,6 +11,7 @@ import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/live
 import freeq_web4/ls_form
+import freeq_web4/pane
 import freeq_web4/profiles
 import freeq_web4/rest
 import freeq_web4/session_store
@@ -330,17 +331,17 @@ pub fn compose_has_attach_controls_test() {
 
 pub fn path_index_mount_test() {
   let model = live.mount_model("/chat")
-  assert model.view == live.Index
-  assert model.channel == None
+  assert live.view(model) == live.Index
+  assert live.current_channel(model) == None
 }
 
 pub fn path_channel_mount_test() {
   let model = live.mount_model("/chat/freeq")
-  assert model.view == live.Channel
-  assert model.channel == Some("#freeq")
+  assert live.view(model) == live.Channel
+  assert live.current_channel(model) == Some("#freeq")
   assert model.my_channels == ["#freeq"]
   // Deep-link first paint shows the loading spinner (not a blank pane).
-  assert model.history_loading == True
+  assert live.history_loading(model) == True
   let html = live.messages_region_for_test(model)
   assert string.contains(html, "Loading messages")
   assert string.contains(html, "data-history-loading=\"1\"")
@@ -348,13 +349,13 @@ pub fn path_channel_mount_test() {
 
 pub fn path_index_mount_not_history_loading_test() {
   let model = live.mount_model("/chat")
-  assert model.history_loading == False
+  assert live.history_loading(model) == False
 }
 
 pub fn path_system_mount_test() {
   let model = live.mount_model("/chat/system")
-  assert model.view == live.System
-  assert model.channel == None
+  assert live.view(model) == live.System
+  assert live.current_channel(model) == None
   assert model.my_channels == []
   assert model.system_messages == []
   assert live.path_for_model(model) == "/chat/system"
@@ -363,15 +364,15 @@ pub fn path_system_mount_test() {
 pub fn open_system_tab_test() {
   let model = live.mount_model("/chat/freeq")
   let #(sys, effect) = live.apply(model, live.OpenSystem)
-  assert sys.view == live.System
-  assert sys.channel == None
+  assert live.view(sys) == live.System
+  assert live.current_channel(sys) == None
   assert effect == live.NoEffect
   // Opening via bare "system" (sidebar link) must not JOIN #system.
   let #(sys2, effect2) = live.apply(model, live.OpenChannel("system"))
-  assert sys2.view == live.System
+  assert live.view(sys2) == live.System
   assert effect2 == live.NoEffect
   let #(sys3, effect3) = live.apply(model, live.Join("system"))
-  assert sys3.view == live.System
+  assert live.view(sys3) == live.System
   assert effect3 == live.NoEffect
 }
 
@@ -409,8 +410,8 @@ pub fn system_compose_slash_commands_test() {
 
   // /join navigates + ensures upstream (not raw "join …").
   let #(joined, effect) = live.apply(model, live.Send("/join #dev"))
-  assert joined.view == live.Channel
-  assert joined.channel == Some("#dev")
+  assert live.view(joined) == live.Channel
+  assert live.current_channel(joined) == Some("#dev")
   assert list.any(joined.system_messages, fn(r) {
     string.contains(r.text, "/join #dev")
   })
@@ -421,7 +422,7 @@ pub fn system_compose_slash_commands_test() {
 
   // /op nick #chan → MODE (works from System without a current channel).
   let #(opped, effect2) = live.apply(model, live.Send("/op eve #test"))
-  assert opped.view == live.System
+  assert live.view(opped) == live.System
   let line = case effect2 {
     live.IrcSend([line]) -> line
     _ -> panic as "expected MODE from /op"
@@ -506,7 +507,7 @@ pub fn with_my_channels_test() {
   let model = live.mount_model("/chat")
   let restored = live.with_my_channels(model, ["#dev", "#test"])
   assert restored.my_channels == ["#dev", "#test"]
-  assert restored.view == live.Index
+  assert live.view(restored) == live.Index
 }
 
 pub fn message_target_channel_test() {
@@ -570,7 +571,7 @@ pub fn unread_clears_on_open_test() {
     live.apply(model, live.PushLine(":alice!a@h PRIVMSG #dev :two"))
   assert live.unread_count(model, "#dev") == 2
   let #(opened, _) = live.apply(model, live.OpenChannel("dev"))
-  assert opened.channel == Some("#dev")
+  assert live.current_channel(opened) == Some("#dev")
   assert live.unread_count(opened, "#dev") == 0
 }
 
@@ -669,8 +670,8 @@ pub fn path_for_model_test() {
 pub fn join_effect_test() {
   let model = live.mount_model("/chat")
   let #(next, effect) = live.apply(model, live.Join("dev"))
-  assert next.view == live.Channel
-  assert next.channel == Some("#dev")
+  assert live.view(next) == live.Channel
+  assert live.current_channel(next) == Some("#dev")
   let primary = case effect {
     live.EnsureUpstream(primary, _) -> primary
     _ -> panic as "expected EnsureUpstream"
@@ -1066,7 +1067,7 @@ pub fn open_channel_clears_reply_test() {
   assert model.reply_to == Some("mid1")
   let #(next, _) = live.apply(model, live.OpenChannel("dev"))
   assert next.reply_to == None
-  assert next.channel == Some("#dev")
+  assert live.current_channel(next) == Some("#dev")
 }
 
 pub fn channel_shell_has_reply_controls_test() {
@@ -1133,12 +1134,12 @@ pub fn open_channel_seeds_topic_from_directory_test() {
       ]),
     )
   let #(opened, _) = live.apply(model, live.OpenChannel("test"))
-  assert opened.channel == Some("#test")
+  assert live.current_channel(opened) == Some("#test")
   assert opened.topic == "6789"
 
   // Unknown / private channel: empty until host REST resolve_topic runs.
   let #(freeq, _) = live.apply(model, live.OpenChannel("freeq"))
-  assert freeq.channel == Some("#freeq")
+  assert live.current_channel(freeq) == Some("#freeq")
   assert freeq.topic == ""
 }
 
@@ -1448,6 +1449,44 @@ pub fn login_disposition_force_shows_form_test() {
   // force=True always shows form (no session id → nothing to clear).
   assert identity.login_disposition("", True) == identity.ShowForm(None)
   assert identity.login_disposition("", False) == identity.ShowForm(None)
+}
+
+pub fn pane_machine_open_history_membership_test() {
+  let cold = pane.open_cold("freeq")
+  assert pane.channel(cold) == Some("#freeq")
+  assert pane.history_cold_loading(cold) == True
+  assert pane.send_block_reason(cold) == None
+  let ready = pane.history_ready(cold, False)
+  assert pane.history_loading(ready) == False
+  assert pane.history_exhausted(ready) == False
+  let joined = pane.mark_joined(ready, "#freeq")
+  assert pane.send_target(joined) == Some("#freeq")
+  let blocked =
+    pane.mark_blocked(joined, "#freeq", "This channel requires authentication")
+  let assert Some(reason) = pane.send_block_reason(blocked)
+  assert string.contains(string.lowercase(reason), "authentication")
+  assert pane.send_target(blocked) == None
+  // Directory never sends.
+  assert pane.send_block_reason(pane.directory()) == Some("Join a channel first")
+  assert pane.from_path("/chat/system") == pane.system()
+  assert pane.browser_path(pane.open_cold("dev")) == "/chat/dev"
+}
+
+pub fn send_blocked_uses_pane_membership_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.apply(live.SetWs(live.WsReady))
+    |> fn(p) { p.0 }
+  // 477 → Blocked membership on the active room.
+  let #(blocked, _) =
+    live.apply(
+      model,
+      live.PushLine(
+        ":irc.freeq.at 477 guest #freeq :This channel requires authentication — sign in to join",
+      ),
+    )
+  let #(_next, effect) = live.apply(blocked, live.Send("hello"))
+  assert effect == live.NoEffect
 }
 
 pub fn parse_353_members_test() {
@@ -1935,10 +1974,10 @@ pub fn load_older_requests_fetch_test() {
     )
   let model = live.apply(model, live.SetHistory([recent])).0
   // Short page → exhausted; LoadOlder is a no-op.
-  assert model.history_exhausted == True
+  assert live.history_exhausted(model) == True
   let #(noop, effect) = live.apply(model, live.LoadOlder)
   assert effect == live.NoEffect
-  assert noop.history_loading == False
+  assert live.history_loading(noop) == False
 
   // Fresh channel model with a full initial page so more history may exist.
   // Timestamps 1001..1050 — oldest is 1001.
@@ -1957,9 +1996,9 @@ pub fn load_older_requests_fetch_test() {
       )
     })
   let model = live.apply(model, live.SetHistory(full)).0
-  assert model.history_exhausted == False
+  assert live.history_exhausted(model) == False
   let #(loading, effect) = live.apply(model, live.LoadOlder)
-  assert loading.history_loading == True
+  assert live.history_loading(loading) == True
   let assert live.FetchOlderHistory("#freeq", before) = effect
   assert before == 1001
 
@@ -1974,8 +2013,8 @@ pub fn load_older_requests_fetch_test() {
     ),
   ]
   let #(next, _) = live.apply(loading, live.PrependHistory(older))
-  assert next.history_loading == False
-  assert next.history_exhausted == True
+  assert live.history_loading(next) == False
+  assert live.history_exhausted(next) == True
   let assert [first, ..] = next.messages
   assert first.msgid == Some("m0")
 }
@@ -2022,7 +2061,7 @@ pub fn open_channel_shows_loading_messages_label_test() {
   // Channel switch paints empty stream + spinner before REST returns.
   let model = live.mount_model("/chat")
   let #(opened, _) = live.apply(model, live.OpenChannel("dev"))
-  assert opened.history_loading == True
+  assert live.history_loading(opened) == True
   assert opened.messages == []
   let html = live.messages_region_for_test(opened)
   assert string.contains(html, "Loading messages")
@@ -2043,17 +2082,17 @@ pub fn channel_page_cache_restores_on_switch_test() {
     )
   let model = live.apply(model, live.SetHistory([row])).0
   assert list.length(model.messages) == 1
-  assert model.history_loading == False
+  assert live.history_loading(model) == False
 
   let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
-  assert on_dev.channel == Some("#dev")
+  assert live.current_channel(on_dev) == Some("#dev")
   // First visit to #dev is still a cold load.
-  assert on_dev.history_loading == True
+  assert live.history_loading(on_dev) == True
   assert on_dev.messages == []
 
   let #(back, effect) = live.apply(on_dev, live.OpenChannel("freeq"))
-  assert back.channel == Some("#freeq")
-  assert back.history_loading == False
+  assert live.current_channel(back) == Some("#freeq")
+  assert live.history_loading(back) == False
   assert list.length(back.messages) == 1
   let assert Ok(first) = list.first(back.messages)
   assert first.text == "cached hello"
@@ -2088,7 +2127,7 @@ pub fn channel_page_cache_appends_background_live_test() {
   assert live.unread_count(on_dev, "#freeq") == 1
 
   let #(back, _) = live.apply(on_dev, live.OpenChannel("freeq"))
-  assert back.history_loading == False
+  assert live.history_loading(back) == False
   assert list.length(back.messages) == 2
   let assert Ok(last) = list.last(back.messages)
   assert last.text == "while away"
@@ -2112,26 +2151,26 @@ pub fn channel_page_cache_dropped_on_part_test() {
   let #(after_part, _) = live.apply(on_dev, live.Part("#freeq"))
   // Re-open freeq must cold-load (cache was dropped with PART).
   let #(reopen, _) = live.apply(after_part, live.OpenChannel("freeq"))
-  assert reopen.history_loading == True
+  assert live.history_loading(reopen) == True
   assert reopen.messages == []
 }
 
 pub fn stash_skips_while_history_loading_test() {
   // Live rows during an in-flight open must not become a sticky incomplete cache.
   let model = live.mount_model("/chat/freeq")
-  assert model.history_loading == True
+  assert live.history_loading(model) == True
   let #(model, _) =
     live.apply(
       model,
       live.PushLine("@msgid=live1 :bob!b@h PRIVMSG #freeq :early"),
     )
   assert list.length(model.messages) == 1
-  assert model.history_loading == True
+  assert live.history_loading(model) == True
   // Navigate away while still loading — must not stash the partial pane.
   let #(on_dev, _) = live.apply(model, live.OpenChannel("dev"))
   let #(back, _) = live.apply(on_dev, live.OpenChannel("freeq"))
   // Cold load again (no incomplete cache hit).
-  assert back.history_loading == True
+  assert live.history_loading(back) == True
   assert back.messages == []
 }
 
@@ -2152,7 +2191,7 @@ pub fn cache_rest_channel_page_restores_on_return_test() {
   let model =
     live.cache_rest_channel_page(on_dev, "#freeq", [row], "topic freeq")
   let #(back, effect) = live.apply(model, live.OpenChannel("freeq"))
-  assert back.history_loading == False
+  assert live.history_loading(back) == False
   assert list.length(back.messages) == 1
   let assert Ok(first) = list.first(back.messages)
   assert first.text == "late rest"
@@ -2165,7 +2204,7 @@ pub fn cache_rest_channel_page_skips_empty_test() {
   let next = live.cache_rest_channel_page(model, "#freeq", [], "t")
   // Empty body must not create a cache entry.
   let #(open, _) = live.apply(next, live.OpenChannel("freeq"))
-  assert open.history_loading == True
+  assert live.history_loading(open) == True
   assert open.messages == []
 }
 
@@ -2183,7 +2222,7 @@ pub fn open_channel_same_channel_is_noop_test() {
   let model = live.apply(model, live.SetHistory([row])).0
   let #(same, effect) = live.apply(model, live.OpenChannel("freeq"))
   assert same.messages == model.messages
-  assert same.history_loading == False
+  assert live.history_loading(same) == False
   let assert live.NoEffect = effect
 }
 
@@ -2402,7 +2441,7 @@ pub fn active_call_from_sessions_json_test() {
 
 pub fn apply_line_353_test_channel_test() {
   let model = live.mount_model("/chat/test")
-  assert model.channel == Some("#test")
+  assert live.current_channel(model) == Some("#test")
   let line = ":irc.freeq.at 353 web4_1 = #test :@alice bob carol"
   let #(next, _) = live.apply(model, live.PushLine(line))
   assert list.length(next.members) == 3
@@ -2821,7 +2860,7 @@ pub fn jump_to_msg_fetches_around_test() {
     live.apply(model, live.JumpToMsg("mid-old", Some(500)))
   assert next.search_open == False
   assert next.scroll_to_msgid == Some("mid-old")
-  assert next.history_loading == True
+  assert live.history_loading(next) == True
   let assert live.FetchAround("#freeq", before) = effect
   // before is exclusive so target at 500 is included.
   assert before == 501
@@ -2850,7 +2889,7 @@ pub fn merge_around_history_test() {
     live.apply(with_scroll, live.MergeAroundHistory([older, recent]))
   assert list.length(next.messages) == 2
   assert next.scroll_to_msgid == Some("m1")
-  assert next.history_loading == False
+  assert live.history_loading(next) == False
 }
 
 pub fn jump_to_msg_route_test() {
