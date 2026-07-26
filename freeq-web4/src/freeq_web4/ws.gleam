@@ -36,12 +36,16 @@ pub type Push {
   RestChannels(List(rest.ChannelInfo))
   /// REST history (+ topic / optional AV probe) for a channel open.
   /// May be stale if the user already navigated away — always check `channel`.
+  /// Embeds are already attached on `rows` when the open worker could warm
+  /// them; `avatars` seeds the model so the first Diff has face imgs.
   RestChannelOpen(
     channel: String,
     rows: List(render.Row),
     topic: String,
     /// `None` = AV not probed (call already active); `Some` = probe result.
     av_call: Option(Option(rest.ActiveCall)),
+    /// Pre-resolved avatar keys (DID / handle → URL) for the history page.
+    avatars: List(#(String, String)),
   )
   /// Background channel FTS finished (may be stale if query moved on).
   RestSearch(
@@ -230,8 +234,15 @@ pub fn handle_push(session: Session, push: Push) -> #(Session, List(String)) {
       let #(model, _) = live.apply(before, live.SetAllChannels(chs))
       finish(session, before, model)
     }
-    RestChannelOpen(channel, rows, topic, av_call) ->
-      apply_rest_channel_open(session, channel, rows, topic, av_call)
+    RestChannelOpen(channel, rows, topic, av_call, avatars) ->
+      apply_rest_channel_open(
+        session,
+        channel,
+        rows,
+        topic,
+        av_call,
+        avatars,
+      )
     RestSearch(query, results, status) -> {
       let before = session.model
       let #(model, effect) =
@@ -401,16 +412,22 @@ fn schedule_av_probe_only(session: Session, channel: String) -> Nil {
           rows: [],
           topic: "",
           av_call: Some(call),
+          avatars: [],
         ),
       )
     })
   Nil
 }
 
-/// Background REST for channel open: history body, topic fallback, AV probe.
+/// Background REST for channel open: history body, topic fallback, AV probe,
+/// plus a bounded server-side media warm (link cards + avatar URLs).
 ///
-/// Results land as `RestChannelOpen` and are ignored if the user already left
-/// the channel (fast sidebar clicks must not clobber the new view).
+/// Warming happens off the Live session so IRC stays free; results land as
+/// one `RestChannelOpen` Diff with embeds/avatars already applied — fewer
+/// morphs than history-then-MediaReady.
+///
+/// Results are ignored if the user already left the channel (fast sidebar
+/// clicks must not clobber the new view).
 fn schedule_channel_open_rest(session: Session, channel: String) -> Nil {
   let subject = session.self_subject
   let bearer = session.model.api_bearer
@@ -427,9 +444,19 @@ fn schedule_channel_open_rest(session: Session, channel: String) -> Nil {
         True -> Some(rest.probe_active_call(ch, bearer))
         False -> None
       }
+      // Server-side prefetch: OG/YT/Bsky cards (disk image cache) + AppView
+      // avatar URLs. Caps keep open latency bounded; leftovers still warm
+      // async via SetHistory → media_warmup_effect.
+      let #(rows, avatars) = warm_open_media(rows)
       process.send(
         subject,
-        RestChannelOpen(channel: ch, rows: rows, topic: topic, av_call: av_call),
+        RestChannelOpen(
+          channel: ch,
+          rows: rows,
+          topic: topic,
+          av_call: av_call,
+          avatars: avatars,
+        ),
       )
     })
   Nil
@@ -442,6 +469,7 @@ fn apply_rest_channel_open(
   rows: List(render.Row),
   topic: String,
   av_call: Option(Option(rest.ActiveCall)),
+  avatars: List(#(String, String)),
 ) -> #(Session, List(String)) {
   case live.current_channel(session.model) {
     Some(current) ->
@@ -461,6 +489,15 @@ fn apply_rest_channel_open(
         }
         True -> {
           let before = session.model
+          // Seed avatar map before SetHistory so message_html has img srcs
+          // on the first body Diff (no empty→avatar morph).
+          let before = case avatars {
+            [] -> before
+            pairs -> {
+              let #(m, _) = live.apply(before, live.PatchAvatars(pairs))
+              m
+            }
+          }
           // Cache-hit opens send empty rows + AV only — never wipe restored
           // messages or flip history_exhausted from a dummy SetHistory([]).
           let need_history = live.history_loading(before)
@@ -1098,6 +1135,63 @@ fn collect_avatars(actors: List(String)) -> List(#(String, String)) {
     }
   })
 }
+
+/// Bounded server-side media warm for channel open (runs in REST worker).
+///
+/// - Full `link_preview.attach` for up to `open_embed_warm_limit` link rows
+///   (downloads OG/YT/Bsky images into disk cache when missing).
+/// - Cache-only attach for the rest (instant, no network).
+/// - AppView avatar URLs for up to `open_avatar_warm_limit` authors.
+///
+/// Returns rows ready for `SetHistory` + avatar pairs for `PatchAvatars`.
+fn warm_open_media(
+  rows: List(render.Row),
+) -> #(List(render.Row), List(#(String, String))) {
+  // map_fold: #(accumulator, mapped list)
+  let #(_budget, warmed) =
+    list.map_fold(rows, 0, fn(budget, row) {
+      case budget < open_embed_warm_limit, link_preview.needs_resolve(row) {
+        True, True -> #(budget + 1, link_preview.attach(row))
+        _, _ -> #(budget, link_preview.attach_cache_only(row))
+      }
+    })
+  let actors =
+    warmed
+    |> list.flat_map(row_open_actors)
+    |> list.filter(fn(d) { string.trim(d) != "" })
+    |> list.unique
+    |> list.take(open_avatar_warm_limit)
+  let avatars = collect_avatars(actors)
+  #(warmed, avatars)
+}
+
+/// Authors to avatar-warm from a history row (account DID or handle-like nick).
+fn row_open_actors(row: render.Row) -> List(String) {
+  case row.kind {
+    render.Msg | render.Notice -> {
+      let from_account = case row.account {
+        Some(a) -> [a]
+        None -> []
+      }
+      let from_nick = case row.nick {
+        Some(n) ->
+          case profiles.looks_like_actor(n) {
+            True -> [n]
+            False -> []
+          }
+        None -> []
+      }
+      list.append(from_account, from_nick)
+    }
+    _ -> []
+  }
+}
+
+/// Max network embed resolves during channel-open warm (OG/YT/Bsky + image).
+const open_embed_warm_limit: Int = 12
+
+/// Max avatar profile fetches during channel-open warm.
+const open_avatar_warm_limit: Int = 24
 
 fn ensure_upstream(
   session: Session,
