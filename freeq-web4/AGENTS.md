@@ -120,7 +120,7 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [x] Scroll-up load older history (`?before=` + CHATHISTORY BEFORE)
 - [x] Message search (REST `/api/v1/search` modal)
 - [x] System channel tab (connection status + server notices)
-- [ ] PWA
+- [x] PWA
 
 ## Idioms
 

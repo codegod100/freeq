@@ -2211,6 +2211,27 @@ pub fn live_csp_allows_blob_worklets_test() {
   assert string.contains(csp, "media-src 'self' https: http: blob:")
 }
 
+/// PWA shell files live under priv/static and are served at the site root.
+pub fn pwa_static_assets_present_test() {
+  let files = [
+    "priv/static/manifest.json",
+    "priv/static/sw.js",
+    "priv/static/offline.html",
+    "priv/static/icon-192.png",
+    "priv/static/icon-512.png",
+    "priv/static/apple-touch-icon.png",
+  ]
+  list.each(files, fn(path) {
+    let assert Ok(True) = simplifile.is_file(path)
+  })
+  let assert Ok(manifest) = simplifile.read("priv/static/manifest.json")
+  assert string.contains(manifest, "\"start_url\": \"/chat\"")
+  assert string.contains(manifest, "\"display\": \"standalone\"")
+  let assert Ok(sw) = simplifile.read("priv/static/sw.js")
+  assert string.contains(sw, "CACHE_VERSION")
+  assert string.contains(sw, "/offline.html")
+}
+
 pub fn active_call_from_sessions_json_test() {
   let body =
     "{\"active\":{\"id\":\"01X\",\"state\":\"Active\",\"participant_count\":3,\"title\":\"standup\"}}"

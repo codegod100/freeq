@@ -150,8 +150,15 @@ fn enhance_live_html(body: String, client_js: String) -> String {
   body
   |> string.replace(
     "</head>",
-    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">"
       <> "<meta name=\"color-scheme\" content=\"dark\">"
+      <> "<meta name=\"theme-color\" content=\"#0e1116\">"
+      <> "<meta name=\"description\" content=\"IRC with AT Protocol identity. Open, federated, yours.\">"
+      <> "<meta name=\"mobile-web-app-capable\" content=\"yes\">"
+      <> "<meta name=\"apple-mobile-web-app-capable\" content=\"yes\">"
+      <> "<meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\">"
+      <> "<meta name=\"apple-mobile-web-app-title\" content=\"freeq\">"
+      <> "<link rel=\"manifest\" href=\"/manifest.json\">"
       <> "<link rel=\"icon\" href=\"/favicon.png?v=2\" type=\"image/png\" sizes=\"48x48\">"
       <> "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png?v=2\" sizes=\"180x180\">"
       <> "<link rel=\"stylesheet\" href=\"/assets/app.css?v="
@@ -164,7 +171,7 @@ fn enhance_live_html(body: String, client_js: String) -> String {
       <> "\"></script>"
       <> "</head>",
   )
-  |> string.replace("<title>Lightspeed</title>", "<title>freeq · web4</title>")
+  |> string.replace("<title>Lightspeed</title>", "<title>freeq</title>")
 }
 
 fn response_body_string(
@@ -202,6 +209,7 @@ fn handle_request(
   favicon_png: BitArray,
   apple_touch_png: BitArray,
   icon_192_png: BitArray,
+  icon_512_png: BitArray,
 ) -> http_response.Response(mist.ResponseData) {
   case req.path, req.method, is_websocket_upgrade(req) {
     "/live", gleam_http.Get, True -> upgrade_live(req)
@@ -218,6 +226,32 @@ fn handle_request(
 
     "/icon-192.png", gleam_http.Get, False ->
       static_png(icon_192_png, "image/png")
+
+    "/icon-512.png", gleam_http.Get, False ->
+      static_png(icon_512_png, "image/png")
+
+    // PWA: re-read from disk so shell/manifest edits apply without restart.
+    // no-cache so browsers pick up CACHE_VERSION bumps in sw.js.
+    "/manifest.json", gleam_http.Get, False ->
+      static_text(
+        load_asset("manifest.json"),
+        "application/manifest+json; charset=utf-8",
+        "no-cache",
+      )
+
+    "/sw.js", gleam_http.Get, False ->
+      static_text(
+        load_asset("sw.js"),
+        "application/javascript; charset=utf-8",
+        "no-cache",
+      )
+
+    "/offline.html", gleam_http.Get, False ->
+      static_text(
+        load_asset("offline.html"),
+        "text/html; charset=utf-8",
+        "no-cache",
+      )
 
     "/assets/av_call.js", gleam_http.Get, False ->
       http_response.new(200)
@@ -667,6 +701,7 @@ pub fn main() -> Nil {
   let favicon_png = load_asset_bits("favicon.png")
   let apple_touch_png = load_asset_bits("apple-touch-icon.png")
   let icon_192_png = load_asset_bits("icon-192.png")
+  let icon_512_png = load_asset_bits("icon-512.png")
 
   // Log before bind so Eaddrinuse (etc.) still shows which port we tried.
   io_println(
@@ -687,6 +722,7 @@ pub fn main() -> Nil {
         favicon_png,
         apple_touch_png,
         icon_192_png,
+        icon_512_png,
       )
     })
     |> mist.port(port)
@@ -706,6 +742,8 @@ fn echo_banner(port: Int) -> Nil {
   io_println("  GET  /login           AT Protocol OAuth")
   io_println("  GET  /auth/callback   OAuth callback")
   io_println("  WS   /live            lightspeed protocol")
+  io_println("  GET  /manifest.json   PWA manifest")
+  io_println("  GET  /sw.js           service worker")
   io_println("  GET  /health          ok")
   io_println("  POST /upload          image upload proxy")
   io_println("  GET  /api/v1/sessions/:id   AV roster proxy")
@@ -781,6 +819,17 @@ fn static_png(
       )
       |> http_response.set_body(mist.Bytes(bytes_tree.from_bit_array(body)))
   }
+}
+
+fn static_text(
+  body: String,
+  content_type: String,
+  cache_control: String,
+) -> http_response.Response(mist.ResponseData) {
+  http_response.new(200)
+  |> http_response.set_header("content-type", content_type)
+  |> http_response.set_header("cache-control", cache_control)
+  |> http_response.set_body(mist.Bytes(bytes_tree.from_string(body)))
 }
 
 // ── Browser client (star-style, freeq events) ────────────────────────────────
@@ -2715,5 +2764,33 @@ bindMessagesScroll();
 }
 connect();
 window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview, scrollToMessage, jumpToBottom };
+
+// PWA: register service worker (https or localhost only — installable contexts).
+(function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  const host = location.hostname;
+  const ok =
+    location.protocol === 'https:' ||
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '[::1]';
+  if (!ok) return;
+  const register = () => {
+    navigator.serviceWorker
+      .register('/sw.js', { scope: '/' })
+      .then((reg) => {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            reg.update().catch(() => {});
+          }
+        });
+      })
+      .catch((err) => {
+        console.warn('[pwa] service worker registration failed', err);
+      });
+  };
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register);
+})();
 "
 }
