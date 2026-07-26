@@ -146,6 +146,9 @@ pub type Model {
     /// Per-channel page cache (`channel_key` → snapshot). Flip between joined
     /// channels without re-fetching REST history.
     channel_pages: Dict(String, ChannelPage),
+    /// Channels we failed to JOIN (key → trailing reason). Blocks PRIVMSG so
+    /// we never silently drop sends when still on the shell after 477/471/….
+    join_errors: Dict(String, String),
   )
 }
 
@@ -411,6 +414,7 @@ fn mount(
       nick_dids: dict.new(),
       avatars: dict.new(),
       channel_pages: dict.new(),
+      join_errors: dict.new(),
     )
   helpers.no_effect(model)
 }
@@ -449,12 +453,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
                   ),
                   NoEffect,
                 )
-                _, Some(ch) -> #(
-                  clear_reply(Model(..model, compose: "", flash: "")),
-                  IrcSend([
-                    privmsg_line(ch, text, model.reply_to, model.edit_to),
-                  ]),
-                )
+                _, Some(ch) -> send_to_channel(model, ch, text)
                 _, None -> #(
                   Model(..model, flash: "Join a channel first"),
                   NoEffect,
@@ -1036,6 +1035,9 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
         ch,
       )
   }
+  // Clear a prior join block so this open can re-attempt JOIN (e.g. after
+  // sign-in). Fresh 477/404 will re-insert into join_errors.
+  let model = clear_join_error(model, ch)
   // Host: EnsureUpstream + after_join (IRC JOIN/NAMES; REST only if loading).
   #(model, EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })))
 }
@@ -1881,6 +1883,67 @@ fn apply_av_state(model: Model, av: render.AvState) -> #(Model, Effect) {
 }
 
 fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
+  // Join failures (477 auth / 471 full / …) — sticky until a real JOIN/353.
+  case render.parse_join_failure(line) {
+    Some(#(ch, _numeric, trailing)) -> {
+      let model = record_join_error(model, ch, trailing)
+      let flash = case viewing_channel(model, ch) {
+        True -> "Could not join " <> ch <> ": " <> trailing
+        False -> model.flash
+      }
+      #(
+        append_system_message(
+          Model(..model, flash: flash),
+          "Could not join " <> ch <> ": " <> trailing,
+        ),
+        NoEffect,
+      )
+    }
+    None ->
+      case render.parse_cannot_send(line) {
+        Some(#(ch, trailing)) -> {
+          // Also treat as join-blocked so further Send clicks stay blocked.
+          let model = record_join_error(model, ch, trailing)
+          #(
+            Model(
+              ..model,
+              flash: send_blocked_flash(ch, trailing),
+            )
+              |> append_system_message(
+                "Cannot send to " <> ch <> ": " <> trailing,
+              ),
+            NoEffect,
+          )
+        }
+        None ->
+          case render.parse_guest_nick_rename(line) {
+            Some(new_nick) -> {
+              let model =
+                Model(..model, nick: new_nick)
+                |> append_system_message(
+                  "Nick reassigned to "
+                  <> new_nick
+                  <> " — sign in to reclaim your handle",
+                )
+              #(
+                Model(
+                  ..model,
+                  flash: "Signed out of identity — click Sign in to reclaim "
+                    <> case model.auth_handle {
+                      "" -> "your handle"
+                      h -> h
+                    },
+                ),
+                NoEffect,
+              )
+            }
+            None -> apply_line_chat_body(model, line)
+          }
+      }
+  }
+}
+
+fn apply_line_chat_body(model: Model, line: String) -> #(Model, Effect) {
   // Topic (header + live meta when someone changes it)
   case render.parse_topic(line) {
     Some(#(ch, topic)) -> {
@@ -1903,19 +1966,28 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
       }
     }
     None ->
-      // Member roster 353 (only for the channel currently in view)
+      // Member roster 353 — proof we are in the channel (clear join error).
       case render.is_353(line) {
         True ->
-          case render.channel_from_353(line), model.channel {
-            Some(ch), Some(c) if ch == c -> {
-              let members =
-                merge_members(model.members, render.parse_353_members(line))
-              let next = Model(..model, members: members)
-              // NAMES has no DIDs; handle-like nicks (chadfowler.com) still
-              // resolve via the public AppView API.
-              #(next, avatars_effect(pending_avatar_dids(next)))
+          case render.channel_from_353(line) {
+            Some(ch) -> {
+              let model = clear_join_error(model, ch)
+              case model.channel {
+                Some(c) if ch == c -> {
+                  let members =
+                    merge_members(
+                      model.members,
+                      render.parse_353_members(line),
+                    )
+                  let next = Model(..model, members: members)
+                  // NAMES has no DIDs; handle-like nicks (chadfowler.com) still
+                  // resolve via the public AppView API.
+                  #(next, avatars_effect(pending_avatar_dids(next)))
+                }
+                _ -> #(model, NoEffect)
+              }
             }
-            _, _ -> #(model, NoEffect)
+            None -> #(model, NoEffect)
           }
         False ->
           case render.parse_mode_change(line) {
@@ -1969,6 +2041,9 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
                   case render.parse_member_change_ex(line) {
                     Some(#("join", nick, Some(ch), join_account)) -> {
                       let viewing = viewing_channel(model, ch)
+                      // Any JOIN (self or peer presence) for a channel we open
+                      // clears a prior 477/404 block — 353 also clears.
+                      let model = clear_join_error(model, ch)
                       let model = case join_account {
                         Some(did) -> learn_nick_did(model, nick, did)
                         None -> model
@@ -4695,6 +4770,76 @@ fn clear_search(model: Model) -> Model {
 
 // scroll_to_msgid is intentionally preserved across clear_search so a
 // search-hit jump can close the modal and still land on the target row.
+
+/// Channel PRIVMSG with join/connection guards so failed JOINs never look like
+/// a successful send (compose clears but nothing hits the wire / room).
+fn send_to_channel(
+  model: Model,
+  ch: String,
+  text: String,
+) -> #(Model, Effect) {
+  case model.ws {
+    WsReady ->
+      case join_error_for(model, ch) {
+        Some(reason) -> #(
+          Model(
+            ..model,
+            flash: send_blocked_flash(ch, reason),
+          ),
+          NoEffect,
+        )
+        None -> #(
+          clear_reply(Model(..model, compose: "", flash: "")),
+          IrcSend([privmsg_line(ch, text, model.reply_to, model.edit_to)]),
+        )
+      }
+    WsConnecting | WsRegistering -> #(
+      Model(..model, flash: "Still connecting — try again in a moment"),
+      NoEffect,
+    )
+    WsDisconnected -> #(
+      Model(..model, flash: "Disconnected from server — reconnecting…"),
+      // Nudge IRC so the next send can succeed once Ready lands.
+      EnsureUpstream(ch, list.filter(model.my_channels, fn(c) { c != ch })),
+    )
+  }
+}
+
+fn send_blocked_flash(ch: String, reason: String) -> String {
+  let reason = string.trim(reason)
+  case reason {
+    "" -> "Not in " <> ch <> " — cannot send"
+    r ->
+      case string.contains(string.lowercase(r), "authentication") {
+        True ->
+          "Cannot send to "
+          <> ch
+          <> " — sign in required ("
+          <> r
+          <> ")"
+        False -> "Cannot send to " <> ch <> " — " <> r
+      }
+  }
+}
+
+fn join_error_for(model: Model, ch: String) -> Option(String) {
+  dict.get(model.join_errors, channel_key(ch))
+  |> option.from_result
+}
+
+fn record_join_error(model: Model, ch: String, reason: String) -> Model {
+  Model(
+    ..model,
+    join_errors: dict.insert(model.join_errors, channel_key(ch), reason),
+  )
+}
+
+fn clear_join_error(model: Model, ch: String) -> Model {
+  Model(
+    ..model,
+    join_errors: dict.delete(model.join_errors, channel_key(ch)),
+  )
+}
 
 /// Build a channel PRIVMSG, optionally tagged with reply or edit.
 fn privmsg_line(

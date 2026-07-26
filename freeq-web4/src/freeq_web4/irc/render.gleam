@@ -8,6 +8,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
+import gleam/result
 import gleam/string
 
 /// Visual/semantic kind of a structured chat row in the message stream.
@@ -1753,6 +1754,78 @@ pub fn parse_join_failure(line: String) -> Option(#(String, String, String)) {
         _ -> None
       }
     _ -> None
+  }
+}
+
+/// ERR_CANNOTSENDTOCHAN (404) — PRIVMSG rejected (not joined, +n, ban, …).
+/// Returns `#(channel, trailing)`.
+pub fn parse_cannot_send(line: String) -> Option(#(String, String)) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  let rest = strip_server_prefix(rest)
+  let tokens = string.split(rest, " ")
+  case tokens {
+    ["404", _me, chan, ..] ->
+      case string.starts_with(chan, "#") || string.starts_with(chan, "&") {
+        True -> {
+          let trailing = case string.split_once(rest, " :") {
+            Ok(#(_, t)) -> t
+            Error(_) -> "Cannot send to channel"
+          }
+          Some(#(canonical_channel(chan), trailing))
+        }
+        False -> None
+      }
+    _ -> None
+  }
+}
+
+/// freeq-server demotes a claimed handle nick to Guest when SASL did not bind:
+/// `Nick nandi.uk is registered — renamed to Guest15100. Authenticate to reclaim.`
+/// Returns the new Guest nick when present.
+pub fn parse_guest_nick_rename(line: String) -> Option(String) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  let lower = string.lowercase(rest)
+  case string.contains(lower, "renamed to guest") {
+    False -> None
+    True -> {
+      // Take the token after "renamed to" (case-insensitive scan on original).
+      case string.split_once(lower, "renamed to ") {
+        Error(_) -> None
+        Ok(#(_, after)) -> {
+          let token =
+            after
+            |> string.split(" ")
+            |> list.first
+            |> result.unwrap("")
+            |> string.trim_end
+            |> string.replace(".", "")
+            |> string.replace(",", "")
+          // Recover original casing from the un-lowercased line when possible.
+          case token {
+            "" -> None
+            t ->
+              case string.contains(string.lowercase(t), "guest") {
+                True -> Some(recover_token_case(rest, t))
+                False -> None
+              }
+          }
+        }
+      }
+    }
+  }
+}
+
+fn recover_token_case(original: String, lower_token: String) -> String {
+  // Scan original words for a case-insensitive match.
+  let words = string.split(original, " ")
+  case
+    list.find(words, fn(w) {
+      string.lowercase(string.replace(string.replace(w, ".", ""), ",", ""))
+      == lower_token
+    })
+  {
+    Ok(w) -> string.replace(string.replace(w, ".", ""), ",", "")
+    Error(_) -> lower_token
   }
 }
 

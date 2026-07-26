@@ -678,7 +678,11 @@ pub fn join_effect_test() {
 }
 
 pub fn send_builds_privmsg_test() {
-  let model = live.mount_model("/chat/freeq")
+  // Ready + joined (no join_errors) so Send is allowed to hit the wire.
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.apply(live.SetWs(live.WsReady))
+    |> fn(p) { p.0 }
   let #(next, effect) = live.apply(model, live.Send("hello"))
   assert next.compose == ""
   let line = case effect {
@@ -686,6 +690,69 @@ pub fn send_builds_privmsg_test() {
     _ -> panic as "expected IrcSend"
   }
   assert string.contains(line, "PRIVMSG #freeq :hello")
+}
+
+pub fn send_blocked_when_join_failed_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.apply(live.SetWs(live.WsReady))
+    |> fn(p) { p.0 }
+  // 477 from freeq-server after guest open of a private channel.
+  let #(blocked, _) =
+    live.apply(
+      model,
+      live.PushLine(
+        ":irc.freeq.at 477 guest #freeq :This channel requires authentication — sign in to join",
+      ),
+    )
+  let #(next, effect) = live.apply(blocked, live.Send("hello"))
+  assert effect == live.NoEffect
+  assert string.contains(next.flash, "sign in") || string.contains(
+    string.lowercase(next.flash),
+    "authentication",
+  )
+  // Compose must not look like a successful send.
+  assert next.compose == blocked.compose
+}
+
+pub fn send_blocked_while_connecting_test() {
+  let model = live.mount_model("/chat/freeq")
+  // Default ws is Disconnected / not Ready.
+  let #(next, effect) = live.apply(model, live.Send("hello"))
+  case effect {
+    live.IrcSend(_) -> panic as "must not PRIVMSG before Ready"
+    _ -> Nil
+  }
+  assert next.flash != ""
+}
+
+pub fn parse_guest_nick_rename_test() {
+  let line =
+    ":irc.freeq.at NOTICE nandi.uk :Nick nandi.uk is registered — renamed to Guest15100. Authenticate to reclaim."
+  assert render.parse_guest_nick_rename(line) == Some("Guest15100")
+  assert render.parse_guest_nick_rename(":x NOTICE y :hello") == None
+}
+
+pub fn parse_cannot_send_test() {
+  let line = ":irc.freeq.at 404 web4_1 #freeq :Cannot send to channel"
+  assert render.parse_cannot_send(line) == Some(#("#freeq", "Cannot send to channel"))
+  assert render.parse_cannot_send(":x 403 me #c :no") == None
+}
+
+pub fn guest_rename_updates_nick_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.apply(live.SetNick("nandi.uk"))
+    |> fn(p) { p.0 }
+  let #(next, _) =
+    live.apply(
+      model,
+      live.PushLine(
+        ":irc.freeq.at NOTICE nandi.uk :Nick nandi.uk is registered — renamed to Guest15100. Authenticate to reclaim.",
+      ),
+    )
+  assert next.nick == "Guest15100"
+  assert string.contains(string.lowercase(next.flash), "sign")
 }
 
 pub fn start_reply_sets_banner_test() {
@@ -717,7 +784,10 @@ pub fn cancel_reply_clears_test() {
 }
 
 pub fn send_reply_builds_tagged_privmsg_test() {
-  let model = live.mount_model("/chat/freeq")
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.apply(live.SetWs(live.WsReady))
+    |> fn(p) { p.0 }
   let row =
     render.history_row(
       "alice!a@h",
@@ -758,7 +828,10 @@ pub fn start_edit_sets_banner_test() {
 }
 
 pub fn send_edit_builds_draft_edit_privmsg_test() {
-  let model = live.mount_model("/chat/freeq")
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.apply(live.SetWs(live.WsReady))
+    |> fn(p) { p.0 }
   let row =
     render.history_row(
       "guest!g@h",

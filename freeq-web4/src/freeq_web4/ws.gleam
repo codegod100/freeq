@@ -6,6 +6,7 @@
 //// 3. Upstream IRC lines → live.apply(PushLine) → Diff patches
 //// 4. Effects: EnsureUpstream / IrcSend / FetchHistory / FetchChannels
 
+import freeq_web4/atproto/oauth
 import freeq_web4/atproto/oauth_session.{type OAuthSession}
 import freeq_web4/irc/render
 import freeq_web4/irc/upstream
@@ -22,6 +23,7 @@ import gleam/string
 import lightspeed/diff
 import lightspeed/event
 import lightspeed/protocol
+import logging
 import mist
 
 /// Parent-facing messages selected on the Mist websocket process.
@@ -609,8 +611,34 @@ fn apply_upstream(
         )
       live.apply(m, live.SetFlash(""))
     }
-    upstream.Sasl(upstream.SaslFailed) ->
-      live.apply(before, live.SetFlash("SASL failed — continuing as guest"))
+    upstream.Sasl(upstream.SaslFailed) -> {
+      // Keep handle in auth_handle for the re-login prompt, but never look
+      // signed-in. Private rooms (#freeq) require a real SASL bind.
+      let handle = case session.oauth {
+        Some(s) -> s.handle
+        None -> before.auth_handle
+      }
+      let msg = case handle {
+        "" -> "Sign-in failed — continuing as guest. Click Sign in to retry."
+        h ->
+          "Sign-in failed for "
+          <> h
+          <> " — continuing as guest. Click Sign in to reconnect."
+      }
+      let #(m, _) = live.apply(before, live.SetFlash(msg))
+      let #(m, _) =
+        live.apply(
+          m,
+          live.SetAuth(authenticated: False, handle: handle, did: before.auth_did),
+        )
+      // Surface in System so the banner is not the only signal.
+      live.apply(
+        m,
+        live.PushLine(
+          ":freeq-web4 NOTICE * :" <> msg,
+        ),
+      )
+    }
     upstream.ApiBearer(bearer) -> {
       session_store.save_api_bearer(session.session_id, bearer)
       let #(m, _) = live.apply(before, live.SetApiBearer(bearer))
@@ -1108,6 +1136,39 @@ fn ensure_upstream(
       let oauth = case session_store.load(session.session_id) {
         Ok(s) -> Some(s)
         Error(_) -> session.oauth
+      }
+      // Proactive refresh when access is expired — SASL verifies the AT via
+      // PDS getSession; a stale access token fails 904 and leaves the user as
+      // Guest on private channels (#freeq) with silent PRIVMSG drops.
+      let oauth = case oauth {
+        None -> None
+        Some(s) ->
+          case oauth.access_still_fresh(s, 120) {
+            True -> Some(s)
+            False ->
+              case oauth.refresh(s) {
+                Ok(next) -> {
+                  logging.log(
+                    logging.Info,
+                    "OAuth refreshed before IRC for " <> next.handle,
+                  )
+                  session_store.save(session.session_id, next)
+                  Some(next)
+                }
+                Error(reason) -> {
+                  logging.log(
+                    logging.Warning,
+                    "OAuth pre-connect refresh failed for "
+                      <> s.handle
+                      <> ": "
+                      <> reason
+                      <> " — SASL may fail (re-login)",
+                  )
+                  // Keep stale session so SASL can still try / show failure UI.
+                  Some(s)
+                }
+              }
+          }
       }
       let session = Session(..session, oauth: oauth)
       let auth = case oauth {
