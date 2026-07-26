@@ -1913,6 +1913,17 @@ pub fn history_loading_html_test() {
   assert string.contains(html, "Loading older messages")
 }
 
+pub fn open_channel_shows_loading_messages_label_test() {
+  // Channel switch paints empty stream + spinner before REST returns.
+  let model = live.mount_model("/chat")
+  let #(opened, _) = live.apply(model, live.OpenChannel("dev"))
+  assert opened.history_loading == True
+  assert opened.messages == []
+  let html = live.messages_region_for_test(opened)
+  assert string.contains(html, "Loading messages")
+  assert string.contains(html, "data-history-loading=\"1\"")
+}
+
 pub fn set_history_preserves_prior_reactions_test() {
   // Simulate: CHATHISTORY hydrated chips, then REST SetHistory without tags.
   let model = live.mount_model("/chat/freeq")

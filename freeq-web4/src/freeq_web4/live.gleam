@@ -495,7 +495,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
           let ch = render.canonical_channel(raw)
           case ch == "#" || ch == "" {
             True -> #(model, NoEffect)
-            // Same single-paint path as sidebar open (after_join fills history).
+            // Same path as sidebar open (async REST history after Diff).
             False -> open_channel(model, ch)
           }
         }
@@ -913,9 +913,9 @@ fn open_system(model: Model) -> #(Model, Effect) {
 
 /// Open a real IRC channel (JOIN + history + optional AV probe).
 ///
-/// Model is prepared here; the session host's `after_join` loads REST history
-/// **before** the first Diff so the client gets one paint (not empty→fill).
-/// EnsureUpstream is the only effect — JOIN/NAMES/history/AV run in after_join.
+/// Model is prepared immediately (`history_loading`, empty messages) so the
+/// session host can Diff the channel switch without waiting on REST. Host
+/// `after_join` fires JOIN/NAMES/TOPIC and schedules async history/AV fill.
 fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
   let ch = render.canonical_channel(bare)
   let my = list_unique_append(model.my_channels, ch)
@@ -931,8 +931,7 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
             view: Channel,
             channel: Some(ch),
             my_channels: my,
-            // Cleared only in the model snapshot; after_join fills history
-            // before plan_patches so the browser never sees an empty pane.
+            // Empty pane + spinner until async RestChannelOpen lands.
             messages: [],
             members: [],
             topic: topic,
@@ -978,7 +977,7 @@ fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
         ch,
       )
   }
-  // Host: EnsureUpstream + after_join (history, JOIN, NAMES, AV) → one Diff.
+  // Host: EnsureUpstream + after_join (async history/AV, IRC JOIN/NAMES).
   #(model, EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })))
 }
 
@@ -3517,7 +3516,13 @@ fn messages_region(model: Model) -> String {
   let lookup = parent_lookup_from_rows(rows)
   let aliases = my_reaction_aliases(model)
   let loader = case model.view, model.history_loading {
-    Channel, True -> history_loading_html()
+    Channel, True ->
+      case model.messages {
+        // Channel switch / bootstrap: empty stream waiting on REST.
+        [] -> history_loading_html_label("Loading messages…")
+        // Scroll-up page-in: older rows above an already-visible stream.
+        _ -> history_loading_html_label("Loading older messages…")
+      }
     _, _ -> ""
   }
   let scroll_mid = option.unwrap(model.scroll_to_msgid, "")
@@ -3590,9 +3595,16 @@ pub fn jump_bottom_html() -> String {
 
 /// Spinner + label for scroll-up history fetch (also injected client-side).
 pub fn history_loading_html() -> String {
+  history_loading_html_label("Loading older messages…")
+}
+
+/// Spinner + custom status text (channel-open vs older-page).
+pub fn history_loading_html_label(label: String) -> String {
   "<div class=\"history-loading\" aria-live=\"polite\" role=\"status\">"
   <> "<span class=\"history-spinner\" aria-hidden=\"true\"></span>"
-  <> "<span class=\"history-loading-text\">Loading older messages…</span>"
+  <> "<span class=\"history-loading-text\">"
+  <> render.escape_html(label)
+  <> "</span>"
   <> "</div>"
 }
 
@@ -4242,6 +4254,11 @@ pub fn mount_model(path: String) -> Model {
 /// Replace the client-authoritative channel list (session restore).
 pub fn with_my_channels(model: Model, channels: List(String)) -> Model {
   Model(..model, my_channels: channels)
+}
+
+/// Mark the messages pane as loading (bootstrap / open before REST returns).
+pub fn with_history_loading(model: Model, loading: Bool) -> Model {
+  Model(..model, history_loading: loading)
 }
 
 /// Restore a previously persisted freeq-server API-BEARER without flipping

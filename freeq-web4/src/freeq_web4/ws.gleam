@@ -32,8 +32,15 @@ pub type Push {
   UpstreamEvent(upstream.Event)
   /// REST channel directory result.
   RestChannels(List(rest.ChannelInfo))
-  /// REST history fetch result for the viewed channel.
-  RestHistory(List(render.Row))
+  /// REST history (+ topic / optional AV probe) for a channel open.
+  /// May be stale if the user already navigated away — always check `channel`.
+  RestChannelOpen(
+    channel: String,
+    rows: List(render.Row),
+    topic: String,
+    /// `None` = AV not probed (call already active); `Some` = probe result.
+    av_call: Option(Option(rest.ActiveCall)),
+  )
   /// Background channel FTS finished (may be stale if query moved on).
   RestSearch(
     query: String,
@@ -153,18 +160,15 @@ fn bootstrap(session: Session) -> Session {
     Some(ch) -> {
       let extras = list.filter(session.model.my_channels, fn(c) { c != ch })
       let session = ensure_upstream(session, ch, extras)
-      let bearer = session.model.api_bearer
-      // REST body first; CHATHISTORY (on Ready / after_join) fills reactions.
-      let history =
-        rest.fetch_history(ch, live.history_page_size, bearer, None)
-      let #(model, effect) = live.apply(session.model, live.SetHistory(history))
-      // Public list + per-channel topic endpoint (private rooms like #freeq
-      // are omitted from /channels; IRC 332 may also skip on reconnect).
-      let topic = rest.resolve_topic(channels, ch)
-      let #(model, _) = live.apply(model, live.SetTopicText(topic))
+      // Seed topic from the public directory immediately; private rooms
+      // get a second fill from async REST when the open job returns.
+      let topic = rest.topic_for(channels, ch)
+      let #(model, _) = live.apply(session.model, live.SetTopicText(topic))
+      let model = live.with_history_loading(model, True)
       let session = Session(..session, model: model)
-      let session = run_effect(session, effect)
-      apply_active_call_probe(session, ch)
+      // Do not block bootstrap Diff on history / AV REST.
+      schedule_channel_open_rest(session, ch)
+      session
     }
     None ->
       // Index: re-JOIN restored my_channels; OAuth still opens IRC for SASL
@@ -229,13 +233,8 @@ pub fn handle_push(session: Session, push: Push) -> #(Session, List(String)) {
       let #(model, _) = live.apply(before, live.SetAllChannels(chs))
       finish(session, before, model)
     }
-    RestHistory(rows) -> {
-      let before = session.model
-      let #(model, effect) = live.apply(before, live.SetHistory(rows))
-      let session = Session(..session, model: model)
-      let session = run_effect(session, effect)
-      finish(session, before, session.model)
-    }
+    RestChannelOpen(channel, rows, topic, av_call) ->
+      apply_rest_channel_open(session, channel, rows, topic, av_call)
     RestSearch(query, results, status) -> {
       let before = session.model
       let #(model, effect) =
@@ -352,20 +351,9 @@ fn apply_client_event(
 fn after_join(session: Session) -> Session {
   case session.model.channel {
     Some(ch) -> {
-      // REST body first (no +freeq.at/reactions). Then CHATHISTORY attaches
-      // tallies onto matching msgids via parse_history_reactions.
-      let history =
-        rest.fetch_history(
-          ch,
-          live.history_page_size,
-          session.model.api_bearer,
-          None,
-        )
-      let #(model, effect) = live.apply(session.model, live.SetHistory(history))
-      // Seed nav topic from public list + REST fallback. IRC 332 still
-      // overwrites later; redundant JOIN often skips 332 entirely.
-      let topic = rest.resolve_topic(session.model.all_channels, ch)
-      let #(model, _) = live.apply(model, live.SetTopicText(topic))
+      // IRC first so membership / topic / NAMES start immediately. REST
+      // history + AV probe run off-process so the channel-switch Diff is not
+      // blocked on HTTP (was the main multi-second lag on navigate).
       case session.upstream {
         Some(handle) -> {
           // JOIN for membership. NAMES always refreshes the People panel —
@@ -375,17 +363,87 @@ fn after_join(session: Session) -> Session {
           upstream.send(handle, "NAMES " <> ch <> "\r\n")
           // Explicit TOPIC query when already joined (no 332 on re-JOIN).
           upstream.send(handle, "TOPIC " <> ch <> "\r\n")
-          // Reaction tallies ride CHATHISTORY (not REST) — request after body.
-          request_chathistory(handle, ch)
+          // CHATHISTORY after REST body lands (see apply_rest_channel_open) so
+          // reaction tags attach to rows that already exist.
         }
         None -> Nil
       }
-      let session = Session(..session, model: model)
-      let session = run_effect(session, effect)
-      apply_active_call_probe(session, ch)
+      schedule_channel_open_rest(session, ch)
+      session
     }
     None -> session
   }
+}
+
+/// Background REST for channel open: history body, topic fallback, AV probe.
+///
+/// Results land as `RestChannelOpen` and are ignored if the user already left
+/// the channel (fast sidebar clicks must not clobber the new view).
+fn schedule_channel_open_rest(session: Session, channel: String) -> Nil {
+  let subject = session.self_subject
+  let bearer = session.model.api_bearer
+  let all = session.model.all_channels
+  let probe_av = !session.model.av_active
+  let ch = channel
+  let _ =
+    process.spawn_unlinked(fn() {
+      let rows =
+        rest.fetch_history(ch, live.history_page_size, bearer, None)
+      // Public list first; private rooms need a second REST round-trip.
+      let topic = rest.resolve_topic(all, ch)
+      let av_call = case probe_av {
+        True -> Some(rest.probe_active_call(ch, bearer))
+        False -> None
+      }
+      process.send(
+        subject,
+        RestChannelOpen(channel: ch, rows: rows, topic: topic, av_call: av_call),
+      )
+    })
+  Nil
+}
+
+/// Apply a finished channel-open REST job, or drop it if navigation moved on.
+fn apply_rest_channel_open(
+  session: Session,
+  channel: String,
+  rows: List(render.Row),
+  topic: String,
+  av_call: Option(Option(rest.ActiveCall)),
+) -> #(Session, List(String)) {
+  case session.model.channel {
+    Some(current) ->
+      case same_channel(current, channel) {
+        False -> #(session, [])
+        True -> {
+          let before = session.model
+          let #(model, effect) = live.apply(before, live.SetHistory(rows))
+          // Prefer REST topic when we have one; keep directory/IRC seed otherwise.
+          let #(model, _) = case topic {
+            "" -> #(model, live.NoEffect)
+            t -> live.apply(model, live.SetTopicText(t))
+          }
+          let #(model, _) = case av_call {
+            None -> #(model, live.NoEffect)
+            Some(call) -> live.apply(model, live.AvProbe(channel, call))
+          }
+          // Reaction tallies ride CHATHISTORY (not REST) — request after body.
+          case session.upstream {
+            Some(handle) -> request_chathistory(handle, channel)
+            None -> Nil
+          }
+          let session = Session(..session, model: model)
+          let session = run_effect(session, effect)
+          finish(session, before, session.model)
+        }
+      }
+    None -> #(session, [])
+  }
+}
+
+fn same_channel(a: String, b: String) -> Bool {
+  string.lowercase(render.canonical_channel(a))
+  == string.lowercase(render.canonical_channel(b))
 }
 
 /// Ask freeq-server for recent PRIVMSGs with `+freeq.at/reactions` tags.
