@@ -1325,6 +1325,10 @@ let ignoreScrollEvents = false;
 // data-channel on #messages — detect stream switches (web3 ChatScroll parity).
 let lastMessagesChannel = null;
 let scrollSoonTimer = 0;
+// Bump to cancel in-flight scrollMessagesToEndSoon rAF/timeout chains.
+let scrollSoonGen = 0;
+// Longer reassert after stream switch: avatars / embeds / fonts keep growing.
+let channelStickUntil = 0;
 
 function messagesEl() {
   return document.getElementById('messages');
@@ -1333,6 +1337,24 @@ function messagesEl() {
 function messagesChannelKey(el) {
   if (!el) return '';
   return el.dataset.channel || '';
+}
+
+function isChannelStickLocked() {
+  return Date.now() < channelStickUntil;
+}
+
+/** Keep bottom while stick intent is on (media load / late layout). */
+function maybeStickScrollToEnd() {
+  if (pendingScrollTo) return;
+  if (!stickToBottom && !isJumpLocked() && !isChannelStickLocked()) return;
+  scrollMessagesToEnd();
+  const el = messagesEl();
+  if (el && nearBottom(el)) {
+    stickToBottom = true;
+    newMsgCount = 0;
+    lastBottomMsgid = lastMessageId(el);
+  }
+  updateJumpBottomUi();
 }
 
 /** Reset stick/FAB state when the open channel (or system buffer) changes. */
@@ -1347,10 +1369,14 @@ function resetScrollForChannelSwitch(seekingMessage) {
     clearTimeout(scrollSoonTimer);
     scrollSoonTimer = 0;
   }
+  scrollSoonGen += 1;
   if (seekingMessage) {
     stickToBottom = false;
+    channelStickUntil = 0;
   } else {
     stickToBottom = true;
+    // Hold stick through avatar/embed/font settle after stream replace.
+    channelStickUntil = Date.now() + 2000;
   }
   updateJumpBottomUi();
 }
@@ -1504,26 +1530,55 @@ function scrollMessagesToEnd() {
 }
 
 /**
- * After channel switch / history paint, height can lag a frame or two
- * (date seps, embeds, fonts). Re-assert bottom like freeq-web3 scrollToBottomSoon.
+ * After channel switch / history paint, height can lag (date seps, embeds,
+ * fonts, avatars). Re-assert bottom like freeq-web3 scrollToBottomSoon, with
+ * a longer tail so late media growth does not leave the pane mid-stream.
  */
 function scrollMessagesToEndSoon() {
   stickToBottom = true;
+  if (!isChannelStickLocked()) {
+    channelStickUntil = Date.now() + 1200;
+  }
+  const gen = ++scrollSoonGen;
   scrollMessagesToEnd();
-  if (scrollSoonTimer) clearTimeout(scrollSoonTimer);
-  requestAnimationFrame(() => {
+  if (scrollSoonTimer) {
+    clearTimeout(scrollSoonTimer);
+    scrollSoonTimer = 0;
+  }
+  const reassert = () => {
+    if (gen !== scrollSoonGen) return;
+    // Stop yanking if the user clearly scrolled up during settle.
+    if (!stickToBottom && !isChannelStickLocked() && !isJumpLocked()) return;
     scrollMessagesToEnd();
+    lastBottomMsgid = lastMessageId(messagesEl());
+    if (nearBottom(messagesEl())) {
+      stickToBottom = true;
+      newMsgCount = 0;
+    }
+    updateJumpBottomUi();
+  };
+  requestAnimationFrame(() => {
+    reassert();
     requestAnimationFrame(() => {
-      scrollMessagesToEnd();
-      scrollSoonTimer = setTimeout(() => {
-        scrollMessagesToEnd();
-        lastBottomMsgid = lastMessageId(messagesEl());
-        if (nearBottom(messagesEl())) {
-          stickToBottom = true;
-          newMsgCount = 0;
+      reassert();
+      // Staggered tail — freeq-web3 only does 80ms; avatars need longer.
+      if (gen !== scrollSoonGen) return;
+      const times = [50, 120, 250, 500, 900, 1500];
+      let i = 0;
+      const tick = () => {
+        if (gen !== scrollSoonGen) {
+          scrollSoonTimer = 0;
+          return;
         }
-        updateJumpBottomUi();
-      }, 80);
+        reassert();
+        i += 1;
+        if (i < times.length) {
+          scrollSoonTimer = setTimeout(tick, times[i] - times[i - 1]);
+        } else {
+          scrollSoonTimer = 0;
+        }
+      };
+      scrollSoonTimer = setTimeout(tick, times[0]);
     });
   });
 }
@@ -1581,9 +1636,10 @@ function jumpToBottom() {
 function noteNewMessagesIfScrolledUp(el) {
   if (!el) return;
   const bottom = lastMessageId(el);
-  if (stickToBottom || pendingScrollTo || isJumpLocked()) {
+  if (stickToBottom || pendingScrollTo || isJumpLocked() || isChannelStickLocked()) {
     lastBottomMsgid = bottom;
-    if (stickToBottom || isJumpLocked()) {
+    if (stickToBottom || isJumpLocked() || isChannelStickLocked()) {
+      if (isChannelStickLocked()) stickToBottom = true;
       newMsgCount = 0;
       scrollMessagesToEnd();
     }
@@ -1616,6 +1672,30 @@ function bindMessagesScroll() {
   if (el.dataset.freeqScrollBound !== '1') {
     el.dataset.freeqScrollBound = '1';
     el.addEventListener('scroll', onMessagesScroll, { passive: true });
+    // Avatar / preview / video loads grow scrollHeight without a Lightspeed
+    // patch — re-stick so channel switch and live traffic stay at the bottom.
+    el.addEventListener(
+      'load',
+      (ev) => {
+        const t = ev.target;
+        if (!t || !t.tagName) return;
+        const tag = t.tagName;
+        if (tag !== 'IMG' && tag !== 'VIDEO' && tag !== 'IFRAME') return;
+        maybeStickScrollToEnd();
+      },
+      true,
+    );
+    el.addEventListener(
+      'error',
+      (ev) => {
+        const t = ev.target;
+        if (!t || !t.tagName) return;
+        if (t.tagName !== 'IMG' && t.tagName !== 'VIDEO') return;
+        // Broken images collapse placeholders — re-measure stick.
+        maybeStickScrollToEnd();
+      },
+      true,
+    );
   }
   bindJumpBottomButton();
   updateJumpBottomUi();
@@ -1633,10 +1713,24 @@ function onMessagesScroll() {
   }
   // Geometry drives both stick and FAB (freeq-app MessageList parity).
   const atBottom = nearBottom(el);
+  // During channel-switch / history-fill settle, morph often leaves scrollTop
+  // at 0 on a tall stream (looks "not at bottom"). That is not user intent —
+  // only treat as unstick when the user has scrolled into the middle.
+  if (isChannelStickLocked() && stickToBottom && !atBottom) {
+    const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+    const midish = el.scrollTop > 120 && dist > 200;
+    if (!midish) {
+      scrollMessagesToEnd();
+      updateJumpBottomUi();
+      return;
+    }
+  }
   stickToBottom = atBottom;
   if (atBottom) {
     newMsgCount = 0;
     lastBottomMsgid = lastMessageId(el);
+    // User returned to bottom — no need to keep forcing.
+    if (isChannelStickLocked()) channelStickUntil = 0;
   }
   updateJumpBottomUi();
   if (!atBottom && el.scrollTop <= 48) requestLoadOlder(el);
@@ -1734,6 +1828,11 @@ function onFrame(text) {
     pendingComposeFocus = false;
     const msgsBefore = messagesEl();
     const chBefore = messagesChannelKey(msgsBefore);
+    // Open paints an empty stream first; REST history is a later same-channel
+    // patch. Detect empty→rows so we reassert bottom (not only on data-channel).
+    const hadRowsBefore = !!(
+      msgsBefore && msgsBefore.querySelector(':scope > .row[data-msgid]')
+    );
     // Preserve viewport when the user is reading history (not stuck to bottom).
     // Discarded on channel switch so we never restore the previous stream's offset.
     let savedScroll = null;
@@ -1771,6 +1870,12 @@ function onFrame(text) {
     const msgs = messagesEl();
     const chAfter = messagesChannelKey(msgs);
     const channelChanged = chBefore !== chAfter;
+    const hasRowsAfter = !!(
+      msgs && msgs.querySelector(':scope > .row[data-msgid]')
+    );
+    // Same data-channel, empty pane → full history (click #freeq race).
+    const historyJustFilled =
+      !channelChanged && !hadRowsBefore && hasRowsAfter;
     if (channelChanged) {
       lastMessagesChannel = chAfter;
     }
@@ -1784,17 +1889,31 @@ function onFrame(text) {
         // New stream: jump to latest unless we are seeking a specific msgid.
         resetScrollForChannelSwitch(!!pendingScrollTo);
         savedScroll = null;
+      } else if (historyJustFilled && !pendingScrollTo) {
+        // History REST landed after open's empty paint — treat like a switch.
+        stickToBottom = true;
+        channelStickUntil = Date.now() + 2000;
+        savedScroll = null;
       }
       if (pendingScrollTo) {
         // Do not yank back to bottom while seeking a target.
         stickToBottom = false;
-      } else if (savedScroll && !channelChanged) {
+        channelStickUntil = 0;
+      } else if (savedScroll && !channelChanged && !historyJustFilled) {
         msgs.scrollTop = msgs.scrollHeight - savedScroll.h + savedScroll.t;
-      } else if (channelChanged) {
-        // Full history paint may lag a frame — re-assert bottom (web3 soon).
+      } else if (channelChanged || historyJustFilled) {
+        // Stream replace / first history page lands at top until we force
+        // bottom. Use the longer reassert path — 80ms is not enough for tall
+        // history + avatars (#freeq).
         scrollMessagesToEndSoon();
-      } else if (stickToBottom) {
-        scrollMessagesToEnd();
+      } else if (stickToBottom || isChannelStickLocked()) {
+        stickToBottom = true;
+        // Still settling after open: keep the multi-frame reassert chain.
+        if (isChannelStickLocked()) {
+          scrollMessagesToEndSoon();
+        } else {
+          scrollMessagesToEnd();
+        }
       }
       // Server finished the older-page fetch (or still loading async).
       if (msgs.dataset.historyLoading === '1') {
@@ -1805,10 +1924,11 @@ function onFrame(text) {
       bindMessagesScroll();
       // Still at the top after prepend? load the next page if more remain.
       // Skip auto-load-older while seeking a jump target (FetchAround owns that).
-      // Also skip right after a channel switch (we force-scrolled to bottom).
+      // Also skip right after a channel switch / history fill (force-scrolled).
       if (
         !pendingScrollTo &&
         !channelChanged &&
+        !historyJustFilled &&
         msgs.scrollTop <= 48 &&
         msgs.dataset.historyLoading !== '1'
       ) {
@@ -1825,10 +1945,16 @@ function onFrame(text) {
     const tBeforeSep = msgsAfter ? msgsAfter.scrollTop : 0;
     localizeTimes();
     if (msgsAfter && !pendingScrollTo) {
-      if (channelChanged) {
+      if (channelChanged || historyJustFilled) {
+        // Date seps just changed height — keep reasserting (same as paint).
         scrollMessagesToEndSoon();
-      } else if (stickToBottom) {
-        scrollMessagesToEnd();
+      } else if (stickToBottom || isChannelStickLocked()) {
+        stickToBottom = true;
+        if (isChannelStickLocked()) {
+          scrollMessagesToEndSoon();
+        } else {
+          scrollMessagesToEnd();
+        }
       } else {
         const grew = msgsAfter.scrollHeight - hBeforeSep;
         if (grew > 0) msgsAfter.scrollTop = tBeforeSep + grew;
@@ -2499,10 +2625,17 @@ bindMessagesScroll();
   if (el) {
     lastMessagesChannel = messagesChannelKey(el);
     stickToBottom = true;
+    channelStickUntil = Date.now() + 2000;
     scrollMessagesToEndSoon();
     lastBottomMsgid = lastMessageId(el);
   }
   updateJumpBottomUi();
+  // Fonts settling after first paint can grow rows — re-stick once ready.
+  try {
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => maybeStickScrollToEnd());
+    }
+  } catch (_) {}
 }
 connect();
 window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview, scrollToMessage, jumpToBottom };
