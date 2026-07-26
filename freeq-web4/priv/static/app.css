@@ -963,45 +963,8 @@ body {
 #messages .body a {
     color: #7ab7ff;
 }
-/* Direct image URL previews (web2 msg-img parity) */
-#messages a.msg-img-url {
-    display: block;
-    font-size: 0.7rem;
-    opacity: 0.75;
-    margin-top: 2px;
-    word-break: break-all;
-}
-/* Reserved frame so decode doesn't reflow the list */
-#messages a.msg-img-link {
-    display: block;
-    position: relative;
-    margin-top: 4px;
-    width: min(420px, 100%);
-    aspect-ratio: 16 / 10;
-    max-height: 320px;
-    border-radius: 8px;
-    overflow: hidden;
-    border: 1px solid var(--border);
-    background: #0a0d12;
-}
-#messages a.msg-img-link:hover {
-    border-color: #7ab7ff;
-}
-#messages img.msg-img {
-    position: absolute;
-    inset: 0;
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    background: #0a0d12;
-}
-#messages a.msg-img-link.is-broken {
-    opacity: 0.55;
-}
-
-/* Link embeds (YouTube / Bluesky / OpenGraph) — freeq-web2 parity */
-#messages a.link-embed {
+/* Link / file embeds — shared card chrome (OG, YouTube, Bluesky, image, video) */
+#messages .link-embed {
     display: block;
     margin-top: 6px;
     max-width: min(420px, 100%);
@@ -1013,7 +976,8 @@ body {
     color: inherit;
     white-space: normal;
 }
-#messages a.link-embed:hover {
+#messages a.link-embed:hover,
+#messages .link-embed:hover {
     border-color: #7ab7ff;
 }
 #messages .link-embed-img {
@@ -1023,11 +987,37 @@ body {
     object-fit: cover;
     background: #0a0d12;
 }
+/* Direct file images: show full frame (contain) instead of OG cover crop */
+#messages .link-embed-img.file-embed-img {
+    height: auto;
+    max-height: 320px;
+    min-height: 120px;
+    object-fit: contain;
+    background: #0a0d12;
+}
 #messages .link-embed-img.yt-thumb {
     height: 220px;
 }
+/* Direct video file player (same card as OG) */
+#messages .link-embed-video {
+    display: block;
+    width: 100%;
+    max-height: 320px;
+    background: #000;
+    vertical-align: middle;
+}
 #messages .link-embed-body {
+    display: block;
     padding: 8px 10px;
+    text-decoration: none;
+    color: inherit;
+}
+#messages a.link-embed-body:hover .link-embed-title {
+    text-decoration: underline;
+}
+/* Broken image file card (optional JS may set .is-broken) */
+#messages .link-embed.file-embed.is-broken {
+    opacity: 0.55;
 }
 #messages .link-embed-site {
     font-size: 0.62rem;

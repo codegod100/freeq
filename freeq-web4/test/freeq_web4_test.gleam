@@ -194,8 +194,11 @@ pub fn linkify_strips_trailing_punct_test() {
   let out = render.linkify_html("pic https://ex.com/i.png.")
   assert string.contains(out, "href=\"https://ex.com/i.png\"")
   assert string.ends_with(out, ".")
-  assert string.contains(out, "class=\"msg-img-url\"")
-  assert string.contains(out, "class=\"msg-img-link\"")
+  assert string.contains(out, "class=\"link-embed file-embed\"")
+  assert string.contains(out, "class=\"link-embed-img file-embed-img\"")
+  assert string.contains(out, "class=\"link-embed-title\"")
+  assert string.contains(out, ">i.png</div>")
+  assert string.contains(out, ">ex.com</div>")
 }
 
 pub fn linkify_at_uri_test() {
@@ -242,6 +245,54 @@ pub fn is_image_url_test() {
   )
   assert !render.is_image_url("https://example.com/page")
   assert !render.is_image_url("https://example.com/video.mp4")
+  // freeq media with video extension is not an image
+  assert !render.is_image_url(
+    "https://irc.freeq.at/api/v1/media/abc/SIG/clip.mp4",
+  )
+}
+
+pub fn is_video_url_test() {
+  assert render.is_video_url("https://cdn.example.com/clip.mp4")
+  assert render.is_video_url("https://cdn.example.com/clip.MP4?token=1")
+  assert render.is_video_url("https://cdn.example.com/a.webm#t=0")
+  assert render.is_video_url("https://cdn.example.com/a.mov")
+  assert render.is_video_url("https://cdn.example.com/a.m4v")
+  assert render.is_video_url(
+    "https://irc.freeq.at/api/v1/media/def/SIG/clip.mp4",
+  )
+  assert !render.is_video_url("https://example.com/page")
+  assert !render.is_video_url("https://cdn.example.com/photo.jpg")
+  assert !render.is_video_url("https://cdn.example.com/sound.mp3")
+}
+
+pub fn linkify_video_url_test() {
+  let out = render.linkify_html("watch https://ex.com/clip.mp4 please")
+  assert string.contains(out, "href=\"https://ex.com/clip.mp4\"")
+  assert string.contains(out, "class=\"link-embed file-embed\"")
+  assert string.contains(out, "<video class=\"link-embed-video\" src=\"https://ex.com/clip.mp4\"")
+  assert string.contains(out, "controls")
+  assert string.contains(out, "preload=\"metadata\"")
+  assert string.contains(out, "playsinline")
+  assert string.contains(out, "class=\"link-embed-title\"")
+  assert string.contains(out, ">clip.mp4</div>")
+  assert string.contains(out, ">ex.com</div>")
+  assert string.starts_with(out, "watch ")
+  assert string.ends_with(out, " please")
+  // Video card is a div so controls stay clickable (not nested in <a>)
+  assert string.contains(out, "<div class=\"link-embed file-embed\">")
+  assert !string.contains(out, "class=\"msg-img\"")
+  assert !string.contains(out, "<img ")
+}
+
+pub fn linkify_media_mp4_not_image_test() {
+  let url = "https://irc.freeq.at/api/v1/media/abc/SIG/clip.mp4"
+  let out = render.linkify_html(url)
+  assert string.contains(out, "<video class=\"link-embed-video\" src=\"" <> url <> "\"")
+  assert string.contains(out, "class=\"link-embed file-embed\"")
+  assert string.contains(out, ">clip.mp4</div>")
+  assert string.contains(out, ">irc.freeq.at</div>")
+  assert !string.contains(out, "class=\"msg-img\"")
+  assert !string.contains(out, "<img ")
 }
 
 pub fn upload_multipart_encode_test() {
@@ -1969,11 +2020,13 @@ pub fn av_channel_shell_has_call_button_test() {
 
 /// MoQ capture/render AudioWorklets load via blob: URLs. CSP without blob:
 /// yields AbortError: Unable to load a worklet's module (silent calls).
+/// media-src must also allow https:/http: so freeq-server /api/v1/media
+/// video players work when the BFF origin differs from the IRC host.
 pub fn live_csp_allows_blob_worklets_test() {
   let csp = freeq_web4.live_csp()
   assert string.contains(csp, "script-src 'self' blob:")
   assert string.contains(csp, "worker-src 'self' blob:")
-  assert string.contains(csp, "media-src 'self' blob:")
+  assert string.contains(csp, "media-src 'self' https: http: blob:")
 }
 
 pub fn active_call_from_sessions_json_test() {

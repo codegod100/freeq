@@ -124,7 +124,9 @@ pub fn live_csp() -> String {
   <> "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
   <> "font-src 'self' https://fonts.gstatic.com data:; "
   <> "img-src 'self' https: data: blob:; "
-  <> "media-src 'self' blob:; "
+  // https:/http: for freeq-server media (signed /api/v1/media/*.mp4) and
+  // other direct video URLs in chat — without this CSP blocks <video src>.
+  <> "media-src 'self' https: http: blob:; "
   <> "connect-src 'self' ws: wss: https:; "
   <> "frame-ancestors 'none'; "
   <> "base-uri 'self'; "

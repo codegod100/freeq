@@ -1851,7 +1851,9 @@ pub fn escape_html(s: String) -> String {
 /// Escape message text and turn http(s) / `at://` URIs into clickable anchors.
 ///
 /// Direct image URLs (file extension, freeq media, bsky CDN) also get an
-/// inline preview — freeq-web2 / freeq-web3 parity.
+/// inline preview — freeq-web2 / freeq-web3 parity. Direct video URLs
+/// (`.mp4` / `.webm` / `.mov` / `.m4v`, including freeq media) get an
+/// inline `<video controls>` player — freeq-app parity.
 ///
 /// AT Protocol URIs (`at://…`) link to the Taproot record explorer at
 /// atproto.at (prefix `https://atproto.` → `https://atproto.at://…`).
@@ -1861,28 +1863,53 @@ pub fn linkify_html(text: String) -> String {
   |> linkify_escaped
 }
 
-/// True when `url` should render as an inline image preview.
-pub fn is_image_url(url: String) -> Bool {
-  let lower = string.lowercase(url)
-  string.contains(lower, "/api/v1/media/")
-  || string.contains(lower, "cdn.bsky.app/img/")
-  || has_image_ext(lower)
+/// True when `url` should render as an inline `<video controls>` player.
+pub fn is_video_url(url: String) -> Bool {
+  has_video_ext(string.lowercase(url))
 }
 
-fn has_image_ext(url: String) -> Bool {
+/// True when `url` should render as an inline image preview.
+///
+/// Video URLs (by extension) are never treated as images, even when they
+/// live under `/api/v1/media/`.
+pub fn is_image_url(url: String) -> Bool {
+  case is_video_url(url) {
+    True -> False
+    False -> {
+      let lower = string.lowercase(url)
+      string.contains(lower, "/api/v1/media/")
+      || string.contains(lower, "cdn.bsky.app/img/")
+      || has_image_ext(lower)
+    }
+  }
+}
+
+fn url_path_only(url: String) -> String {
   let path = case string.split_once(url, "?") {
     Ok(#(p, _)) -> p
     Error(_) -> url
   }
-  let path = case string.split_once(path, "#") {
+  case string.split_once(path, "#") {
     Ok(#(p, _)) -> p
     Error(_) -> path
   }
+}
+
+fn has_image_ext(url: String) -> Bool {
+  let path = url_path_only(url)
   string.ends_with(path, ".jpg")
   || string.ends_with(path, ".jpeg")
   || string.ends_with(path, ".png")
   || string.ends_with(path, ".gif")
   || string.ends_with(path, ".webp")
+}
+
+fn has_video_ext(url: String) -> Bool {
+  let path = url_path_only(url)
+  string.ends_with(path, ".mp4")
+  || string.ends_with(path, ".webm")
+  || string.ends_with(path, ".mov")
+  || string.ends_with(path, ".m4v")
 }
 
 fn linkify_escaped(escaped: String) -> String {
@@ -2004,17 +2031,119 @@ fn link_anchor(url: String) -> String {
     True ->
       anchor_tag("https://atproto." <> url, url, "")
     False ->
-      case is_image_url(url) {
-        True ->
-          anchor_tag(url, url, " class=\"msg-img-url\"")
-          <> anchor_tag(
-            url,
-            "<img src=\""
-              <> url
-              <> "\" alt=\"\" class=\"msg-img\" loading=\"lazy\" referrerpolicy=\"no-referrer\">",
-            " class=\"msg-img-link\"",
-          )
-        False -> anchor_tag(url, url, "")
+      case is_video_url(url) {
+        True -> file_video_card(url)
+        False ->
+          case is_image_url(url) {
+            True -> file_image_card(url)
+            False -> anchor_tag(url, url, "")
+          }
+      }
+  }
+}
+
+/// Direct image URL as an OG-style card (media + title/domain footer).
+fn file_image_card(url: String) -> String {
+  let #(title, domain) = file_card_meta(url)
+  "<a href=\""
+  <> url
+  <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"link-embed file-embed\">"
+  <> "<img class=\"link-embed-img file-embed-img\" src=\""
+  <> url
+  <> "\" alt=\"\" loading=\"lazy\" referrerpolicy=\"no-referrer\">"
+  <> file_card_body(title, domain)
+  <> "</a>"
+}
+
+/// Direct video URL as an OG-style card. Outer is a `<div>` (not `<a>`) so
+/// native video controls stay clickable; footer links to the file.
+fn file_video_card(url: String) -> String {
+  let #(title, domain) = file_card_meta(url)
+  "<div class=\"link-embed file-embed\">"
+  <> "<video class=\"link-embed-video\" src=\""
+  <> url
+  <> "\" controls preload=\"metadata\" playsinline></video>"
+  <> "<a href=\""
+  <> url
+  <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"link-embed-body file-embed-footer\">"
+  <> file_card_body_inner(title, domain)
+  <> "</a>"
+  <> "</div>"
+}
+
+fn file_card_body(title: String, domain: String) -> String {
+  "<div class=\"link-embed-body\">"
+  <> file_card_body_inner(title, domain)
+  <> "</div>"
+}
+
+fn file_card_body_inner(title: String, domain: String) -> String {
+  let title_html = case title {
+    "" -> ""
+    t -> "<div class=\"link-embed-title\">" <> t <> "</div>"
+  }
+  let domain_html = case domain {
+    "" -> ""
+    d -> "<div class=\"link-embed-domain\">" <> d <> "</div>"
+  }
+  title_html <> domain_html
+}
+
+/// `#(filename_or_host, domain)` for the card footer. `url` is already
+/// HTML-escaped (linkify runs after escape_html).
+fn file_card_meta(url: String) -> #(String, String) {
+  let domain = url_host(url)
+  let name = url_filename(url)
+  let title = case name {
+    "" -> domain
+    n -> n
+  }
+  #(title, domain)
+}
+
+fn url_host(url: String) -> String {
+  let after_scheme = case string.split_once(url, "://") {
+    Ok(#(_, rest)) -> rest
+    Error(_) -> url
+  }
+  let host_path = case string.split_once(after_scheme, "/") {
+    Ok(#(host, _)) -> host
+    Error(_) -> after_scheme
+  }
+  let host = case string.split_once(host_path, "?") {
+    Ok(#(h, _)) -> h
+    Error(_) -> host_path
+  }
+  case string.split_once(host, "#") {
+    Ok(#(h, _)) -> h
+    Error(_) -> host
+  }
+}
+
+fn url_filename(url: String) -> String {
+  let path = url_path_only(url)
+  let after_scheme = case string.split_once(path, "://") {
+    Ok(#(_, rest)) -> rest
+    Error(_) -> path
+  }
+  // Drop host, keep path segments.
+  let path_only = case string.split_once(after_scheme, "/") {
+    Ok(#(_, rest)) -> rest
+    Error(_) -> ""
+  }
+  case path_only {
+    "" -> ""
+    p -> last_path_segment(p)
+  }
+}
+
+fn last_path_segment(path: String) -> String {
+  case string.split(path, "/") {
+    [] -> ""
+    segs ->
+      case list.last(segs) {
+        Ok(s) -> s
+        Error(_) -> ""
       }
   }
 }
