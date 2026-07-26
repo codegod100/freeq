@@ -242,6 +242,18 @@ body {
     min-height: 0;
 }
 /*
+ * Message pane shell: flex child of chat-main; holds the scroll region and
+ * the floating jump-to-bottom control (sibling so message patches leave it).
+ */
+.messages-shell {
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+/*
  * Message pane: flex column + spacer so short history sits at the *bottom*
  * (no giant empty void under a few lines). Still scrolls when full.
  */
@@ -249,10 +261,62 @@ body {
     flex: 1 1 0;
     min-height: 0;
     overflow-y: auto;
+    /* Prevent scroll anchoring from fighting jump-to-bottom on tall history. */
+    overflow-anchor: none;
     padding: 0.15rem 0.25rem 0.2rem 0;
     display: flex;
     flex-direction: column;
-    line-height: 1.25;
+    line-height: 1.4;
+}
+/* Jump-to-bottom FAB (shown by client when scrolled up). freeq-app parity. */
+.jump-bottom {
+    position: absolute;
+    bottom: 0.75rem;
+    left: 50%;
+    transform: translateX(-50%);
+    /* Above message rows and compose stack (compose uses z-index: 5). */
+    z-index: 20;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    padding: 0.4rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: #161b22;
+    color: #8b93a7;
+    font: inherit;
+    font-size: 0.8rem;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: pointer;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+    transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.jump-bottom:hover,
+.jump-bottom:focus-visible {
+    color: var(--fg);
+    border-color: #7ab7ff;
+    background: #1a2230;
+    outline: none;
+}
+.jump-bottom[hidden],
+/* Belt-and-suspenders: stick intent also sets .is-at-bottom on the shell. */
+.messages-shell.is-at-bottom .jump-bottom {
+    display: none !important;
+}
+.jump-bottom-icon {
+    flex: 0 0 auto;
+    display: block;
+}
+.jump-bottom.has-new {
+    color: #cfe4ff;
+    border-color: rgba(122, 183, 255, 0.55);
+}
+.jump-bottom.has-new:hover,
+.jump-bottom.has-new:focus-visible {
+    color: #fff;
+    border-color: #7ab7ff;
 }
 #messages.is-hidden,
 #messages[hidden] {
@@ -262,6 +326,45 @@ body {
     content: "";
     flex: 1 0 0;
     min-height: 0;
+}
+/* Scroll-up pagination: spinner while older history is fetched. */
+#messages .history-loading {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+    text-align: center;
+    font-size: 0.75rem;
+    color: #8b93a7;
+    padding: 0.55rem 0.5rem;
+    opacity: 0.95;
+    min-height: 1.75rem;
+}
+#messages .history-loading-text {
+    letter-spacing: 0.01em;
+}
+#messages .history-spinner {
+    display: inline-block;
+    width: 0.85rem;
+    height: 0.85rem;
+    border: 2px solid rgba(139, 147, 167, 0.28);
+    border-top-color: #7ab7ff;
+    border-radius: 50%;
+    animation: freeq-history-spin 0.7s linear infinite;
+    flex: 0 0 auto;
+}
+@keyframes freeq-history-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    #messages .history-spinner {
+        animation: none;
+        border-top-color: rgba(139, 147, 167, 0.55);
+        opacity: 0.7;
+    }
 }
 /* Compose column: preview strip + send bar (web2 parity). */
 #compose-stack,
@@ -425,7 +528,7 @@ body {
     white-space: nowrap;
 }
 
-/* Dense IRC rows — single line-height, no vertical padding. */
+/* Channel message rows — readable size (closer to freeq-app ~15px). */
 #messages .msg,
 #messages .notice,
 #messages .join,
@@ -440,19 +543,19 @@ body {
     align-items: baseline;
     margin: 0;
     padding: 0;
-    font-size: 0.85rem;
-    line-height: 1.25;
+    font-size: 0.92rem;
+    line-height: 1.4;
     min-height: 0;
 }
 #messages .ts {
     color: var(--muted);
-    font-size: 0.65rem;
+    font-size: 0.7rem;
     text-align: right;
     user-select: none;
     white-space: nowrap;
     overflow: hidden;
     padding: 0;
-    line-height: 1.25;
+    line-height: 1.4;
     font-variant-numeric: tabular-nums;
 }
 #messages .body {
@@ -461,7 +564,7 @@ body {
     padding: 0;
     white-space: normal;
     overflow-wrap: anywhere;
-    line-height: 1.25;
+    line-height: 1.4;
 }
 #messages .nick {
     font-weight: 600;
@@ -494,18 +597,18 @@ body {
 #messages .notice .body {
     color: var(--muted);
     font-style: italic;
-    font-size: 0.78rem;
-    line-height: 1.2;
+    font-size: 0.85rem;
+    line-height: 1.35;
 }
 #messages .join .body {
     color: var(--nick-5);
-    font-size: 0.78rem;
-    line-height: 1.2;
+    font-size: 0.85rem;
+    line-height: 1.35;
 }
 #messages .part .body {
     color: var(--nick-6);
-    font-size: 0.78rem;
-    line-height: 1.2;
+    font-size: 0.85rem;
+    line-height: 1.35;
 }
 #status .dot {
     display: inline-block;
@@ -609,6 +712,151 @@ body {
     background: rgba(122, 183, 255, 0.12);
 }
 
+/* ── Message search modal (REST FTS) ─────────────────────────────────── */
+.nav-search-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 0.35rem;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+}
+.nav-search-btn:hover {
+    color: var(--fg);
+    border-color: var(--border);
+    background: rgba(122, 183, 255, 0.08);
+}
+.nav-search-btn svg {
+    width: 0.95rem;
+    height: 0.95rem;
+}
+.search-host[hidden] {
+    display: none !important;
+}
+.search-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 140;
+    background: rgba(0, 0, 0, 0.45);
+}
+.search-modal {
+    position: fixed;
+    z-index: 150;
+    top: 10vh;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(560px, 92vw);
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    background: #151a22;
+    border: 1px solid var(--border);
+    border-radius: 0.75rem;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+    overflow: hidden;
+}
+.search-form {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--border);
+    margin: 0;
+}
+.search-form .search-icon {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+    color: var(--muted);
+}
+#search-input {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    outline: none;
+    color: var(--fg);
+    font: inherit;
+    font-size: 0.9rem;
+}
+#search-input::placeholder {
+    color: var(--muted);
+}
+.search-esc {
+    font-size: 0.65rem;
+    color: var(--muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 0.25rem;
+    padding: 0.15rem 0.4rem;
+    font-family: var(--font-mono);
+}
+.search-status {
+    padding: 0.5rem 1rem 0;
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+.search-status-loading {
+    color: #7ab7ff;
+}
+.search-results {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 4rem;
+    max-height: calc(70vh - 3.5rem);
+}
+.search-hit {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 0.65rem 1rem;
+    border: 0;
+    border-bottom: 1px solid rgba(35, 41, 50, 0.7);
+    background: transparent;
+    color: var(--fg);
+    cursor: pointer;
+}
+.search-hit:last-child {
+    border-bottom: 0;
+}
+.search-hit:hover {
+    background: rgba(122, 183, 255, 0.08);
+}
+.search-hit-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.15rem;
+}
+.search-hit-nick {
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+.search-hit-time {
+    font-size: 0.65rem;
+    color: var(--muted);
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+}
+.search-hit-text {
+    font-size: 0.85rem;
+    color: #a8b0bc;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.search-empty {
+    text-align: center;
+    color: var(--muted);
+    font-size: 0.85rem;
+    padding: 2rem 1rem;
+}
+
 /* Inline quote of the parent message on replies (freeq-web2 parity). */
 .reply-badge {
     display: flex;
@@ -660,12 +908,13 @@ body {
 .reply-btn:hover {
     color: #7ab7ff;
 }
-/* Brief highlight when jumping to a replied-to message. */
+/* Brief highlight when jumping to a search hit / replied-to message. */
 #messages .msg.highlight,
 #messages .row.highlight {
-    background: rgba(122, 183, 255, 0.12);
+    background: rgba(122, 183, 255, 0.22) !important;
+    box-shadow: inset 3px 0 0 #7ab7ff;
     border-radius: 0.25rem;
-    transition: background 0.3s ease;
+    transition: background 0.35s ease, box-shadow 0.35s ease;
 }
 
 /* Generic links in message body */
@@ -1330,20 +1579,29 @@ body {
     font-size: 0.75rem;
     line-height: 1.2;
 }
-.sidebar-toggle {
+/* Must beat #freeq-chat p { margin: 0 } (id+element beats class alone). */
+#freeq-chat .sidebar-toggle {
     font-size: 0.6rem;
     font-weight: 600;
     letter-spacing: 0.05em;
     color: var(--muted);
-    margin: 0.2rem 0 0.05rem;
+    margin: 0.45rem 0 0.2rem;
     user-select: none;
 }
+#system-channels,
 #my-channels,
 #all-channels-sidebar {
     list-style: none;
     margin: 0;
     padding: 0;
 }
+/* Must beat #freeq-chat ul { margin/padding: 0 }. */
+#freeq-chat #system-channels {
+    margin: 0 0 0.25rem;
+    padding: 0 0 0.45rem;
+    border-bottom: 1px solid var(--border);
+}
+#system-channels li,
 #my-channels li,
 #all-channels-sidebar li {
     display: flex;
@@ -1352,24 +1610,79 @@ body {
     border-radius: 0.25rem;
     min-height: 0;
 }
+#system-channels li.active,
 #my-channels li.active {
     background: rgba(122, 183, 255, 0.1);
+}
+#system-channels .channel-link-icon {
+    flex: 0 0 auto;
+    opacity: 0.55;
+    font-size: 0.85rem;
+    line-height: 1;
+}
+#system-channels .system-dot {
+    flex: 0 0 auto;
+    width: 0.4rem;
+    height: 0.4rem;
+    border-radius: 999px;
+    background: var(--muted);
+    margin-left: auto;
+}
+.system-empty {
+    padding: 2.5rem 1.25rem;
+    text-align: center;
+    color: var(--muted);
+}
+.system-empty .empty-state-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--fg);
+    margin-bottom: 0.35rem;
+}
+.system-empty .empty-state-sub {
+    font-size: 0.85rem;
+}
+#my-channels li.has-unread:not(.active) .channel-link-name {
+    color: var(--fg);
+    font-weight: 600;
 }
 .channel-link {
     flex: 1 1 auto;
     min-width: 0;
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
     padding: 0.1rem 0.2rem;
     color: var(--fg);
     text-decoration: none;
     font-size: 0.9rem;
     line-height: 1.3;
+}
+.channel-link-name {
+    flex: 1 1 auto;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 .channel-link:hover {
     color: #7ab7ff;
+}
+.channel-unread {
+    flex: 0 0 auto;
+    min-width: 1.15rem;
+    padding: 0 0.35rem;
+    border-radius: 999px;
+    background: #7ab7ff;
+    color: #0e1116;
+    font-size: 0.65rem;
+    font-weight: 700;
+    line-height: 1.35;
+    text-align: center;
+    letter-spacing: 0.01em;
+}
+#my-channels li.active .channel-unread {
+    background: rgba(122, 183, 255, 0.85);
 }
 .sidebar-channel-part {
     opacity: 0;
@@ -1382,6 +1695,10 @@ body {
 }
 #my-channels li:hover .sidebar-channel-part {
     opacity: 0.8;
+}
+/* Keep the part button from hiding an unread badge on hover gap. */
+#my-channels li.has-unread .sidebar-channel-part {
+    opacity: 0.45;
 }
 .sidebar-channel-part:hover {
     color: var(--nick-6);
@@ -1471,6 +1788,7 @@ body {
     background: transparent;
     color: var(--muted);
     cursor: pointer;
+    position: relative;
 }
 .mobile-btn svg {
     width: 1.2rem;
@@ -1480,6 +1798,21 @@ body {
     stroke-width: 1.75;
     stroke-linecap: round;
     stroke-linejoin: round;
+}
+.nav-channels-unread {
+    position: absolute;
+    top: 0.05rem;
+    right: 0.05rem;
+    min-width: 0.95rem;
+    padding: 0 0.28rem;
+    border-radius: 999px;
+    background: #7ab7ff;
+    color: #0e1116;
+    font-size: 0.58rem;
+    font-weight: 700;
+    line-height: 1.3;
+    text-align: center;
+    pointer-events: none;
 }
 #drawer-scrim {
     position: fixed;

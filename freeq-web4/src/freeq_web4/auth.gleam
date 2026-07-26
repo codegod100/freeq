@@ -277,6 +277,8 @@ fn shell(title: String, body: String) -> String {
   <> "<title>"
   <> escape(title)
   <> "</title>"
+  <> "<link rel=\"icon\" href=\"/favicon.png?v=2\" type=\"image/png\" sizes=\"48x48\">"
+  <> "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png?v=2\" sizes=\"180x180\">"
   <> "<link rel=\"stylesheet\" href=\"/assets/app.css\">"
   <> "<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">"
   <> "<style>"

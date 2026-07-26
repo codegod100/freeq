@@ -26,6 +26,45 @@ pub type Kind {
   System
 }
 
+/// Link preview card kind (YouTube / Bluesky / generic Open Graph).
+pub type EmbedKind {
+  /// freeq-server `/api/v1/og` metadata.
+  Og
+  /// YouTube watch / short / youtu.be.
+  Youtube
+  /// Bluesky post card (`bsky.app/profile/.../post/...`).
+  Bsky
+}
+
+/// Bluesky-specific card fields.
+pub type BskyMeta {
+  BskyMeta(
+    display: String,
+    handle: String,
+    text: String,
+    likes: Int,
+    reposts: Int,
+    time: String,
+    avatar_url: Option(String),
+  )
+}
+
+/// Resolved Open Graph / YouTube / Bluesky card attached to a message row.
+pub type Embed {
+  Embed(
+    kind: EmbedKind,
+    href: String,
+    title: Option(String),
+    description: Option(String),
+    site_name: Option(String),
+    domain: Option(String),
+    /// Same-origin `/preview-cache/:id` or remote URL fallback.
+    image_url: Option(String),
+    video_id: Option(String),
+    bsky: Option(BskyMeta),
+  )
+}
+
 /// One rendered message or presence line in the chat stream.
 pub type Row {
   Row(
@@ -35,12 +74,17 @@ pub type Row {
     text: String,
     msgid: Option(String),
     time_label: String,
+    /// Unix seconds from REST (or None for live IRC without a stored ts).
+    /// Used as the cursor for `?before=` history pagination.
+    timestamp: Option(Int),
     own: Bool,
     color: String,
     parent: Option(String),
     account: Option(String),
     /// emoji → reactor nicks (from `+freeq.at/reactions` or live TAGMSG).
     reactions: Dict(String, List(String)),
+    /// Link preview card (resolved async; may be None until warmup).
+    embed: Option(Embed),
   )
 }
 
@@ -354,13 +398,61 @@ fn unique_id() -> String {
   "row-" <> int.to_string(sec) <> "-" <> int.to_string(nanos % 1_000_000)
 }
 
+/// Local system / status row (connection, server notices, errors).
+///
+/// Used by the System channel tab — not from a channel PRIVMSG.
+pub fn system_row(text: String) -> Row {
+  let now = unix_seconds()
+  Row(
+    id: unique_id(),
+    kind: System,
+    nick: None,
+    text: text,
+    msgid: None,
+    time_label: time_label_from_unix(now),
+    timestamp: Some(now),
+    own: False,
+    color: "",
+    parent: None,
+    account: None,
+    reactions: dict.new(),
+    embed: None,
+  )
+}
+
 fn time_label_now() -> String {
-  // SSR fallback; browser may reformat. Keep short.
-  let sec = unix_seconds()
-  let mins = { sec % 86_400 } / 60
-  let h = mins / 60
-  let m = mins % 60
-  pad2(h) <> ":" <> pad2(m)
+  // UTC 12h SSR fallback; browser rewrites via data-ts → local 12h.
+  time_label_from_unix(unix_seconds())
+}
+
+/// UTC 12-hour clock for a unix timestamp (`4:05 PM` with NBSP).
+/// Browser `localizeTimes` rewrites to the user's local zone when `data-ts` is set.
+pub fn time_label_from_unix(sec: Int) -> String {
+  let day_sec = positive_mod(sec, 86_400)
+  let h = day_sec / 3600
+  let m = { day_sec % 3600 } / 60
+  format_12h(h, m)
+}
+
+/// `hour` 0–23, `minute` 0–59 → `"12:05 PM"` (NBSP before meridiem, web3 parity).
+fn format_12h(hour24: Int, minute: Int) -> String {
+  let period = case hour24 >= 12 {
+    True -> "PM"
+    False -> "AM"
+  }
+  let hour12 = case hour24 % 12 {
+    0 -> 12
+    h -> h
+  }
+  int.to_string(hour12) <> ":" <> pad2(minute) <> "\u{00A0}" <> period
+}
+
+fn positive_mod(n: Int, m: Int) -> Int {
+  let r = n % m
+  case r < 0 {
+    True -> r + m
+    False -> r
+  }
 }
 
 fn pad2(n: Int) -> String {
@@ -368,6 +460,91 @@ fn pad2(n: Int) -> String {
     True -> "0" <> int.to_string(n)
     False -> int.to_string(n)
   }
+}
+
+/// Parse IRCv3 `time` / RFC3339 (`2026-07-24T20:06:25.000Z`) → unix seconds (UTC).
+pub fn parse_iso_unix(iso: String) -> Option(Int) {
+  let s = string.trim(iso)
+  // Drop trailing Z or numeric offset (+00:00 / -05:00) for freeq's Zulu stamps.
+  let s = case string.ends_with(s, "Z") || string.ends_with(s, "z") {
+    True -> string.drop_end(s, 1)
+    False -> drop_numeric_offset(s)
+  }
+  case string.split_once(s, "T") {
+    Error(_) -> None
+    Ok(#(date, time)) -> {
+      let time = case string.split_once(time, ".") {
+        Ok(#(hms, _)) -> hms
+        Error(_) -> time
+      }
+      case string.split(date, "-"), string.split(time, ":") {
+        [ys, ms, ds], [hs, mis, ss] ->
+          case
+            int.parse(ys),
+            int.parse(ms),
+            int.parse(ds),
+            int.parse(hs),
+            int.parse(mis),
+            int.parse(ss)
+          {
+            Ok(y), Ok(mo), Ok(d), Ok(h), Ok(mi), Ok(sec) ->
+              Some(unix_from_civil(y, mo, d, h, mi, sec))
+            _, _, _, _, _, _ -> None
+          }
+        _, _ -> None
+      }
+    }
+  }
+}
+
+/// Strip a trailing `+HH:MM` / `-HH:MM` offset when present (not applied to the clock).
+fn drop_numeric_offset(s: String) -> String {
+  // Look for the last + or - after the T (time part).
+  case string.split_once(s, "T") {
+    Error(_) -> s
+    Ok(#(date, time)) -> {
+      let time = case string.split_once(time, "+") {
+        Ok(#(hms, _)) -> hms
+        Error(_) ->
+          // Minus only after HH:MM:SS (avoid date dashes).
+          case string.split(time, "-") {
+            [hms] -> hms
+            [hms, ..] -> hms
+            [] -> time
+          }
+      }
+      date <> "T" <> time
+    }
+  }
+}
+
+/// Days since Unix epoch for civil date, then add clock → unix seconds (UTC).
+/// Howard Hinnant civil-from-days inverse (proleptic Gregorian).
+fn unix_from_civil(
+  year: Int,
+  month: Int,
+  day: Int,
+  hour: Int,
+  minute: Int,
+  second: Int,
+) -> Int {
+  let y = case month <= 2 {
+    True -> year - 1
+    False -> year
+  }
+  let era = case y >= 0 {
+    True -> y / 400
+    False -> { y - 399 } / 400
+  }
+  let yoe = y - era * 400
+  let mp = case month > 2 {
+    True -> month - 3
+    False -> month + 9
+  }
+  let doy = { 153 * mp + 2 } / 5 + day - 1
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  let days = era * 146_097 + doe - 719_468
+  days * 86_400 + hour * 3600 + minute * 60 + second
 }
 
 fn nick_matches(nick: String, own: Option(String)) -> Bool {
@@ -496,9 +673,23 @@ fn parse_message_line_body(
     Some(e) -> Some(e)
     None -> msgid
   }
-  let time = case tag_get(tags, "time") {
-    Some(iso) -> time_label_from_iso(iso)
-    None -> time_label_now()
+  // Prefer IRCv3 `time` → unix + 12h label; else "now" so live rows still get data-ts.
+  let #(time, ts) = case tag_get(tags, "time") {
+    Some(iso) -> {
+      let unix = case parse_iso_unix(iso) {
+        Some(u) -> Some(u)
+        None -> Some(unix_seconds())
+      }
+      let label = case unix {
+        Some(u) -> time_label_from_unix(u)
+        None -> time_label_from_iso(iso)
+      }
+      #(label, unix)
+    }
+    None -> {
+      let now = unix_seconds()
+      #(time_label_from_unix(now), Some(now))
+    }
   }
 
   case string.starts_with(rest, ":") {
@@ -540,6 +731,7 @@ fn parse_message_line_body(
                   text: text,
                   msgid: effective_msgid,
                   time_label: time,
+                  timestamp: ts,
                   own: nick_matches(nick, own_nick),
                   color: color,
                   parent: reply_parent(tags),
@@ -548,6 +740,7 @@ fn parse_message_line_body(
                     None -> tag_get(tags, "+account")
                   },
                   reactions: reactions,
+                  embed: None,
                 ),
               )
             }
@@ -559,11 +752,13 @@ fn parse_message_line_body(
                 text: "joined",
                 msgid: None,
                 time_label: time,
+                timestamp: ts,
                 own: False,
                 color: nick_color_class(nick),
                 parent: None,
                 account: None,
                 reactions: dict.new(),
+                embed: None,
               ))
             ["PART", ..] ->
               Some(Row(
@@ -573,11 +768,13 @@ fn parse_message_line_body(
                 text: "left",
                 msgid: None,
                 time_label: time,
+                timestamp: ts,
                 own: False,
                 color: nick_color_class(nick),
                 parent: None,
                 account: None,
                 reactions: dict.new(),
+                embed: None,
               ))
             ["QUIT", ..] ->
               Some(Row(
@@ -587,11 +784,13 @@ fn parse_message_line_body(
                 text: "quit",
                 msgid: None,
                 time_label: time,
+                timestamp: ts,
                 own: False,
                 color: nick_color_class(nick),
                 parent: None,
                 account: None,
                 reactions: dict.new(),
+                embed: None,
               ))
             // CAP / numerics / BATCH / MODE / TOPIC / etc. — not chat rows.
             _ -> None
@@ -602,24 +801,32 @@ fn parse_message_line_body(
   }
 }
 
-/// Best-effort `HH:MM` from IRCv3 `time` tag (`2026-07-24T20:06:25.000Z`).
+/// Best-effort 12h label from IRCv3 `time` when full ISO parse fails.
 fn time_label_from_iso(iso: String) -> String {
-  case string.split(iso, "T") {
-    [_, clock, ..] -> {
-      let clock = case string.split_once(clock, ".") {
-        Ok(#(hms, _)) -> hms
-        Error(_) ->
-          case string.split_once(clock, "Z") {
+  case parse_iso_unix(iso) {
+    Some(u) -> time_label_from_unix(u)
+    None ->
+      case string.split(iso, "T") {
+        [_, clock, ..] -> {
+          let clock = case string.split_once(clock, ".") {
             Ok(#(hms, _)) -> hms
-            Error(_) -> clock
+            Error(_) ->
+              case string.split_once(clock, "Z") {
+                Ok(#(hms, _)) -> hms
+                Error(_) -> clock
+              }
           }
-      }
-      case string.split(clock, ":") {
-        [h, m, ..] -> h <> ":" <> m
+          case string.split(clock, ":") {
+            [h, m, ..] ->
+              case int.parse(h), int.parse(m) {
+                Ok(hh), Ok(mm) -> format_12h(hh, mm)
+                _, _ -> time_label_now()
+              }
+            _ -> time_label_now()
+          }
+        }
         _ -> time_label_now()
       }
-    }
-    _ -> time_label_now()
   }
 }
 
@@ -650,10 +857,7 @@ pub fn history_row(
   }
   let id = option.unwrap(msgid, unique_id())
   let time = case timestamp_unix {
-    Some(sec) -> {
-      let mins = { sec % 86_400 } / 60
-      pad2(mins / 60) <> ":" <> pad2(mins % 60)
-    }
+    Some(sec) -> time_label_from_unix(sec)
     None -> time_label_now()
   }
   Row(
@@ -663,12 +867,25 @@ pub fn history_row(
     text: text,
     msgid: msgid,
     time_label: time,
+    timestamp: timestamp_unix,
     own: False,
     color: nick_color_class(nick),
     parent: parent,
     account: None,
     reactions: reactions,
+    embed: None,
   )
+}
+
+/// Smallest unix timestamp among rows that have one (for REST `?before=`).
+pub fn oldest_timestamp(rows: List(Row)) -> Option(Int) {
+  list.fold(rows, None, fn(acc, row) {
+    case row.timestamp, acc {
+      Some(t), None -> Some(t)
+      Some(t), Some(min) if t < min -> Some(t)
+      _, _ -> acc
+    }
+  })
 }
 
 /// Parse server-persisted reaction tallies: `👍:alice,bob;❤️:carol`.
@@ -831,6 +1048,58 @@ pub fn chathistory_latest_line(channel: String, count: Int) -> String {
   <> " * "
   <> int.to_string(n)
   <> "\r\n"
+}
+
+/// Request N messages strictly before a unix timestamp (scroll-up pagination).
+///
+/// freeq-server also attaches `+freeq.at/reactions` on the batch lines so
+/// REST-prepended bodies can pick up chips the same way as LATEST.
+pub fn chathistory_before_line(
+  channel: String,
+  before_ts: Int,
+  count: Int,
+) -> String {
+  let n = case count > 0 {
+    True -> count
+    False -> 50
+  }
+  "CHATHISTORY BEFORE "
+  <> canonical_channel(channel)
+  <> " timestamp="
+  <> int.to_string(before_ts)
+  <> " "
+  <> int.to_string(n)
+  <> "\r\n"
+}
+
+/// Channel target of a live PRIVMSG/NOTICE, if the target is a channel.
+///
+/// Returns canonical `#name` for channel messages; `None` for DMs, numerics,
+/// or non-chat lines. Used to scope the message stream and unread badges.
+pub fn message_target_channel(line: String) -> Option(String) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  case string.starts_with(rest, ":") {
+    False -> None
+    True -> {
+      let body = string.drop_start(rest, 1)
+      case string.split_once(body, " ") {
+        Error(_) -> None
+        Ok(#(_prefix, cmd_and_args)) -> {
+          let parts = string.split(cmd_and_args, " ")
+          case parts {
+            ["PRIVMSG", target, ..] | ["NOTICE", target, ..] -> {
+              let t = drop_leading_colon(target)
+              case string.starts_with(t, "#") || string.starts_with(t, "&") {
+                True -> Some(canonical_channel(t))
+                False -> None
+              }
+            }
+            _ -> None
+          }
+        }
+      }
+    }
+  }
 }
 
 /// Whether the line is RPL_NAMREPLY (353).
@@ -1011,8 +1280,13 @@ fn apply_one_mode(
   }
 }
 
-/// Parse channel MODE for privilege changes → `#(channel, ops)`.
-pub fn parse_mode_change(line: String) -> Option(#(String, List(ModeOp))) {
+/// Parse channel MODE → `#(channel, from, modestring, args, ops)`.
+///
+/// `ops` are privilege letters o/h/v for roster updates; `modestring` + `args`
+/// are the full mode for meta display (e.g. `+m`, `+o eve`).
+pub fn parse_mode_change(
+  line: String,
+) -> Option(#(String, String, String, List(String), List(ModeOp))) {
   let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
   case string.starts_with(rest, ":") {
     False -> None
@@ -1020,7 +1294,11 @@ pub fn parse_mode_change(line: String) -> Option(#(String, List(ModeOp))) {
       let body = string.drop_start(rest, 1)
       case string.split_once(body, " ") {
         Error(_) -> None
-        Ok(#(_prefix, cmd_args)) ->
+        Ok(#(prefix, cmd_args)) -> {
+          let from = case string.split_once(prefix, "!") {
+            Ok(#(n, _)) -> n
+            Error(_) -> prefix
+          }
           case string.split(cmd_args, " ") {
             ["MODE", chan, modestring, ..args] -> {
               let chan = drop_leading_colon(chan)
@@ -1030,6 +1308,9 @@ pub fn parse_mode_change(line: String) -> Option(#(String, List(ModeOp))) {
                 True ->
                   Some(#(
                     canonical_channel(chan),
+                    from,
+                    modestring,
+                    args,
                     parse_mode_ops(modestring, args),
                   ))
                 False -> None
@@ -1037,8 +1318,79 @@ pub fn parse_mode_change(line: String) -> Option(#(String, List(ModeOp))) {
             }
             _ -> None
           }
+        }
       }
     }
+  }
+}
+
+/// freeq-app / SDK style: `— nandi.uk set mode +o eve`.
+pub fn format_mode_meta(
+  from: String,
+  modestring: String,
+  args: List(String),
+) -> String {
+  let args_s = case args {
+    [] -> ""
+    _ -> " " <> string.join(args, " ")
+  }
+  "— " <> from <> " set mode " <> modestring <> args_s
+}
+
+/// Channel KICK → `#(channel, kicker, kicked, reason)`.
+pub fn parse_kick(
+  line: String,
+) -> Option(#(String, String, String, String)) {
+  let #(_tags, rest) = parse_irc_tags(string.trim_end(line))
+  case string.starts_with(rest, ":") {
+    False -> None
+    True -> {
+      let body = string.drop_start(rest, 1)
+      case string.split_once(body, " ") {
+        Error(_) -> None
+        Ok(#(prefix, cmd_args)) -> {
+          let kicker = case string.split_once(prefix, "!") {
+            Ok(#(n, _)) -> n
+            Error(_) -> prefix
+          }
+          case string.split(cmd_args, " ") {
+            ["KICK", chan, kicked, ..reason_parts] -> {
+              let chan = drop_leading_colon(chan)
+              case
+                string.starts_with(chan, "#") || string.starts_with(chan, "&")
+              {
+                True -> {
+                  let reason =
+                    reason_parts
+                    |> string.join(" ")
+                    |> drop_leading_colon
+                  Some(#(
+                    canonical_channel(chan),
+                    kicker,
+                    drop_leading_colon(kicked),
+                    reason,
+                  ))
+                }
+                False -> None
+              }
+            }
+            _ -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+/// freeq-app / SDK style: `— eve kicked by nandi.uk: spam`.
+pub fn format_kick_meta(
+  kicker: String,
+  kicked: String,
+  reason: String,
+) -> String {
+  case string.trim(reason) {
+    "" -> "— " <> kicked <> " kicked by " <> kicker
+    r -> "— " <> kicked <> " kicked by " <> kicker <> ": " <> r
   }
 }
 
@@ -1161,6 +1513,157 @@ pub fn welcome_numeric(line: String) -> Bool {
   case string.split(rest, " ") {
     ["001", ..] | ["002", ..] | ["003", ..] | ["004", ..] -> True
     _ -> False
+  }
+}
+
+/// Format an IRC status line for the System buffer (numerics, ERROR, FAIL).
+///
+/// Returns `None` for protocol noise (NAMES, CAP, PING, chat already handled
+/// elsewhere) so the System tab stays readable while still showing command
+/// errors and WHOIS replies.
+pub fn parse_system_status_line(line: String) -> Option(String) {
+  let line = string.trim_end(line)
+  let #(_tags, rest) = parse_irc_tags(line)
+  let rest = string.trim(rest)
+  case rest {
+    "" -> None
+    _ -> {
+      // Unprefixed ERROR / FAIL / PONG noise.
+      case string.split(rest, " ") {
+        ["PING", ..] | ["PONG", ..] -> None
+        ["ERROR", ..parts] ->
+          Some(
+            "ERROR "
+            <> parts
+            |> string.join(" ")
+            |> drop_leading_colon,
+          )
+        ["FAIL", cmd, code, ..parts] -> {
+          let detail =
+            parts
+            |> string.join(" ")
+            |> drop_leading_colon
+          Some("FAIL " <> cmd <> " " <> code <> case detail {
+            "" -> ""
+            d -> " " <> d
+          })
+        }
+        ["FAIL", ..parts] ->
+          Some("FAIL " <> string.join(parts, " ") |> drop_leading_colon)
+        _ -> parse_system_status_prefixed(rest)
+      }
+    }
+  }
+}
+
+fn parse_system_status_prefixed(rest: String) -> Option(String) {
+  case string.starts_with(rest, ":") {
+    False -> None
+    True -> {
+      let body = string.drop_start(rest, 1)
+      case string.split_once(body, " ") {
+        Error(_) -> None
+        Ok(#(prefix, cmd_and_args)) -> {
+          let server = case string.split_once(prefix, "!") {
+            Ok(#(n, _)) -> n
+            Error(_) -> prefix
+          }
+          let parts = string.split(cmd_and_args, " ")
+          case parts {
+            ["ERROR", ..text] ->
+              Some(
+                "ERROR "
+                <> text
+                |> string.join(" ")
+                |> drop_leading_colon,
+              )
+            ["FAIL", cmd, code, ..rest_parts] -> {
+              let detail =
+                rest_parts
+                |> string.join(" ")
+                |> drop_leading_colon
+              Some("FAIL " <> cmd <> " " <> code <> case detail {
+                "" -> ""
+                d -> " " <> d
+              })
+            }
+            [numeric, ..params] ->
+              case is_irc_numeric(numeric) {
+                False -> None
+                True ->
+                  case is_noise_numeric(numeric) {
+                    True -> None
+                    False ->
+                      Some(format_system_numeric(server, numeric, params))
+                  }
+              }
+            _ -> None
+          }
+        }
+      }
+    }
+  }
+}
+
+fn is_irc_numeric(token: String) -> Bool {
+  case string.to_utf_codepoints(token) {
+    [a, b, c] ->
+      is_digit_cp(a) && is_digit_cp(b) && is_digit_cp(c)
+    _ -> False
+  }
+}
+
+fn is_digit_cp(cp: UtfCodepoint) -> Bool {
+  let n = string.utf_codepoint_to_int(cp)
+  n >= 48 && n <= 57
+}
+
+/// Numerics already handled elsewhere or pure protocol noise.
+fn is_noise_numeric(n: String) -> Bool {
+  case n {
+    // NAMES / WHO / LIST framing
+    "353" | "366" | "352" | "315" | "321" | "322" | "323"
+    // Topic (handled by parse_topic) + channel mode query spam
+    | "332" | "333" | "324" | "329"
+    // ISUPPORT / myinfo spam
+    | "004" | "005"
+    // SASL machine-readable (client handles; NOTICEs already surface)
+    | "900" | "901" | "902" | "903" | "904" | "905" | "906" | "907" | "908" ->
+      True
+    _ -> False
+  }
+}
+
+fn format_system_numeric(
+  server: String,
+  numeric: String,
+  params: List(String),
+) -> String {
+  // Drop the target nick (params[0]) when present; keep channel + trailing.
+  let useful = case params {
+    [_me, ..rest] -> rest
+    other -> other
+  }
+  let trailing = case string.split_once(string.join(useful, " "), " :") {
+    Ok(#(head, tail)) -> {
+      let head = string.trim(head)
+      case head {
+        "" -> tail
+        h -> h <> " — " <> tail
+      }
+    }
+    Error(_) ->
+      useful
+      |> string.join(" ")
+      |> drop_leading_colon
+  }
+  let body = case string.trim(trailing) {
+    "" -> numeric
+    t -> numeric <> " " <> t
+  }
+  case server {
+    "" -> body
+    s -> s <> " " <> body
   }
 }
 

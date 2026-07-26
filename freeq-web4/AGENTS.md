@@ -46,7 +46,8 @@ Without the flake: Gleam 1.17+, OTP 26+.
 | `src/freeq_web4/ws.gleam` | Live session host — protocol Event → handle → Diff |
 | `src/freeq_web4/irc/upstream.gleam` | Stratus WS to freeq-server `/irc` (guest + SASL) |
 | `src/freeq_web4/irc/render.gleam` | IRC parse + history rows (port of web3 `Irc.Render`) |
-| `src/freeq_web4/rest.gleam` | REST client for channels + history |
+| `src/freeq_web4/rest.gleam` | REST client for channels + history + search + OG |
+| `src/freeq_web4/link_preview.gleam` | YouTube / Bluesky / OpenGraph cards + image cache |
 | `src/freeq_web4/auth.gleam` | OAuth login / callback / logout / client metadata |
 | `src/freeq_web4/atproto/*` | DPoP, OAuth, SASL ATPROTO-CHALLENGE |
 | `src/freeq_web4/cookie_session.gleam` | `freeq_session` cookie |
@@ -87,8 +88,11 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [x] Reactions (TAGMSG +react / unreact)
 - [ ] Message edit/delete UI
 - [ ] DMs + E2EE
-- [ ] Link embeds / preview cache
+- [x] Link embeds / preview cache
 - [x] Image paste / attach button + upload proxy (`POST /upload`)
+- [x] Scroll-up load older history (`?before=` + CHATHISTORY BEFORE)
+- [x] Message search (REST `/api/v1/search` modal)
+- [x] System channel tab (connection status + server notices)
 - [ ] PWA
 
 ## Idioms

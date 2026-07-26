@@ -61,6 +61,12 @@ pub fn sessions_dir() -> String {
   |> result.unwrap(".dev-data/web4-sessions")
 }
 
+/// Disk cache for Open Graph / YouTube / Bluesky preview images + meta JSON.
+pub fn preview_cache_dir() -> String {
+  envoy.get("FREEQ_WEB4_PREVIEW_CACHE_DIR")
+  |> result.unwrap(".dev-data/web4-preview-cache")
+}
+
 /// HTTP(S) origin of freeq-server for MoQ media (`/av/moq`).
 ///
 /// The BFF does not terminate MoQ WebSockets; the browser dials this origin

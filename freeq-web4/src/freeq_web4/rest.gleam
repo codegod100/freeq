@@ -34,20 +34,29 @@ pub fn fetch_channels() -> List(ChannelInfo) {
   }
 }
 
-/// GET /api/v1/channels/:name/history?limit=
+/// GET /api/v1/channels/:name/history?limit=&before=
+///
+/// `before` is a unix timestamp: only messages strictly older are returned
+/// (oldest-first page, max 200 upstream).
 pub fn fetch_history(
   channel: String,
   limit: Int,
   bearer: Option(String),
+  before: Option(Int),
 ) -> List(render.Row) {
   let bare = render.bare_channel(channel)
   let encoded = uri.percent_encode(bare)
+  let before_q = case before {
+    Some(ts) -> "&before=" <> int.to_string(ts)
+    None -> ""
+  }
   let url =
     config.upstream_rest()
     <> "/api/v1/channels/"
     <> encoded
     <> "/history?limit="
     <> int.to_string(limit)
+    <> before_q
   case get_json(url, bearer) {
     Ok(body) -> decode_history(body)
     Error(reason) -> {
@@ -56,6 +65,59 @@ pub fn fetch_history(
         "fetch_history " <> channel <> " failed: " <> reason,
       )
       []
+    }
+  }
+}
+
+/// Outcome of `GET /api/v1/search` (channel-scoped FTS).
+pub type SearchResult {
+  /// Hits newest-first (server order). Same row shape as history.
+  SearchOk(List(render.Row))
+  /// Upstream refused or failed (`http_403`, `http_404`, network, …).
+  SearchErr(String)
+}
+
+/// Default page size for channel message search (server caps at 100).
+pub const search_page_size: Int = 25
+
+/// GET /api/v1/search?channel=#name&q=terms&limit=
+///
+/// Full-text history search for one channel. Public rooms work anonymously;
+/// +i/+k rooms need the freeq-server API-BEARER (same as history). DMs are
+/// not supported on this REST route (403).
+pub fn search_messages(
+  channel: String,
+  query: String,
+  limit: Int,
+  bearer: Option(String),
+) -> SearchResult {
+  let q = string.trim(query)
+  case q {
+    "" -> SearchOk([])
+    _ -> {
+      let ch = render.canonical_channel(channel)
+      let lim = case limit < 1 {
+        True -> search_page_size
+        False -> limit
+      }
+      let url =
+        config.upstream_rest()
+        <> "/api/v1/search?channel="
+        <> uri.percent_encode(ch)
+        <> "&q="
+        <> uri.percent_encode(q)
+        <> "&limit="
+        <> int.to_string(lim)
+      case get_json(url, bearer) {
+        Ok(body) -> SearchOk(decode_history(body))
+        Error(reason) -> {
+          logging.log(
+            logging.Info,
+            "search_messages " <> ch <> " failed: " <> reason,
+          )
+          SearchErr(reason)
+        }
+      }
     }
   }
 }
@@ -300,6 +362,90 @@ fn active_session_map() -> decode.Decoder(Option(ActiveCall)) {
         )),
       )
     False -> decode.success(None)
+  }
+}
+
+/// Open Graph fields from freeq-server `GET /api/v1/og`.
+pub type OgMeta {
+  OgMeta(
+    title: String,
+    description: String,
+    image: String,
+    site_name: String,
+  )
+}
+
+/// GET /api/v1/og?url= — SSRF-safe OpenGraph fetch on freeq-server.
+pub fn fetch_og(url: String) -> Option(OgMeta) {
+  case string.trim(url) {
+    "" -> None
+    u -> {
+      let encoded = uri.percent_encode(u)
+      let endpoint = config.upstream_rest() <> "/api/v1/og?url=" <> encoded
+      case request.to(endpoint) {
+        Error(_) -> None
+        Ok(req) -> {
+          let req =
+            req
+            |> request.set_method(http.Get)
+            |> request.set_header("accept", "application/json")
+          case
+            httpc.configure()
+            |> httpc.timeout(10_000)
+            |> httpc.dispatch(req)
+          {
+            Ok(resp) if resp.status == 200 ->
+              case
+                json.parse(resp.body, {
+                  use title <- decode.optional_field(
+                    "title",
+                    "",
+                    nullable_string(),
+                  )
+                  use description <- decode.optional_field(
+                    "description",
+                    "",
+                    nullable_string(),
+                  )
+                  use image <- decode.optional_field(
+                    "image",
+                    "",
+                    nullable_string(),
+                  )
+                  use site_name <- decode.optional_field(
+                    "site_name",
+                    "",
+                    nullable_string(),
+                  )
+                  decode.success(OgMeta(
+                    title: title,
+                    description: description,
+                    image: image,
+                    site_name: site_name,
+                  ))
+                })
+              {
+                Ok(meta) -> Some(meta)
+                Error(_) -> None
+              }
+            Ok(resp) -> {
+              logging.log(
+                logging.Info,
+                "fetch_og HTTP "
+                  <> int.to_string(resp.status)
+                  <> ": "
+                  <> string.slice(resp.body, 0, 120),
+              )
+              None
+            }
+            Error(_) -> {
+              logging.log(logging.Warning, "fetch_og failed")
+              None
+            }
+          }
+        }
+      }
+    }
   }
 }
 

@@ -5,18 +5,24 @@ import freeq_web4/atproto/oauth
 import freeq_web4/atproto/oauth_session.{OAuthSession}
 import freeq_web4/atproto/sasl
 import freeq_web4/atproto/util as atutil
+import freeq_web4/config
 import freeq_web4/irc/render
+import freeq_web4/link_preview
 import freeq_web4/live
 import freeq_web4/rest
 import freeq_web4/session_store
 import freeq_web4/upload
+import filepath
 import gleam/bit_array
+import gleam/crypto
 import gleam/dict
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
+import lightspeed/diff
 import lightspeed/testing/liveview
 import simplifile
 
@@ -115,6 +121,36 @@ pub fn history_row_test() {
   assert row.text == "scrollback"
   assert row.parent == None
   assert row.reactions == dict.new()
+  assert row.timestamp == Some(0)
+  // Unix 0 = 1970-01-01 00:00 UTC → 12:00 AM
+  assert row.time_label == "12:00\u{00A0}AM"
+}
+
+pub fn time_label_12h_test() {
+  // 15:05 UTC → 3:05 PM
+  assert render.time_label_from_unix(15 * 3600 + 5 * 60) == "3:05\u{00A0}PM"
+  // midnight
+  assert render.time_label_from_unix(0) == "12:00\u{00A0}AM"
+  // noon
+  assert render.time_label_from_unix(12 * 3600) == "12:00\u{00A0}PM"
+  // 09:07 → no leading zero on hour
+  assert render.time_label_from_unix(9 * 3600 + 7 * 60) == "9:07\u{00A0}AM"
+}
+
+pub fn parse_iso_unix_test() {
+  // 2024-01-01T00:00:00.000Z
+  assert render.parse_iso_unix("2024-01-01T00:00:00.000Z") == Some(1_704_067_200)
+  assert render.parse_iso_unix("2024-01-01T00:00:00Z") == Some(1_704_067_200)
+  assert render.parse_iso_unix("not-a-date") == None
+}
+
+pub fn parse_privmsg_with_server_time_test() {
+  let line =
+    "@time=2024-01-01T12:00:00.000Z;msgid=m1 :alice!a@h PRIVMSG #freeq :hi"
+  let assert Some(row) = render.parse_message_line(line, None)
+  assert row.timestamp == Some(1_704_110_400)
+  assert row.time_label == "12:00\u{00A0}PM"
+  assert row.msgid == Some("m1")
 }
 
 pub fn history_row_with_parent_test() {
@@ -250,11 +286,155 @@ pub fn path_channel_mount_test() {
   assert model.my_channels == ["#freeq"]
 }
 
+pub fn path_system_mount_test() {
+  let model = live.mount_model("/chat/system")
+  assert model.view == live.System
+  assert model.channel == None
+  assert model.my_channels == []
+  assert model.system_messages == []
+  assert live.path_for_model(model) == "/chat/system"
+}
+
+pub fn open_system_tab_test() {
+  let model = live.mount_model("/chat/freeq")
+  let #(sys, effect) = live.apply(model, live.OpenSystem)
+  assert sys.view == live.System
+  assert sys.channel == None
+  assert effect == live.NoEffect
+  // Opening via bare "system" (sidebar link) must not JOIN #system.
+  let #(sys2, effect2) = live.apply(model, live.OpenChannel("system"))
+  assert sys2.view == live.System
+  assert effect2 == live.NoEffect
+  let #(sys3, effect3) = live.apply(model, live.Join("system"))
+  assert sys3.view == live.System
+  assert effect3 == live.NoEffect
+}
+
+pub fn system_buffer_captures_notices_and_ws_test() {
+  let model = live.mount_model("/chat/system")
+  // Non-channel NOTICE → system buffer.
+  let #(next, _) =
+    live.apply(
+      model,
+      live.PushLine(":irc.freeq.at NOTICE guest :Welcome to freeq"),
+    )
+  assert list.length(next.system_messages) == 1
+  let assert [row] = next.system_messages
+  assert row.kind == render.Notice
+  assert string.contains(row.text, "Welcome to freeq")
+  // Ready/Disconnected transitions log a local system line.
+  let #(ready, _) = live.apply(next, live.SetWs(live.WsReady))
+  assert list.length(ready.system_messages) == 2
+  let assert [_, status] = ready.system_messages
+  assert status.kind == render.System
+  assert status.text == "connected"
+  // Sidebar shows System tab; messages region renders the buffer.
+  let html = live.initial_html("/chat/system")
+  assert string.contains(html, "System")
+  assert string.contains(html, "href=\"/chat/system\"")
+  assert string.contains(html, "id=\"system-channels\"")
+  // Compose input present (slash commands).
+  assert string.contains(html, "id=\"message-input\"")
+  assert string.contains(html, "Type /join")
+  assert string.contains(html, "data-ls-submit=\"send\"")
+}
+
+pub fn system_compose_slash_commands_test() {
+  let model = live.mount_model("/chat/system")
+
+  // /join navigates + ensures upstream (not raw "join …").
+  let #(joined, effect) = live.apply(model, live.Send("/join #dev"))
+  assert joined.view == live.Channel
+  assert joined.channel == Some("#dev")
+  assert list.any(joined.system_messages, fn(r) {
+    string.contains(r.text, "/join #dev")
+  })
+  case effect {
+    live.EnsureUpstream("#dev", _) -> Nil
+    _ -> panic as "expected EnsureUpstream for /join"
+  }
+
+  // /op nick #chan → MODE (works from System without a current channel).
+  let #(opped, effect2) = live.apply(model, live.Send("/op eve #test"))
+  assert opped.view == live.System
+  let line = case effect2 {
+    live.IrcSend([line]) -> line
+    _ -> panic as "expected MODE from /op"
+  }
+  assert line == "MODE #test +o eve\r\n"
+
+  // /op without a channel → usage help, no wire send.
+  let #(bad, effect3) = live.apply(model, live.Send("/op eve"))
+  assert effect3 == live.NoEffect
+  assert list.any(bad.system_messages, fn(r) { string.contains(r.text, "Usage") })
+
+  // /help is local.
+  let #(helped, effect4) = live.apply(model, live.Send("/help"))
+  assert effect4 == live.NoEffect
+  assert list.any(helped.system_messages, fn(r) {
+    string.contains(r.text, "/whois")
+  })
+
+  // /whois → WHOIS
+  let #(_, effect5) = live.apply(model, live.Send("/whois alice"))
+  let whois = case effect5 {
+    live.IrcSend([line]) -> line
+    _ -> panic as "expected WHOIS"
+  }
+  assert whois == "WHOIS alice\r\n"
+
+  // Plain text without slash is rejected on System.
+  let #(plain, effect6) = live.apply(model, live.Send("hello"))
+  assert effect6 == live.NoEffect
+  assert string.contains(plain.flash, "/commands")
+}
+
+pub fn system_buffer_shows_error_numerics_test() {
+  let model = live.mount_model("/chat/system")
+  let #(next, _) =
+    live.apply(
+      model,
+      live.PushLine(
+        ":irc.freeq.at 421 guest OP :Unknown command",
+      ),
+    )
+  assert list.any(next.system_messages, fn(r) {
+    string.contains(r.text, "421") && string.contains(r.text, "Unknown command")
+  })
+  // NAMES noise stays out of the System buffer.
+  let #(quiet, _) =
+    live.apply(
+      model,
+      live.PushLine(":irc.freeq.at 353 guest = #test :@alice bob"),
+    )
+  assert quiet.system_messages == []
+}
+
+pub fn parse_system_status_line_test() {
+  assert render.parse_system_status_line(
+      ":irc.freeq.at 421 guest OP :Unknown command",
+    )
+    == Some("irc.freeq.at 421 OP — Unknown command")
+  assert render.parse_system_status_line(
+      ":irc.freeq.at 482 guest #test :You're not channel operator",
+    )
+    == Some("irc.freeq.at 482 #test — You're not channel operator")
+  assert render.parse_system_status_line(
+      ":irc.freeq.at 353 guest = #test :@alice",
+    )
+    == None
+  assert render.parse_system_status_line("ERROR :Closing Link")
+    == Some("ERROR Closing Link")
+}
+
 pub fn merge_my_channels_test() {
   assert live.merge_my_channels(["#freeq"], ["#dev", "#freeq", "#test"])
     == ["#freeq", "#dev", "#test"]
   assert live.merge_my_channels([], ["#a", "#b"]) == ["#a", "#b"]
   assert live.merge_my_channels(["#only"], []) == ["#only"]
+  // Never treat the local System key as a joined IRC channel.
+  assert live.merge_my_channels(["#freeq"], ["system", "#system", "#dev"])
+    == ["#freeq", "#dev"]
 }
 
 pub fn with_my_channels_test() {
@@ -262,6 +442,106 @@ pub fn with_my_channels_test() {
   let restored = live.with_my_channels(model, ["#dev", "#test"])
   assert restored.my_channels == ["#dev", "#test"]
   assert restored.view == live.Index
+}
+
+pub fn message_target_channel_test() {
+  assert render.message_target_channel(":alice!a@h PRIVMSG #freeq :hi")
+    == Some("#freeq")
+  assert render.message_target_channel(
+      "@msgid=1 :bob!b@h PRIVMSG #dev :hello",
+    )
+    == Some("#dev")
+  assert render.message_target_channel(":alice!a@h NOTICE #ops :mod")
+    == Some("#ops")
+  assert render.message_target_channel(":alice!a@h PRIVMSG bob :dm") == None
+  assert render.message_target_channel(":alice!a@h JOIN #freeq") == None
+}
+
+pub fn unread_bumps_for_other_channel_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#dev"])
+  assert live.unread_count(model, "#dev") == 0
+  let line = "@msgid=u1 :alice!a@h PRIVMSG #dev :ping"
+  let #(next, _) = live.apply(model, live.PushLine(line))
+  // Not viewing #dev → no stream pollution, badge increments.
+  assert next.messages == model.messages
+  assert live.unread_count(next, "#dev") == 1
+  let #(next2, _) =
+    live.apply(next, live.PushLine("@msgid=u2 :bob!b@h PRIVMSG #dev :again"))
+  assert live.unread_count(next2, "#dev") == 2
+  // Active channel traffic does not bump.
+  let #(same, _) =
+    live.apply(
+      next2,
+      live.PushLine("@msgid=u3 :carol!c@h PRIVMSG #freeq :here"),
+    )
+  assert live.unread_count(same, "#freeq") == 0
+  assert list.any(same.messages, fn(r) { r.msgid == Some("u3") })
+}
+
+pub fn unread_skips_own_and_unjoined_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#dev"])
+  // Own echo on another channel.
+  let model = live.apply(model, live.SetNick("guest")).0
+  let #(next, _) =
+    live.apply(model, live.PushLine(":guest!g@h PRIVMSG #dev :mine"))
+  assert live.unread_count(next, "#dev") == 0
+  // Message for a channel we are not tracking.
+  let #(next2, _) =
+    live.apply(next, live.PushLine(":alice!a@h PRIVMSG #other :x"))
+  assert live.unread_count(next2, "#other") == 0
+}
+
+pub fn unread_clears_on_open_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#dev"])
+  let #(model, _) =
+    live.apply(model, live.PushLine(":alice!a@h PRIVMSG #dev :one"))
+  let #(model, _) =
+    live.apply(model, live.PushLine(":alice!a@h PRIVMSG #dev :two"))
+  assert live.unread_count(model, "#dev") == 2
+  let #(opened, _) = live.apply(model, live.OpenChannel("dev"))
+  assert opened.channel == Some("#dev")
+  assert live.unread_count(opened, "#dev") == 0
+}
+
+pub fn unread_clears_on_part_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#dev"])
+  let #(model, _) =
+    live.apply(model, live.PushLine(":alice!a@h PRIVMSG #dev :x"))
+  assert live.unread_count(model, "#dev") == 1
+  let #(parted, _) = live.apply(model, live.Part("dev"))
+  assert live.unread_count(parted, "#dev") == 0
+  assert !list.contains(parted.my_channels, "#dev")
+}
+
+pub fn sidebar_shows_unread_badge_test() {
+  let before =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#dev"])
+  let #(after, _) =
+    live.apply(before, live.PushLine(":alice!a@h PRIVMSG #dev :hello"))
+  assert live.unread_count(after, "#dev") == 1
+  let patches = live.plan_patches(before, after)
+  let assert Ok(side) =
+    list.find_map(patches, fn(p) {
+      case p {
+        diff.Replace(html:, ..) ->
+          case string.contains(html, "channel-unread") {
+            True -> Ok(html)
+            False -> Error(Nil)
+          }
+        _ -> Error(Nil)
+      }
+    })
+  assert string.contains(side, "has-unread")
+  assert string.contains(side, "1 unread")
 }
 
 pub fn with_api_bearer_test() {
@@ -310,12 +590,15 @@ pub fn path_for_model_test() {
   assert live.path_for_model(index) == "/chat"
   assert live.channel_path("#freeq") == "/chat/freeq"
   assert live.channel_path("dev") == "/chat/dev"
+  assert live.system_path() == "/chat/system"
   let channel = live.mount_model("/chat/freeq")
   assert live.path_for_model(channel) == "/chat/freeq"
   let #(opened, _) = live.apply(index, live.OpenChannel("dev"))
   assert live.path_for_model(opened) == "/chat/dev"
   let #(back, _) = live.apply(opened, live.GoIndex)
   assert live.path_for_model(back) == "/chat"
+  let #(sys, _) = live.apply(index, live.OpenSystem)
+  assert live.path_for_model(sys) == "/chat/system"
 }
 
 pub fn join_effect_test() {
@@ -471,6 +754,117 @@ pub fn open_channel_seeds_topic_from_directory_test() {
   let #(freeq, _) = live.apply(model, live.OpenChannel("freeq"))
   assert freeq.channel == Some("#freeq")
   assert freeq.topic == ""
+}
+
+pub fn topic_edit_op_only_test() {
+  let model = live.mount_model("/chat/test")
+  let model =
+    live.Model(
+      ..model,
+      nick: "alice",
+      topic: "old",
+      members: [
+        render.Member(
+          nick: "alice",
+          op: False,
+          halfop: False,
+          voice: False,
+          color: "n1",
+        ),
+      ],
+    )
+  let #(plain, effect) = live.apply(model, live.EditTopic)
+  assert plain.editing_topic == False
+  assert effect == live.NoEffect
+
+  let model =
+    live.Model(
+      ..model,
+      members: [
+        render.Member(
+          nick: "alice",
+          op: True,
+          halfop: False,
+          voice: False,
+          color: "n1",
+        ),
+      ],
+    )
+  let #(editing, _) = live.apply(model, live.EditTopic)
+  assert editing.editing_topic == True
+
+  let #(saved, send) = live.apply(editing, live.SetTopic("  new topic  "))
+  assert saved.topic == "new topic"
+  assert saved.editing_topic == False
+  let assert live.IrcSend([line]) = send
+  assert line == "TOPIC #test :new topic\r\n"
+
+  let #(halfop_model, _) =
+    live.apply(
+      live.Model(
+        ..model,
+        members: [
+          render.Member(
+            nick: "alice",
+            op: False,
+            halfop: True,
+            voice: False,
+            color: "n1",
+          ),
+        ],
+      ),
+      live.EditTopic,
+    )
+  assert halfop_model.editing_topic == True
+
+  let #(cancelled, _) = live.apply(halfop_model, live.CancelTopicEdit)
+  assert cancelled.editing_topic == False
+  assert cancelled.topic == "old"
+}
+
+pub fn topic_edit_route_and_nav_test() {
+  let assert Ok(live.EditTopic) = live.decode_event("edit_topic", "")
+  let assert Ok(live.CancelTopicEdit) =
+    live.decode_event("cancel_topic_edit", "")
+  let assert Ok(live.SetTopic("hello")) =
+    live.decode_event("set_topic", "topic=hello")
+
+  let html = live.initial_html("/chat/test")
+  assert string.contains(html, "channel-topic")
+  assert string.contains(html, "id=\"channel-topic\"")
+
+  // Op member: patches include the topic form when edit opens.
+  let model = live.mount_model("/chat/test")
+  let before =
+    live.Model(
+      ..model,
+      nick: "op",
+      topic: "hello",
+      members: [
+        render.Member(
+          nick: "op",
+          op: True,
+          halfop: False,
+          voice: False,
+          color: "n1",
+        ),
+      ],
+    )
+  let #(after, _) = live.apply(before, live.EditTopic)
+  let patches = live.plan_patches(before, after)
+  let htmls =
+    list.map(patches, fn(p) {
+      case p {
+        diff.Replace(_, html) -> html
+        _ -> ""
+      }
+    })
+    |> string.concat
+  assert string.contains(htmls, "topic-form")
+  assert string.contains(htmls, "topic-input")
+  assert string.contains(htmls, "data-ls-submit=\"set_topic\"")
+  // Form replaces the clickable span while editing.
+  assert !string.contains(htmls, "data-ls-click=\"edit_topic\"")
 }
 
 pub fn mount_renders_shell_test() {
@@ -711,9 +1105,15 @@ pub fn sort_members_rank_test() {
 
 pub fn parse_mode_change_test() {
   let line = ":op!u@h MODE #freeq +ov alice bob"
-  let assert Some(#(ch, ops)) = render.parse_mode_change(line)
+  let assert Some(#(ch, from, modestring, args, ops)) =
+    render.parse_mode_change(line)
   assert ch == "#freeq"
+  assert from == "op"
+  assert modestring == "+ov"
+  assert args == ["alice", "bob"]
   assert list.length(ops) == 2
+  assert render.format_mode_meta(from, modestring, args)
+    == "— op set mode +ov alice bob"
   let members =
     render.apply_mode_ops(
       [
@@ -740,6 +1140,24 @@ pub fn parse_mode_change_test() {
   assert bob.voice == True
 }
 
+pub fn format_mode_meta_single_test() {
+  assert render.format_mode_meta("nandi.uk", "+o", ["eve"])
+    == "— nandi.uk set mode +o eve"
+  assert render.format_mode_meta("nandi.uk", "+m", [])
+    == "— nandi.uk set mode +m"
+}
+
+pub fn parse_kick_meta_test() {
+  let line = ":op!u@h KICK #freeq eve :spam"
+  let assert Some(#(ch, kicker, kicked, reason)) = render.parse_kick(line)
+  assert ch == "#freeq"
+  assert kicker == "op"
+  assert kicked == "eve"
+  assert reason == "spam"
+  assert render.format_kick_meta(kicker, kicked, reason)
+    == "— eve kicked by op: spam"
+}
+
 pub fn userlist_applies_353_for_current_channel_test() {
   let model = live.mount_model("/chat/freeq")
   let line = ":irc.freeq.at 353 me = #freeq :@alice bob"
@@ -760,11 +1178,36 @@ pub fn userlist_join_part_mode_test() {
   let model = live.mount_model("/chat/freeq")
   let #(m1, _) = live.apply(model, live.PushLine(":carol!c@h JOIN #freeq"))
   assert list.any(m1.members, fn(m) { m.nick == "carol" })
+  // Join also appears as a presence row in the channel stream.
+  assert list.any(m1.messages, fn(r) {
+    r.kind == render.Join && r.nick == Some("carol")
+  })
   let #(m2, _) = live.apply(m1, live.PushLine(":op!u@h MODE #freeq +o carol"))
   let assert Ok(carol) = list.find(m2.members, fn(m) { m.nick == "carol" })
   assert carol.op == True
+  // Mode meta: freeq-app style em-dash line.
+  assert list.any(m2.messages, fn(r) {
+    r.kind == render.System
+    && string.contains(r.text, "set mode +o carol")
+  })
   let #(m3, _) = live.apply(m2, live.PushLine(":carol!c@h PART #freeq :bye"))
   assert !list.any(m3.members, fn(m) { m.nick == "carol" })
+  assert list.any(m3.messages, fn(r) {
+    r.kind == render.Part && r.nick == Some("carol")
+  })
+}
+
+pub fn channel_mode_meta_in_stream_test() {
+  let model = live.mount_model("/chat/freeq")
+  let #(next, _) =
+    live.apply(model, live.PushLine(":nandi.uk!n@h MODE #freeq +o eve"))
+  let assert [row] = next.messages
+  assert row.kind == render.System
+  assert row.text == "— nandi.uk set mode +o eve"
+  // Other channel: no stream row, no roster change.
+  let #(other, _) =
+    live.apply(model, live.PushLine(":nandi.uk!n@h MODE #other +o eve"))
+  assert other.messages == []
 }
 
 pub fn members_prefix_helpers_test() {
@@ -983,6 +1426,126 @@ pub fn chathistory_latest_line_test() {
     || string.contains(line, "\r\n")
 }
 
+pub fn chathistory_before_line_test() {
+  let line = render.chathistory_before_line("freeq", 1_700_000_000, 50)
+  assert string.contains(line, "CHATHISTORY BEFORE #freeq timestamp=1700000000 50")
+  assert string.contains(line, "\r\n")
+}
+
+pub fn oldest_timestamp_test() {
+  let rows = [
+    render.history_row("a!a@h", "x", Some("m1"), Some(100), None, dict.new()),
+    render.history_row("b!b@h", "y", Some("m2"), Some(50), None, dict.new()),
+    render.history_row("c!c@h", "z", Some("m3"), None, None, dict.new()),
+  ]
+  assert render.oldest_timestamp(rows) == Some(50)
+  assert render.oldest_timestamp([]) == None
+}
+
+pub fn prepend_history_rows_test() {
+  let older = [
+    render.history_row("a!a@h", "old", Some("m0"), Some(1), None, dict.new()),
+    render.history_row("b!b@h", "mid", Some("m1"), Some(2), None, dict.new()),
+  ]
+  let current = [
+    render.history_row("b!b@h", "mid", Some("m1"), Some(2), None, dict.new()),
+    render.history_row("c!c@h", "new", Some("m2"), Some(3), None, dict.new()),
+  ]
+  let merged = live.prepend_history_rows(older, current)
+  assert list.length(merged) == 3
+  let assert [first, ..] = merged
+  assert first.msgid == Some("m0")
+  assert live.prepend_history_rows([], current) == current
+}
+
+pub fn load_older_requests_fetch_test() {
+  let model = live.mount_model("/chat/freeq")
+  let recent =
+    render.history_row(
+      "alice!a@h",
+      "hello",
+      Some("mid1"),
+      Some(1000),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([recent])).0
+  // Short page → exhausted; LoadOlder is a no-op.
+  assert model.history_exhausted == True
+  let #(noop, effect) = live.apply(model, live.LoadOlder)
+  assert effect == live.NoEffect
+  assert noop.history_loading == False
+
+  // Fresh channel model with a full initial page so more history may exist.
+  // Timestamps 1001..1050 — oldest is 1001.
+  let model = live.mount_model("/chat/freeq")
+  let full =
+    list.repeat(0, live.history_page_size)
+    |> list.index_map(fn(_, i) {
+      let n = i + 1
+      render.history_row(
+        "alice!a@h",
+        "msg",
+        Some("m" <> int.to_string(n)),
+        Some(1000 + n),
+        None,
+        dict.new(),
+      )
+    })
+  let model = live.apply(model, live.SetHistory(full)).0
+  assert model.history_exhausted == False
+  let #(loading, effect) = live.apply(model, live.LoadOlder)
+  assert loading.history_loading == True
+  let assert live.FetchOlderHistory("#freeq", before) = effect
+  assert before == 1001
+
+  let older = [
+    render.history_row(
+      "bob!b@h",
+      "earlier",
+      Some("m0"),
+      Some(900),
+      None,
+      dict.new(),
+    ),
+  ]
+  let #(next, _) = live.apply(loading, live.PrependHistory(older))
+  assert next.history_loading == False
+  assert next.history_exhausted == True
+  let assert [first, ..] = next.messages
+  assert first.msgid == Some("m0")
+}
+
+pub fn load_older_route_test() {
+  let assert Ok(live.LoadOlder) = live.decode_event("load_older", "")
+}
+
+pub fn jump_bottom_html_test() {
+  let html = live.jump_bottom_html()
+  assert string.contains(html, "id=\"jump-bottom\"")
+  assert string.contains(html, "Jump to bottom")
+  assert string.contains(html, "hidden")
+}
+
+pub fn messages_region_is_only_messages_node_test() {
+  // Lightspeed patches [data-ls-region=messages] by replacing that node with
+  // the region HTML root. The shell + FAB must NOT be in this HTML or each
+  // message update nests another .messages-shell and the FAB breaks.
+  let model = live.mount_model("/chat/freeq")
+  let html = live.messages_region_for_test(model)
+  assert string.contains(html, "id=\"messages\"")
+  assert string.contains(html, "data-ls-region=\"messages\"")
+  assert !string.contains(html, "messages-shell")
+  assert !string.contains(html, "jump-bottom")
+}
+
+pub fn history_loading_html_test() {
+  let html = live.history_loading_html()
+  assert string.contains(html, "history-loading")
+  assert string.contains(html, "history-spinner")
+  assert string.contains(html, "Loading older messages")
+}
+
 pub fn set_history_preserves_prior_reactions_test() {
   // Simulate: CHATHISTORY hydrated chips, then REST SetHistory without tags.
   let model = live.mount_model("/chat/freeq")
@@ -1181,4 +1744,463 @@ pub fn apply_line_353_test_channel_test() {
   assert list.length(next.members) == 3
   let patches = live.plan_patches(model, next)
   assert patches != []
+}
+
+pub fn link_preview_needs_resolve_test() {
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "see https://example.com/post",
+      Some("m1"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  assert link_preview.needs_resolve(row)
+  let with_embed =
+    render.Row(
+      ..row,
+      embed: Some(
+        render.Embed(
+          kind: render.Og,
+          href: "https://example.com/post",
+          title: Some("Hello"),
+          description: None,
+          site_name: None,
+          domain: Some("example.com"),
+          image_url: None,
+          video_id: None,
+          bsky: None,
+        ),
+      ),
+    )
+  assert !link_preview.needs_resolve(with_embed)
+  let plain =
+    render.history_row("alice!a@h", "no links here", Some("m2"), Some(1), None, dict.new())
+  assert !link_preview.needs_resolve(plain)
+}
+
+pub fn link_preview_attach_cache_only_test() {
+  let url = "https://example.com/cached-preview-test"
+  let key =
+    crypto.hash(crypto.Sha256, bit_array.from_string("og:" <> url))
+    |> bit_array.base16_encode
+    |> string.lowercase
+    |> string.slice(0, 40)
+  let dir = config.preview_cache_dir()
+  let _ = simplifile.create_directory_all(dir)
+  let meta =
+    "{\"fail\":false,\"kind\":\"og\",\"href\":\""
+    <> url
+    <> "\",\"title\":\"Cached Title\",\"domain\":\"example.com\"}"
+  let path = filepath.join(dir, key <> ".json")
+  let assert Ok(_) = simplifile.write(path, meta)
+  let row =
+    render.history_row(
+      "bob!b@h",
+      "check " <> url,
+      Some("m-cache"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let attached = link_preview.attach_cache_only(row)
+  let assert Some(embed) = attached.embed
+  assert embed.kind == render.Og
+  assert embed.href == url
+  assert embed.title == Some("Cached Title")
+  assert embed.domain == Some("example.com")
+}
+
+pub fn patch_embed_renders_link_card_test() {
+  let model = live.mount_model("/chat/test")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "https://example.com/x",
+      Some("m-embed"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let #(with_hist, _) = live.apply(model, live.SetHistory([row]))
+  let embed =
+    render.Embed(
+      kind: render.Og,
+      href: "https://example.com/x",
+      title: Some("Example Domain"),
+      description: Some("This domain is for use in illustrative examples."),
+      site_name: Some("Example"),
+      domain: Some("example.com"),
+      image_url: None,
+      video_id: None,
+      bsky: None,
+    )
+  let #(with_embed, _) =
+    live.apply(with_hist, live.PatchEmbed("m-embed", embed))
+  let htmls =
+    live.plan_patches(with_hist, with_embed)
+    |> list.map(fn(p) {
+      case p {
+        diff.Replace(_, html) -> html
+        _ -> ""
+      }
+    })
+    |> string.concat
+  assert string.contains(htmls, "class=\"link-embed\"")
+  assert string.contains(htmls, "Example Domain")
+  assert string.contains(htmls, "example.com")
+  assert string.contains(htmls, "href=\"https://example.com/x\"")
+}
+
+// ── Message search ───────────────────────────────────────────────────────────
+
+pub fn search_routes_test() {
+  let assert Ok(live.OpenSearch) = live.decode_event("open_search", "")
+  let assert Ok(live.CloseSearch) = live.decode_event("close_search", "")
+  let assert Ok(live.RunSearch(q)) = live.decode_event("search", "q=deploy")
+  assert q == "deploy"
+}
+
+pub fn open_search_on_channel_test() {
+  let model = live.mount_model("/chat/freeq")
+  let #(next, effect) = live.apply(model, live.OpenSearch)
+  assert next.search_open == True
+  assert effect == live.NoEffect
+  assert string.contains(next.search_status, "at least")
+}
+
+pub fn open_search_on_index_flash_test() {
+  let model = live.mount_model("/chat")
+  let #(next, effect) = live.apply(model, live.OpenSearch)
+  assert next.search_open == False
+  assert effect == live.NoEffect
+  assert string.contains(next.flash, "Join a channel")
+}
+
+pub fn run_search_too_short_test() {
+  let model = live.mount_model("/chat/freeq")
+  let #(next, effect) = live.apply(model, live.RunSearch("a"))
+  assert next.search_open == True
+  assert next.search_loading == False
+  assert effect == live.NoEffect
+  assert string.contains(next.search_status, "at least")
+}
+
+pub fn run_search_fetch_effect_test() {
+  let model = live.mount_model("/chat/freeq")
+  let hit =
+    render.history_row(
+      "alice!a@h",
+      "deploy failed",
+      Some("m1"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([hit])).0
+  let #(next, effect) = live.apply(model, live.RunSearch("deploy"))
+  assert next.search_open == True
+  assert next.search_loading == True
+  assert next.search_query == "deploy"
+  // Instant local hit before REST returns.
+  assert list.length(next.search_results) == 1
+  let assert live.FetchSearch(ch, q) = effect
+  assert ch == "#freeq"
+  assert q == "deploy"
+}
+
+pub fn set_search_results_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.RunSearch("deploy")).0
+  let hit =
+    render.history_row(
+      "alice!a@h",
+      "deploy failed",
+      Some("mid-s1"),
+      Some(1_700_000_000),
+      None,
+      dict.new(),
+    )
+  let #(next, _) =
+    live.apply(
+      model,
+      live.SetSearchResults("deploy", [hit], "1 result"),
+    )
+  assert next.search_loading == False
+  assert list.length(next.search_results) == 1
+  assert next.search_status == "1 result"
+}
+
+pub fn set_search_results_stale_ignored_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.RunSearch("deploy")).0
+  // User typed further before REST returned for "deploy".
+  let model = live.apply(model, live.RunSearch("deployment")).0
+  let hit =
+    render.history_row(
+      "alice!a@h",
+      "deploy failed",
+      Some("mid-old"),
+      Some(1),
+      None,
+      dict.new(),
+    )
+  let #(next, _) =
+    live.apply(model, live.SetSearchResults("deploy", [hit], "1 result"))
+  // Stale — still waiting on "deployment", no clobber.
+  assert next.search_query == "deployment"
+  assert next.search_loading == True
+  assert !list.any(next.search_results, fn(r) { r.msgid == Some("mid-old") })
+}
+
+pub fn local_search_hits_test() {
+  let rows = [
+    render.history_row("alice!a@h", "hello", Some("m1"), Some(1), None, dict.new()),
+    render.history_row(
+      "bob!b@h",
+      "deploy failed",
+      Some("m2"),
+      Some(2),
+      None,
+      dict.new(),
+    ),
+    render.history_row(
+      "carol!c@h",
+      "another deploy",
+      Some("m3"),
+      Some(3),
+      None,
+      dict.new(),
+    ),
+  ]
+  let hits = live.local_search_hits(rows, "deploy")
+  assert list.length(hits) == 2
+  // Newest first.
+  let assert Ok(first) = list.first(hits)
+  assert first.msgid == Some("m3")
+}
+
+pub fn live_message_updates_open_search_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.OpenSearch).0
+  let model = live.apply(model, live.RunSearch("needle")).0
+  assert model.search_open == True
+  // Simulate REST empty first.
+  let model =
+    live.apply(model, live.SetSearchResults("needle", [], "No messages found")).0
+  assert list.length(model.search_results) == 0
+  // Live PRIVMSG matching the query should land in the hit list.
+  let line = "@msgid=live1 :alice!a@h PRIVMSG #freeq :found a needle here"
+  let #(next, _) = live.apply(model, live.PushLine(line))
+  assert list.any(next.search_results, fn(r) { r.msgid == Some("live1") })
+}
+
+pub fn search_status_for_test() {
+  assert live.search_status_for([], None) == "No messages found"
+  assert live.search_status_for([], Some("http_403"))
+    == "This channel is private — sign in or join before searching"
+  let hit =
+    render.history_row("a!a@h", "x", Some("m1"), Some(1), None, dict.new())
+  assert live.search_status_for([hit], None) == "1 result"
+  assert live.search_status_for([hit, hit], None) == "2 results"
+}
+
+pub fn search_modal_patches_test() {
+  let model = live.mount_model("/chat/freeq")
+  let hit =
+    render.history_row(
+      "bob!b@h",
+      "needle in haystack",
+      Some("mid-hit"),
+      Some(42),
+      None,
+      dict.new(),
+    )
+  let open = live.apply(model, live.OpenSearch).0
+  let searching = live.apply(open, live.RunSearch("needle")).0
+  let with_hits =
+    live.apply(
+      searching,
+      live.SetSearchResults("needle", [hit], "1 result"),
+    ).0
+  let htmls =
+    live.plan_patches(model, with_hits)
+    |> list.map(fn(p) {
+      case p {
+        diff.Replace(_, html) -> html
+        _ -> ""
+      }
+    })
+    |> string.concat
+  assert string.contains(htmls, "search-modal")
+  assert string.contains(htmls, "id=\"search-input\"")
+  assert string.contains(htmls, "data-scroll-to=\"mid-hit\"")
+  assert string.contains(htmls, "needle in haystack")
+  assert string.contains(htmls, "bob")
+
+  // While open, result updates patch search-body without remounting the form.
+  let body_only = live.plan_patches(searching, with_hits)
+  let body_html =
+    list.map(body_only, fn(p) {
+      case p {
+        diff.Replace(target, html) -> target <> html
+        _ -> ""
+      }
+    })
+    |> string.concat
+  assert string.contains(body_html, "search-body")
+  assert string.contains(body_html, "mid-hit")
+}
+
+pub fn close_search_clears_test() {
+  let model = live.mount_model("/chat/freeq")
+  let hit =
+    render.history_row("a!a@h", "x", Some("m1"), Some(1), None, dict.new())
+  let model = live.apply(model, live.RunSearch("xx")).0
+  let model =
+    live.apply(
+      model,
+      live.SetSearchResults("xx", [hit], "1 result"),
+    ).0
+  assert model.search_open == True
+  let #(next, _) = live.apply(model, live.CloseSearch)
+  assert next.search_open == False
+  assert next.search_results == []
+  assert next.search_query == ""
+}
+
+pub fn navigate_clears_search_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.RunSearch("xx")).0
+  let model =
+    live.apply(
+      model,
+      live.SetSearchResults(
+        "xx",
+        [
+          render.history_row(
+            "a!a@h",
+            "x",
+            Some("m1"),
+            Some(1),
+            None,
+            dict.new(),
+          ),
+        ],
+        "1 result",
+      ),
+    ).0
+  assert model.search_open == True
+  let #(next, _) = live.apply(model, live.GoIndex)
+  assert next.search_open == False
+  assert next.search_results == []
+}
+
+pub fn jump_to_msg_in_list_test() {
+  let model = live.mount_model("/chat/freeq")
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "hello",
+      Some("mid-jump"),
+      Some(1000),
+      None,
+      dict.new(),
+    )
+  let model = live.apply(model, live.SetHistory([row])).0
+  let model = live.apply(model, live.OpenSearch).0
+  let #(next, effect) =
+    live.apply(model, live.JumpToMsg("mid-jump", Some(1000)))
+  assert next.search_open == False
+  assert next.scroll_to_msgid == Some("mid-jump")
+  assert effect == live.NoEffect
+}
+
+pub fn jump_to_msg_fetches_around_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.OpenSearch).0
+  let #(next, effect) =
+    live.apply(model, live.JumpToMsg("mid-old", Some(500)))
+  assert next.search_open == False
+  assert next.scroll_to_msgid == Some("mid-old")
+  assert next.history_loading == True
+  let assert live.FetchAround("#freeq", before) = effect
+  // before is exclusive so target at 500 is included.
+  assert before == 501
+}
+
+pub fn merge_around_history_test() {
+  let recent =
+    render.history_row("a!a@h", "new", Some("m2"), Some(200), None, dict.new())
+  let older =
+    render.history_row("b!b@h", "old", Some("m1"), Some(100), None, dict.new())
+  // Pure merge helper (oldest-first, de-duped).
+  let merged = live.merge_rows_chronological([recent], [older, recent])
+  assert list.length(merged) == 2
+  let assert [first, second] = merged
+  assert first.msgid == Some("m1")
+  assert second.msgid == Some("m2")
+
+  // MergeAroundHistory keeps scroll_to_msgid so the client can land on it.
+  let base = live.mount_model("/chat/freeq")
+  let base = live.apply(base, live.SetHistory([recent])).0
+  let base = live.apply(base, live.JumpToMsg("m1", Some(100))).0
+  // Jump queues FetchAround; re-seed messages and apply the page merge.
+  let with_scroll =
+    live.Model(..base, messages: [recent], scroll_to_msgid: Some("m1"))
+  let #(next, _) =
+    live.apply(with_scroll, live.MergeAroundHistory([older, recent]))
+  assert list.length(next.messages) == 2
+  assert next.scroll_to_msgid == Some("m1")
+  assert next.history_loading == False
+}
+
+pub fn jump_to_msg_route_test() {
+  let assert Ok(live.JumpToMsg(mid, ts)) =
+    live.decode_event("jump_to_msg", "msgid=abc&ts=1700000000")
+  assert mid == "abc"
+  assert ts == Some(1_700_000_000)
+  let assert Ok(live.ClearScrollTo) = live.decode_event("clear_scroll_to", "")
+}
+
+pub fn jump_to_msg_renders_highlight_class_test() {
+  let row =
+    render.history_row(
+      "alice!a@h",
+      "hello",
+      Some("mid-hl"),
+      Some(1000),
+      None,
+      dict.new(),
+    )
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetHistory([row])).0
+  let jumped = live.apply(model, live.JumpToMsg("mid-hl", Some(1000))).0
+  assert jumped.scroll_to_msgid == Some("mid-hl")
+  let htmls =
+    live.plan_patches(model, jumped)
+    |> list.map(fn(p) {
+      case p {
+        diff.Replace(_, html) -> html
+        _ -> ""
+      }
+    })
+    |> string.concat
+  assert string.contains(htmls, "highlight")
+  assert string.contains(htmls, "data-msgid=\"mid-hl\"")
+  assert string.contains(htmls, "data-scroll-to-msgid=\"mid-hl\"")
+}
+
+pub fn unread_case_insensitive_test() {
+  let model =
+    live.mount_model("/chat/freeq")
+    |> live.with_my_channels(["#freeq", "#Dev"])
+  let #(next, _) =
+    live.apply(model, live.PushLine(":alice!a@h PRIVMSG #dev :hi"))
+  assert live.unread_count(next, "#Dev") == 1
+  assert live.unread_count(next, "#dev") == 1
+  assert live.total_unread(next) == 1
+  let #(opened, _) = live.apply(next, live.OpenChannel("DEV"))
+  assert live.unread_count(opened, "#dev") == 0
 }

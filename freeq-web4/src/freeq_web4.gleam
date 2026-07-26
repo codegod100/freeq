@@ -11,6 +11,7 @@ import filepath
 import freeq_web4/auth
 import freeq_web4/config
 import freeq_web4/cookie_session
+import freeq_web4/link_preview
 import freeq_web4/live
 import freeq_web4/rest
 import freeq_web4/session_store
@@ -146,6 +147,8 @@ fn enhance_live_html(body: String) -> String {
     "</head>",
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
       <> "<meta name=\"color-scheme\" content=\"dark\">"
+      <> "<link rel=\"icon\" href=\"/favicon.png?v=2\" type=\"image/png\" sizes=\"48x48\">"
+      <> "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png?v=2\" sizes=\"180x180\">"
       <> "<link rel=\"stylesheet\" href=\"/assets/app.css\">"
       <> "<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">"
       <> "<script type=\"module\" src=\"/assets/av_call.js\"></script>"
@@ -187,13 +190,25 @@ fn handle_request(
   css: String,
   client_js: String,
   av_js: String,
+  favicon_png: BitArray,
+  apple_touch_png: BitArray,
+  icon_192_png: BitArray,
 ) -> http_response.Response(mist.ResponseData) {
   case req.path, req.method, is_websocket_upgrade(req) {
     "/live", gleam_http.Get, True -> upgrade_live(req)
 
+    // PNG bytes (same file as favicon.png); browsers accept PNG at /favicon.ico.
     "/favicon.ico", gleam_http.Get, False ->
-      http_response.new(204)
-      |> http_response.set_body(mist.Bytes(bytes_tree.new()))
+      static_png(favicon_png, "image/png")
+
+    "/favicon.png", gleam_http.Get, False ->
+      static_png(favicon_png, "image/png")
+
+    "/apple-touch-icon.png", gleam_http.Get, False ->
+      static_png(apple_touch_png, "image/png")
+
+    "/icon-192.png", gleam_http.Get, False ->
+      static_png(icon_192_png, "image/png")
 
     "/assets/av_call.js", gleam_http.Get, False ->
       http_response.new(200)
@@ -203,26 +218,40 @@ fn handle_request(
       )
       |> http_response.set_body(mist.Bytes(bytes_tree.from_string(av_js)))
 
+    // Re-read CSS from disk each request so priv/static/app.css edits show
+    // without restarting (boot-time `css` is only a fallback if the file is gone).
+    "/assets/app.css", gleam_http.Get, False ->
+      http_response.new(200)
+      |> http_response.set_header("content-type", "text/css; charset=utf-8")
+      |> http_response.set_header("cache-control", "no-cache")
+      |> http_response.set_body(
+        mist.Bytes(bytes_tree.from_string(load_asset_or(css, "app.css"))),
+      )
+
     "/upload", gleam_http.Post, False -> upload.handle(req)
 
     _, _, False ->
       case auth.handle(req) {
         Some(resp) -> resp
         None ->
-          case handle_av_api(req) {
+          case handle_preview_routes(req) {
             Some(resp) -> resp
             None ->
-              case req.method {
-                gleam_http.Get ->
-                  case string.starts_with(req.path, "/chat/") {
-                    True -> live_html_response(req)
-                    False -> call_endpoint(req, port, css, client_js)
+              case handle_av_api(req) {
+                Some(resp) -> resp
+                None ->
+                  case req.method {
+                    gleam_http.Get ->
+                      case string.starts_with(req.path, "/chat/") {
+                        True -> live_html_response(req)
+                        False -> call_endpoint(req, port, css, client_js)
+                      }
+                    _ ->
+                      http_response.new(404)
+                      |> http_response.set_body(
+                        mist.Bytes(bytes_tree.from_string("not found")),
+                      )
                   }
-                _ ->
-                  http_response.new(404)
-                  |> http_response.set_body(
-                    mist.Bytes(bytes_tree.from_string("not found")),
-                  )
               }
           }
       }
@@ -230,6 +259,110 @@ fn handle_request(
     _, _, True ->
       http_response.new(404)
       |> http_response.set_body(mist.Bytes(bytes_tree.from_string("not found")))
+  }
+}
+
+/// Same-origin OG proxy + cached preview images (web3 parity).
+fn handle_preview_routes(
+  req: http_request.Request(mist.Connection),
+) -> Option(http_response.Response(mist.ResponseData)) {
+  case req.method {
+    gleam_http.Get ->
+      case req.path {
+        "/api/v1/og" -> Some(handle_og_proxy(req))
+        _ ->
+          case string.starts_with(req.path, "/preview-cache/") {
+            True -> {
+              let id =
+                string.drop_start(req.path, string.length("/preview-cache/"))
+              Some(handle_preview_cache(id))
+            }
+            False -> None
+          }
+      }
+    _ -> None
+  }
+}
+
+fn handle_og_proxy(
+  req: http_request.Request(mist.Connection),
+) -> http_response.Response(mist.ResponseData) {
+  let url = query_param(req, "url")
+  let url =
+    url
+    |> string.replace("\u{200B}", "")
+    |> string.replace("\u{200C}", "")
+    |> string.replace("\u{200D}", "")
+    |> string.replace("\u{FEFF}", "")
+    |> string.trim
+  let url = case string.starts_with(url, "<") {
+    True -> string.drop_start(url, 1)
+    False -> url
+  }
+  let url = case string.ends_with(url, ">") {
+    True -> string.drop_end(url, 1)
+    False -> url
+  }
+  case url {
+    "" -> json_response(400, "{\"error\":\"url required\"}")
+    u ->
+      case string.starts_with(u, "http://") || string.starts_with(u, "https://")
+      {
+        False -> json_response(400, "{\"error\":\"Invalid URL\"}")
+        True ->
+          case rest.fetch_og(u) {
+            None -> json_response(502, "{\"error\":\"Fetch failed\"}")
+            Some(meta) ->
+              json_response(
+                200,
+                json_object([
+                  #("title", meta.title),
+                  #("description", meta.description),
+                  #("image", meta.image),
+                  #("site_name", meta.site_name),
+                ]),
+              )
+          }
+      }
+  }
+}
+
+fn json_object(fields: List(#(String, String))) -> String {
+  fields
+  |> list.map(fn(pair) {
+    "\"" <> json_escape(pair.0) <> "\":\"" <> json_escape(pair.1) <> "\""
+  })
+  |> string.join(",")
+  |> fn(body) { "{" <> body <> "}" }
+}
+
+fn query_param(
+  req: http_request.Request(mist.Connection),
+  name: String,
+) -> String {
+  case http_request.get_query(req) {
+    Ok(pairs) ->
+      case list.find(pairs, fn(p) { p.0 == name }) {
+        Ok(#(_, v)) -> v
+        Error(_) -> ""
+      }
+    Error(_) -> ""
+  }
+}
+
+fn handle_preview_cache(id: String) -> http_response.Response(mist.ResponseData) {
+  case link_preview.read_image(id) {
+    Error(_) ->
+      http_response.new(404)
+      |> http_response.set_body(mist.Bytes(bytes_tree.from_string("not found")))
+    Ok(#(bin, content_type)) ->
+      http_response.new(200)
+      |> http_response.set_header("content-type", content_type)
+      |> http_response.set_header(
+        "cache-control",
+        "public, max-age=604800, immutable",
+      )
+      |> http_response.set_body(mist.Bytes(bytes_tree.from_bit_array(bin)))
   }
 }
 
@@ -519,6 +652,9 @@ pub fn main() -> Nil {
   let css = load_asset("app.css")
   let client_js = freeq_client_js()
   let av_js = load_asset("av_call.js")
+  let favicon_png = load_asset_bits("favicon.png")
+  let apple_touch_png = load_asset_bits("apple-touch-icon.png")
+  let icon_192_png = load_asset_bits("icon-192.png")
 
   // Log before bind so Eaddrinuse (etc.) still shows which port we tried.
   io_println(
@@ -529,7 +665,18 @@ pub fn main() -> Nil {
 
   // Bind all interfaces + IPv6 so browsers resolving localhost → ::1 work.
   let assert Ok(_) =
-    mist.new(fn(req) { handle_request(req, port, css, client_js, av_js) })
+    mist.new(fn(req) {
+      handle_request(
+        req,
+        port,
+        css,
+        client_js,
+        av_js,
+        favicon_png,
+        apple_touch_png,
+        icon_192_png,
+      )
+    })
     |> mist.port(port)
     |> mist.bind("0.0.0.0")
     |> mist.with_ipv6
@@ -564,6 +711,12 @@ fn io_println(line: String) -> Nil {
 }
 
 fn load_asset(name: String) -> String {
+  load_asset_or("/* missing asset: " <> name <> " */", name)
+}
+
+/// Read `priv/static/<name>` (or freeq-web4/… when cwd is the monorepo root).
+/// Falls back to `fallback` when the file is missing (e.g. packed deploy).
+fn load_asset_or(fallback: String, name: String) -> String {
   let candidates = [
     filepath.join("priv/static", name),
     filepath.join("freeq-web4/priv/static", name),
@@ -577,7 +730,44 @@ fn load_asset(name: String) -> String {
     })
   {
     Ok(body) -> body
-    Error(_) -> "/* missing asset: " <> name <> " */"
+    Error(_) -> fallback
+  }
+}
+
+fn load_asset_bits(name: String) -> BitArray {
+  let candidates = [
+    filepath.join("priv/static", name),
+    filepath.join("freeq-web4/priv/static", name),
+  ]
+  case
+    list.find_map(candidates, fn(path) {
+      case simplifile.read_bits(path) {
+        Ok(body) -> Ok(body)
+        Error(_) -> Error(Nil)
+      }
+    })
+  {
+    Ok(body) -> body
+    Error(_) -> <<>>
+  }
+}
+
+fn static_png(
+  body: BitArray,
+  content_type: String,
+) -> http_response.Response(mist.ResponseData) {
+  case bit_array.byte_size(body) {
+    0 ->
+      http_response.new(404)
+      |> http_response.set_body(mist.Bytes(bytes_tree.from_string("not found")))
+    _ ->
+      http_response.new(200)
+      |> http_response.set_header("content-type", content_type)
+      |> http_response.set_header(
+        "cache-control",
+        "public, max-age=86400",
+      )
+      |> http_response.set_body(mist.Bytes(bytes_tree.from_bit_array(body)))
   }
 }
 
@@ -830,23 +1020,229 @@ function restoreCompose(snap, forceFocus) {
 }
 
 let pendingComposeFocus = false;
+let pendingScrollTo = null;
+let searchDebounceTimer = 0;
+let lastPushedSearchQ = null;
 
+function searchInput() {
+  return document.getElementById('search-input');
+}
+
+function snapshotSearch() {
+  const input = searchInput();
+  if (!input) return null;
+  return {
+    focused: document.activeElement === input,
+    value: input.value,
+    start: input.selectionStart ?? input.value.length,
+    end: input.selectionEnd ?? input.value.length,
+  };
+}
+
+function restoreSearch(snap, forceFocus) {
+  const input = searchInput();
+  if (!input) return;
+  if (snap) {
+    if (input.value !== snap.value) input.value = snap.value;
+    if (snap.focused || forceFocus) {
+      try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+      try { input.setSelectionRange(snap.start, snap.end); } catch (_) {}
+    }
+  } else if (forceFocus) {
+    try { input.focus({ preventScroll: true }); } catch (_) { input.focus(); }
+  }
+}
+
+function encodeSearchPayload(q) {
+  // Match formPayload escaping (Lightspeed form.parse does not percent-decode).
+  return 'q=' + String(q ?? '').replace(/&/g, '%26').replace(/=/g, '%3D');
+}
+
+function pushSearchQuery(q) {
+  if (lastPushedSearchQ === q) return;
+  lastPushedSearchQ = q;
+  pushEvent('search', encodeSearchPayload(q));
+}
+
+function onSearchInput(ev) {
+  const t = ev.target;
+  if (!t || t.id !== 'search-input') return;
+  const q = t.value || '';
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  // Clear / short query: respond quickly; longer queries debounce for FTS.
+  const delay = q.trim().length < 2 ? 40 : 180;
+  searchDebounceTimer = setTimeout(() => {
+    searchDebounceTimer = 0;
+    pushSearchQuery(q);
+  }, delay);
+}
+
+function findMessageRow(mid, root) {
+  const scope = root || document.getElementById('messages') || ROOT;
+  if (!scope || !mid) return null;
+  try {
+    return scope.querySelector('[data-msgid=\"' + CSS.escape(mid) + '\"]');
+  } catch (_) {
+    const safe = mid.split('\"').join('').split('\\\\').join('');
+    return scope.querySelector('[data-msgid=\"' + safe + '\"]');
+  }
+}
+
+// Keep flash visible across Lightspeed remounts of #messages.
+let highlightMsgid = null;
+let highlightUntil = 0;
+let highlightClearTimer = 0;
+
+function applyHighlight(row, mid) {
+  if (!row) return;
+  row.classList.add('highlight');
+  highlightMsgid = mid;
+  highlightUntil = Date.now() + 1800;
+  if (highlightClearTimer) clearTimeout(highlightClearTimer);
+  highlightClearTimer = setTimeout(() => {
+    highlightClearTimer = 0;
+    const root = document.getElementById('messages');
+    const el = root && findMessageRow(mid, root);
+    if (el) el.classList.remove('highlight');
+    if (highlightMsgid === mid) {
+      highlightMsgid = null;
+      highlightUntil = 0;
+    }
+  }, 1800);
+}
+
+/** Re-apply highlight after a messages region morph if still within the flash window. */
+function restoreHighlightFlash() {
+  if (!highlightMsgid || Date.now() > highlightUntil) return;
+  const root = document.getElementById('messages');
+  const row = root && findMessageRow(highlightMsgid, root);
+  if (row && !row.classList.contains('highlight')) {
+    row.classList.add('highlight');
+  }
+}
+
+/** Scroll #messages so `msgid` is centered. Returns true if the row was found.
+ *  Uses manual scrollTop — flex + ::before spacer breaks scrollIntoView. */
 function scrollToMessage(msgid) {
   const mid = String(msgid || '');
-  if (!mid) return;
-  const root = document.getElementById('messages') || ROOT;
-  let row = null;
-  try {
-    row = root.querySelector('[data-msgid=\"' + CSS.escape(mid) + '\"]');
-  } catch (_) {
-    // Strip chars that would break the attribute selector.
-    const safe = mid.split('\"').join('').split('\\\\').join('');
-    row = root.querySelector('[data-msgid=\"' + safe + '\"]');
+  if (!mid) return false;
+  const root = document.getElementById('messages');
+  if (!root) return false;
+  const row = findMessageRow(mid, root);
+  if (!row) return false;
+  stickToBottom = false;
+  // Center the row inside the scroll container (not the window).
+  const rootRect = root.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const delta =
+    rowRect.top + rowRect.height / 2 - (rootRect.top + rootRect.height / 2);
+  root.scrollTop += delta;
+  applyHighlight(row, mid);
+  updateJumpBottomUi();
+  return true;
+}
+
+/** Try scroll; keep pendingScrollTo until success so history loads can retry. */
+function tryPendingScroll() {
+  if (!pendingScrollTo) return;
+  const mid = pendingScrollTo;
+  if (scrollToMessage(mid)) {
+    pendingScrollTo = null;
+    // Delay clear so the server can keep the highlight class on the row for
+    // the flash, then clear_scroll_to remounts without immediately wiping it
+    // before the user sees anything. restoreHighlightFlash covers the remount.
+    setTimeout(() => {
+      pushEvent('clear_scroll_to', '');
+      // After clear patch, re-assert class for remaining flash duration.
+      setTimeout(restoreHighlightFlash, 30);
+      setTimeout(restoreHighlightFlash, 120);
+    }, 400);
   }
-  if (!row) return;
-  row.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  row.classList.add('highlight');
-  setTimeout(() => row.classList.remove('highlight'), 1200);
+}
+
+/**
+ * Rewrite .ts[data-ts] into the browser's local timezone (12h) and rebuild
+ * day separators on local calendar boundaries (web2/web3 parity).
+ * Server still emits UTC 12h clocks as a no-JS fallback.
+ */
+function localizeTimes() {
+  const root = document.getElementById('messages');
+  if (!root) return;
+
+  root.querySelectorAll('.ts[data-ts]').forEach((el) => {
+    const sec = parseInt(el.dataset.ts, 10);
+    if (!Number.isFinite(sec)) return;
+    const d = new Date(sec * 1000);
+    // NBSP so time and AM/PM never wrap onto separate lines.
+    el.textContent = d
+      .toLocaleTimeString(undefined, {
+        hour: 'numeric',
+        minute: '2-digit',
+        hour12: true,
+      })
+      .replace(/\\s+/g, String.fromCharCode(160));
+  });
+
+  rebuildDateSeparators(root);
+}
+
+function localDayKey(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+
+function formatLocalDateLabel(d) {
+  const now = new Date();
+  const today = localDayKey(now);
+  const key = localDayKey(d);
+  if (key === today) return 'Today';
+  const yest = new Date(now);
+  yest.setDate(yest.getDate() - 1);
+  if (key === localDayKey(yest)) return 'Yesterday';
+  return d.toLocaleDateString(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+/**
+ * Insert .date-sep rows between message stream items when the local
+ * calendar day changes. Rebuilt after every patch so region morphs
+ * cannot leave stale separators.
+ */
+function rebuildDateSeparators(root) {
+  if (!root) return;
+  root.querySelectorAll('.date-sep').forEach((el) => el.remove());
+
+  let lastDay = null;
+  const children = Array.from(root.children);
+  for (const node of children) {
+    if (node.classList && node.classList.contains('date-sep')) continue;
+    // Skip history-loading spinner and flex spacer pseudo-content.
+    if (node.classList && node.classList.contains('history-loading')) continue;
+    const tsEl = node.querySelector && node.querySelector('.ts[data-ts]');
+    if (!tsEl) continue;
+    const sec = parseInt(tsEl.dataset.ts, 10);
+    if (!Number.isFinite(sec)) continue;
+    const d = new Date(sec * 1000);
+    const day = localDayKey(d);
+    if (day === lastDay) continue;
+    lastDay = day;
+
+    const sep = document.createElement('div');
+    sep.className = 'date-sep';
+    sep.dataset.ts = String(sec);
+    sep.dataset.day = day;
+    sep.setAttribute('role', 'separator');
+    const span = document.createElement('span');
+    span.textContent = formatLocalDateLabel(d);
+    sep.appendChild(span);
+    node.parentNode.insertBefore(sep, node);
+  }
 }
 
 // Fill reply badges whose parent nick/text was missing when the server
@@ -888,26 +1284,471 @@ function hydrateReplyBadges() {
   });
 }
 
+// Message pane: stick to bottom for new traffic; preserve position when
+// prepending older history (scroll-to-top load more).
+// FAB visibility is geometry-based (not at bottom) except during jumpLock,
+// when we hide optimistically while force-scrolling to the end.
+let stickToBottom = true;
+let loadOlderPending = false;
+let loadOlderTimer = 0;
+// Jump-to-bottom FAB: unread count while the user is reading history.
+let newMsgCount = 0;
+// Last (newest) msgid at the bottom of the stream — used to count only
+// appends, not older-history prepending.
+let lastBottomMsgid = '';
+// While Date.now() < jumpLockUntil, hide FAB and keep force-scrolling.
+let jumpLockUntil = 0;
+let jumpBottomTimers = [];
+let ignoreScrollEvents = false;
+
+function messagesEl() {
+  return document.getElementById('messages');
+}
+
+function jumpBottomEl() {
+  return document.getElementById('jump-bottom');
+}
+
+function messagesShellEl() {
+  const msgs = messagesEl();
+  if (msgs && msgs.parentElement && msgs.parentElement.classList.contains('messages-shell')) {
+    return msgs.parentElement;
+  }
+  return document.querySelector('#freeq-chat .messages-shell, .messages-shell');
+}
+
+/**
+ * Keep shell + FAB as siblings of #messages (outside the Lightspeed
+ * messages region). Older builds nested shells inside #messages patches;
+ * unwrap that and re-attach a single FAB.
+ */
+function ensureJumpBottomDom() {
+  const msgs = messagesEl();
+  if (!msgs) return null;
+  let shell = msgs.parentElement;
+  // Unwrap accidental nesting: .messages-shell > .messages-shell > #messages
+  while (
+    shell &&
+    shell.classList.contains('messages-shell') &&
+    shell.parentElement &&
+    shell.parentElement.classList.contains('messages-shell')
+  ) {
+    const outer = shell.parentElement;
+    outer.parentNode.insertBefore(shell, outer);
+    outer.remove();
+    shell = msgs.parentElement;
+  }
+  if (!shell || !shell.classList.contains('messages-shell')) {
+    shell = document.createElement('div');
+    shell.className = 'messages-shell';
+    msgs.parentNode.insertBefore(shell, msgs);
+    shell.appendChild(msgs);
+  }
+  // One FAB only, sibling of #messages (not inside the scroll region).
+  shell.querySelectorAll('#jump-bottom').forEach((b) => {
+    if (b.parentElement !== shell) b.remove();
+  });
+  document.querySelectorAll('#jump-bottom').forEach((b) => {
+    if (b.parentElement !== shell) b.remove();
+  });
+  let btn = shell.querySelector(':scope > #jump-bottom');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'jump-bottom';
+    btn.className = 'jump-bottom';
+    btn.hidden = true;
+    btn.setAttribute('aria-label', 'Jump to bottom');
+    btn.innerHTML =
+      '<svg class=\"jump-bottom-icon\" viewBox=\"0 0 16 16\" width=\"14\" height=\"14\" aria-hidden=\"true\" focusable=\"false\">' +
+      '<path fill=\"currentColor\" fill-rule=\"evenodd\" d=\"M8 1a.5.5 0 01.5.5v11.793l3.146-3.147a.5.5 0 01.708.708l-4 4a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 13.293V1.5A.5.5 0 018 1z\"/>' +
+      '</svg><span class=\"jump-bottom-label\">Jump to bottom</span>';
+    shell.appendChild(btn);
+  }
+  return btn;
+}
+
+function nearBottom(el) {
+  if (!el) return true;
+  // Slack for subpixel + short flicks; still shows FAB after ~1 line scroll.
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+/** Newest message row id in #messages (last .row[data-msgid] child). */
+function lastMessageId(el) {
+  if (!el) return '';
+  const rows = el.querySelectorAll(':scope > .row[data-msgid]');
+  if (!rows.length) return '';
+  return rows[rows.length - 1].getAttribute('data-msgid') || '';
+}
+
+/** How many rows sit after `msgid` (0 if msgid missing / is last). */
+function countRowsAfter(el, msgid) {
+  if (!el || !msgid) return 0;
+  const rows = el.querySelectorAll(':scope > .row[data-msgid]');
+  let idx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if ((rows[i].getAttribute('data-msgid') || '') === msgid) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx < 0) return 0;
+  return rows.length - idx - 1;
+}
+
+function jumpBottomLabel() {
+  if (newMsgCount <= 0) return 'Jump to bottom';
+  if (newMsgCount === 1) return '1 new message';
+  return newMsgCount + ' new messages';
+}
+
+function isJumpLocked() {
+  return Date.now() < jumpLockUntil;
+}
+
+function updateJumpBottomUi() {
+  const el = messagesEl();
+  if (!el) return;
+  const btn = ensureJumpBottomDom() || jumpBottomEl();
+  const shell = messagesShellEl();
+  const atBottom = nearBottom(el);
+  // freeq-app parity: show whenever scrolled up. jumpLock hides during
+  // an in-progress jump so the FAB does not flash mid-scroll.
+  const show = !isJumpLocked() && !atBottom;
+  if (shell) shell.classList.toggle('is-at-bottom', !show);
+  if (!btn) return;
+  if (show) {
+    btn.hidden = false;
+    btn.removeAttribute('hidden');
+    btn.style.display = '';
+  } else {
+    btn.hidden = true;
+    btn.setAttribute('hidden', '');
+  }
+  const label = btn.querySelector('.jump-bottom-label');
+  if (label) label.textContent = jumpBottomLabel();
+  btn.classList.toggle('has-new', newMsgCount > 0);
+  btn.setAttribute('aria-label', jumpBottomLabel());
+  bindJumpBottomButton(btn);
+}
+
+function resetJumpBottom() {
+  newMsgCount = 0;
+  lastBottomMsgid = lastMessageId(messagesEl());
+  updateJumpBottomUi();
+}
+
+/** Clamp scroll position to the true bottom of #messages. */
+function scrollMessagesToEnd() {
+  const el = messagesEl();
+  if (!el) return;
+  ignoreScrollEvents = true;
+  try {
+    el.scrollTop = el.scrollHeight;
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+  } finally {
+    // scroll events are sync in modern browsers; clear on next task too.
+    ignoreScrollEvents = false;
+  }
+}
+
+function clearJumpBottomTimers() {
+  for (const id of jumpBottomTimers) clearTimeout(id);
+  jumpBottomTimers = [];
+}
+
+function jumpToBottom() {
+  const el = messagesEl();
+  if (!el) return;
+  stickToBottom = true;
+  newMsgCount = 0;
+  // Hide FAB immediately; keep locked while we force-scroll (tall history).
+  jumpLockUntil = Date.now() + 900;
+  updateJumpBottomUi();
+  clearJumpBottomTimers();
+  scrollMessagesToEnd();
+  lastBottomMsgid = lastMessageId(el);
+  const reassert = () => {
+    scrollMessagesToEnd();
+    lastBottomMsgid = lastMessageId(messagesEl());
+    if (nearBottom(messagesEl())) {
+      stickToBottom = true;
+      newMsgCount = 0;
+      jumpLockUntil = 0;
+    }
+    updateJumpBottomUi();
+  };
+  requestAnimationFrame(() => {
+    reassert();
+    requestAnimationFrame(reassert);
+  });
+  jumpBottomTimers.push(setTimeout(reassert, 50));
+  jumpBottomTimers.push(setTimeout(reassert, 150));
+  jumpBottomTimers.push(setTimeout(reassert, 350));
+  jumpBottomTimers.push(
+    setTimeout(() => {
+      reassert();
+      // End lock even if geometry is still short — stick intent keeps
+      // following new messages; next user scroll will re-show FAB via geometry.
+      jumpLockUntil = 0;
+      stickToBottom = true;
+      updateJumpBottomUi();
+    }, 900),
+  );
+}
+
+/**
+ * After a messages patch: if the user is scrolled up and new rows landed
+ * below the previous bottom msgid, bump the FAB counter. Prepending older
+ * history keeps the same last msgid so it does not inflate the count.
+ */
+function noteNewMessagesIfScrolledUp(el) {
+  if (!el) return;
+  const bottom = lastMessageId(el);
+  if (stickToBottom || pendingScrollTo || isJumpLocked()) {
+    lastBottomMsgid = bottom;
+    if (stickToBottom || isJumpLocked()) {
+      newMsgCount = 0;
+      scrollMessagesToEnd();
+    }
+    updateJumpBottomUi();
+    return;
+  }
+  if (lastBottomMsgid && bottom && bottom !== lastBottomMsgid) {
+    const added = countRowsAfter(el, lastBottomMsgid);
+    if (added > 0) newMsgCount += added;
+  }
+  if (bottom) lastBottomMsgid = bottom;
+  updateJumpBottomUi();
+}
+
+function bindJumpBottomButton(btn) {
+  const el = btn || jumpBottomEl();
+  if (!el || el.dataset.freeqJumpBound === '1') return;
+  el.dataset.freeqJumpBound = '1';
+  el.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    jumpToBottom();
+  });
+}
+
+function bindMessagesScroll() {
+  ensureJumpBottomDom();
+  const el = messagesEl();
+  if (!el) return;
+  if (el.dataset.freeqScrollBound !== '1') {
+    el.dataset.freeqScrollBound = '1';
+    el.addEventListener('scroll', onMessagesScroll, { passive: true });
+  }
+  bindJumpBottomButton();
+  updateJumpBottomUi();
+}
+
+function onMessagesScroll() {
+  const el = messagesEl();
+  if (!el) return;
+  if (ignoreScrollEvents) return;
+  if (isJumpLocked()) {
+    // Stay glued while jump animation runs; do not flip stick off mid-jump.
+    if (!nearBottom(el)) scrollMessagesToEnd();
+    updateJumpBottomUi();
+    return;
+  }
+  // Geometry drives both stick and FAB (freeq-app MessageList parity).
+  const atBottom = nearBottom(el);
+  stickToBottom = atBottom;
+  if (atBottom) {
+    newMsgCount = 0;
+    lastBottomMsgid = lastMessageId(el);
+  }
+  updateJumpBottomUi();
+  if (!atBottom && el.scrollTop <= 48) requestLoadOlder(el);
+}
+
+/** Optimistic spinner at the top of the pane (fetch is often one round-trip). */
+function showHistoryLoading(el) {
+  if (!el) return;
+  let node = el.querySelector(':scope > .history-loading');
+  if (node) {
+    node.hidden = false;
+    return;
+  }
+  const prevH = el.scrollHeight;
+  const prevT = el.scrollTop;
+  node = document.createElement('div');
+  node.className = 'history-loading';
+  node.setAttribute('aria-live', 'polite');
+  node.setAttribute('role', 'status');
+  const spin = document.createElement('span');
+  spin.className = 'history-spinner';
+  spin.setAttribute('aria-hidden', 'true');
+  const label = document.createElement('span');
+  label.className = 'history-loading-text';
+  label.textContent = 'Loading older messages…';
+  node.appendChild(spin);
+  node.appendChild(label);
+  // After the flex spacer (::before), as the first real child.
+  el.insertBefore(node, el.firstChild);
+  // Keep the same messages in view when the spinner grows the top.
+  const delta = el.scrollHeight - prevH;
+  if (delta > 0) el.scrollTop = prevT + delta;
+}
+
+function hideHistoryLoading(el) {
+  if (!el) return;
+  const node = el.querySelector(':scope > .history-loading');
+  if (node) node.remove();
+}
+
+function clearLoadOlderPending() {
+  loadOlderPending = false;
+  if (loadOlderTimer) {
+    clearTimeout(loadOlderTimer);
+    loadOlderTimer = 0;
+  }
+}
+
+function requestLoadOlder(el) {
+  if (!el) return;
+  if (loadOlderPending) return;
+  if (el.dataset.historyExhausted === '1') return;
+  if (el.dataset.historyLoading === '1') return;
+  // Nothing rendered yet — wait for initial history.
+  if (!el.querySelector('[data-msgid], .row')) return;
+  loadOlderPending = true;
+  showHistoryLoading(el);
+  pushEvent('load_older', '');
+  if (loadOlderTimer) clearTimeout(loadOlderTimer);
+  // Safety: unlock if the server never clears loading (offline / empty).
+  loadOlderTimer = setTimeout(() => {
+    clearLoadOlderPending();
+    hideHistoryLoading(messagesEl());
+  }, 8000);
+}
+
+// Document title badge from sidebar unreads (nav data-unread-total).
+const TITLE_BASE = 'freeq · web4';
+function syncUnreadTitle() {
+  const navEl = document.querySelector('nav[data-ls-region=nav]');
+  const raw = navEl && navEl.getAttribute('data-unread-total');
+  const n = raw ? parseInt(raw, 10) : 0;
+  if (Number.isFinite(n) && n > 0) {
+    document.title = '(' + n + ') ' + TITLE_BASE;
+  } else {
+    document.title = TITLE_BASE;
+  }
+}
+
 function onFrame(text) {
   const fields = splitFields(text);
   const tag = fields[0];
   if (tag === 'hello') {
     ROOT.classList.add('ls-connected');
+    syncUnreadTitle();
     return;
   }
   if (tag === 'diff') {
     const hadCompose = !!composeInput();
+    const hadTopic = !!document.getElementById('topic-input');
+    const hadSearchInput = !!searchInput();
     const snap = snapshotCompose();
+    const searchSnap = snapshotSearch();
     const force = pendingComposeFocus;
     pendingComposeFocus = false;
+    const msgsBefore = messagesEl();
+    // Preserve viewport when the user is reading history (not stuck to bottom).
+    let savedScroll = null;
+    if (msgsBefore && !stickToBottom) {
+      savedScroll = { h: msgsBefore.scrollHeight, t: msgsBefore.scrollTop };
+    }
     applyPatches(fields[2] || '');
+    syncUnreadTitle();
     // autofocus only runs on initial HTML parse; re-focus when compose
     // appears after join/open, and restore after morph/send.
     const hasCompose = !!composeInput();
-    restoreCompose(snap, force || (!hadCompose && hasCompose));
-    const msgs = document.getElementById('messages');
-    if (msgs) msgs.scrollTop = msgs.scrollHeight;
+    const topicInput = document.getElementById('topic-input');
+    const hasSearch = !!searchInput();
+    if (topicInput && !hadTopic) {
+      try { topicInput.focus({ preventScroll: true }); } catch (_) { topicInput.focus(); }
+      try { topicInput.select(); } catch (_) {}
+    } else if (hasSearch && (!hadSearchInput || (searchSnap && searchSnap.focused))) {
+      // Prefer search focus while the modal is open.
+      restoreSearch(searchSnap, !hadSearchInput);
+      if (!hadSearchInput) {
+        lastPushedSearchQ = null;
+        try { searchInput().select(); } catch (_) {}
+      }
+    } else {
+      restoreCompose(snap, force || (!hadCompose && hasCompose));
+      restoreSearch(searchSnap, false);
+    }
+    const msgs = messagesEl();
+    if (msgs) {
+      // Server may ask us to land on a msgid (search jump / reply).
+      if (msgs.dataset.scrollToMsgid) {
+        pendingScrollTo = msgs.dataset.scrollToMsgid;
+        stickToBottom = false;
+      }
+      if (pendingScrollTo) {
+        // Do not yank back to bottom while seeking a target.
+        stickToBottom = false;
+      } else if (savedScroll) {
+        msgs.scrollTop = msgs.scrollHeight - savedScroll.h + savedScroll.t;
+      } else if (stickToBottom) {
+        scrollMessagesToEnd();
+      }
+      // Server finished the older-page fetch (or still loading async).
+      if (msgs.dataset.historyLoading === '1') {
+        showHistoryLoading(msgs);
+      } else {
+        clearLoadOlderPending();
+      }
+      bindMessagesScroll();
+      // Still at the top after prepend? load the next page if more remain.
+      // Skip auto-load-older while seeking a jump target (FetchAround owns that).
+      if (
+        !pendingScrollTo &&
+        msgs.scrollTop <= 48 &&
+        msgs.dataset.historyLoading !== '1'
+      ) {
+        requestLoadOlder(msgs);
+      }
+    } else {
+      clearLoadOlderPending();
+    }
     hydrateReplyBadges();
+    // Date seps change #messages height — measure before/after so scroll sticks.
+    const msgsAfter = messagesEl();
+    const hBeforeSep = msgsAfter ? msgsAfter.scrollHeight : 0;
+    const tBeforeSep = msgsAfter ? msgsAfter.scrollTop : 0;
+    localizeTimes();
+    if (msgsAfter && !pendingScrollTo) {
+      if (stickToBottom) {
+        scrollMessagesToEnd();
+      } else {
+        const grew = msgsAfter.scrollHeight - hBeforeSep;
+        if (grew > 0) msgsAfter.scrollTop = tBeforeSep + grew;
+      }
+    }
+    // Search / reply jump after layout settles (region morph + flex spacer).
+    if (pendingScrollTo) {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          tryPendingScroll();
+          // One more frame if font/layout still settling.
+          if (pendingScrollTo) {
+            setTimeout(tryPendingScroll, 50);
+          }
+          noteNewMessagesIfScrolledUp(messagesEl());
+        });
+      });
+    } else {
+      // Messages region may have remounted (clear_scroll_to, live PRIVMSG).
+      restoreHighlightFlash();
+      noteNewMessagesIfScrolledUp(msgsAfter || messagesEl());
+    }
     try { if (window.__freeqAv && window.__freeqAv.sync) window.__freeqAv.sync(); } catch (_) {}
     return;
   }
@@ -963,13 +1804,53 @@ function onClick(ev) {
     return;
   }
 
+  // Jump-to-bottom FAB (client-only; outside Lightspeed click routing).
+  const jumpBtn = ev.target && ev.target.closest
+    ? ev.target.closest('#jump-bottom')
+    : null;
+  if (jumpBtn && ROOT.contains(jumpBtn)) {
+    ev.preventDefault();
+    jumpToBottom();
+    return;
+  }
+
   // Reply chip: jump to the original message in the stream.
   const badge = ev.target && ev.target.closest
     ? ev.target.closest('.reply-badge[data-reply-to]')
     : null;
   if (badge && ROOT.contains(badge)) {
     ev.preventDefault();
-    scrollToMessage(badge.getAttribute('data-reply-to') || '');
+    const mid = badge.getAttribute('data-reply-to') || '';
+    stickToBottom = false;
+    pendingScrollTo = mid;
+    updateJumpBottomUi();
+    if (!scrollToMessage(mid)) {
+      // Not loaded — ask server for a history window around it (no ts known).
+      pushEvent(
+        'jump_to_msg',
+        'msgid=' + String(mid).replace(/&/g, '%26').replace(/=/g, '%3D'),
+      );
+    } else {
+      pendingScrollTo = null;
+    }
+    return;
+  }
+
+  // Search hit: close modal, load history around the hit if needed, scroll.
+  const searchHit = ev.target && ev.target.closest
+    ? ev.target.closest('.search-hit[data-scroll-to]')
+    : null;
+  if (searchHit && ROOT.contains(searchHit)) {
+    ev.preventDefault();
+    const mid = searchHit.getAttribute('data-scroll-to') || '';
+    const ts = searchHit.getAttribute('data-ts') || '';
+    stickToBottom = false;
+    pendingScrollTo = mid;
+    updateJumpBottomUi();
+    // Prefer server jump so unloaded hits are fetched; it also closes search.
+    let payload = 'msgid=' + String(mid).replace(/&/g, '%26').replace(/=/g, '%3D');
+    if (ts) payload += '&ts=' + String(ts).replace(/&/g, '%26').replace(/=/g, '%3D');
+    pushEvent('jump_to_msg', payload);
     return;
   }
 
@@ -998,6 +1879,16 @@ function onClick(ev) {
   if (name === 'open' || name === 'reply' || name === 'cancel_reply') {
     pendingComposeFocus = true;
   }
+  // New channel → jump to latest when the history patch lands.
+  if (name === 'open' || name === 'join' || name === 'go_index' || name === 'part') {
+    stickToBottom = true;
+    jumpLockUntil = 0;
+    loadOlderPending = false;
+    newMsgCount = 0;
+    lastBottomMsgid = '';
+    clearJumpBottomTimers();
+    updateJumpBottomUi();
+  }
   const payload = el.getAttribute('data-ls-payload') || '';
   pushEvent(name, payload);
 }
@@ -1013,6 +1904,12 @@ function onSubmit(ev) {
     const path = channelPathFromInput(input && input.value);
     if (path) pushPath(path);
     pendingComposeFocus = true;
+    stickToBottom = true;
+    jumpLockUntil = 0;
+    loadOlderPending = false;
+    newMsgCount = 0;
+    lastBottomMsgid = '';
+    updateJumpBottomUi();
   }
   pushEvent(name, formPayload(form));
   if (name === 'send' || form.id === 'send-form') {
@@ -1022,6 +1919,8 @@ function onSubmit(ev) {
     // Keep focus after the next diff even if the Send button was active.
     pendingComposeFocus = true;
     tabCycle = null;
+    // Scroll now so the user's own send lands at the bottom before the echo.
+    jumpToBottom();
   }
 }
 
@@ -1087,10 +1986,59 @@ function applyTabMatch(input, wordStart, after, cycle) {
 }
 
 function onKeyDown(ev) {
+  // Global: Ctrl/Cmd+F opens channel message search (when available).
+  if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'f' || ev.key === 'F')) {
+    if (document.querySelector('.nav-search-btn, #search-input')) {
+      ev.preventDefault();
+      if (!document.getElementById('search-input')) {
+        pushEvent('open_search', '');
+      } else {
+        const si = document.getElementById('search-input');
+        try { si.focus({ preventScroll: true }); } catch (_) { si.focus(); }
+        try { si.select(); } catch (_) {}
+      }
+      return;
+    }
+  }
+
+  // Escape closes search modal from anywhere.
+  if (ev.key === 'Escape' && document.getElementById('search-input')) {
+    ev.preventDefault();
+    pushEvent('close_search', '');
+    pendingComposeFocus = true;
+    tabCycle = null;
+    return;
+  }
+
   const t = ev.target;
-  if (!t || t.tagName !== 'INPUT') return;
-  if (t.name !== 'msg' && t.id !== 'message-input') return;
+  if (!t || (t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA')) return;
   if (!ROOT.contains(t)) return;
+
+  // Escape on topic editor cancels without saving.
+  if (ev.key === 'Escape' && (t.id === 'topic-input' || t.name === 'topic')) {
+    ev.preventDefault();
+    pushEvent('cancel_topic_edit', '');
+    pendingComposeFocus = true;
+    tabCycle = null;
+    return;
+  }
+
+  // Search input: realtime via input events; Enter still submits immediately.
+  if (t.id === 'search-input' || t.name === 'q') {
+    if (ev.key === 'Tab') ev.preventDefault();
+    if (ev.key === 'Enter') {
+      // Flush debounce so Enter does not wait for the timer.
+      if (searchDebounceTimer) {
+        clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = 0;
+      }
+      // Let the form submit handler fire; also push now for snappiness.
+      pushSearchQuery(t.value || '');
+    }
+    return;
+  }
+
+  if (t.name !== 'msg' && t.id !== 'message-input') return;
 
   // Escape cancels compose-side reply mode (banner).
   if (ev.key === 'Escape') {
@@ -1389,8 +2337,10 @@ ROOT.addEventListener('click', onClick);
 ROOT.addEventListener('click', onAttachClick);
 ROOT.addEventListener('click', onPreviewCancel);
 ROOT.addEventListener('change', onFileChange);
+ROOT.addEventListener('input', onSearchInput);
 ROOT.addEventListener('submit', onSubmit);
-ROOT.addEventListener('keydown', onKeyDown);
+// Capture phase so Ctrl+F / Esc work even when focus is outside #app.
+document.addEventListener('keydown', onKeyDown);
 ROOT.addEventListener('paste', onPaste);
 ROOT.addEventListener('dragover', onDragOver);
 ROOT.addEventListener('drop', onDrop);
@@ -1401,7 +2351,19 @@ ROOT.dataset.lsRoute = location.pathname || ROOT.dataset.lsRoute || '/chat';
 focusCompose();
 queueMicrotask(focusCompose);
 hydrateReplyBadges();
+localizeTimes();
+bindMessagesScroll();
+// Initial channel pages should land at the latest message (after date seps).
+{
+  const el = messagesEl();
+  if (el) {
+    stickToBottom = true;
+    scrollMessagesToEnd();
+    lastBottomMsgid = lastMessageId(el);
+  }
+  updateJumpBottomUi();
+}
 connect();
-window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview, scrollToMessage };
+window.__freeq = { pushEvent, pushPath, uploadFile, clearUploadPreview, scrollToMessage, jumpToBottom };
 "
 }

@@ -6,6 +6,7 @@
 
 import freeq_web4/config
 import freeq_web4/irc/render
+import freeq_web4/link_preview
 import freeq_web4/rest
 import gleam/bit_array
 import gleam/crypto
@@ -13,6 +14,7 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/result
 import gleam/string
 import lightspeed/component
@@ -30,7 +32,12 @@ pub type View {
   Index
   /// Single channel chat shell (`/chat/:name`).
   Channel
+  /// System / server buffer (`/chat/system`) — connection + notices.
+  System
 }
+
+/// Path segment and sidebar key for the system buffer (not a real IRC channel).
+pub const system_key: String = "system"
 
 /// Upstream IRC WebSocket connection phase, shown in the shell status.
 pub type WsLabel {
@@ -90,7 +97,61 @@ pub type Model {
     av_token: Option(String),
     /// Open emoji picker target msgid (`None` = closed).
     react_picker_msgid: Option(String),
+    /// Nav bar: inline topic editor open.
+    editing_topic: Bool,
+    /// REST scroll-up page in flight (client debounces on this too).
+    history_loading: Bool,
+    /// No older REST page left (`before` returned fewer than a full page).
+    history_exhausted: Bool,
+    /// Message search modal open (channel-scoped FTS).
+    search_open: Bool,
+    /// Current search query string (form / results header).
+    search_query: String,
+    /// Hits from the last successful REST search (newest-first).
+    search_results: List(render.Row),
+    /// REST search request in flight.
+    search_loading: Bool,
+    /// Empty-state / error line under the search input.
+    search_status: String,
+    /// After search/reply jump: client scrolls to this msgid once in the DOM.
+    scroll_to_msgid: Option(String),
+    /// Unread chat counts for non-active joined channels (`#name` → n).
+    /// Cleared when the user opens that channel; sidebar shows a badge.
+    unread: Dict(String, Int),
+    /// System buffer: connection status, server notices, non-channel rows.
+    /// Persists across navigation (unlike per-channel `messages`).
+    system_messages: List(render.Row),
   )
+}
+
+/// Page size for initial + scroll-up REST history fetches.
+pub const history_page_size: Int = 50
+
+/// Min characters before we hit freeq-server FTS (matches freeq-app UX).
+pub const search_min_chars: Int = 2
+
+/// Human status line after a REST search completes.
+pub fn search_status_for(
+  results: List(render.Row),
+  error: Option(String),
+) -> String {
+  case error {
+    Some("http_403") ->
+      "This channel is private — sign in or join before searching"
+    Some("http_404") -> "Channel not found"
+    Some(_) -> "Search failed — try again"
+    None ->
+      case results {
+        [] -> "No messages found"
+        rows -> {
+          let n = list.length(rows)
+          case n == 1 {
+            True -> "1 result"
+            False -> int.to_string(n) <> " results"
+          }
+        }
+      }
+  }
 }
 
 /// Parent assigns — path selects index vs channel on mount.
@@ -116,8 +177,14 @@ pub type Msg {
   GoIndex
   /// Browser: open a channel (sidebar / directory).
   OpenChannel(bare: String)
+  /// Browser: open the System buffer (`/chat/system`).
+  OpenSystem
   /// Browser: set topic.
   SetTopic(topic: String)
+  /// Browser: open inline topic editor (ops / half-ops).
+  EditTopic
+  /// Browser: cancel inline topic editor (Esc).
+  CancelTopicEdit
   /// Server: IRC connection state.
   SetWs(WsLabel)
   /// Server: nick assigned.
@@ -126,6 +193,10 @@ pub type Msg {
   PushLine(String)
   /// Server: replace history after REST fetch.
   SetHistory(List(render.Row))
+  /// Browser: scrolled to top of message pane — load older page.
+  LoadOlder
+  /// Server: prepend older REST page (scroll-up pagination).
+  PrependHistory(List(render.Row))
   /// Server: public channel directory.
   SetAllChannels(List(rest.ChannelInfo))
   /// Server: topic update.
@@ -156,6 +227,26 @@ pub type Msg {
   CloseReactPicker
   /// Browser: toggle reaction on a message (add if not mine, else remove).
   ToggleReaction(msgid: String, emoji: String)
+  /// Server: async link-preview resolve finished for a row.
+  PatchEmbed(row_id: String, embed: render.Embed)
+  /// Browser: open channel message search modal.
+  OpenSearch
+  /// Browser: close search modal (Esc / backdrop / result click).
+  CloseSearch
+  /// Browser: run FTS for the current channel (`q` from form).
+  RunSearch(query: String)
+  /// Server: REST search finished (ok or error status line).
+  SetSearchResults(
+    query: String,
+    results: List(render.Row),
+    status: String,
+  )
+  /// Browser: jump to a search hit (close modal; load history if needed).
+  JumpToMsg(msgid: String, ts: Option(Int))
+  /// Server: history page around a jump target merged into the stream.
+  MergeAroundHistory(List(render.Row))
+  /// Browser: clear one-shot scroll target after client scrolled.
+  ClearScrollTo
   /// No-op / ignored.
   Nop
 }
@@ -170,12 +261,20 @@ pub type Effect {
   EnsureUpstream(primary: String, extras: List(String))
   /// Fetch REST history for a channel.
   FetchHistory(channel: String)
+  /// Fetch older REST history page (`before` = unix ts of oldest loaded).
+  FetchOlderHistory(channel: String, before: Int)
   /// Fetch public channel list.
   FetchChannels
   /// Probe freeq-server for an active AV call on a channel.
   FetchActiveCall(channel: String)
+  /// Channel FTS via REST `GET /api/v1/search`.
+  FetchSearch(channel: String, query: String)
+  /// REST history page ending at `before` (unix exclusive) to land on a msgid.
+  FetchAround(channel: String, before: Int)
   /// Stop upstream (logout / socket close).
   StopUpstream
+  /// Background-resolve Open Graph / YouTube / Bluesky cards for these rows.
+  ResolveEmbeds(List(render.Row))
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -254,6 +353,17 @@ fn mount(
       av_instance: generate_av_instance(),
       av_token: None,
       react_picker_msgid: None,
+      editing_topic: False,
+      history_loading: False,
+      history_exhausted: False,
+      search_open: False,
+      search_query: "",
+      search_results: [],
+      search_loading: False,
+      search_status: "",
+      scroll_to_msgid: None,
+      unread: dict.new(),
+      system_messages: [],
     )
   helpers.no_effect(model)
 }
@@ -277,16 +387,31 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
 
     Send(text) -> {
       let text = string.trim(text)
-      case text == "", model.channel {
-        True, _ -> #(model, NoEffect)
-        _, None -> #(Model(..model, flash: "Join a channel first"), NoEffect)
-        _, Some(ch) -> {
-          let line = case string.starts_with(text, "/") {
-            True -> string.drop_start(text, 1) <> "\r\n"
-            False -> privmsg_line(ch, text, model.reply_to)
+      case text == "" {
+        True -> #(model, NoEffect)
+        False ->
+          case string.starts_with(text, "/") {
+            // Client-side slash commands (join/op/whois/help/…) — freeq-app parity.
+            True -> handle_slash_command(model, text)
+            False ->
+              case model.view, model.channel {
+                System, _ -> #(
+                  Model(
+                    ..model,
+                    flash: "Use /commands here (e.g. /join #channel, /whois nick, /help)",
+                  ),
+                  NoEffect,
+                )
+                _, Some(ch) -> #(
+                  clear_reply(Model(..model, compose: "", flash: "")),
+                  IrcSend([privmsg_line(ch, text, model.reply_to)]),
+                )
+                _, None -> #(
+                  Model(..model, flash: "Join a channel first"),
+                  NoEffect,
+                )
+              }
           }
-          #(clear_reply(Model(..model, compose: "", flash: "")), IrcSend([line]))
-        }
       }
     }
 
@@ -312,67 +437,85 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     CancelReply -> #(clear_reply(model), NoEffect)
 
     Join(raw) -> {
-      let ch = render.canonical_channel(raw)
-      case ch == "#" || ch == "" {
-        True -> #(model, NoEffect)
+      // "system" is the local status buffer, not IRC #system.
+      case is_system_key(raw) {
+        True -> open_system(model)
         False -> {
-          let my = list_unique_append(model.my_channels, ch)
-          // Seed from directory when present (#test); host REST fills private
-          // rooms (#freeq) and IRC 332 may refine further.
-          let topic = rest.topic_for(model.all_channels, ch)
-          let model = case model.av_active {
-            True ->
-              clear_reply(
-                Model(
-                  ..model,
-                  view: Channel,
-                  channel: Some(ch),
-                  my_channels: my,
-                  messages: [],
-                  members: [],
-                  topic: topic,
-                  flash: "",
-                  react_picker_msgid: None,
-                  av_channel: case model.av_channel {
-                    Some(_) -> model.av_channel
-                    None -> model.channel
-                  },
-                ),
+          let ch = render.canonical_channel(raw)
+          case ch == "#" || ch == "" {
+            True -> #(model, NoEffect)
+            False -> {
+              let my = list_unique_append(model.my_channels, ch)
+              // Seed from directory when present (#test); host REST fills private
+              // rooms (#freeq) and IRC 332 may refine further.
+              let topic = rest.topic_for(model.all_channels, ch)
+              let model = case model.av_active {
+                True ->
+                  clear_unread(
+                    clear_search(clear_reply(
+                      Model(
+                        ..model,
+                        view: Channel,
+                        channel: Some(ch),
+                        my_channels: my,
+                        messages: [],
+                        members: [],
+                        topic: topic,
+                        flash: "",
+                        react_picker_msgid: None,
+                        editing_topic: False,
+                        history_loading: False,
+                        history_exhausted: False,
+                        av_channel: case model.av_channel {
+                          Some(_) -> model.av_channel
+                          None -> model.channel
+                        },
+                      ),
+                    )),
+                    ch,
+                  )
+                False ->
+                  clear_unread(
+                    clear_search(clear_reply(
+                      Model(
+                        ..model,
+                        view: Channel,
+                        channel: Some(ch),
+                        my_channels: my,
+                        messages: [],
+                        members: [],
+                        topic: topic,
+                        flash: "",
+                        av_call_present: False,
+                        av_session_id: None,
+                        av_channel: None,
+                        av_participant_count: 0,
+                        av_muted: False,
+                        av_camera: False,
+                        av_instance: generate_av_instance(),
+                        av_token: None,
+                        react_picker_msgid: None,
+                        editing_topic: False,
+                        history_loading: False,
+                        history_exhausted: False,
+                      ),
+                    )),
+                    ch,
+                  )
+              }
+              #(
+                model,
+                multi_effect([
+                  EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
+                  // JOIN + NAMES: re-open of an already-joined channel still refreshes
+                  // the userlist (some servers skip 353 on redundant JOIN).
+                  IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
+                  FetchHistory(ch),
+                  FetchActiveCall(ch),
+                ]),
               )
-            False ->
-              clear_reply(
-                Model(
-                  ..model,
-                  view: Channel,
-                  channel: Some(ch),
-                  my_channels: my,
-                  messages: [],
-                  members: [],
-                  topic: topic,
-                  flash: "",
-                  av_call_present: False,
-                  av_session_id: None,
-                  av_channel: None,
-                  av_participant_count: 0,
-                  av_muted: False,
-                  av_camera: False,
-                  av_instance: generate_av_instance(),
-                  av_token: None,
-                  react_picker_msgid: None,
-                ),
-              )
+            }
           }
-          #(
-            model,
-            multi_effect([
-              EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
-              // JOIN + NAMES: re-open of an already-joined channel still refreshes
-              // the userlist (some servers skip 353 on redundant JOIN).
-              IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
-              FetchHistory(ch),
-              FetchActiveCall(ch),
-            ]),
-          )
         }
       }
     }
@@ -386,19 +529,25 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
       }
       let model = case leaving_current {
         True ->
-          clear_reply(
-            Model(
-              ..model,
-              view: Index,
-              channel: None,
-              my_channels: my,
-              messages: [],
-              members: [],
-              topic: "",
-              react_picker_msgid: None,
-            ),
+          clear_unread(
+            clear_search(clear_reply(
+              Model(
+                ..model,
+                view: Index,
+                channel: None,
+                my_channels: my,
+                messages: [],
+                members: [],
+                topic: "",
+                react_picker_msgid: None,
+                editing_topic: False,
+                history_loading: False,
+                history_exhausted: False,
+              ),
+            )),
+            ch,
           )
-        False -> Model(..model, my_channels: my)
+        False -> clear_unread(Model(..model, my_channels: my), ch)
       }
       #(model, IrcSend(["PART " <> ch <> "\r\n"]))
     }
@@ -406,7 +555,7 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     GoIndex ->
       // Keep AV state — browsing the directory must not leave the call.
       #(
-        clear_reply(
+        clear_search(clear_reply(
           Model(
             ..model,
             view: Index,
@@ -415,80 +564,54 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
             members: [],
             topic: "",
             react_picker_msgid: None,
+            editing_topic: False,
+            history_loading: False,
+            history_exhausted: False,
           ),
-        ),
+        )),
         FetchChannels,
       )
 
+    OpenSystem -> open_system(model)
+
     OpenChannel(bare) -> {
-      let ch = render.canonical_channel(bare)
-      let my = list_unique_append(model.my_channels, ch)
-      // Seed from directory when present (#test); host REST fills private
-      // rooms (#freeq) and IRC 332 may refine further.
-      let topic = rest.topic_for(model.all_channels, ch)
-      let model = case model.av_active {
-        True ->
-          clear_reply(
-            Model(
-              ..model,
-              view: Channel,
-              channel: Some(ch),
-              my_channels: my,
-              messages: [],
-              members: [],
-              topic: topic,
-              flash: "",
-              react_picker_msgid: None,
-              av_channel: case model.av_channel {
-                Some(_) -> model.av_channel
-                None -> model.channel
-              },
-            ),
-          )
-        False ->
-          clear_reply(
-            Model(
-              ..model,
-              view: Channel,
-              channel: Some(ch),
-              my_channels: my,
-              messages: [],
-              members: [],
-              topic: topic,
-              flash: "",
-              av_call_present: False,
-              av_session_id: None,
-              av_channel: None,
-              av_participant_count: 0,
-              av_muted: False,
-              av_camera: False,
-              av_instance: generate_av_instance(),
-              av_token: None,
-              react_picker_msgid: None,
-            ),
-          )
+      case is_system_key(bare) {
+        True -> open_system(model)
+        False -> open_channel(model, bare)
       }
-      #(
-        model,
-        multi_effect([
-          EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
-          IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
-          FetchHistory(ch),
-          FetchActiveCall(ch),
-        ]),
-      )
     }
 
-    SetTopic(topic) ->
-      case model.channel {
-        Some(ch) -> #(
-          Model(..model, topic: topic),
+    SetTopic(raw) -> {
+      let topic = string.trim(raw)
+      case model.channel, can_edit_topic(model) {
+        Some(ch), True -> #(
+          Model(..model, topic: topic, editing_topic: False),
           IrcSend(["TOPIC " <> ch <> " :" <> topic <> "\r\n"]),
         )
-        None -> #(model, NoEffect)
+        _, _ -> #(Model(..model, editing_topic: False), NoEffect)
+      }
+    }
+
+    EditTopic ->
+      case can_edit_topic(model) {
+        True -> #(Model(..model, editing_topic: True), NoEffect)
+        False -> #(model, NoEffect)
       }
 
-    SetWs(ws) -> #(Model(..model, ws: ws, status: ws_status(ws)), NoEffect)
+    CancelTopicEdit -> #(Model(..model, editing_topic: False), NoEffect)
+
+    SetWs(ws) -> {
+      let label = ws_status(ws)
+      let model = Model(..model, ws: ws, status: label)
+      // Log meaningful connection transitions into the System buffer.
+      case ws {
+        WsReady | WsDisconnected -> #(
+          append_system_message(model, label),
+          NoEffect,
+        )
+        _ -> #(model, NoEffect)
+      }
+    }
 
     SetNick(nick) -> #(Model(..model, nick: nick), NoEffect)
 
@@ -496,7 +619,62 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
 
     // Prefer apply_rest_history at call sites; raw SetHistory still merges
     // reaction tallies so REST never clobbers chips already on the model.
-    SetHistory(rows) -> #(apply_rest_history(model, rows), NoEffect)
+    // Cache-only embeds for first paint; host warms uncached URLs in background.
+    SetHistory(rows) -> {
+      let rows = link_preview.attach_many_cache_only(rows)
+      let next = apply_rest_history(model, rows)
+      let next =
+        Model(
+          ..next,
+          history_loading: False,
+          // Full page means more may exist above; short page is the top.
+          history_exhausted: list.length(rows) < history_page_size,
+        )
+      #(next, ResolveEmbeds(next.messages))
+    }
+
+    LoadOlder -> {
+      case
+        model.history_loading,
+        model.history_exhausted,
+        model.channel,
+        render.oldest_timestamp(model.messages)
+      {
+        True, _, _, _ -> #(model, NoEffect)
+        _, True, _, _ -> #(model, NoEffect)
+        _, _, None, _ -> #(model, NoEffect)
+        _, _, _, None -> #(
+          // Nothing to page with (no REST ts yet) — stop spinning forever.
+          Model(..model, history_exhausted: True),
+          NoEffect,
+        )
+        _, _, Some(ch), Some(before) -> #(
+          Model(..model, history_loading: True),
+          FetchOlderHistory(ch, before),
+        )
+      }
+    }
+
+    PrependHistory(older) -> {
+      let older = link_preview.attach_many_cache_only(older)
+      let merged = prepend_history_rows(older, model.messages)
+      let next =
+        Model(
+          ..model,
+          messages: merged,
+          history_loading: False,
+          history_exhausted: list.length(older) < history_page_size,
+        )
+      #(next, ResolveEmbeds(older))
+    }
+
+    PatchEmbed(row_id, embed) -> #(
+      Model(
+        ..model,
+        messages: patch_row_embed(model.messages, row_id, embed),
+      ),
+      NoEffect,
+    )
 
     SetAllChannels(chs) -> #(Model(..model, all_channels: chs), NoEffect)
 
@@ -544,6 +722,719 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
     CloseReactPicker -> #(Model(..model, react_picker_msgid: None), NoEffect)
 
     ToggleReaction(msgid, emoji) -> toggle_reaction(model, msgid, emoji)
+
+    OpenSearch ->
+      case model.view, model.channel {
+        Channel, Some(_) -> {
+          let q = string.trim(model.search_query)
+          case string.length(q) < search_min_chars {
+            True -> #(
+              Model(
+                ..model,
+                search_open: True,
+                search_status: search_hint_status(),
+              ),
+              NoEffect,
+            )
+            // Re-open with an existing query — refresh server hits.
+            False -> #(
+              Model(
+                ..model,
+                search_open: True,
+                search_loading: True,
+                search_status: "Searching…",
+                search_results: local_search_hits(model.messages, q),
+              ),
+              case model.channel {
+                Some(ch) -> FetchSearch(ch, q)
+                None -> NoEffect
+              },
+            )
+          }
+        }
+        _, _ -> #(
+          Model(..model, flash: "Join a channel to search messages"),
+          NoEffect,
+        )
+      }
+
+    CloseSearch -> #(clear_search(model), NoEffect)
+
+    RunSearch(query) -> {
+      // Keep raw query for the client-owned input; trim only for FTS / status.
+      let raw = query
+      let query = string.trim(query)
+      case model.channel {
+        None -> #(
+          Model(
+            ..model,
+            search_open: True,
+            search_query: raw,
+            search_results: [],
+            search_loading: False,
+            search_status: "Join a channel to search messages",
+          ),
+          NoEffect,
+        )
+        Some(ch) ->
+          case string.length(query) < search_min_chars {
+            True -> #(
+              Model(
+                ..model,
+                search_open: True,
+                search_query: raw,
+                search_results: [],
+                search_loading: False,
+                search_status: search_hint_status(),
+              ),
+              NoEffect,
+            )
+            False -> {
+              // Instant local hits from loaded history; REST FTS replaces.
+              let local = local_search_hits(model.messages, query)
+              #(
+                Model(
+                  ..model,
+                  search_open: True,
+                  search_query: raw,
+                  search_loading: True,
+                  search_status: case local {
+                    [] -> "Searching…"
+                    rows ->
+                      search_status_for(rows, None) <> " (searching history…)"
+                  },
+                  search_results: local,
+                ),
+                FetchSearch(ch, query),
+              )
+            }
+          }
+      }
+    }
+
+    SetSearchResults(query, results, status) -> {
+      // Drop stale REST responses when the user has already typed further.
+      // Compare trimmed forms so "deploy " / "deploy" still match.
+      let want = string.trim(query)
+      let have = string.trim(model.search_query)
+      case have == want {
+        True -> #(
+          Model(
+            ..model,
+            search_results: results,
+            search_loading: False,
+            search_status: status,
+            search_open: True,
+          ),
+          NoEffect,
+        )
+        False -> #(model, NoEffect)
+      }
+    }
+
+    JumpToMsg(msgid, ts) -> jump_to_msg(model, msgid, ts)
+
+    MergeAroundHistory(rows) -> {
+      let rows = link_preview.attach_many_cache_only(rows)
+      let merged = merge_rows_chronological(model.messages, rows)
+      let next =
+        Model(
+          ..model,
+          messages: merged,
+          history_loading: False,
+          // Opening a window around an old hit — more history may exist above.
+          history_exhausted: list.length(rows) < history_page_size,
+        )
+      #(next, ResolveEmbeds(rows))
+    }
+
+    ClearScrollTo -> #(Model(..model, scroll_to_msgid: None), NoEffect)
+  }
+}
+
+/// True when `raw` names the local System buffer (`system` / `#system`).
+fn is_system_key(raw: String) -> Bool {
+  let bare = string.lowercase(string.trim(raw))
+  bare == system_key || bare == "#" <> system_key
+}
+
+/// Open the System status buffer (no IRC JOIN, no REST history).
+fn open_system(model: Model) -> #(Model, Effect) {
+  #(
+    clear_search(clear_reply(
+      Model(
+        ..model,
+        view: System,
+        channel: None,
+        messages: [],
+        members: [],
+        topic: "",
+        flash: "",
+        react_picker_msgid: None,
+        editing_topic: False,
+        history_loading: False,
+        history_exhausted: True,
+      ),
+    )),
+    NoEffect,
+  )
+}
+
+/// Open a real IRC channel (JOIN + history + optional AV probe).
+fn open_channel(model: Model, bare: String) -> #(Model, Effect) {
+  let ch = render.canonical_channel(bare)
+  let my = list_unique_append(model.my_channels, ch)
+  // Seed from directory when present (#test); host REST fills private
+  // rooms (#freeq) and IRC 332 may refine further.
+  let topic = rest.topic_for(model.all_channels, ch)
+  let model = case model.av_active {
+    True ->
+      clear_unread(
+        clear_search(clear_reply(
+          Model(
+            ..model,
+            view: Channel,
+            channel: Some(ch),
+            my_channels: my,
+            messages: [],
+            members: [],
+            topic: topic,
+            flash: "",
+            react_picker_msgid: None,
+            editing_topic: False,
+            history_loading: False,
+            history_exhausted: False,
+            av_channel: case model.av_channel {
+              Some(_) -> model.av_channel
+              None -> model.channel
+            },
+          ),
+        )),
+        ch,
+      )
+    False ->
+      clear_unread(
+        clear_search(clear_reply(
+          Model(
+            ..model,
+            view: Channel,
+            channel: Some(ch),
+            my_channels: my,
+            messages: [],
+            members: [],
+            topic: topic,
+            flash: "",
+            av_call_present: False,
+            av_session_id: None,
+            av_channel: None,
+            av_participant_count: 0,
+            av_muted: False,
+            av_camera: False,
+            av_instance: generate_av_instance(),
+            av_token: None,
+            react_picker_msgid: None,
+            editing_topic: False,
+            history_loading: False,
+            history_exhausted: False,
+          ),
+        )),
+        ch,
+      )
+  }
+  #(
+    model,
+    multi_effect([
+      EnsureUpstream(ch, list.filter(my, fn(c) { c != ch })),
+      IrcSend(["JOIN " <> ch <> "\r\n", "NAMES " <> ch <> "\r\n"]),
+      FetchHistory(ch),
+      FetchActiveCall(ch),
+    ]),
+  )
+}
+
+/// Append a local system status line (capped).
+fn append_system_message(model: Model, text: String) -> Model {
+  let row = render.system_row(text)
+  Model(
+    ..model,
+    system_messages: append_capped(model.system_messages, row, 500),
+  )
+}
+
+/// Expand client slash commands (freeq-app ComposeBox parity).
+///
+/// Raw strip-the-slash is wrong for `/op`, `/join`, etc. — those need MODE /
+/// JOIN framing. Unknown commands become uppercased IRC verbs.
+fn handle_slash_command(model: Model, text: String) -> #(Model, Effect) {
+  let rest = string.drop_start(string.trim(text), 1)
+  let #(cmd_raw, args) = split_cmd_args(rest)
+  let cmd = string.lowercase(cmd_raw)
+  let model = Model(..model, compose: "", flash: "")
+  let model = append_system_message(model, "» /" <> string.trim(rest))
+  let current = option.unwrap(model.channel, "")
+
+  case cmd {
+    "help" | "commands" -> #(append_help(model), NoEffect)
+
+    "join" | "j" ->
+      case first_token(args) {
+        "" -> #(
+          append_system_message(model, "Usage: /join #channel"),
+          NoEffect,
+        )
+        ch -> {
+          // Join navigates + JOINs upstream (open_channel).
+          let #(next, effect) = open_channel(model, ch)
+          // Preserve system echo from above (open_channel clears messages only).
+          #(
+            Model(..next, system_messages: model.system_messages),
+            effect,
+          )
+        }
+      }
+
+    "part" | "leave" -> {
+      let ch = case first_token(args) {
+        "" -> current
+        c -> render.canonical_channel(c)
+      }
+      case ch {
+        "" | "#" -> #(
+          append_system_message(model, "Usage: /part [#channel]"),
+          NoEffect,
+        )
+        c -> {
+          // Reuse Part handler logic via apply.
+          let #(next, effect) = handle_effect(model, Part(c))
+          #(Model(..next, system_messages: model.system_messages), effect)
+        }
+      }
+    }
+
+    "topic" | "t" ->
+      case current {
+        "" | "#" -> #(
+          append_system_message(
+            model,
+            "Usage: open a channel, then /topic text",
+          ),
+          NoEffect,
+        )
+        ch ->
+          case string.trim(args) {
+            "" -> #(model, IrcSend(["TOPIC " <> ch <> "\r\n"]))
+            t -> #(
+              model,
+              IrcSend(["TOPIC " <> ch <> " :" <> t <> "\r\n"]),
+            )
+          }
+      }
+
+    "mode" | "m" ->
+      case string.trim(args) {
+        "" ->
+          case current {
+            "" | "#" -> #(
+              append_system_message(model, "Usage: /mode #chan +o nick"),
+              NoEffect,
+            )
+            ch -> #(model, IrcSend(["MODE " <> ch <> "\r\n"]))
+          }
+        a ->
+          case string.starts_with(a, "#") || string.starts_with(a, "&") {
+            True -> #(model, IrcSend(["MODE " <> a <> "\r\n"]))
+            False ->
+              case current {
+                "" | "#" -> #(
+                  append_system_message(
+                    model,
+                    "Usage: /mode #chan +o nick  (or run from a channel)",
+                  ),
+                  NoEffect,
+                )
+                ch -> #(model, IrcSend(["MODE " <> ch <> " " <> a <> "\r\n"]))
+              }
+          }
+      }
+
+    "op" -> slash_mode(model, current, args, "+o", "op")
+    "deop" -> slash_mode(model, current, args, "-o", "deop")
+    "voice" -> slash_mode(model, current, args, "+v", "voice")
+    "devoice" -> slash_mode(model, current, args, "-v", "devoice")
+
+    "kick" | "k" -> {
+      let #(chan, target, why) = kick_args(current, args)
+      case chan, target {
+        Some(c), t if t != "" ->
+          case why {
+            "" -> #(model, IrcSend(["KICK " <> c <> " " <> t <> "\r\n"]))
+            w -> #(
+              model,
+              IrcSend(["KICK " <> c <> " " <> t <> " :" <> w <> "\r\n"]),
+            )
+          }
+        _, _ -> #(
+          append_system_message(
+            model,
+            "Usage: /kick nick [reason]  or  /kick #chan nick [reason]",
+          ),
+          NoEffect,
+        )
+      }
+    }
+
+    "invite" -> {
+      let #(nick, rest) = split_cmd_args(args)
+      let ch = case first_token(rest) {
+        "" -> current
+        c -> render.canonical_channel(c)
+      }
+      case nick == "" || ch == "" || ch == "#" {
+        True -> #(
+          append_system_message(model, "Usage: /invite nick [#channel]"),
+          NoEffect,
+        )
+        False -> #(
+          model,
+          IrcSend(["INVITE " <> nick <> " " <> ch <> "\r\n"]),
+        )
+      }
+    }
+
+    "whois" | "wi" ->
+      case first_token(args) {
+        "" -> #(
+          append_system_message(model, "Usage: /whois nick"),
+          NoEffect,
+        )
+        nick -> #(model, IrcSend(["WHOIS " <> nick <> "\r\n"]))
+      }
+
+    "away" ->
+      case string.trim(args) {
+        "" -> #(model, IrcSend(["AWAY\r\n"]))
+        reason -> #(model, IrcSend(["AWAY :" <> reason <> "\r\n"]))
+      }
+
+    "msg" | "query" | "privmsg" -> {
+      let #(target, body) = split_cmd_args(args)
+      case target == "" || string.trim(body) == "" {
+        True -> #(
+          append_system_message(model, "Usage: /msg nick_or_#chan text"),
+          NoEffect,
+        )
+        False -> #(
+          model,
+          IrcSend([
+            "PRIVMSG " <> target <> " :" <> string.trim(body) <> "\r\n",
+          ]),
+        )
+      }
+    }
+
+    "me" | "action" ->
+      case current {
+        "" | "#" -> #(
+          append_system_message(model, "Usage: open a channel, then /me action"),
+          NoEffect,
+        )
+        ch ->
+          case string.trim(args) {
+            "" -> #(
+              append_system_message(model, "Usage: /me action text"),
+              NoEffect,
+            )
+            a -> #(
+              model,
+              IrcSend([
+                "PRIVMSG " <> ch <> " :\u{0001}ACTION " <> a <> "\u{0001}\r\n",
+              ]),
+            )
+          }
+      }
+
+    "raw" | "quote" ->
+      case string.trim(args) {
+        "" -> #(
+          append_system_message(model, "Usage: /raw IRC_LINE"),
+          NoEffect,
+        )
+        line -> #(model, IrcSend([line <> "\r\n"]))
+      }
+
+    // Unknown → uppercased IRC verb (WHOIS-style) so typos get a 421 back.
+    _ -> {
+      let line = case string.trim(args) {
+        "" -> string.uppercase(cmd) <> "\r\n"
+        a -> string.uppercase(cmd) <> " " <> a <> "\r\n"
+      }
+      #(model, IrcSend([line]))
+    }
+  }
+}
+
+fn append_help(model: Model) -> Model {
+  [
+    "── Commands ──",
+    "/join #channel  ·  /part [#channel]  ·  /topic text",
+    "/kick nick  ·  /op nick  ·  /deop nick  ·  /voice nick",
+    "/invite nick  ·  /mode #chan +o nick",
+    "/whois nick  ·  /away reason  ·  /me action",
+    "/msg nick_or_#chan text  ·  /raw IRC_LINE",
+    "/help",
+    "── Note ──",
+    "/op and friends use the current channel, or /op nick #channel",
+  ]
+  |> list.fold(model, fn(m, line) { append_system_message(m, line) })
+}
+
+fn slash_mode(
+  model: Model,
+  current: String,
+  args: String,
+  mode: String,
+  name: String,
+) -> #(Model, Effect) {
+  case parse_nick_channel_args(current, args) {
+    Some(#(ch, nick)) -> #(
+      model,
+      IrcSend(["MODE " <> ch <> " " <> mode <> " " <> nick <> "\r\n"]),
+    )
+    None -> #(
+      append_system_message(
+        model,
+        "Usage: /" <> name <> " nick  or  /" <> name <> " nick #channel",
+      ),
+      NoEffect,
+    )
+  }
+}
+
+/// `/op nick`, `/op nick #chan`, `/op #chan nick`.
+fn parse_nick_channel_args(
+  current: String,
+  args: String,
+) -> Option(#(String, String)) {
+  let args = string.trim(args)
+  case args {
+    "" -> None
+    _ -> {
+      let #(a, b) = split_cmd_args(args)
+      case a {
+        "" -> None
+        first ->
+          case string.starts_with(first, "#") || string.starts_with(first, "&") {
+            True ->
+              case first_token(b) {
+                "" -> None
+                nick -> Some(#(render.canonical_channel(first), nick))
+              }
+            False ->
+              case first_token(b) {
+                "" ->
+                  case current {
+                    "" | "#" -> None
+                    ch -> Some(#(ch, first))
+                  }
+                maybe_ch ->
+                  case
+                    string.starts_with(maybe_ch, "#")
+                    || string.starts_with(maybe_ch, "&")
+                  {
+                    True -> Some(#(render.canonical_channel(maybe_ch), first))
+                    False ->
+                      case current {
+                        "" | "#" -> None
+                        ch -> Some(#(ch, first))
+                      }
+                  }
+              }
+          }
+      }
+    }
+  }
+}
+
+/// Kick: `/kick nick [reason]`, `/kick #chan nick [reason]`.
+fn kick_args(
+  current: String,
+  args: String,
+) -> #(Option(String), String, String) {
+  let args = string.trim(args)
+  let #(a, rest) = split_cmd_args(args)
+  case a {
+    "" -> #(None, "", "")
+    first ->
+      case string.starts_with(first, "#") || string.starts_with(first, "&") {
+        True -> {
+          let #(nick, reason) = split_cmd_args(rest)
+          #(Some(render.canonical_channel(first)), nick, string.trim(reason))
+        }
+        False ->
+          case current {
+            "" | "#" -> #(None, "", "")
+            ch -> #(Some(ch), first, string.trim(rest))
+          }
+      }
+  }
+}
+
+fn split_cmd_args(s: String) -> #(String, String) {
+  let s = string.trim(s)
+  case string.split_once(s, " ") {
+    Ok(#(cmd, rest)) -> #(cmd, string.trim(rest))
+    Error(_) -> #(s, "")
+  }
+}
+
+fn first_token(s: String) -> String {
+  let #(t, _) = split_cmd_args(s)
+  t
+}
+
+fn jump_to_msg(
+  model: Model,
+  msgid: String,
+  ts: Option(Int),
+) -> #(Model, Effect) {
+  let msgid = string.trim(msgid)
+  case msgid == "" {
+    True -> #(clear_search(model), NoEffect)
+    False -> {
+      let model =
+        clear_search(Model(..model, scroll_to_msgid: Some(msgid)))
+      case message_in_list(model.messages, msgid) {
+        True -> #(model, NoEffect)
+        False ->
+          case model.channel, ts {
+            Some(ch), Some(t) if t > 0 -> #(
+              Model(..model, history_loading: True),
+              // `before` is exclusive: t+1 includes the hit at timestamp t.
+              FetchAround(ch, t + 1),
+            )
+            Some(ch), _ ->
+              // No ts — page upward from current oldest (client may retry).
+              case render.oldest_timestamp(model.messages) {
+                Some(before) -> #(
+                  Model(..model, history_loading: True),
+                  FetchOlderHistory(ch, before),
+                )
+                None -> #(
+                  Model(..model, history_loading: True),
+                  FetchHistory(ch),
+                )
+              }
+            None, _ -> #(model, NoEffect)
+          }
+      }
+    }
+  }
+}
+
+fn message_in_list(rows: List(render.Row), msgid: String) -> Bool {
+  list.any(rows, fn(r) {
+    case r.msgid {
+      Some(id) -> id == msgid
+      None -> r.id == msgid
+    }
+  })
+}
+
+/// Union two history streams by msgid and sort oldest-first by timestamp.
+pub fn merge_rows_chronological(
+  a: List(render.Row),
+  b: List(render.Row),
+) -> List(render.Row) {
+  let combined =
+    list.fold(b, a, fn(acc, row) {
+      case row_msgid_known(acc, row) {
+        True -> union_reactions_into(acc, row)
+        False -> [row, ..acc]
+      }
+    })
+  list.sort(combined, fn(x, y) {
+    case x.timestamp, y.timestamp {
+      Some(tx), Some(ty) -> int.compare(tx, ty)
+      Some(_), None -> order.Lt
+      None, Some(_) -> order.Gt
+      None, None -> string.compare(x.id, y.id)
+    }
+  })
+}
+
+/// Hint under the search box before a query is long enough for FTS.
+pub fn search_hint_status() -> String {
+  "Type at least " <> int.to_string(search_min_chars) <> " characters"
+}
+
+/// Substring filter over currently loaded channel rows (newest-first, capped).
+/// Used for instant feedback while REST FTS is in flight.
+pub fn local_search_hits(
+  messages: List(render.Row),
+  query: String,
+) -> List(render.Row) {
+  let q = string.lowercase(string.trim(query))
+  case q == "" {
+    True -> []
+    False ->
+      messages
+      |> list.reverse
+      |> list.filter(fn(row) { row_matches_query(row, q) })
+      |> list.take(rest.search_page_size)
+  }
+}
+
+fn row_matches_query(row: render.Row, q_lower: String) -> Bool {
+  case row.kind {
+    render.Msg | render.Notice -> {
+      let text = string.lowercase(row.text)
+      let nick = string.lowercase(option.unwrap(row.nick, ""))
+      string.contains(text, q_lower) || string.contains(nick, q_lower)
+    }
+    _ -> False
+  }
+}
+
+/// If the search modal is open, fold a new live PRIVMSG into the hit list.
+fn live_search_maybe_add(model: Model, row: render.Row) -> Model {
+  case model.search_open {
+    False -> model
+    True -> {
+      let q = string.trim(model.search_query)
+      case string.length(q) < search_min_chars {
+        True -> model
+        False ->
+          case row_matches_query(row, string.lowercase(q)) {
+            False -> model
+            True -> {
+              let mid = option.unwrap(row.msgid, row.id)
+              let already =
+                mid != ""
+                && list.any(model.search_results, fn(r) {
+                  option.unwrap(r.msgid, r.id) == mid
+                })
+              case already {
+                True -> model
+                False -> {
+                  let results =
+                    [row, ..model.search_results]
+                    |> list.take(rest.search_page_size)
+                  Model(
+                    ..model,
+                    search_results: results,
+                    search_status: case model.search_loading {
+                      True ->
+                        search_status_for(results, None)
+                        <> " (searching history…)"
+                      False -> search_status_for(results, None)
+                    },
+                  )
+                }
+              }
+            }
+          }
+      }
+    }
   }
 }
 
@@ -880,13 +1771,27 @@ fn apply_av_state(model: Model, av: render.AvState) -> #(Model, Effect) {
 }
 
 fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
-  // Topic
+  // Topic (header + live meta when someone changes it)
   case render.parse_topic(line) {
-    Some(#(ch, topic)) ->
-      case model.channel {
-        Some(c) if c == ch -> #(Model(..model, topic: topic), NoEffect)
-        _ -> #(model, NoEffect)
+    Some(#(ch, topic)) -> {
+      let viewing = viewing_channel(model, ch)
+      let model = case viewing {
+        True -> Model(..model, topic: topic)
+        False -> model
       }
+      // Live TOPIC (not 332 RPL on join) → meta in the stream.
+      case viewing && string.contains(line, " TOPIC ") {
+        True -> {
+          let from = topic_setter_nick(line)
+          let text = case from {
+            Some(n) -> "— " <> n <> " set topic: " <> topic
+            None -> "— topic: " <> topic
+          }
+          #(append_channel_meta(model, text), NoEffect)
+        }
+        False -> #(model, NoEffect)
+      }
+    }
     None ->
       // Member roster 353 (only for the channel currently in view)
       case render.is_353(line) {
@@ -901,112 +1806,384 @@ fn apply_line_chat(model: Model, line: String) -> #(Model, Effect) {
           }
         False ->
           case render.parse_mode_change(line) {
-            Some(#(ch, ops)) ->
-              case model.channel {
-                Some(c) if c == ch -> #(
+            Some(#(ch, from, modestring, args, ops)) -> {
+              let viewing = viewing_channel(model, ch)
+              let model = case viewing {
+                True ->
                   Model(
                     ..model,
                     members: render.apply_mode_ops(model.members, ops),
+                  )
+                False -> model
+              }
+              case viewing {
+                True -> #(
+                  append_channel_meta(
+                    model,
+                    render.format_mode_meta(from, modestring, args),
                   ),
                   NoEffect,
                 )
-                _ -> #(model, NoEffect)
+                False -> #(model, NoEffect)
               }
+            }
             None ->
-              case render.parse_member_change(line) {
-                Some(#("join", nick, Some(ch))) ->
-                  case model.channel {
-                    Some(c) if c == ch -> #(
-                      Model(
-                        ..model,
-                        members: upsert_member(
-                          model.members,
-                          render.Member(
-                            nick: nick,
-                            op: False,
-                            halfop: False,
-                            voice: False,
-                            color: render.nick_color_class(nick),
-                          ),
-                        ),
-                      ),
-                      NoEffect,
-                    )
-                    _ -> #(model, NoEffect)
-                  }
-                Some(#("part", nick, Some(ch))) ->
-                  case model.channel {
-                    Some(c) if c == ch -> #(
+              case render.parse_kick(line) {
+                Some(#(ch, kicker, kicked, reason)) -> {
+                  let viewing = viewing_channel(model, ch)
+                  let model = case viewing {
+                    True ->
                       Model(
                         ..model,
                         members: list.filter(model.members, fn(m) {
-                          m.nick != nick
+                          string.lowercase(m.nick) != string.lowercase(kicked)
                         }),
+                      )
+                    False -> model
+                  }
+                  case viewing {
+                    True -> #(
+                      append_channel_meta(
+                        model,
+                        render.format_kick_meta(kicker, kicked, reason),
                       ),
                       NoEffect,
                     )
-                    _ -> #(model, NoEffect)
+                    False -> #(model, NoEffect)
                   }
-                Some(#("quit", nick, _)) -> #(
-                  Model(
-                    ..model,
-                    members: list.filter(model.members, fn(m) { m.nick != nick }),
-                  ),
-                  NoEffect,
-                )
-                Some(#("nick", old, Some(new))) -> #(
-                  Model(
-                    ..model,
-                    nick: case
-                      string.lowercase(model.nick) == string.lowercase(old)
-                    {
-                      True -> new
-                      False -> model.nick
-                    },
-                    members: list.map(model.members, fn(m) {
-                      case string.lowercase(m.nick) == string.lowercase(old) {
+                }
+                None ->
+                  case render.parse_member_change(line) {
+                    Some(#("join", nick, Some(ch))) -> {
+                      let viewing = viewing_channel(model, ch)
+                      let model = case viewing {
                         True ->
-                          render.Member(
-                            ..m,
-                            nick: new,
-                            color: render.nick_color_class(new),
-                          )
-                        False -> m
-                      }
-                    }),
-                  ),
-                  NoEffect,
-                )
-                _ ->
-                  case render.parse_message_line(line, Some(model.nick)) {
-                    Some(row) -> {
-                      // Filter to current channel for PRIVMSG when possible —
-                      // full line parse doesn't always carry target; show all.
-                      let messages = append_capped(model.messages, row, 400)
-                      #(Model(..model, messages: messages), NoEffect)
-                    }
-                    None ->
-                      // CHATHISTORY batch lines are skipped as rows, but still
-                      // carry +freeq.at/reactions — hydrate matching REST rows.
-                      case render.parse_history_reactions(line) {
-                        Some(#(msgid, reactions)) -> #(
                           Model(
                             ..model,
-                            messages: hydrate_reactions(
-                              model.messages,
-                              msgid,
-                              reactions,
+                            members: upsert_member(
+                              model.members,
+                              render.Member(
+                                nick: nick,
+                                op: False,
+                                halfop: False,
+                                voice: False,
+                                color: render.nick_color_class(nick),
+                              ),
                             ),
+                          )
+                        False -> model
+                      }
+                      case viewing {
+                        True ->
+                          case
+                            render.parse_message_line(line, Some(model.nick))
+                          {
+                            Some(row) -> #(
+                              Model(
+                                ..model,
+                                messages: append_capped(
+                                  model.messages,
+                                  row,
+                                  400,
+                                ),
+                              ),
+                              NoEffect,
+                            )
+                            None -> #(model, NoEffect)
+                          }
+                        False -> #(model, NoEffect)
+                      }
+                    }
+                    Some(#("part", nick, Some(ch))) -> {
+                      let viewing = viewing_channel(model, ch)
+                      let model = case viewing {
+                        True ->
+                          Model(
+                            ..model,
+                            members: list.filter(model.members, fn(m) {
+                              m.nick != nick
+                            }),
+                          )
+                        False -> model
+                      }
+                      case viewing {
+                        True ->
+                          case
+                            render.parse_message_line(line, Some(model.nick))
+                          {
+                            Some(row) -> #(
+                              Model(
+                                ..model,
+                                messages: append_capped(
+                                  model.messages,
+                                  row,
+                                  400,
+                                ),
+                              ),
+                              NoEffect,
+                            )
+                            None -> #(model, NoEffect)
+                          }
+                        False -> #(model, NoEffect)
+                      }
+                    }
+                    Some(#("quit", nick, _)) -> {
+                      let was_member =
+                        list.any(model.members, fn(m) {
+                          string.lowercase(m.nick) == string.lowercase(nick)
+                        })
+                      let model =
+                        Model(
+                          ..model,
+                          members: list.filter(model.members, fn(m) {
+                            m.nick != nick
+                          }),
+                        )
+                      case was_member {
+                        True ->
+                          case
+                            render.parse_message_line(line, Some(model.nick))
+                          {
+                            Some(row) -> #(
+                              Model(
+                                ..model,
+                                messages: append_capped(
+                                  model.messages,
+                                  row,
+                                  400,
+                                ),
+                              ),
+                              NoEffect,
+                            )
+                            None -> #(model, NoEffect)
+                          }
+                        False -> #(model, NoEffect)
+                      }
+                    }
+                    Some(#("nick", old, Some(new))) -> {
+                      let was_member =
+                        list.any(model.members, fn(m) {
+                          string.lowercase(m.nick) == string.lowercase(old)
+                        })
+                      let model =
+                        Model(
+                          ..model,
+                          nick: case
+                            string.lowercase(model.nick)
+                            == string.lowercase(old)
+                          {
+                            True -> new
+                            False -> model.nick
+                          },
+                          members: list.map(model.members, fn(m) {
+                            case
+                              string.lowercase(m.nick) == string.lowercase(old)
+                            {
+                              True ->
+                                render.Member(
+                                  ..m,
+                                  nick: new,
+                                  color: render.nick_color_class(new),
+                                )
+                              False -> m
+                            }
+                          }),
+                        )
+                      case was_member {
+                        True -> #(
+                          append_channel_meta(
+                            model,
+                            "— " <> old <> " is now known as " <> new,
                           ),
                           NoEffect,
                         )
-                        None -> #(model, NoEffect)
+                        False -> #(model, NoEffect)
+                      }
+                    }
+                    _ ->
+                      case render.parse_message_line(line, Some(model.nick)) {
+                        Some(row) -> apply_chat_row(model, line, row)
+                        None ->
+                          // CHATHISTORY batch lines are skipped as rows, but still
+                          // carry +freeq.at/reactions — hydrate matching REST rows.
+                          case render.parse_history_reactions(line) {
+                            Some(#(msgid, reactions)) -> #(
+                              Model(
+                                ..model,
+                                messages: hydrate_reactions(
+                                  model.messages,
+                                  msgid,
+                                  reactions,
+                                ),
+                              ),
+                              NoEffect,
+                            )
+                            None ->
+                              // Error numerics / WHOIS / FAIL → System buffer so
+                              // slash commands get visible feedback.
+                              case render.parse_system_status_line(line) {
+                                Some(text) -> #(
+                                  append_system_message(model, text),
+                                  NoEffect,
+                                )
+                                None -> #(model, NoEffect)
+                              }
+                          }
                       }
                   }
               }
           }
       }
   }
+}
+
+fn viewing_channel(model: Model, ch: String) -> Bool {
+  case model.channel {
+    Some(c) -> channels_equal(c, ch)
+    None -> False
+  }
+}
+
+/// Append a muted meta line to the active channel stream (mode / kick / topic / nick).
+fn append_channel_meta(model: Model, text: String) -> Model {
+  Model(
+    ..model,
+    messages: append_capped(model.messages, render.system_row(text), 400),
+  )
+}
+
+fn topic_setter_nick(line: String) -> Option(String) {
+  let #(_tags, rest) = render.parse_irc_tags(string.trim_end(line))
+  case string.starts_with(rest, ":") {
+    False -> None
+    True -> {
+      let body = string.drop_start(rest, 1)
+      case string.split_once(body, " ") {
+        Ok(#(prefix, _)) ->
+          case string.split_once(prefix, "!") {
+            Ok(#(n, _)) -> Some(n)
+            Error(_) -> Some(prefix)
+          }
+        Error(_) -> None
+      }
+    }
+  }
+}
+
+/// Live PRIVMSG/NOTICE: append when viewing that channel; otherwise bump
+/// sidebar unread (joined channels only, not own echoes / presence rows).
+fn apply_chat_row(
+  model: Model,
+  line: String,
+  row: render.Row,
+) -> #(Model, Effect) {
+  let target = render.message_target_channel(line)
+  let viewing = case target, model.channel {
+    Some(t), Some(c) -> channels_equal(t, c)
+    _, _ -> False
+  }
+  case viewing {
+    True -> {
+      // Fast path: cache-only embed; network resolve off-session.
+      let row = link_preview.attach_cache_only(row)
+      let messages = append_capped(model.messages, row, 400)
+      let model =
+        live_search_maybe_add(Model(..model, messages: messages), row)
+      let effect = case link_preview.needs_resolve(row) {
+        True -> ResolveEmbeds([row])
+        False -> NoEffect
+      }
+      #(model, effect)
+    }
+    False -> {
+      case target {
+        Some(ch) -> #(maybe_bump_unread(model, ch, row), NoEffect)
+        // Server notices / directed NOTICE / non-channel targets → System tab.
+        None -> #(
+          Model(
+            ..model,
+            system_messages: append_capped(model.system_messages, row, 500),
+          ),
+          NoEffect,
+        )
+      }
+    }
+  }
+}
+
+/// IRC channel names are case-insensitive (freeq-server keys are lowercase).
+fn channels_equal(a: String, b: String) -> Bool {
+  channel_key(a) == channel_key(b)
+}
+
+fn channel_key(ch: String) -> String {
+  string.lowercase(render.canonical_channel(ch))
+}
+
+fn in_my_channels(model: Model, channel: String) -> Bool {
+  let key = channel_key(channel)
+  list.any(model.my_channels, fn(c) { channel_key(c) == key })
+}
+
+/// Unread for a non-active joined channel (chat messages only, not own).
+fn maybe_bump_unread(model: Model, channel: String, row: render.Row) -> Model {
+  case row.own {
+    True -> model
+    False ->
+      case row.kind {
+        render.Msg | render.Notice ->
+          case in_my_channels(model, channel) {
+            True -> bump_unread(model, channel)
+            False -> model
+          }
+        _ -> model
+      }
+  }
+}
+
+/// Clear the unread badge when the user opens / parts a channel.
+fn clear_unread(model: Model, channel: String) -> Model {
+  let key = channel_key(channel)
+  // Drop any casing variant that may have been stored earlier.
+  let unread =
+    dict.drop(
+      model.unread,
+      dict.keys(model.unread)
+        |> list.filter(fn(k) { channel_key(k) == key }),
+    )
+  Model(..model, unread: unread)
+}
+
+fn bump_unread(model: Model, channel: String) -> Model {
+  let key = channel_key(channel)
+  // Prefer the existing key spelling if present; else store canonical lower.
+  let store_key = case
+    list.find(dict.keys(model.unread), fn(k) { channel_key(k) == key })
+  {
+    Ok(k) -> k
+    Error(_) -> key
+  }
+  let n = case dict.get(model.unread, store_key) {
+    Ok(c) -> c + 1
+    Error(_) -> 1
+  }
+  Model(..model, unread: dict.insert(model.unread, store_key, n))
+}
+
+/// Unread count for a channel (0 when none). Case-insensitive.
+pub fn unread_count(model: Model, channel: String) -> Int {
+  let key = channel_key(channel)
+  dict.fold(model.unread, 0, fn(acc, k, n) {
+    case channel_key(k) == key {
+      True -> acc + n
+      False -> acc
+    }
+  })
+}
+
+/// Sum of all channel unread badges (for nav / title).
+pub fn total_unread(model: Model) -> Int {
+  dict.fold(model.unread, 0, fn(acc, _k, n) { acc + n })
 }
 
 fn merge_members(
@@ -1075,13 +2252,15 @@ fn path_to_view(path: String) -> #(View, Option(String)) {
   }
   case path {
     "/" | "/chat" | "" -> #(Index, None)
+    "/chat/system" -> #(System, None)
     _ ->
       case string.starts_with(path, "/chat/") {
         True -> {
           let bare = string.drop_start(path, 6)
-          case bare == "" {
-            True -> #(Index, None)
-            False -> #(Channel, Some(render.canonical_channel(bare)))
+          case bare == "", is_system_key(bare) {
+            True, _ -> #(Index, None)
+            _, True -> #(System, None)
+            False, False -> #(Channel, Some(render.canonical_channel(bare)))
           }
         }
         False -> #(Index, None)
@@ -1089,10 +2268,11 @@ fn path_to_view(path: String) -> #(View, Option(String)) {
   }
 }
 
-/// Browser path for the current view (`/chat` or `/chat/freeq`).
+/// Browser path for the current view (`/chat`, `/chat/system`, or `/chat/freeq`).
 /// Used by the client to keep the address bar in sync with LiveView state.
 pub fn path_for_model(model: Model) -> String {
   case model.view, model.channel {
+    System, _ -> system_path()
     Channel, Some(ch) -> channel_path(ch)
     _, _ -> "/chat"
   }
@@ -1101,6 +2281,11 @@ pub fn path_for_model(model: Model) -> String {
 /// `/chat/<bare>` for a channel name (with or without `#`).
 pub fn channel_path(channel: String) -> String {
   "/chat/" <> render.bare_channel(channel)
+}
+
+/// Fixed path for the System status buffer.
+pub fn system_path() -> String {
+  "/chat/" <> system_key
 }
 
 fn ws_status(ws: WsLabel) -> String {
@@ -1161,6 +2346,12 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
         Ok(SetTopic(topic))
       })
     }),
+    stateful.route("edit_topic", fn(e) {
+      event.decode_unit(e, "edit_topic", EditTopic)
+    }),
+    stateful.route("cancel_topic_edit", fn(e) {
+      event.decode_unit(e, "cancel_topic_edit", CancelTopicEdit)
+    }),
     stateful.route("av_start", fn(e) {
       event.decode_unit(e, "av_start", AvStart)
     }),
@@ -1201,6 +2392,41 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
         Ok(ToggleReaction(msgid, emoji))
       })
     }),
+    stateful.route("load_older", fn(e) {
+      event.decode_unit(e, "load_older", LoadOlder)
+    }),
+    stateful.route("open_search", fn(e) {
+      event.decode_unit(e, "open_search", OpenSearch)
+    }),
+    stateful.route("close_search", fn(e) {
+      event.decode_unit(e, "close_search", CloseSearch)
+    }),
+    stateful.route("search", fn(e) {
+      event.decode_form(e, "search", fn(data) {
+        use q <- result.try(
+          form.require(data, "q")
+          |> result.or(form.require(data, "query")),
+        )
+        Ok(RunSearch(q))
+      })
+    }),
+    stateful.route("jump_to_msg", fn(e) {
+      event.decode_form(e, "jump_to_msg", fn(data) {
+        use msgid <- result.try(form.require(data, "msgid"))
+        let ts = case form.require(data, "ts") {
+          Ok(raw) ->
+            case int.parse(string.trim(raw)) {
+              Ok(n) if n > 0 -> Some(n)
+              _ -> None
+            }
+          Error(_) -> None
+        }
+        Ok(JumpToMsg(msgid, ts))
+      })
+    }),
+    stateful.route("clear_scroll_to", fn(e) {
+      event.decode_unit(e, "clear_scroll_to", ClearScrollTo)
+    }),
   ]
 }
 
@@ -1213,14 +2439,21 @@ pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
       let acc = []
       let acc = maybe_region(before, after, "nav", nav_region, acc)
       let acc = maybe_region(before, after, "sidebar", sidebar_region, acc)
-      // Channel chat: patch messages / compose separately so the compose
-      // input is not remounted on every PRIVMSG (would drop focus + draft).
-      // Index, or Index↔Channel: replace the whole main region.
+      // Channel / System chat: patch messages (and compose on Channel) so
+      // the compose input is not remounted on every PRIVMSG.
+      // Index, or view switches: replace the whole main region.
       let acc = case before.view, after.view {
         Channel, Channel -> {
           let acc = maybe_region(before, after, "flash", flash_region, acc)
           let acc =
             maybe_region(before, after, "messages", messages_region, acc)
+          maybe_region(before, after, "compose", compose_region, acc)
+        }
+        System, System -> {
+          let acc = maybe_region(before, after, "flash", flash_region, acc)
+          let acc =
+            maybe_region(before, after, "messages", messages_region, acc)
+          // Compose stays mounted; only patch if structure changes (rare).
           maybe_region(before, after, "compose", compose_region, acc)
         }
         _, _ -> maybe_region(before, after, "main", main_region, acc)
@@ -1230,6 +2463,16 @@ pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
       let acc = maybe_region(before, after, "members", members_region, acc)
       let acc =
         maybe_region(before, after, "react-picker", react_picker_region, acc)
+      // Search: open/close replaces the host; while open, patch form and body
+      // separately so keystrokes do not remount the input (would drop focus).
+      let acc = case before.search_open, after.search_open {
+        True, True -> {
+          let acc =
+            maybe_region(before, after, "search-form", search_form_region, acc)
+          maybe_region(before, after, "search-body", search_body_region, acc)
+        }
+        _, _ -> maybe_region(before, after, "search", search_region, acc)
+      }
       list.reverse(acc)
     }
   }
@@ -1274,6 +2517,7 @@ fn shell(model: Model) -> String {
   <> members_region(model)
   <> "</div>"
   <> react_picker_region(model)
+  <> search_region(model)
   <> "</div>"
 }
 
@@ -1302,19 +2546,121 @@ fn react_picker_region(model: Model) -> String {
   }
 }
 
+fn search_region(model: Model) -> String {
+  case model.search_open {
+    False ->
+      "<div data-ls-region=\"search\" class=\"search-host\" hidden></div>"
+    True ->
+      "<div data-ls-region=\"search\" class=\"search-host\">"
+      <> "<div class=\"search-backdrop\" data-ls-click=\"close_search\" aria-hidden=\"true\"></div>"
+      <> "<div class=\"search-modal\" role=\"dialog\" aria-label=\"Search messages\" aria-modal=\"true\">"
+      <> search_form_region(model)
+      <> search_body_region(model)
+      <> "</div></div>"
+  }
+}
+
+/// Search box — client owns the draft (no `value`); only channel placeholder
+/// comes from the model so typing does not remount the input.
+fn search_form_region(model: Model) -> String {
+  let ch = option.unwrap(model.channel, "")
+  "<div data-ls-region=\"search-form\">"
+  <> "<form id=\"search-form\" class=\"search-form\" data-ls-submit=\"search\">"
+  <> "<svg class=\"search-icon\" viewBox=\"0 0 16 16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\">"
+  <> "<circle cx=\"7\" cy=\"7\" r=\"5\" /><path d=\"M11 11l3.5 3.5\" />"
+  <> "</svg>"
+  <> "<input id=\"search-input\" type=\"search\" name=\"q\" placeholder=\"Search "
+  <> render.escape_html(ch)
+  <> "…\" autocomplete=\"off\" maxlength=\"200\" autofocus />"
+  <> "<kbd class=\"search-esc\">ESC</kbd>"
+  <> "</form></div>"
+}
+
+/// Status line + hit list (updates on every keystroke / REST response).
+fn search_body_region(model: Model) -> String {
+  let status = case model.search_status {
+    "" -> ""
+    s ->
+      "<div class=\"search-status"
+      <> case model.search_loading {
+        True -> " search-status-loading"
+        False -> ""
+      }
+      <> "\">"
+      <> render.escape_html(s)
+      <> "</div>"
+  }
+  let hits = search_hits_html(model)
+  "<div data-ls-region=\"search-body\">"
+  <> status
+  <> "<div class=\"search-results\" id=\"search-results\">"
+  <> hits
+  <> "</div></div>"
+}
+
+fn search_hits_html(model: Model) -> String {
+  case model.search_results {
+    [] -> ""
+    results ->
+      list.map(results, search_hit_html)
+      |> string.concat
+  }
+}
+
+fn search_hit_html(row: render.Row) -> String {
+  let nick = option.unwrap(row.nick, "unknown")
+  let mid = option.unwrap(row.msgid, row.id)
+  let scroll = case mid {
+    "" -> ""
+    m -> " data-scroll-to=\"" <> render.escape_html(m) <> "\""
+  }
+  let ts_attr = case row.timestamp {
+    Some(t) -> " data-ts=\"" <> int.to_string(t) <> "\""
+    None -> ""
+  }
+  // Client: jump_to_msg closes the modal, loads history if the row is not
+  // in the pane, then scrolls/highlights the hit.
+  "<button type=\"button\" class=\"search-hit\""
+  <> scroll
+  <> ts_attr
+  <> ">"
+  <> "<div class=\"search-hit-meta\">"
+  <> "<span class=\"search-hit-nick\">"
+  <> render.escape_html(nick)
+  <> "</span>"
+  <> "<span class=\"search-hit-time\">"
+  <> render.escape_html(row.time_label)
+  <> "</span>"
+  <> "</div>"
+  <> "<div class=\"search-hit-text\">"
+  <> render.escape_html(row.text)
+  <> "</div>"
+  <> "</button>"
+}
+
 fn nav_region(model: Model) -> String {
   let channel_label = case model.view, model.channel {
     Index, _ -> "channels"
+    System, _ -> "System"
     Channel, Some(ch) -> ch
     Channel, None -> "chat"
   }
-  let topic = case model.topic {
+  let topic_label = case model.topic {
     "" -> "add topic"
     t -> render.escape_html(t)
   }
   let connected = case model.ws {
     WsReady -> " connected"
     _ -> ""
+  }
+  let search_btn = case model.view {
+    Channel ->
+      "<button type=\"button\" class=\"nav-search-btn\" data-ls-click=\"open_search\" title=\"Search messages (Ctrl+F)\" aria-label=\"Search messages\">"
+      <> "<svg viewBox=\"0 0 16 16\" aria-hidden=\"true\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\">"
+      <> "<circle cx=\"7\" cy=\"7\" r=\"5\" />"
+      <> "<path d=\"M11 11l3.5 3.5\" />"
+      <> "</svg></button>"
+    Index | System -> ""
   }
   let people_btn = case model.view {
     Channel ->
@@ -1325,25 +2671,80 @@ fn nav_region(model: Model) -> String {
       <> "<path d=\"M20 19v-1a3.5 3.5 0 0 0-2.5-3.35\" />"
       <> "<path d=\"M16.5 4.6a3.5 3.5 0 0 1 0 6.8\" />"
       <> "</svg></button>"
-    Index -> ""
+    Index | System -> ""
   }
-  "<nav data-ls-region=\"nav\">"
-  <> "<button type=\"button\" class=\"mobile-btn\" data-drawer=\"sidebar\" aria-label=\"Channels\">"
+  let topic_ui = case model.view {
+    Index | System -> ""
+    Channel ->
+      case model.editing_topic {
+        True ->
+          "<form id=\"topic-form\" data-ls-submit=\"set_topic\">"
+          <> "<input id=\"topic-input\" type=\"text\" name=\"topic\" value=\""
+          <> render.escape_html(model.topic)
+          <> "\" placeholder=\"Set topic… (Enter to save, Esc to cancel)\" "
+          <> "autocomplete=\"off\" maxlength=\"390\" autofocus />"
+          <> "</form>"
+        False -> {
+          let editable = can_edit_topic(model)
+          let class = case editable {
+            True -> "editable"
+            False -> ""
+          }
+          let title = case editable {
+            True -> "Click to edit topic"
+            False -> "Channel topic"
+          }
+          let click = case editable {
+            True -> " data-ls-click=\"edit_topic\""
+            False -> ""
+          }
+          "<span id=\"channel-topic\" class=\""
+          <> class
+          <> "\" title=\""
+          <> title
+          <> "\""
+          <> click
+          <> ">"
+          <> topic_label
+          <> "</span>"
+        }
+      }
+  }
+  let total = total_unread(model)
+  let channels_badge = case total > 0 {
+    True -> {
+      let label = case total > 99 {
+        True -> "99+"
+        False -> int.to_string(total)
+      }
+      "<span class=\"nav-channels-unread\" aria-label=\""
+      <> label
+      <> " unread across channels\">"
+      <> label
+      <> "</span>"
+    }
+    False -> ""
+  }
+  "<nav data-ls-region=\"nav\""
+  <> case total > 0 {
+    True -> " data-unread-total=\"" <> int.to_string(total) <> "\""
+    False -> " data-unread-total=\"0\""
+  }
+  <> ">"
+  <> "<button type=\"button\" class=\"mobile-btn channels-btn\" data-drawer=\"sidebar\" aria-label=\"Channels\">"
   <> "<svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M4 7h16M4 12h16M4 17h16\" /></svg>"
+  <> channels_badge
   <> "</button>"
   <> "<span class=\"brand\">freeq</span>"
   <> "<div class=\"nav-channel-meta\">"
   <> "<span class=\"nav-channel\">"
   <> render.escape_html(channel_label)
   <> "</span>"
-  <> case model.view {
-    Channel ->
-      "<span id=\"channel-topic\" class=\"editable\">" <> topic <> "</span>"
-    Index -> ""
-  }
+  <> topic_ui
   <> av_call_button(model)
   <> "</div>"
   <> "<div class=\"nav-right\">"
+  <> search_btn
   <> "<span id=\"status\" class=\""
   <> connected
   <> "\"><span class=\"dot\"></span><span>"
@@ -1354,10 +2755,28 @@ fn nav_region(model: Model) -> String {
   <> "</div></nav>"
 }
 
+/// Channel +o / half-op can set topic when +t is on; server enforces 482.
+/// Founder/admin prefixes are already folded into `Member.op` by the parser.
+fn can_edit_topic(model: Model) -> Bool {
+  let nick = string.lowercase(string.trim(model.nick))
+  case nick == "" {
+    True -> False
+    False ->
+      case
+        list.find(model.members, fn(m) {
+          string.lowercase(m.nick) == nick
+        })
+      {
+        Ok(m) -> m.op || m.halfop
+        Error(_) -> False
+      }
+  }
+}
+
 fn av_call_button(model: Model) -> String {
   let show = case model.view {
     Channel -> True
-    Index -> model.av_active
+    Index | System -> model.av_active
   }
   case show {
     False -> ""
@@ -1565,15 +2984,60 @@ fn auth_badge(model: Model) -> String {
 }
 
 fn sidebar_region(model: Model) -> String {
+  let system_active = case model.view {
+    System -> " active"
+    _ -> ""
+  }
+  let system_dot = case model.view, model.system_messages {
+    System, _ -> ""
+    _, [] -> ""
+    _, _ -> "<span class=\"system-dot\" aria-hidden=\"true\"></span>"
+  }
+  let system_li =
+    "<li class=\"system-channel"
+    <> system_active
+    <> "\">"
+    <> "<a href=\""
+    <> system_path()
+    <> "\" class=\"channel-link\" data-ls-click=\"open\" data-ls-payload=\"channel="
+    <> system_key
+    <> "\" title=\"Connection status and server notices\">"
+    <> "<span class=\"channel-link-icon\" aria-hidden=\"true\">⚙</span>"
+    <> "<span class=\"channel-link-name\">System</span>"
+    <> system_dot
+    <> "</a>"
+    <> "</li>"
+
   let my =
     list.map(model.my_channels, fn(ch) {
       let bare = render.bare_channel(ch)
-      let active = case model.channel {
-        Some(c) if c == ch -> " active"
-        _ -> ""
+      let n = unread_count(model, ch)
+      let has_unread = n > 0
+      let active = case model.view, model.channel {
+        Channel, Some(c) if c == ch -> " active"
+        _, _ -> ""
+      }
+      let unread_class = case has_unread {
+        True -> " has-unread"
+        False -> ""
+      }
+      let badge = case has_unread {
+        True -> {
+          let label = case n > 99 {
+            True -> "99+"
+            False -> int.to_string(n)
+          }
+          "<span class=\"channel-unread\" aria-label=\""
+          <> label
+          <> " unread\">"
+          <> label
+          <> "</span>"
+        }
+        False -> ""
       }
       "<li class=\""
       <> active
+      <> unread_class
       <> "\">"
       <> "<a href=\""
       <> channel_path(ch)
@@ -1581,7 +3045,9 @@ fn sidebar_region(model: Model) -> String {
       <> bare
       <> "\"><span class=\"channel-link-name\">"
       <> render.escape_html(ch)
-      <> "</span></a>"
+      <> "</span>"
+      <> badge
+      <> "</a>"
       <> "<button type=\"button\" class=\"sidebar-channel-part\" data-ls-click=\"part\" data-ls-payload=\"channel="
       <> bare
       <> "\" title=\"Part\">×</button>"
@@ -1596,6 +3062,9 @@ fn sidebar_region(model: Model) -> String {
   <> "<input type=\"text\" name=\"channel\" placeholder=\"join #…\" autocomplete=\"off\" />"
   <> "<button type=\"submit\">+</button>"
   <> "</form>"
+  <> "<ul id=\"system-channels\">"
+  <> system_li
+  <> "</ul>"
   <> "<p class=\"sidebar-toggle\"><span class=\"arrow\">▾</span> MY CHANNELS</p>"
   <> "<ul id=\"my-channels\">"
   <> my
@@ -1640,6 +3109,7 @@ fn main_region(model: Model) -> String {
   case model.view {
     Index -> index_main(model)
     Channel -> channel_main(model)
+    System -> system_main(model)
   }
 }
 
@@ -1687,9 +3157,28 @@ fn index_main(model: Model) -> String {
 
 fn channel_main(model: Model) -> String {
   // Nested regions: messages updates must not remount #send-form.
+  // Shell + jump FAB sit *outside* data-ls-region=messages so message
+  // patches replace only #messages (applyReplace swaps by tag/selector).
+  // If the shell were inside messages_region HTML, each PRIVMSG would
+  // nest another .messages-shell and the FAB would never show correctly.
   "<section class=\"chat-main\" data-ls-region=\"main\">"
   <> flash_region(model)
+  <> "<div class=\"messages-shell\">"
   <> messages_region(model)
+  <> jump_bottom_html()
+  <> "</div>"
+  <> compose_region(model)
+  <> "</section>"
+}
+
+/// System buffer: notices + connection log + slash-command compose.
+fn system_main(model: Model) -> String {
+  "<section class=\"chat-main\" data-ls-region=\"main\">"
+  <> flash_region(model)
+  <> "<div class=\"messages-shell\">"
+  <> messages_region(model)
+  <> jump_bottom_html()
+  <> "</div>"
   <> compose_region(model)
   <> "</section>"
 }
@@ -1702,14 +3191,86 @@ fn flash_region(model: Model) -> String {
   "<div data-ls-region=\"flash\">" <> inner <> "</div>"
 }
 
+/// ONLY the #messages node — must match `[data-ls-region=\"messages\"]`.
+/// Pub for unit tests (region HTML must not wrap shell/FAB).
+pub fn messages_region_for_test(model: Model) -> String {
+  messages_region(model)
+}
+
 fn messages_region(model: Model) -> String {
-  let lookup = parent_lookup_from_rows(model.messages)
+  let rows = case model.view {
+    System -> model.system_messages
+    _ -> model.messages
+  }
+  let lookup = parent_lookup_from_rows(rows)
   let aliases = my_reaction_aliases(model)
+  let loader = case model.view, model.history_loading {
+    Channel, True -> history_loading_html()
+    _, _ -> ""
+  }
+  let scroll_mid = option.unwrap(model.scroll_to_msgid, "")
+  let empty = case model.view, rows {
+    System, [] ->
+      "<div class=\"empty-state system-empty\">"
+      <> "<div class=\"empty-state-title\">System</div>"
+      <> "<div class=\"empty-state-sub\">Connection status and server notices will appear here.</div>"
+      <> "</div>"
+    _, _ -> ""
+  }
   let msgs =
-    list.map(model.messages, fn(row) { message_html(row, lookup, aliases) })
+    list.map(rows, fn(row) {
+      message_html(row, lookup, aliases, scroll_mid)
+    })
     |> string.concat
-  "<div id=\"messages\" class=\"messages\" data-ls-region=\"messages\">"
+  let loading = case model.view, model.history_loading {
+    Channel, True -> "1"
+    _, _ -> "0"
+  }
+  let exhausted = case model.view {
+    System -> "1"
+    _ ->
+      case model.history_exhausted {
+        True -> "1"
+        False -> "0"
+      }
+  }
+  let scroll_attr = case scroll_mid {
+    "" -> ""
+    mid -> " data-scroll-to-msgid=\"" <> render.escape_html(mid) <> "\""
+  }
+  "<div id=\"messages\" class=\"messages\" data-ls-region=\"messages\""
+  <> " data-history-loading=\""
+  <> loading
+  <> "\" data-history-exhausted=\""
+  <> exhausted
+  <> "\""
+  <> scroll_attr
+  <> ">"
+  <> loader
+  <> empty
   <> msgs
+  <> "</div>"
+}
+
+/// Floating control shown by client JS when the user scrolls up the stream.
+pub fn jump_bottom_html() -> String {
+  "<button type=\"button\" id=\"jump-bottom\" class=\"jump-bottom\" hidden"
+  <> " aria-label=\"Jump to bottom\">"
+  <> "<svg class=\"jump-bottom-icon\" viewBox=\"0 0 16 16\" width=\"14\" height=\"14\""
+  <> " aria-hidden=\"true\" focusable=\"false\">"
+  <> "<path fill=\"currentColor\" fill-rule=\"evenodd\""
+  <> " d=\"M8 1a.5.5 0 01.5.5v11.793l3.146-3.147a.5.5 0 01.708.708l-4 4"
+  <> "a.5.5 0 01-.708 0l-4-4a.5.5 0 01.708-.708L7.5 13.293V1.5A.5.5 0 018 1z\"/>"
+  <> "</svg>"
+  <> "<span class=\"jump-bottom-label\">Jump to bottom</span>"
+  <> "</button>"
+}
+
+/// Spinner + label for scroll-up history fetch (also injected client-side).
+pub fn history_loading_html() -> String {
+  "<div class=\"history-loading\" aria-live=\"polite\" role=\"status\">"
+  <> "<span class=\"history-spinner\" aria-hidden=\"true\"></span>"
+  <> "<span class=\"history-loading-text\">Loading older messages…</span>"
   <> "</div>"
 }
 
@@ -1732,33 +3293,60 @@ fn compose_region(model: Model) -> String {
   // IDs match app.css / freeq-web2 (#send-bar, #attach-btn, #upload-preview).
   // No value attr on the text input: draft is client-owned so message patches
   // never wipe it. Image paste/upload is handled client-side (POST /upload).
+  let system = case model.view {
+    System -> True
+    _ -> False
+  }
   let ch = option.unwrap(model.channel, "")
   let auth_did = case model.authenticated {
     True -> model.auth_did
     False -> ""
   }
   let banner = reply_banner_html(model)
-  "<div id=\"compose-stack\" data-ls-region=\"compose\">"
-  <> "<div id=\"upload-preview\" class=\"upload-preview\" hidden>"
-  <> "<img id=\"upload-preview-img\" alt=\"preview\" />"
-  <> "<div class=\"upload-preview-meta\">"
-  <> "<span id=\"upload-preview-name\"></span>"
-  <> "<span id=\"upload-preview-status\"></span>"
-  <> "</div>"
-  <> "<button type=\"button\" id=\"upload-preview-cancel\" class=\"btn-link\" title=\"Cancel\">×</button>"
-  <> "</div>"
+  let attach = case system {
+    True -> ""
+    False ->
+      "<input type=\"file\" id=\"file-input\" accept=\"image/*,image/png,image/jpeg,image/gif,image/webp\" hidden />"
+      <> "<button type=\"button\" id=\"attach-btn\" class=\"attach-btn\" title=\"Upload screenshot or image\" aria-label=\"Upload image\">+</button>"
+  }
+  let placeholder = case system {
+    True -> "Type /join #channel, /whois nick, …"
+    False ->
+      "Message " <> render.escape_html(ch) <> "… (paste images)"
+  }
+  let channel_attr = case system {
+    True -> system_key
+    False -> ch
+  }
+  "<div id=\"compose-stack\" data-ls-region=\"compose\""
+  <> case system {
+    True -> " class=\"system-compose\""
+    False -> ""
+  }
+  <> ">"
+  <> case system {
+    True -> ""
+    False ->
+      "<div id=\"upload-preview\" class=\"upload-preview\" hidden>"
+      <> "<img id=\"upload-preview-img\" alt=\"preview\" />"
+      <> "<div class=\"upload-preview-meta\">"
+      <> "<span id=\"upload-preview-name\"></span>"
+      <> "<span id=\"upload-preview-status\"></span>"
+      <> "</div>"
+      <> "<button type=\"button\" id=\"upload-preview-cancel\" class=\"btn-link\" title=\"Cancel\">×</button>"
+      <> "</div>"
+  }
   <> banner
   <> "<div id=\"send-bar\">"
-  <> "<input type=\"file\" id=\"file-input\" accept=\"image/*,image/png,image/jpeg,image/gif,image/webp\" hidden />"
-  <> "<button type=\"button\" id=\"attach-btn\" class=\"attach-btn\" title=\"Upload screenshot or image\" aria-label=\"Upload image\">+</button>"
+  <> attach
   <> "<form id=\"send-form\" data-ls-submit=\"send\" data-channel=\""
-  <> render.escape_html(ch)
+  <> render.escape_html(channel_attr)
   <> "\" data-auth-did=\""
   <> render.escape_html(auth_did)
   <> "\">"
-  <> "<input id=\"message-input\" type=\"text\" name=\"msg\" placeholder=\"Message "
-  <> render.escape_html(ch)
-  <> "… (paste images)\" autocomplete=\"off\" autofocus />"
+  <> "<input id=\"message-input\" type=\"text\" name=\"msg\" placeholder=\""
+  <> placeholder
+  <> "\" autocomplete=\"off\" autofocus />"
   <> "<button type=\"submit\">Send</button>"
   <> "</form>"
   <> "</div></div>"
@@ -1794,6 +3382,7 @@ fn message_html(
   row: render.Row,
   lookup: Dict(String, #(String, String)),
   aliases: List(String),
+  scroll_mid: String,
 ) -> String {
   // Match freeq-web3 row shape: 2-column grid `.ts` | `.body` (nick inline).
   let kind = render.kind_class(row.kind)
@@ -1810,6 +3399,17 @@ fn message_html(
     True -> " own"
     False -> ""
   }
+  // Server-rendered highlight so Lightspeed region replaces keep the flash
+  // (client-only classList is wiped when clear_scroll_to remounts #messages).
+  let hl = case scroll_mid {
+    "" -> ""
+    target ->
+      case row.msgid, row.id {
+        Some(mid), _ if mid == target -> " highlight"
+        _, id if id == target -> " highlight"
+        _, _ -> ""
+      }
+  }
   let data_nick = case row.nick {
     Some(n) -> " data-nick=\"" <> render.escape_html(n) <> "\""
     None -> ""
@@ -1822,16 +3422,24 @@ fn message_html(
   let badge = reply_badge_html(row, lookup)
   let reactions = reactions_html(row, aliases)
   let reply_btn = reply_btn_html(row)
+  // data-ts = unix seconds so the browser can localize to 12h + day separators.
+  let ts_attr = case row.timestamp {
+    Some(sec) -> " data-ts=\"" <> int.to_string(sec) <> "\""
+    None -> ""
+  }
   "<div class=\"row "
   <> kind
   <> own
+  <> hl
   <> "\" data-msgid=\""
   <> render.escape_html(option.unwrap(row.msgid, row.id))
   <> "\""
   <> data_nick
   <> data_text
   <> ">"
-  <> "<span class=\"ts\">"
+  <> "<span class=\"ts\""
+  <> ts_attr
+  <> ">"
   <> render.escape_html(row.time_label)
   <> "</span>"
   <> "<span class=\"body\">"
@@ -1840,6 +3448,127 @@ fn message_html(
   <> render.linkify_html(row.text)
   <> reactions
   <> reply_btn
+  <> "</span>"
+  <> link_embed_html(row.embed)
+  <> "</div>"
+}
+
+/// Open Graph / YouTube / Bluesky card under the message body (web3 parity).
+fn link_embed_html(embed: Option(render.Embed)) -> String {
+  case embed {
+    None -> ""
+    Some(e) -> {
+      let kind_class = case e.kind {
+        render.Youtube -> " yt-embed"
+        render.Bsky -> " bsky-embed"
+        render.Og -> ""
+      }
+      let inner = case e.kind, e.bsky {
+        render.Bsky, Some(b) -> bsky_embed_inner(e, b)
+        render.Youtube, _ -> youtube_embed_inner(e)
+        _, _ -> og_embed_inner(e)
+      }
+      "<a href=\""
+      <> render.escape_html(e.href)
+      <> "\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"link-embed"
+      <> kind_class
+      <> "\" style=\"grid-column: 2\">"
+      <> inner
+      <> "</a>"
+    }
+  }
+}
+
+fn youtube_embed_inner(e: render.Embed) -> String {
+  let img = case e.image_url {
+    Some(src) ->
+      "<img class=\"link-embed-img yt-thumb\" src=\""
+      <> render.escape_html(src)
+      <> "\" alt=\"\" loading=\"lazy\">"
+    None -> ""
+  }
+  img
+  <> "<div class=\"link-embed-body yt-footer\"><span class=\"yt-play\">▶</span> YouTube</div>"
+}
+
+fn og_embed_inner(e: render.Embed) -> String {
+  let img = case e.image_url {
+    Some(src) ->
+      "<img class=\"link-embed-img\" src=\""
+      <> render.escape_html(src)
+      <> "\" alt=\"\" loading=\"lazy\" referrerpolicy=\"no-referrer\">"
+    None -> ""
+  }
+  let site = case e.site_name {
+    Some(s) ->
+      "<div class=\"link-embed-site\">" <> render.escape_html(s) <> "</div>"
+    None -> ""
+  }
+  let title = case e.title {
+    Some(t) ->
+      "<div class=\"link-embed-title\">" <> render.escape_html(t) <> "</div>"
+    None -> ""
+  }
+  let desc = case e.description {
+    Some(d) ->
+      "<div class=\"link-embed-desc\">" <> render.escape_html(d) <> "</div>"
+    None -> ""
+  }
+  let domain = case e.domain {
+    Some(d) ->
+      "<div class=\"link-embed-domain\">" <> render.escape_html(d) <> "</div>"
+    None -> ""
+  }
+  img
+  <> "<div class=\"link-embed-body\">"
+  <> site
+  <> title
+  <> desc
+  <> domain
+  <> "</div>"
+}
+
+fn bsky_embed_inner(e: render.Embed, b: render.BskyMeta) -> String {
+  let avatar = case b.avatar_url {
+    Some(src) ->
+      "<img class=\"bsky-avatar\" src=\""
+      <> render.escape_html(src)
+      <> "\" alt=\"\" loading=\"lazy\">"
+    None -> {
+      let letter = case string.first(b.handle) {
+        Ok(ch) -> string.uppercase(ch)
+        Error(_) -> "?"
+      }
+      "<span class=\"bsky-avatar bsky-avatar-fallback\">"
+      <> render.escape_html(letter)
+      <> "</span>"
+    }
+  }
+  let img = case e.image_url {
+    Some(src) ->
+      "<img class=\"link-embed-img\" src=\""
+      <> render.escape_html(src)
+      <> "\" alt=\"\" loading=\"lazy\">"
+    None -> ""
+  }
+  "<div class=\"bsky-author\">"
+  <> avatar
+  <> "<span class=\"bsky-name\">"
+  <> render.escape_html(b.display)
+  <> "</span>"
+  <> "<span class=\"bsky-handle\">@"
+  <> render.escape_html(b.handle)
+  <> "</span></div>"
+  <> "<div class=\"bsky-text\">"
+  <> render.escape_html(b.text)
+  <> "</div>"
+  <> img
+  <> "<div class=\"bsky-footer\"><span>♥ "
+  <> int.to_string(b.likes)
+  <> "</span><span>↻ "
+  <> int.to_string(b.reposts)
+  <> "</span><span class=\"bsky-time\">🦋 "
+  <> render.escape_html(b.time)
   <> "</span></div>"
 }
 
@@ -1927,7 +3656,7 @@ fn reply_badge_html(
 
 fn members_region(model: Model) -> String {
   case model.view {
-    Index ->
+    Index | System ->
       "<aside id=\"member-panel\" data-ls-region=\"members\" class=\"hidden\"></aside>"
     Channel -> {
       let sorted = render.sort_members(model.members)
@@ -2005,11 +3734,13 @@ pub fn with_api_bearer(model: Model, bearer: Option(String)) -> Model {
 }
 
 /// Merge path-seeded channels with a persisted list (path first, then rest).
+/// Drops the local System key if it was ever persisted by mistake.
 pub fn merge_my_channels(
   seed: List(String),
   persisted: List(String),
 ) -> List(String) {
   list.fold(persisted, seed, list_unique_append)
+  |> list.filter(fn(c) { !is_system_key(c) })
 }
 
 /// Merge REST history with any live rows already on the model.
@@ -2037,6 +3768,23 @@ pub fn merge_history_rows(
   }
 }
 
+/// Prepend an older REST page in front of the current stream (scroll-up).
+///
+/// Drops rows already present (by msgid) so a race with live traffic is safe.
+pub fn prepend_history_rows(
+  older: List(render.Row),
+  current: List(render.Row),
+) -> List(render.Row) {
+  case older {
+    [] -> current
+    _ -> {
+      let new_only =
+        list.filter(older, fn(row) { !row_msgid_known(current, row) })
+      list.append(new_only, current)
+    }
+  }
+}
+
 /// Copy/union reactions from `live` onto the matching msgid row in `rows`.
 fn union_reactions_into(
   rows: List(render.Row),
@@ -2054,11 +3802,30 @@ fn union_reactions_into(
                 r.reactions,
                 live.reactions,
               ),
+              // Keep a live-resolved embed if REST has none yet.
+              embed: case r.embed {
+                Some(e) -> Some(e)
+                None -> live.embed
+              },
             )
           _ -> r
         }
       })
   }
+}
+
+/// Attach a fully resolved link preview onto a row by id or msgid.
+fn patch_row_embed(
+  messages: List(render.Row),
+  row_id: String,
+  embed: render.Embed,
+) -> List(render.Row) {
+  list.map(messages, fn(row) {
+    case row.id == row_id || row.msgid == Some(row_id) {
+      True -> render.Row(..row, embed: Some(embed))
+      False -> row
+    }
+  })
 }
 
 /// Apply server-attached reaction tallies to a row already in the stream.
@@ -2115,6 +3882,21 @@ fn clear_reply(model: Model) -> Model {
     reply_preview_text: "",
   )
 }
+
+/// Close search modal and drop results (navigate / Esc).
+fn clear_search(model: Model) -> Model {
+  Model(
+    ..model,
+    search_open: False,
+    search_query: "",
+    search_results: [],
+    search_loading: False,
+    search_status: "",
+  )
+}
+
+// scroll_to_msgid is intentionally preserved across clear_search so a
+// search-hit jump can close the modal and still land on the target row.
 
 /// Build a channel PRIVMSG, optionally tagged with `@+reply=<msgid>`.
 fn privmsg_line(channel: String, text: String, reply_to: Option(String)) -> String {

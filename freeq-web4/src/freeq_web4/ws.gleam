@@ -9,6 +9,7 @@
 import freeq_web4/atproto/oauth_session.{type OAuthSession}
 import freeq_web4/irc/render
 import freeq_web4/irc/upstream
+import freeq_web4/link_preview
 import freeq_web4/live
 import freeq_web4/rest
 import freeq_web4/session_store
@@ -32,6 +33,14 @@ pub type Push {
   RestChannels(List(rest.ChannelInfo))
   /// REST history fetch result for the viewed channel.
   RestHistory(List(render.Row))
+  /// Background channel FTS finished (may be stale if query moved on).
+  RestSearch(
+    query: String,
+    results: List(render.Row),
+    status: String,
+  )
+  /// Background link-preview resolve finished for one message row.
+  MessageEmbed(row_id: String, embed: render.Embed)
 }
 
 /// One connected LiveView browser session: model, IRC upstream, OAuth.
@@ -126,13 +135,15 @@ fn bootstrap(session: Session) -> Session {
       let session = ensure_upstream(session, ch, extras)
       let bearer = session.model.api_bearer
       // REST body first; CHATHISTORY (on Ready / after_join) fills reactions.
-      let history = rest.fetch_history(ch, 50, bearer)
-      let #(model, _) = live.apply(session.model, live.SetHistory(history))
+      let history =
+        rest.fetch_history(ch, live.history_page_size, bearer, None)
+      let #(model, effect) = live.apply(session.model, live.SetHistory(history))
       // Public list + per-channel topic endpoint (private rooms like #freeq
       // are omitted from /channels; IRC 332 may also skip on reconnect).
       let topic = rest.resolve_topic(channels, ch)
       let #(model, _) = live.apply(model, live.SetTopicText(topic))
       let session = Session(..session, model: model)
+      let session = run_effect(session, effect)
       apply_active_call_probe(session, ch)
     }
     None ->
@@ -200,7 +211,22 @@ pub fn handle_push(session: Session, push: Push) -> #(Session, List(String)) {
     }
     RestHistory(rows) -> {
       let before = session.model
-      let #(model, _) = live.apply(before, live.SetHistory(rows))
+      let #(model, effect) = live.apply(before, live.SetHistory(rows))
+      let session = Session(..session, model: model)
+      let session = run_effect(session, effect)
+      finish(session, before, session.model)
+    }
+    RestSearch(query, results, status) -> {
+      let before = session.model
+      let #(model, effect) =
+        live.apply(before, live.SetSearchResults(query, results, status))
+      let session = Session(..session, model: model)
+      let session = run_effect(session, effect)
+      finish(session, before, session.model)
+    }
+    MessageEmbed(row_id, embed) -> {
+      let before = session.model
+      let #(model, _) = live.apply(before, live.PatchEmbed(row_id, embed))
       finish(session, before, model)
     }
   }
@@ -260,8 +286,14 @@ fn after_join(session: Session) -> Session {
     Some(ch) -> {
       // REST body first (no +freeq.at/reactions). Then CHATHISTORY attaches
       // tallies onto matching msgids via parse_history_reactions.
-      let history = rest.fetch_history(ch, 50, session.model.api_bearer)
-      let #(model, _) = live.apply(session.model, live.SetHistory(history))
+      let history =
+        rest.fetch_history(
+          ch,
+          live.history_page_size,
+          session.model.api_bearer,
+          None,
+        )
+      let #(model, effect) = live.apply(session.model, live.SetHistory(history))
       // Seed nav topic from public list + REST fallback. IRC 332 still
       // overwrites later; redundant JOIN often skips 332 entirely.
       let topic = rest.resolve_topic(session.model.all_channels, ch)
@@ -281,6 +313,7 @@ fn after_join(session: Session) -> Session {
         None -> Nil
       }
       let session = Session(..session, model: model)
+      let session = run_effect(session, effect)
       apply_active_call_probe(session, ch)
     }
     None -> session
@@ -292,7 +325,30 @@ fn request_chathistory(handle: upstream.Handle, channel: String) -> Nil {
   case channel == "" || channel == "#" {
     True -> Nil
     False ->
-      upstream.send(handle, render.chathistory_latest_line(channel, 50))
+      upstream.send(
+        handle,
+        render.chathistory_latest_line(channel, live.history_page_size),
+      )
+  }
+}
+
+/// Reaction hydration for a scroll-up page (messages before `before_ts`).
+fn request_chathistory_before(
+  handle: upstream.Handle,
+  channel: String,
+  before_ts: Int,
+) -> Nil {
+  case channel == "" || channel == "#" {
+    True -> Nil
+    False ->
+      upstream.send(
+        handle,
+        render.chathistory_before_line(
+          channel,
+          before_ts,
+          live.history_page_size,
+        ),
+      )
   }
 }
 
@@ -311,24 +367,25 @@ fn apply_active_call_probe(session: Session, channel: String) -> Session {
 }
 
 /// Re-fetch REST history for the viewed channel and merge with any live rows.
-/// No-op when not on a channel view.
+/// No-op when not on a channel view. Schedules link-preview warmup.
 fn backfill_channel_history(
-  model: live.Model,
+  session: Session,
   bearer: Option(String),
-) -> live.Model {
-  case model.channel {
-    None -> model
+) -> Session {
+  case session.model.channel {
+    None -> session
     Some(ch) -> {
-      let rows = rest.fetch_history(ch, 50, bearer)
-      let merged = live.merge_history_rows(rows, model.messages)
-      let #(model, _) = live.apply(model, live.SetHistory(merged))
+      let rows = rest.fetch_history(ch, live.history_page_size, bearer, None)
+      let merged = live.merge_history_rows(rows, session.model.messages)
+      let #(model, effect) = live.apply(session.model, live.SetHistory(merged))
       // Topic for private rooms is also often empty until we are authorized.
       let topic = case model.topic {
         "" -> rest.resolve_topic(model.all_channels, ch)
         t -> t
       }
       let #(model, _) = live.apply(model, live.SetTopicText(topic))
-      model
+      let session = Session(..session, model: model)
+      run_effect(session, effect)
     }
   }
 }
@@ -375,8 +432,12 @@ fn apply_upstream(
       // Bootstrap often fetched history before SASL (guest / stale bearer).
       // Private rooms (#freeq) 403 without a valid API-BEARER, and IRC
       // chathistory is suppressed — re-fetch once the bearer lands (web3
-      // auth_history_backfill).
-      let m = backfill_channel_history(m, Some(bearer))
+      // auth_history_backfill). Embed warmup is scheduled inside backfill.
+      let session = backfill_channel_history(
+        Session(..session, model: m),
+        Some(bearer),
+      )
+      let m = session.model
       // REST still omits +freeq.at/reactions; re-request CHATHISTORY after
       // the authorized body lands so chips survive refresh/SASL.
       case session.upstream, m.channel {
@@ -587,15 +648,42 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
       ensure_upstream(session, primary, extras)
 
     live.FetchHistory(channel) -> {
-      let rows = rest.fetch_history(channel, 50, session.model.api_bearer)
+      let rows =
+        rest.fetch_history(
+          channel,
+          live.history_page_size,
+          session.model.api_bearer,
+          None,
+        )
       // SetHistory merges reaction tallies with any live/CHATHISTORY state.
-      let #(model, _) = live.apply(session.model, live.SetHistory(rows))
+      let #(model, effect) = live.apply(session.model, live.SetHistory(rows))
       // After REST body, request CHATHISTORY so chips reappear on refresh.
       case session.upstream {
         Some(handle) -> request_chathistory(handle, channel)
         None -> Nil
       }
-      Session(..session, model: model)
+      let session = Session(..session, model: model)
+      run_effect(session, effect)
+    }
+
+    live.FetchOlderHistory(channel, before) -> {
+      let rows =
+        rest.fetch_history(
+          channel,
+          live.history_page_size,
+          session.model.api_bearer,
+          Some(before),
+        )
+      let #(model, effect) =
+        live.apply(session.model, live.PrependHistory(rows))
+      // Hydrate reaction chips for the older page (batch lines still skipped
+      // as rows; parse_history_reactions attaches tallies by msgid).
+      case session.upstream {
+        Some(handle) -> request_chathistory_before(handle, channel, before)
+        None -> Nil
+      }
+      let session = Session(..session, model: model)
+      run_effect(session, effect)
     }
 
     live.FetchChannels -> {
@@ -606,12 +694,88 @@ fn run_effect(session: Session, effect: live.Effect) -> Session {
 
     live.FetchActiveCall(channel) -> apply_active_call_probe(session, channel)
 
+    live.FetchSearch(channel, query) -> {
+      // Off-session so keystroke search does not block IRC / LiveView.
+      let subject = session.self_subject
+      let bearer = session.model.api_bearer
+      let _ =
+        process.spawn_unlinked(fn() {
+          let outcome =
+            rest.search_messages(
+              channel,
+              query,
+              rest.search_page_size,
+              bearer,
+            )
+          let #(results, err) = case outcome {
+            rest.SearchOk(rows) -> #(rows, None)
+            rest.SearchErr(reason) -> #([], Some(reason))
+          }
+          let status = live.search_status_for(results, err)
+          process.send(subject, RestSearch(query, results, status))
+        })
+      session
+    }
+
+    live.FetchAround(channel, before) -> {
+      // Load a history page ending at `before` so a search hit can be scrolled
+      // into view even when it was outside the current window.
+      let rows =
+        rest.fetch_history(
+          channel,
+          live.history_page_size,
+          session.model.api_bearer,
+          Some(before),
+        )
+      let #(model, effect) =
+        live.apply(session.model, live.MergeAroundHistory(rows))
+      case session.upstream {
+        Some(handle) -> request_chathistory_before(handle, channel, before)
+        None -> Nil
+      }
+      let session = Session(..session, model: model)
+      run_effect(session, effect)
+    }
+
     live.StopUpstream -> {
       case session.upstream {
         Some(handle) -> upstream.stop(handle)
         None -> Nil
       }
       Session(..session, upstream: None)
+    }
+
+    live.ResolveEmbeds(rows) -> {
+      schedule_preview_warmup(session.self_subject, rows)
+      session
+    }
+  }
+}
+
+/// Resolve uncached link previews off the Live session process.
+fn schedule_preview_warmup(
+  subject: Subject(Push),
+  rows: List(render.Row),
+) -> Nil {
+  let pending =
+    rows
+    |> list.filter(link_preview.needs_resolve)
+    |> list.take(30)
+  case pending {
+    [] -> Nil
+    _ -> {
+      let _ =
+        process.spawn_unlinked(fn() {
+          list.each(pending, fn(row) {
+            let full = link_preview.attach(row)
+            case full.embed {
+              Some(embed) ->
+                process.send(subject, MessageEmbed(row.id, embed))
+              None -> Nil
+            }
+          })
+        })
+      Nil
     }
   }
 }
