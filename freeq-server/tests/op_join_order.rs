@@ -551,3 +551,156 @@ async fn deop_clears_the_prefix_for_a_multi_device_user() {
     .unwrap();
     server.abort();
 }
+
+// ── The same asymmetry at the other read sites ───────────────────────────────
+//
+// `ops`/`voiced` are keyed by SESSION; identity is keyed by DID. Every place
+// that renders membership has to reconcile the two, and each one did it
+// differently (or not at all). NAMES is fixed; these cover WHO and WHOIS.
+
+/// WHO lists users, not sockets. A person signed in twice must appear once.
+#[tokio::test]
+async fn who_lists_a_multi_device_user_once() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #whodup");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+        let key = PrivateKey::generate_ed25519();
+        let did = format!("did:key:{}", key.public_key_multibase());
+        let secret = key.secret_bytes();
+        let mut bob = C::sasl_with(addr, "bob", &did, key);
+        bob.tx("JOIN #whodup");
+        bob.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob joined");
+        let mut bob2 =
+            C::sasl_with(addr, "bob", &did, PrivateKey::ed25519_from_bytes(&secret).unwrap());
+        bob2.drain(400);
+        alice.drain(300);
+
+        alice.tx("WHO #whodup");
+        let lines = alice.collect_until(
+            |l| l.split_whitespace().nth(1) == Some("315"),
+            "end of WHO",
+        );
+        let bob_rows: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.split_whitespace().nth(1) == Some("352") && l.contains(" bob "))
+            .collect();
+        assert_eq!(
+            bob_rows.len(),
+            1,
+            "bob is one person on two devices but WHO returned {} rows for him:\n  {}",
+            bob_rows.len(),
+            bob_rows.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("\n  ")
+        );
+
+        alice.tx("QUIT");
+        bob.tx("QUIT");
+        bob2.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// WHO must agree with NAMES and with what the server will let the user do.
+#[tokio::test]
+async fn who_shows_op_flag_for_a_multi_device_op() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #whoop");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+        let key = PrivateKey::generate_ed25519();
+        let did = format!("did:key:{}", key.public_key_multibase());
+        let secret = key.secret_bytes();
+        let mut bob = C::sasl_with(addr, "bob", &did, key);
+        bob.tx("JOIN #whoop");
+        bob.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob joined");
+        let mut extra: Vec<C> = (0..3)
+            .map(|_| {
+                let mut c = C::sasl_with(
+                    addr, "bob", &did,
+                    PrivateKey::ed25519_from_bytes(&secret).unwrap(),
+                );
+                c.drain(300);
+                c
+            })
+            .collect();
+
+        alice.tx("MODE #whoop +o bob");
+        alice.rx(|l| l.contains("+o") && l.contains("bob"), "opped");
+        alice.drain(300);
+
+        alice.tx("WHO #whoop");
+        let lines = alice.collect_until(
+            |l| l.split_whitespace().nth(1) == Some("315"),
+            "end of WHO",
+        );
+        let bob_row = lines
+            .iter()
+            .find(|l| l.split_whitespace().nth(1) == Some("352") && l.contains(" bob "))
+            .expect("a WHO row for bob");
+        assert!(
+            bob_row.contains("H@") || bob_row.contains("G@"),
+            "bob is an op but his WHO flags omit @: {bob_row}"
+        );
+
+        alice.tx("QUIT");
+        bob.tx("QUIT");
+        for c in extra.iter_mut() {
+            c.tx("QUIT");
+        }
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
+
+/// WHOIS lists a *remote* user's channels with an `@` for ops, but the local
+/// branch emits no 319 at all — so `/whois` on someone on your own server tells
+/// you nothing about where they are or what they can do.
+#[tokio::test]
+async fn whois_lists_channels_for_a_local_user() {
+    let (addr, server) = start().await;
+    tokio::task::spawn_blocking(move || {
+        let (mut alice, _) = C::sasl(addr, "alice");
+        alice.tx("JOIN #whoischan");
+        alice.rx(|l| l.split_whitespace().nth(1) == Some("366"), "alice joined");
+
+        let (mut bob, _) = C::sasl(addr, "bob");
+        bob.tx("JOIN #whoischan");
+        bob.rx(|l| l.split_whitespace().nth(1) == Some("366"), "bob joined");
+        alice.tx("MODE #whoischan +o bob");
+        alice.rx(|l| l.contains("+o"), "bob opped");
+        alice.drain(300);
+
+        alice.tx("WHOIS bob");
+        let lines = alice.collect_until(
+            |l| l.split_whitespace().nth(1) == Some("318"),
+            "end of WHOIS",
+        );
+        let chans = lines
+            .iter()
+            .find(|l| l.split_whitespace().nth(1) == Some("319"));
+        assert!(
+            chans.is_some(),
+            "WHOIS on a local user listed no channels (no 319). A remote user's \
+             WHOIS does list them, with @ for ops:\n  {}",
+            lines.join("\n  ")
+        );
+        assert!(
+            chans.unwrap().contains("@#whoischan"),
+            "bob is an op in #whoischan but WHOIS does not mark it: {}",
+            chans.unwrap()
+        );
+
+        alice.tx("QUIT");
+        bob.tx("QUIT");
+    })
+    .await
+    .unwrap();
+    server.abort();
+}
