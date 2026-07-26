@@ -7,6 +7,7 @@
 import freeq_web4/config
 import freeq_web4/irc/render
 import freeq_web4/link_preview
+import freeq_web4/ls_form
 import freeq_web4/rest
 import gleam/bit_array
 import gleam/crypto
@@ -22,7 +23,6 @@ import lightspeed/component/helpers
 import lightspeed/component/stateful
 import lightspeed/diff
 import lightspeed/event
-import lightspeed/form
 
 // ── Model ────────────────────────────────────────────────────────────────────
 
@@ -67,9 +67,11 @@ pub type Model {
     compose: String,
     /// Parent msgid when composing a reply (`@+reply=` on send).
     reply_to: Option(String),
+    /// Msgid being edited (`@+draft/edit=` on send). Mutually exclusive with reply.
+    edit_to: Option(String),
     /// Banner nick for the message being replied to.
     reply_preview_nick: String,
-    /// Banner snippet for the message being replied to.
+    /// Banner snippet for the message being replied to (or edited).
     reply_preview_text: String,
     status: String,
     /// Last error / system banner.
@@ -167,7 +169,9 @@ pub type Msg {
   Send(text: String)
   /// Browser: start replying to a message (msgid).
   StartReply(msgid: String)
-  /// Browser: cancel reply compose mode.
+  /// Browser: start editing own message (msgid).
+  StartEdit(msgid: String)
+  /// Browser: cancel reply / edit compose mode.
   CancelReply
   /// Browser: join channel form.
   Join(raw: String)
@@ -335,6 +339,7 @@ fn mount(
       members: [],
       compose: "",
       reply_to: None,
+      edit_to: None,
       reply_preview_nick: "",
       reply_preview_text: "",
       status: "connecting…",
@@ -404,7 +409,9 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
                 )
                 _, Some(ch) -> #(
                   clear_reply(Model(..model, compose: "", flash: "")),
-                  IrcSend([privmsg_line(ch, text, model.reply_to)]),
+                  IrcSend([
+                    privmsg_line(ch, text, model.reply_to, model.edit_to),
+                  ]),
                 )
                 _, None -> #(
                   Model(..model, flash: "Join a channel first"),
@@ -425,8 +432,31 @@ pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
             Model(
               ..model,
               reply_to: Some(msgid),
+              edit_to: None,
               reply_preview_nick: nick,
               reply_preview_text: render.preview_text(text),
+            ),
+            NoEffect,
+          )
+        }
+      }
+    }
+
+    StartEdit(msgid) -> {
+      let msgid = string.trim(msgid)
+      case msgid == "" {
+        True -> #(model, NoEffect)
+        False -> {
+          let #(_nick, text) = message_preview(model.messages, msgid)
+          #(
+            Model(
+              ..model,
+              edit_to: Some(msgid),
+              reply_to: None,
+              reply_preview_nick: "",
+              reply_preview_text: render.preview_text(text),
+              // Server-side draft hint; client also prefills the input via JS.
+              compose: text,
             ),
             NoEffect,
           )
@@ -2304,15 +2334,15 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     stateful.route("send", fn(e) {
       event.decode_form(e, "send", fn(data) {
         use text <- result.try(
-          form.require(data, "msg")
-          |> result.or(form.require(data, "text")),
+          ls_form.require(data, "msg")
+          |> result.or(ls_form.require(data, "text")),
         )
         Ok(Send(text))
       })
     }),
     stateful.route("reply", fn(e) {
       event.decode_form(e, "reply", fn(data) {
-        use msgid <- result.try(form.require(data, "msgid"))
+        use msgid <- result.try(ls_form.require(data, "msgid"))
         Ok(StartReply(msgid))
       })
     }),
@@ -2321,13 +2351,13 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     }),
     stateful.route("join", fn(e) {
       event.decode_form(e, "join", fn(data) {
-        use ch <- result.try(form.require(data, "channel"))
+        use ch <- result.try(ls_form.require(data, "channel"))
         Ok(Join(ch))
       })
     }),
     stateful.route("part", fn(e) {
       event.decode_form(e, "part", fn(data) {
-        use ch <- result.try(form.require(data, "channel"))
+        use ch <- result.try(ls_form.require(data, "channel"))
         Ok(Part(ch))
       })
     }),
@@ -2336,13 +2366,13 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     }),
     stateful.route("open", fn(e) {
       event.decode_form(e, "open", fn(data) {
-        use ch <- result.try(form.require(data, "channel"))
+        use ch <- result.try(ls_form.require(data, "channel"))
         Ok(OpenChannel(ch))
       })
     }),
     stateful.route("set_topic", fn(e) {
       event.decode_form(e, "set_topic", fn(data) {
-        use topic <- result.try(form.require(data, "topic"))
+        use topic <- result.try(ls_form.require(data, "topic"))
         Ok(SetTopic(topic))
       })
     }),
@@ -2369,7 +2399,7 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     }),
     stateful.route("av_roster", fn(e) {
       event.decode_form(e, "av_roster", fn(data) {
-        use raw <- result.try(form.require(data, "count"))
+        use raw <- result.try(ls_form.require(data, "count"))
         case int.parse(raw) {
           Ok(n) -> Ok(AvRoster(n))
           Error(_) -> Ok(AvRoster(0))
@@ -2378,7 +2408,7 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     }),
     stateful.route("open_react_picker", fn(e) {
       event.decode_form(e, "open_react_picker", fn(data) {
-        use msgid <- result.try(form.require(data, "msgid"))
+        use msgid <- result.try(ls_form.require(data, "msgid"))
         Ok(OpenReactPicker(msgid))
       })
     }),
@@ -2387,8 +2417,8 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     }),
     stateful.route("toggle_reaction", fn(e) {
       event.decode_form(e, "toggle_reaction", fn(data) {
-        use msgid <- result.try(form.require(data, "msgid"))
-        use emoji <- result.try(form.require(data, "emoji"))
+        use msgid <- result.try(ls_form.require(data, "msgid"))
+        use emoji <- result.try(ls_form.require(data, "emoji"))
         Ok(ToggleReaction(msgid, emoji))
       })
     }),
@@ -2404,16 +2434,16 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
     stateful.route("search", fn(e) {
       event.decode_form(e, "search", fn(data) {
         use q <- result.try(
-          form.require(data, "q")
-          |> result.or(form.require(data, "query")),
+          ls_form.require(data, "q")
+          |> result.or(ls_form.require(data, "query")),
         )
         Ok(RunSearch(q))
       })
     }),
     stateful.route("jump_to_msg", fn(e) {
       event.decode_form(e, "jump_to_msg", fn(data) {
-        use msgid <- result.try(form.require(data, "msgid"))
-        let ts = case form.require(data, "ts") {
+        use msgid <- result.try(ls_form.require(data, "msgid"))
+        let ts = case ls_form.require(data, "ts") {
           Ok(raw) ->
             case int.parse(string.trim(raw)) {
               Ok(n) if n > 0 -> Some(n)

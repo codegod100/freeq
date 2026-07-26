@@ -250,24 +250,33 @@ fn decode_history(body: String) -> List(render.Row) {
       dict.new(),
       decode.dict(decode.string, decode.string),
     )
-    decode.success(#(sender, text, msgid, ts, tags))
+    use replaces <- decode.optional_field(
+      "replaces_msgid",
+      None,
+      decode.optional(decode.string),
+    )
+    decode.success(#(sender, text, msgid, ts, tags, replaces))
   }
   case json.parse(body, decode.list(decoder)) {
-    Ok(rows) ->
-      list.map(rows, fn(row) {
-        let #(sender, text, msgid, ts, tags) = row
-        let tag_list = dict.to_list(tags)
-        let parent = render.reply_parent(tag_list)
-        let reactions = case dict.get(tags, "+freeq.at/reactions") {
-          Ok(raw) -> render.parse_reactions_tag(raw)
-          Error(_) ->
-            case dict.get(tags, "freeq.at/reactions") {
-              Ok(raw) -> render.parse_reactions_tag(raw)
-              Error(_) -> dict.new()
-            }
-        }
-        render.history_row(sender, text, msgid, ts, parent, reactions)
-      })
+    Ok(rows) -> {
+      let pairs =
+        list.map(rows, fn(row) {
+          let #(sender, text, msgid, ts, tags, replaces) = row
+          let tag_list = dict.to_list(tags)
+          let parent = render.reply_parent(tag_list)
+          let reactions = case dict.get(tags, "+freeq.at/reactions") {
+            Ok(raw) -> render.parse_reactions_tag(raw)
+            Error(_) ->
+              case dict.get(tags, "freeq.at/reactions") {
+                Ok(raw) -> render.parse_reactions_tag(raw)
+                Error(_) -> dict.new()
+              }
+          }
+          let base = render.history_row(sender, text, msgid, ts, parent, reactions)
+          #(base, replaces)
+        })
+      render.collapse_history_edits(pairs)
+    }
     Error(_) -> []
   }
 }

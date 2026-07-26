@@ -9,6 +9,7 @@ import freeq_web4/config
 import freeq_web4/irc/render
 import freeq_web4/link_preview
 import freeq_web4/live
+import freeq_web4/ls_form
 import freeq_web4/rest
 import freeq_web4/session_store
 import freeq_web4/upload
@@ -23,6 +24,7 @@ import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
 import lightspeed/diff
+import lightspeed/form
 import lightspeed/testing/liveview
 import simplifile
 
@@ -1744,6 +1746,39 @@ pub fn apply_line_353_test_channel_test() {
   assert list.length(next.members) == 3
   let patches = live.plan_patches(model, next)
   assert patches != []
+}
+
+pub fn ls_form_round_trip_test() {
+  let samples = [
+    "hello",
+    "https://www.youtube.com/watch?v=-7vISn5nnks",
+    "a=b&c=d",
+    "100% done",
+    "literal %3D and %26 stay",
+    "",
+  ]
+  list.each(samples, fn(s) {
+    assert ls_form.unescape(ls_form.escape(s)) == s
+  })
+}
+
+/// Older browser only escaped = / & (not %). Server still recovers those.
+pub fn ls_form_legacy_client_unescape_test() {
+  assert ls_form.unescape("https://www.youtube.com/watch?v%3D-7vISn5nnks")
+    == "https://www.youtube.com/watch?v=-7vISn5nnks"
+  assert ls_form.unescape("a%3Db%26c%3Dd") == "a=b&c=d"
+}
+
+pub fn ls_form_require_decodes_payload_test() {
+  // Simulate browser formPayload for a YouTube URL.
+  let payload =
+    "msg=" <> ls_form.escape("https://www.youtube.com/watch?v=-7vISn5nnks")
+  let data = form.parse_payload(payload)
+  let assert Ok(text) = ls_form.require(data, "msg")
+  assert text == "https://www.youtube.com/watch?v=-7vISn5nnks"
+  // Bare form.require would leave the mangled value (the old bug).
+  let assert Ok(raw) = form.require(data, "msg")
+  assert string.contains(raw, "%3D")
 }
 
 pub fn link_preview_needs_resolve_test() {

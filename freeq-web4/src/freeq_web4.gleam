@@ -833,15 +833,22 @@ function splitFields(payload) {
   return fields;
 }
 
+// Lightspeed form.parse_payload splits on raw = / & and does not percent-decode.
+// Escape so field boundaries stay intact; freeq_web4/ls_form unescapes on read.
+// Order: % first so round-trip of literal %3D / %26 is unambiguous.
+function escapeLsField(s) {
+  return String(s ?? '')
+    .replace(/%/g, '%25')
+    .replace(/&/g, '%26')
+    .replace(/=/g, '%3D');
+}
+
 function formPayload(form) {
   try {
     const data = new FormData(form);
     const parts = [];
     for (const [k, v] of data.entries()) {
-      // Lightspeed form.parse does not percent-decode; only escape &/=.
-      const ek = String(k).replace(/&/g, '%26').replace(/=/g, '%3D');
-      const ev = String(v).replace(/&/g, '%26').replace(/=/g, '%3D');
-      parts.push(ek + '=' + ev);
+      parts.push(escapeLsField(k) + '=' + escapeLsField(v));
     }
     return parts.join('&');
   } catch (_) {
@@ -1054,8 +1061,7 @@ function restoreSearch(snap, forceFocus) {
 }
 
 function encodeSearchPayload(q) {
-  // Match formPayload escaping (Lightspeed form.parse does not percent-decode).
-  return 'q=' + String(q ?? '').replace(/&/g, '%26').replace(/=/g, '%3D');
+  return 'q=' + escapeLsField(q);
 }
 
 function pushSearchQuery(q) {
@@ -1828,7 +1834,7 @@ function onClick(ev) {
       // Not loaded — ask server for a history window around it (no ts known).
       pushEvent(
         'jump_to_msg',
-        'msgid=' + String(mid).replace(/&/g, '%26').replace(/=/g, '%3D'),
+        'msgid=' + escapeLsField(mid),
       );
     } else {
       pendingScrollTo = null;
@@ -1848,8 +1854,8 @@ function onClick(ev) {
     pendingScrollTo = mid;
     updateJumpBottomUi();
     // Prefer server jump so unloaded hits are fetched; it also closes search.
-    let payload = 'msgid=' + String(mid).replace(/&/g, '%26').replace(/=/g, '%3D');
-    if (ts) payload += '&ts=' + String(ts).replace(/&/g, '%26').replace(/=/g, '%3D');
+    let payload = 'msgid=' + escapeLsField(mid);
+    if (ts) payload += '&ts=' + escapeLsField(ts);
     pushEvent('jump_to_msg', payload);
     return;
   }

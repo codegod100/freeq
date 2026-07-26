@@ -85,6 +85,8 @@ pub type Row {
     reactions: Dict(String, List(String)),
     /// Link preview card (resolved async; may be None until warmup).
     embed: Option(Embed),
+    /// True after a `+draft/edit` / REST `replaces_msgid` update landed.
+    edited: Bool,
   )
 }
 
@@ -417,6 +419,7 @@ pub fn system_row(text: String) -> Row {
     account: None,
     reactions: dict.new(),
     embed: None,
+    edited: False,
   )
 }
 
@@ -668,10 +671,18 @@ fn parse_message_line_body(
   own_nick: Option(String),
 ) -> Option(Row) {
   let msgid = tag_get(tags, "msgid")
-  let edit = tag_get(tags, "+draft/edit")
+  let edit = case tag_get(tags, "+draft/edit") {
+    Some(e) if e != "" -> Some(e)
+    _ -> None
+  }
+  // Edits keep the *original* msgid as the row identity (IRCv3 draft/edit).
   let effective_msgid = case edit {
     Some(e) -> Some(e)
     None -> msgid
+  }
+  let is_edit = case edit {
+    Some(_) -> True
+    None -> False
   }
   // Prefer IRCv3 `time` → unix + 12h label; else "now" so live rows still get data-ts.
   let #(time, ts) = case tag_get(tags, "time") {
@@ -741,6 +752,7 @@ fn parse_message_line_body(
                   },
                   reactions: reactions,
                   embed: None,
+                  edited: is_edit,
                 ),
               )
             }
@@ -759,6 +771,7 @@ fn parse_message_line_body(
                 account: None,
                 reactions: dict.new(),
                 embed: None,
+                edited: False,
               ))
             ["PART", ..] ->
               Some(Row(
@@ -775,6 +788,7 @@ fn parse_message_line_body(
                 account: None,
                 reactions: dict.new(),
                 embed: None,
+                edited: False,
               ))
             ["QUIT", ..] ->
               Some(Row(
@@ -791,6 +805,7 @@ fn parse_message_line_body(
                 account: None,
                 reactions: dict.new(),
                 embed: None,
+                edited: False,
               ))
             // CAP / numerics / BATCH / MODE / TOPIC / etc. — not chat rows.
             _ -> None
@@ -874,7 +889,53 @@ pub fn history_row(
     account: None,
     reactions: reactions,
     embed: None,
+    edited: False,
   )
+}
+
+/// Mark a row as an applied edit of `original` (identity stays on original msgid).
+pub fn apply_edit_to_row(row: Row, new_text: String) -> Row {
+  let text = case string.trim(new_text) {
+    "" -> "[message cleared]"
+    t -> t
+  }
+  Row(..row, text: text, edited: True)
+}
+
+/// Collapse REST history rows that carry `replaces_msgid` into their originals.
+///
+/// freeq-server stores each edit as a *new* row pointing at the root msgid.
+/// Clients keep a single row per original identity and show an (edited) badge.
+pub fn collapse_history_edits(
+  rows: List(#(Row, Option(String))),
+) -> List(Row) {
+  list.fold(rows, [], fn(acc, pair) {
+    let #(row, replaces) = pair
+    case replaces {
+      Some(orig) if orig != "" ->
+        case list.find(acc, fn(r) { r.msgid == Some(orig) }) {
+          Ok(_) ->
+            list.map(acc, fn(r) {
+              case r.msgid {
+                Some(m) if m == orig -> apply_edit_to_row(r, row.text)
+                _ -> r
+              }
+            })
+          Error(_) -> {
+            // Orphan edit (original outside the page): show as that msgid.
+            let collapsed =
+              Row(
+                ..row,
+                id: orig,
+                msgid: Some(orig),
+                edited: True,
+              )
+            list.append(acc, [collapsed])
+          }
+        }
+      _ -> list.append(acc, [row])
+    }
+  })
 }
 
 /// Smallest unix timestamp among rows that have one (for REST `?before=`).
