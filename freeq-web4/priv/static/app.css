@@ -1614,12 +1614,29 @@ body {
     color: var(--muted);
     font-weight: 500;
 }
+.auth-badge.pending {
+    color: #e0b44a;
+    font-weight: 600;
+}
+.auth-badge.reauth {
+    color: #f0a0a0;
+    font-weight: 600;
+}
 .auth-badge.signed-in {
     color: #7ab7ff;
     font-weight: 600;
 }
 #user-info .user-handle.signed-in {
     color: #7ab7ff;
+}
+#user-info .user-handle.pending {
+    color: #e0b44a;
+}
+#user-info .user-handle.reauth {
+    color: #f0a0a0;
+}
+#user-info .user-handle.guest {
+    color: var(--muted);
 }
 .btn-link {
     color: #7ab7ff;
