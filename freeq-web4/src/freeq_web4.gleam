@@ -144,10 +144,11 @@ fn with_live_security_headers(
   |> http_response.set_header("referrer-policy", "strict-origin-when-cross-origin")
 }
 
-fn enhance_live_html(body: String, client_js: String) -> String {
-  // Bust browser cache when the embedded client script changes (length is a
-  // cheap fingerprint; content edits always change size for this blob).
-  let js_v = int.to_string(string.length(client_js))
+fn enhance_live_html(body: String, css: String, client_js: String) -> String {
+  // Bust browser cache when CSS or the embedded client script changes
+  // (length is a cheap fingerprint; edits usually change size).
+  let asset_v =
+    int.to_string(string.length(css) + string.length(client_js))
   body
   |> string.replace(
     "</head>",
@@ -163,12 +164,12 @@ fn enhance_live_html(body: String, client_js: String) -> String {
       <> "<link rel=\"icon\" href=\"/favicon.png?v=2\" type=\"image/png\" sizes=\"48x48\">"
       <> "<link rel=\"apple-touch-icon\" href=\"/apple-touch-icon.png?v=2\" sizes=\"180x180\">"
       <> "<link rel=\"stylesheet\" href=\"/assets/app.css?v="
-      <> js_v
+      <> asset_v
       <> "\">"
       <> "<link href=\"https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap\" rel=\"stylesheet\">"
       <> "<script type=\"module\" src=\"/assets/av_call.js\"></script>"
       <> "<script type=\"module\" src=\"/assets/lightspeed.js?v="
-      <> js_v
+      <> asset_v
       <> "\"></script>"
       <> "</head>",
   )
@@ -287,7 +288,7 @@ fn handle_request(
                   case req.method {
                     gleam_http.Get ->
                       case string.starts_with(req.path, "/chat/") {
-                        True -> live_html_response(req, client_js)
+                        True -> live_html_response(req, css, client_js)
                         False -> call_endpoint(req, port, css, client_js)
                       }
                     _ ->
@@ -578,7 +579,9 @@ fn call_endpoint(
               response
               |> http_response.set_body(
                 mist.Bytes(
-                  bytes_tree.from_string(enhance_live_html(body, client_js)),
+                  bytes_tree.from_string(
+                    enhance_live_html(body, css, client_js),
+                  ),
                 ),
               )
               |> with_live_security_headers
@@ -593,6 +596,7 @@ fn call_endpoint(
 
 fn live_html_response(
   req: http_request.Request(mist.Connection),
+  css: String,
   client_js: String,
 ) -> http_response.Response(mist.ResponseData) {
   let path = chat_path(req.path)
@@ -608,7 +612,7 @@ fn live_html_response(
     <> " data-ls-version=\"1\" data-ls-patch-stream-version=\"1\">"
     <> inner
     <> "</main></body></html>"
-  let body = enhance_live_html(shell, client_js)
+  let body = enhance_live_html(shell, css, client_js)
   let resp =
     http_response.new(200)
     |> http_response.set_header("content-type", "text/html; charset=utf-8")
@@ -2098,11 +2102,19 @@ function onFrame(text) {
       // Still at the top after prepend? load the next page if more remain.
       // Skip auto-load-older while seeking a jump target (FetchAround owns that).
       // Also skip right after a channel switch / history fill (force-scrolled).
+      // Critical: after a Lightspeed replace #messages starts at scrollTop=0
+      // even when stickToBottom — layout may not have a real scrollHeight yet.
+      // Loading older on that frame prepends history on every send and jumps
+      // the viewport to earlier messages. Only load-older when the user is
+      // intentionally reading history (not stuck to the live tail).
       if (
         !pendingScrollTo &&
         !channelChanged &&
         !historyJustFilled &&
         !awaitingHistoryFill &&
+        !stickToBottom &&
+        !isChannelStickLocked() &&
+        !isJumpLocked() &&
         msgs.scrollTop <= 48 &&
         msgs.dataset.historyLoading !== '1'
       ) {

@@ -13,6 +13,7 @@ import freeq_web4/config
 import freeq_web4/irc/render
 import freeq_web4/irc/upstream
 import freeq_web4/live
+import freeq_web4/pane
 import freeq_web4/rest
 import freeq_web4/ui
 import gleam/dynamic.{type Dynamic}
@@ -77,8 +78,11 @@ type State {
     upstream: Option(upstream.Handle),
     /// Subject that receives `upstream.Event` (owned by bridge process).
     irc_events: Subject(upstream.Event),
-    /// PRIVMSG lines queued while IRC was not Ready (flushed on Ready).
+    /// Outbound IRC lines queued until the bridge socket is Ready **and**
+    /// membership for the active room is Joined (avoids 404 +n races).
     pending_out: List(String),
+    /// Last PRIVMSG batch put on the wire (re-queued after 404 +n).
+    last_out: List(String),
   )
 }
 
@@ -127,6 +131,7 @@ pub fn start() -> Nil {
                   upstream: None,
                   irc_events: irc_events,
                   pending_out: [],
+                  last_out: [],
                 )
               // Open guest IRC immediately so the first Send can succeed.
               let state = ensure_upstream(state, "", [])
@@ -183,6 +188,13 @@ fn loop(state: State) -> Nil {
     Publish(model) -> {
       // Keep connection labels / nick from the bridge IRC — browser publish
       // must not clobber Ready with the LiveView's separate socket state.
+      //
+      // Critical: browser `pane.Joined` means *browser* IRC is in the room.
+      // Bridge has its own IRC socket — never inherit browser Joined/Blocked.
+      // If *this* bridge already confirmed JOIN for the same room, keep
+      // `Joined` so PRIVMSG is not stuck behind a perpetual re-JOIN race
+      // (LiveView publish on every keystroke used to reset membership).
+      let prev_ch = live.current_channel(state.model)
       let model =
         live.Model(
           ..model,
@@ -192,8 +204,21 @@ fn loop(state: State) -> Nil {
             "" -> model.nick
             n -> n
           },
+          pane: merge_publish_pane(state.model.pane, model.pane),
         )
       let state = State(..state, model: model)
+      let state = case live.current_channel(state.model), prev_ch {
+        Some(ch), Some(old) if ch == old ->
+          case pane.is_joined(state.model.pane) {
+            // Already in the room on the bridge socket — do not thrash JOIN.
+            True -> state
+            False -> join_channel(state, ch)
+          }
+        Some(_), _ -> after_join(state)
+        None, _ -> state
+      }
+      // If publish restored Joined, release any queued PRIVMSGs.
+      let state = flush_pending(state)
       let _ = do_push(state.gtk_node, state.model)
       state
     }
@@ -241,6 +266,12 @@ fn handle_dist_event(state: State, raw: Dynamic) -> State {
     }
     Some(msg) -> {
       let before = live.view(state.model)
+      // If Send is blocked (stale +n after browser Publish), clear block and
+      // re-JOIN before applying so this keystroke can still go out.
+      let state = case msg {
+        live.Send(_) -> ensure_joined_for_send(state)
+        _ -> state
+      }
       let #(model, effect) = live.apply(state.model, msg)
       let state = State(..state, model: model)
       let _ = do_push(state.gtk_node, state.model)
@@ -276,18 +307,103 @@ fn handle_dist_event(state: State, raw: Dynamic) -> State {
   }
 }
 
-/// Build a plain PRIVMSG and queue/send when `live.Send` did not emit IrcSend
-/// (connecting / disconnected). Skips empty text and no-channel cases.
+/// Merge browser paint state into the bridge pane without stealing membership.
+///
+/// - Different / new room → Joining (bridge must JOIN its own socket)
+/// - Same room and bridge already Joined → keep Joined
+/// - Same room but bridge still Joining/Blocked → keep bridge membership
+///   (do not adopt browser Joined)
+fn merge_publish_pane(bridge: pane.Pane, browser: pane.Pane) -> pane.Pane {
+  case browser, bridge {
+    pane.InRoom(br), pane.InRoom(bb) ->
+      case pane.same_room(bridge, br.name) {
+        True ->
+          pane.InRoom(
+            pane.RoomState(
+              ..br,
+              // Bridge socket authority for membership only.
+              membership: bb.membership,
+            ),
+          )
+        False ->
+          pane.InRoom(
+            pane.RoomState(..br, membership: pane.Joining),
+          )
+      }
+    pane.InRoom(br), _ ->
+      pane.InRoom(pane.RoomState(..br, membership: pane.Joining))
+    other, _ -> other
+  }
+}
+
+/// Before Send: clear Blocked / stale Joined, re-assert JOIN.
+///
+/// PRIVMSG is held in `pending_out` until `on_channel` (Joined + self in
+/// roster when the roster is non-empty). Always re-sends JOIN — safe if
+/// already present, recovers after silent PART/reconnect.
+fn ensure_joined_for_send(state: State) -> State {
+  case live.current_channel(state.model) {
+    None -> state
+    Some(ch) -> {
+      let on_chan = on_channel(state)
+      let state = ensure_upstream(state, ch, other_channels(state, ch))
+      // Always re-assert JOIN (idempotent when already a member).
+      let state = join_channel(state, ch)
+      case on_chan {
+        True -> state
+        False -> {
+          // Clear Blocked / stale Joined so live.Send emits IrcSend → queue.
+          let model =
+            live.Model(
+              ..state.model,
+              pane: pane.open_cached(
+                ch,
+                pane.history_exhausted(state.model.pane),
+              ),
+              flash: "Joining " <> ch <> "…",
+            )
+          State(..state, model: model)
+        }
+      }
+    }
+  }
+}
+
+/// True when this bridge socket is safe to PRIVMSG the active room.
+///
+/// Requires pane Joined **and**, once a NAMES roster has arrived, that our
+/// nick is on it. Stale `Joined` after a silent leave used to fire 404 +n.
+fn on_channel(state: State) -> Bool {
+  case pane.is_joined(state.model.pane) {
+    False -> False
+    True ->
+      case state.model.members {
+        // Roster not loaded yet — trust the Joined flag from 353/self JOIN.
+        [] -> True
+        _ -> self_in_roster(state.model)
+      }
+  }
+}
+
+fn self_in_roster(model: live.Model) -> Bool {
+  let nick = string.lowercase(string.trim(model.nick))
+  case nick == "" {
+    True -> False
+    False ->
+      list.any(model.members, fn(m) {
+        string.lowercase(m.nick) == nick
+      })
+  }
+}
+
+/// Build a plain PRIVMSG when `live.Send` did not emit IrcSend.
 fn queue_send_text(state: State, text: String) -> State {
   let text = string.trim(text)
-  case text == "", live.current_channel(state.model), state.model.ws {
-    True, _, _ -> state
-    _, None, _ -> state
-    // Already Ready but still no IrcSend → join blocked / flash; do not force.
-    _, _, live.WsReady -> state
-    _, Some(ch), _ -> {
+  case text == "", live.current_channel(state.model) {
+    True, _ -> state
+    _, None -> state
+    _, Some(ch) -> {
       let line = "PRIVMSG " <> ch <> " :" <> text <> "\r\n"
-      // Clear compose so the GTK entry does not re-send the same draft.
       let #(model, _) = live.apply(state.model, live.SetCompose(""))
       let state = State(..state, model: model)
       let _ = do_push(state.gtk_node, state.model)
@@ -298,6 +414,7 @@ fn queue_send_text(state: State, text: String) -> State {
 
 fn handle_upstream(state: State, ev: upstream.Event) -> State {
   let before = state.model
+  let was_on = on_channel(state)
   let #(model, effect) = case ev {
     upstream.Line(line) -> live.apply(before, live.PushLine(line))
     upstream.ConnState(upstream.Connecting) ->
@@ -318,20 +435,55 @@ fn handle_upstream(state: State, ev: upstream.Event) -> State {
     }
   }
   let state = case ev {
-    upstream.Down(_) -> State(..state, model: model, upstream: None)
+    upstream.Down(_) ->
+      State(..state, model: model, upstream: None, last_out: [])
     _ -> State(..state, model: model)
   }
   let state = run_effect(state, effect)
+  // 404 +n marks Blocked — re-JOIN and re-queue the PRIVMSG that failed.
+  let state = recover_join_if_blocked(state)
   let state = case ev {
-    // Registration done: flush queued PRIVMSGs and re-assert JOIN/NAMES.
-    upstream.Ready(_) -> {
-      let state = flush_pending(state)
-      rejoin_and_names(state)
-    }
+    // Registration done: re-assert JOIN/NAMES; flush only once on-channel.
+    upstream.Ready(_) -> rejoin_and_names(state)
     _ -> state
+  }
+  // Flush queued PRIVMSGs when we become on-channel (353 / self JOIN / roster).
+  let state = case was_on, on_channel(state) {
+    False, True -> flush_pending(state)
+    _, True -> flush_pending(state)
+    _, False -> state
   }
   let _ = do_push(state.gtk_node, state.model)
   state
+}
+
+/// After a cannot-send / join failure, force Joining + JOIN and re-queue
+/// the last on-wire PRIVMSG (otherwise the user keystroke is lost).
+fn recover_join_if_blocked(state: State) -> State {
+  case state.model.pane {
+    pane.InRoom(pane.RoomState(membership: pane.Blocked(_), name: ch, ..)) -> {
+      logging.log(
+        logging.Info,
+        "gtk bridge re-JOIN after block on "
+          <> ch
+          <> " (re-queue "
+          <> int.to_string(list.length(state.last_out))
+          <> " line(s))",
+      )
+      let model =
+        live.Model(
+          ..state.model,
+          pane: pane.remount_joining(state.model.pane),
+          flash: "Rejoining " <> ch <> "…",
+        )
+      let pending =
+        list.append(state.pending_out, state.last_out)
+      let state =
+        State(..state, model: model, pending_out: pending, last_out: [])
+      join_channel(state, ch)
+    }
+    _ -> state
+  }
 }
 
 fn run_effect(state: State, effect: live.Effect) -> State {
@@ -365,48 +517,108 @@ fn run_effect(state: State, effect: live.Effect) -> State {
 }
 
 fn send_or_queue(state: State, lines: List(String)) -> State {
-  case state.upstream, state.model.ws {
-    Some(handle), live.WsReady -> {
+  case lines {
+    [] -> state
+    _ ->
+      case wire_ready(state) {
+        True -> {
+          // On-channel + Ready — send now.
+          flush_lines(state, lines)
+        }
+        False -> {
+          // Not on channel yet: queue and make sure JOIN is out.
+          logging.log(
+            logging.Info,
+            "gtk irc queue "
+              <> int.to_string(list.length(lines))
+              <> " line(s) until on-channel (membership="
+              <> membership_label(state.model.pane)
+              <> " roster_self="
+              <> case self_in_roster(state.model) {
+                True -> "yes"
+                False -> "no"
+              }
+              <> " ws="
+              <> ws_label(state.model.ws)
+              <> ")",
+          )
+          let state = case live.current_channel(state.model) {
+            Some(ch) -> {
+              let state =
+                ensure_upstream(state, ch, other_channels(state, ch))
+              join_channel(state, ch)
+            }
+            None -> state
+          }
+          State(
+            ..state,
+            pending_out: list.append(state.pending_out, lines),
+          )
+        }
+      }
+  }
+}
+
+/// PRIVMSG only when Ready and actually on the channel (see `on_channel`).
+fn wire_ready(state: State) -> Bool {
+  case state.upstream, state.model.ws, on_channel(state) {
+    Some(_), live.WsReady, True -> True
+    _, _, _ -> False
+  }
+}
+
+fn flush_lines(state: State, lines: List(String)) -> State {
+  case state.upstream {
+    Some(handle) -> {
       list.each(lines, fn(line) {
         logging.log(logging.Info, "gtk irc out: " <> string.trim(line))
         upstream.send(handle, line)
       })
-      state
+      // Remember for 404 +n recovery.
+      State(..state, last_out: lines)
     }
-    Some(_), _ -> {
-      // Connected but not Ready yet — queue for flush on Ready.
-      logging.log(
-        logging.Info,
-        "gtk irc queue "
-          <> int.to_string(list.length(lines))
-          <> " line(s) until Ready",
-      )
+    None ->
       State(..state, pending_out: list.append(state.pending_out, lines))
-    }
-    None, _ -> {
-      let primary = case live.current_channel(state.model) {
-        Some(ch) -> ch
-        None -> ""
-      }
-      let extras =
-        list.filter(state.model.my_channels, fn(c) { c != primary })
-      let state = ensure_upstream(state, primary, extras)
-      State(..state, pending_out: list.append(state.pending_out, lines))
-    }
   }
 }
 
 fn flush_pending(state: State) -> State {
-  case state.pending_out, state.upstream {
-    [], _ -> state
-    lines, Some(handle) -> {
-      list.each(lines, fn(line) {
-        logging.log(logging.Info, "gtk irc flush: " <> string.trim(line))
-        upstream.send(handle, line)
-      })
-      State(..state, pending_out: [])
-    }
-    _, None -> state
+  case state.pending_out {
+    [] -> state
+    lines ->
+      case wire_ready(state) {
+        False -> state
+        True -> {
+          list.each(lines, fn(line) {
+            logging.log(logging.Info, "gtk irc flush: " <> string.trim(line))
+            case state.upstream {
+              Some(handle) -> upstream.send(handle, line)
+              None -> Nil
+            }
+          })
+          State(..state, pending_out: [], last_out: lines)
+        }
+      }
+  }
+}
+
+fn membership_label(p: pane.Pane) -> String {
+  case p {
+    pane.InRoom(pane.RoomState(membership: pane.Joined, ..)) -> "joined"
+    pane.InRoom(pane.RoomState(membership: pane.Joining, ..)) -> "joining"
+    pane.InRoom(pane.RoomState(membership: pane.Blocked(r), ..)) ->
+      "blocked:" <> r
+    pane.Directory -> "directory"
+    pane.System -> "system"
+  }
+}
+
+fn ws_label(ws: live.WsLabel) -> String {
+  case ws {
+    live.WsDisconnected -> "disconnected"
+    live.WsConnecting -> "connecting"
+    live.WsRegistering -> "registering"
+    live.WsReady -> "ready"
   }
 }
 

@@ -6,7 +6,7 @@
 //! - `log` / `log_scroll` — chat stream; labels wrap fully (no ellipsis)
 //! - `members_scroll` — compact right-rail list
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -14,14 +14,27 @@ use std::sync::mpsc;
 use gtk::glib;
 use gtk::prelude::*;
 
-use crate::view::{ButtonStyle, Node, UiEvent, View};
+use crate::scroll_state::ScrollState;
+use crate::view::{AvPanel, ButtonStyle, MsgRow, Node, Scroll, UiEvent, View};
 
+/// Public builder used by [`crate::iso`] for full mounts and log-row patches.
+pub fn build_node_public(
+    node: &Node,
+    drafts: &HashMap<String, String>,
+    event_tx: mpsc::Sender<UiEvent>,
+    scroll_targets: &mut Vec<(String, gtk::ScrolledWindow)>,
+) -> gtk::Widget {
+    build_node(node, drafts, event_tx, LayoutCtx::Root, scroll_targets)
+}
+
+/// Legacy full remount (prefer [`crate::iso::IsoMount::apply`]).
 pub fn mount_view(
     window: &adw::ApplicationWindow,
     host: &gtk::Box,
     view: &View,
     entry_drafts: &HashMap<String, String>,
     event_tx: mpsc::Sender<UiEvent>,
+    _scroll_state: &Rc<RefCell<ScrollState>>,
 ) {
     window.set_title(Some(&view.title));
     if window.default_width() < 100 {
@@ -33,13 +46,13 @@ pub fn mount_view(
         host.remove(&child);
     }
 
-    let mut scroll_bottom: Vec<gtk::ScrolledWindow> = Vec::new();
+    let mut scroll_targets: Vec<(String, gtk::ScrolledWindow)> = Vec::new();
     let body = build_node(
         &view.body,
         entry_drafts,
         event_tx,
         LayoutCtx::Root,
-        &mut scroll_bottom,
+        &mut scroll_targets,
     );
     body.set_hexpand(true);
     body.set_vexpand(true);
@@ -47,64 +60,33 @@ pub fn mount_view(
     host.queue_allocate();
     host.queue_draw();
 
-    // After layout, pin chat logs to the newest messages.
-    for sw in scroll_bottom {
-        scroll_to_bottom(&sw);
+    // Pure scroll apply from View data (isomorphic — no stick hacks).
+    for (id, sw) in &scroll_targets {
+        if id == "log_scroll" {
+            apply_scroll_simple(&view.scroll, sw);
+        }
     }
 }
 
-/// Scroll a chat `ScrolledWindow` to the end once content has a real height.
-///
-/// Wrapping labels grow `upper` over several frames after remount. A single
-/// early pin (or "done after first non-zero") leaves the viewport on older
-/// messages until the user scrolls — felt like "stale until I wheel". Keep
-/// pinning while height is still settling, then stop.
-fn scroll_to_bottom(sw: &gtk::ScrolledWindow) {
-    let vadj = sw.vadjustment();
-
-    let pin = |adj: &gtk::Adjustment| {
-        let upper = adj.upper();
-        let page = adj.page_size();
-        if upper > page {
-            adj.set_value(upper - page);
-        }
-    };
-
-    // Immediate (often still 0 height).
-    pin(&vadj);
-
-    // Settle flag: re-pin on adjustment changes while true.
-    let settling = Rc::new(Cell::new(true));
-    let settling_cb = settling.clone();
-    vadj.connect_changed(move |adj| {
-        if settling_cb.get() {
-            let upper = adj.upper();
-            let page = adj.page_size();
-            if upper > page {
-                adj.set_value(upper - page);
-            }
-        }
-    });
-
-    // Explicit ticks cover allocate / wrap without relying only on signals.
-    for delay_ms in [0_u64, 16, 50, 100, 200, 350] {
-        let adj = vadj.clone();
-        let settling = settling.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(delay_ms), move || {
-            if settling.get() {
+fn apply_scroll_simple(policy: &Scroll, sw: &gtk::ScrolledWindow) {
+    match policy {
+        Scroll::Preserve => {}
+        Scroll::Bottom => {
+            let pin = |adj: &gtk::Adjustment| {
+                let max = (adj.upper() - adj.page_size()).max(0.0);
+                adj.set_value(max);
+            };
+            pin(&sw.vadjustment());
+            let adj = sw.vadjustment();
+            glib::idle_add_local_once(move || {
                 pin(&adj);
-            }
-            glib::ControlFlow::Break
-        });
-    }
-
-    // End settle window so later user scroll is not yanked back to bottom.
-    {
-        let settling = settling.clone();
-        glib::timeout_add_local(std::time::Duration::from_millis(450), move || {
-            settling.set(false);
-            glib::ControlFlow::Break
-        });
+            });
+        }
+        Scroll::To { msgid } => {
+            let _ = msgid;
+            let max = (sw.vadjustment().upper() - sw.vadjustment().page_size()).max(0.0);
+            sw.vadjustment().set_value(max);
+        }
     }
 }
 
@@ -134,7 +116,11 @@ fn css_name(id: &str) -> String {
 fn ctx_for_id(id: &str, parent: LayoutCtx) -> LayoutCtx {
     if id == "user_panel" || id == "side" || id.ends_with("_panel") {
         LayoutCtx::SideRail
-    } else if id == "log" || id == "log_scroll" || id.starts_with("msg:") {
+    } else if id == "log"
+        || id == "log_scroll"
+        || id.starts_with("msg:")
+        || id.starts_with("log@")
+    {
         LayoutCtx::ChatLog
     } else if id == "chat_col" {
         LayoutCtx::Normal
@@ -152,7 +138,7 @@ fn build_node(
     drafts: &HashMap<String, String>,
     event_tx: mpsc::Sender<UiEvent>,
     parent_ctx: LayoutCtx,
-    scroll_bottom: &mut Vec<gtk::ScrolledWindow>,
+    scroll_targets: &mut Vec<(String, gtk::ScrolledWindow)>,
 ) -> gtk::Widget {
     match node {
         Node::VBox {
@@ -164,21 +150,47 @@ fn build_node(
             let b = gtk::Box::new(gtk::Orientation::Vertical, *spacing);
             b.set_widget_name(&css_name(id));
             apply_box_layout(&b, id, ctx, true);
+            // Shell / chat column must fill so log_scroll gets a real viewport
+            // (otherwise SW grows with content and "scroll to bottom" is a no-op).
+            if id == "shell" || id == "chat_col" || id.starts_with("log@") {
+                b.set_vexpand(true);
+                b.set_hexpand(true);
+            }
             for c in children {
+                let child_id = node_id(c);
                 let child_ctx = match c {
                     Node::VBox { id, .. } | Node::HBox { id, .. } | Node::Scrolled { id, .. } => {
                         ctx_for_id(id, ctx)
                     }
                     Node::Label { id, .. } => ctx_for_id(id, ctx),
+                    Node::Msg { row } => ctx_for_id(&row.id, LayoutCtx::ChatLog),
                     _ => ctx,
                 };
-                let w = build_node(c, drafts, event_tx.clone(), child_ctx, scroll_bottom);
-                if matches!(c, Node::Scrolled { .. }) {
+                let w = build_node(c, drafts, event_tx.clone(), child_ctx, scroll_targets);
+                if matches!(c, Node::Scrolled { .. }) || child_id == "log_scroll" {
+                    w.set_vexpand(true);
+                    w.set_hexpand(true);
+                    w.set_valign(gtk::Align::Fill);
+                }
+                if child_id == "root" || child_id == "chat_col" {
                     w.set_vexpand(true);
                     w.set_hexpand(true);
                 }
                 if matches!(c, Node::Entry { .. }) {
                     w.set_hexpand(true);
+                }
+                // Non-log chrome must not steal vertical space from the log.
+                if matches!(
+                    c,
+                    Node::Label { .. } | Node::Button { .. } | Node::HBox { .. } | Node::Av { .. }
+                ) && child_id != "root"
+                    && child_id != "chat_col"
+                    && child_id != "composer"
+                {
+                    w.set_vexpand(false);
+                }
+                if child_id == "composer" || child_id == "nav" || child_id == "ch_header" {
+                    w.set_vexpand(false);
                 }
                 b.append(&w);
             }
@@ -196,7 +208,7 @@ fn build_node(
             for c in children {
                 let child_id = node_id(c);
                 let child_ctx = ctx_for_id(child_id, ctx);
-                let w = build_node(c, drafts, event_tx.clone(), child_ctx, scroll_bottom);
+                let w = build_node(c, drafts, event_tx.clone(), child_ctx, scroll_targets);
                 // Chat column grows; user panel stays fixed.
                 if child_id == "chat_col" || child_id == "log_scroll" {
                     w.set_hexpand(true);
@@ -405,7 +417,7 @@ fn build_node(
                 sw.set_margin_start(4);
                 sw.set_margin_end(4);
             }
-            let inner = build_node(child, drafts, event_tx, ctx, scroll_bottom);
+            let inner = build_node(child, drafts, event_tx, ctx, scroll_targets);
             inner.set_hexpand(true);
             // Viewport-friendly wrapper so labels get a defined width.
             let wrap = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -417,9 +429,9 @@ fn build_node(
             }
             wrap.append(&inner);
             sw.set_child(Some(&wrap));
-            // Chat / system logs should open scrolled to the newest line.
+            // Chat / system logs — View.scroll decides pin vs preserve.
             if id == "log_scroll" || ctx == LayoutCtx::ChatLog {
-                scroll_bottom.push(sw.clone());
+                scroll_targets.push((id.clone(), sw.clone()));
             }
             sw.upcast()
         }
@@ -438,10 +450,289 @@ fn build_node(
         }
         Node::Spacer => {
             let s = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            s.set_vexpand(true);
+            // Overlay placeholders (empty react-picker) must not steal vertical space.
+            s.set_vexpand(false);
+            s.set_size_request(-1, 0);
             s.upcast()
         }
+        Node::Msg { row } => build_msg_row(row, event_tx),
+        Node::Av { panel } => build_av_panel(panel, event_tx),
     }
+}
+
+/// Call chrome only — MoQ media is browser-side; GTK shows status + controls.
+fn build_av_panel(panel: &AvPanel, event_tx: mpsc::Sender<UiEvent>) -> gtk::Widget {
+    if !panel.active && !panel.call_present {
+        let empty = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        empty.set_size_request(-1, 0);
+        return empty.upcast();
+    }
+
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    outer.set_widget_name("fq_av_panel");
+    outer.set_hexpand(true);
+    outer.set_margin_top(4);
+    outer.set_margin_bottom(4);
+    outer.add_css_class("card");
+    outer.set_margin_start(4);
+    outer.set_margin_end(4);
+
+    if panel.active {
+        let n = if panel.participant_count > 0 {
+            panel.participant_count
+        } else {
+            1
+        };
+        let status = gtk::Label::new(Some(&format!(
+            "📞 {} · {} in call",
+            panel.channel, n
+        )));
+        status.set_xalign(0.0);
+        status.set_margin_start(10);
+        status.set_margin_end(10);
+        status.set_margin_top(8);
+        outer.append(&status);
+
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        actions.set_margin_start(10);
+        actions.set_margin_end(10);
+        actions.set_margin_bottom(8);
+
+        let mute_label = if panel.muted { "🎤 off" } else { "🎤 on" };
+        let mute = gtk::Button::with_label(mute_label);
+        mute.add_css_class("flat");
+        let tx = event_tx.clone();
+        mute.connect_clicked(move |_| {
+            let _ = tx.send(UiEvent::Clicked {
+                id: "av_toggle_mute".into(),
+            });
+        });
+        actions.append(&mute);
+
+        let cam_label = if panel.camera { "📷 on" } else { "📷 off" };
+        let cam = gtk::Button::with_label(cam_label);
+        cam.add_css_class("flat");
+        let tx = event_tx.clone();
+        cam.connect_clicked(move |_| {
+            let _ = tx.send(UiEvent::Clicked {
+                id: "av_toggle_camera".into(),
+            });
+        });
+        actions.append(&cam);
+
+        let leave = gtk::Button::with_label("Leave");
+        leave.add_css_class("destructive-action");
+        let tx = event_tx.clone();
+        leave.connect_clicked(move |_| {
+            let _ = tx.send(UiEvent::Clicked {
+                id: "av_leave".into(),
+            });
+        });
+        actions.append(&leave);
+
+        outer.append(&actions);
+
+        let hint = gtk::Label::new(Some(
+            "Media tiles are browser-only (MoQ). Controls sync via the shared View tree.",
+        ));
+        hint.add_css_class("dim-label");
+        hint.set_xalign(0.0);
+        hint.set_wrap(true);
+        hint.set_margin_start(10);
+        hint.set_margin_end(10);
+        hint.set_margin_bottom(8);
+        outer.append(&hint);
+    } else if panel.call_present {
+        let n = if panel.participant_count > 0 {
+            panel.participant_count
+        } else {
+            1
+        };
+        let status = gtk::Label::new(Some(&format!(
+            "🔊 Call on {} · {} in call",
+            panel.channel, n
+        )));
+        status.set_xalign(0.0);
+        status.set_margin_start(10);
+        status.set_margin_top(8);
+        outer.append(&status);
+
+        let join = gtk::Button::with_label("Join call");
+        join.add_css_class("suggested-action");
+        join.set_margin_start(10);
+        join.set_margin_end(10);
+        join.set_margin_bottom(8);
+        let tx = event_tx.clone();
+        join.connect_clicked(move |_| {
+            let _ = tx.send(UiEvent::Clicked {
+                id: "av_join".into(),
+            });
+        });
+        outer.append(&join);
+    }
+
+    outer.upcast()
+}
+
+fn build_msg_row(row: &MsgRow, event_tx: mpsc::Sender<UiEvent>) -> gtk::Widget {
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    outer.set_widget_name(&css_name(&row.id));
+    outer.set_hexpand(true);
+    outer.set_halign(gtk::Align::Fill);
+    outer.set_margin_top(2);
+    outer.set_margin_bottom(2);
+    outer.add_css_class("chat-msg");
+    if row.own {
+        outer.add_css_class("chat-msg-own");
+    }
+    if row.deleted {
+        outer.add_css_class("chat-msg-deleted");
+    }
+    if row.highlight {
+        outer.add_css_class("chat-msg-highlight");
+    }
+
+    // Header: time · nick
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    if !row.time.is_empty() {
+        let ts = gtk::Label::new(Some(&row.time));
+        ts.add_css_class("dim-label");
+        ts.set_xalign(0.0);
+        header.append(&ts);
+    }
+    if !row.nick.is_empty() {
+        let nick = gtk::Label::new(Some(&row.nick));
+        nick.add_css_class("title-4");
+        nick.set_xalign(0.0);
+        header.append(&nick);
+    }
+    if row.edited && !row.deleted {
+        let ed = gtk::Label::new(Some("(edited)"));
+        ed.add_css_class("dim-label");
+        header.append(&ed);
+    }
+    outer.append(&header);
+
+    if !row.parent_msgid.is_empty() {
+        let who = if row.parent_nick.is_empty() {
+            "message"
+        } else {
+            row.parent_nick.as_str()
+        };
+        let preview = if row.parent_preview.is_empty() {
+            format!("↪ {who}")
+        } else {
+            format!("↪ {who}: {}", row.parent_preview)
+        };
+        let badge = gtk::Label::new(Some(&preview));
+        badge.add_css_class("dim-label");
+        badge.set_xalign(0.0);
+        badge.set_wrap(true);
+        badge.set_max_width_chars(72);
+        outer.append(&badge);
+    }
+
+    let body_text = if row.deleted {
+        let who = if row.nick.is_empty() {
+            "someone"
+        } else {
+            row.nick.as_str()
+        };
+        format!("Message from {who} deleted")
+    } else {
+        row.text.clone()
+    };
+    let body = gtk::Label::new(Some(&body_text));
+    body.set_xalign(0.0);
+    body.set_yalign(0.0);
+    body.set_selectable(true);
+    body.set_wrap(true);
+    body.set_wrap_mode(gtk::pango::WrapMode::WordChar);
+    body.set_ellipsize(gtk::pango::EllipsizeMode::None);
+    body.set_hexpand(true);
+    body.set_halign(gtk::Align::Fill);
+    body.set_max_width_chars(72);
+    body.add_css_class("chat-line");
+    if row.deleted {
+        body.add_css_class("dim-label");
+    }
+    outer.append(&body);
+
+    if !row.deleted && !row.embed_href.is_empty() {
+        let title = if row.embed_title.is_empty() {
+            row.embed_href.clone()
+        } else {
+            row.embed_title.clone()
+        };
+        let emb = gtk::Label::new(Some(&format!("🔗 {title}")));
+        emb.add_css_class("dim-label");
+        emb.set_xalign(0.0);
+        emb.set_wrap(true);
+        emb.set_max_width_chars(72);
+        emb.set_selectable(true);
+        outer.append(&emb);
+    }
+
+    if !row.deleted && (row.can_reply || row.can_edit || !row.reactions.is_empty() || !row.msgid.is_empty())
+    {
+        let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        actions.set_halign(gtk::Align::Start);
+
+        for chip in &row.reactions {
+            let id = format!("react:{}:{}", row.msgid, chip.emoji);
+            let btn = gtk::Button::with_label(&chip.label);
+            btn.add_css_class("flat");
+            btn.add_css_class("pill");
+            if chip.mine {
+                btn.add_css_class("suggested-action");
+            }
+            let tx = event_tx.clone();
+            btn.connect_clicked(move |_| {
+                let _ = tx.send(UiEvent::Clicked { id: id.clone() });
+            });
+            actions.append(&btn);
+        }
+
+        if !row.msgid.is_empty() && !row.deleted && row.kind == "msg" {
+            let id = format!("open_react:{}", row.msgid);
+            let btn = gtk::Button::with_label("+");
+            btn.add_css_class("flat");
+            btn.set_tooltip_text(Some("React"));
+            let tx = event_tx.clone();
+            btn.connect_clicked(move |_| {
+                let _ = tx.send(UiEvent::Clicked { id: id.clone() });
+            });
+            actions.append(&btn);
+        }
+
+        if row.can_reply {
+            let id = format!("reply:{}", row.msgid);
+            let btn = gtk::Button::with_label("↩");
+            btn.add_css_class("flat");
+            btn.set_tooltip_text(Some("Reply"));
+            let tx = event_tx.clone();
+            btn.connect_clicked(move |_| {
+                let _ = tx.send(UiEvent::Clicked { id: id.clone() });
+            });
+            actions.append(&btn);
+        }
+
+        if row.can_edit {
+            let id = format!("edit:{}", row.msgid);
+            let btn = gtk::Button::with_label("✎");
+            btn.add_css_class("flat");
+            btn.set_tooltip_text(Some("Edit"));
+            let tx = event_tx.clone();
+            btn.connect_clicked(move |_| {
+                let _ = tx.send(UiEvent::Clicked { id: id.clone() });
+            });
+            actions.append(&btn);
+        }
+
+        outer.append(&actions);
+    }
+
+    outer.upcast()
 }
 
 fn node_id(node: &Node) -> &str {
@@ -453,6 +744,8 @@ fn node_id(node: &Node) -> &str {
         | Node::Entry { id, .. }
         | Node::List { id, .. }
         | Node::Scrolled { id, .. } => id.as_str(),
+        Node::Msg { row } => row.id.as_str(),
+        Node::Av { .. } => "av_panel",
         Node::Separator | Node::Spacer => "",
     }
 }

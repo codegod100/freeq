@@ -121,16 +121,35 @@ body {
     min-height: 0;
 }
 
-/* ── Phase 2 View-tree shell (ui/html) ───────────────────────────────────────
- * LiveView renders View nodes: #root h-box → #chat_col + members aside.
- * Without this, flex height collapses and #messages looks empty.
+/* ── Phase 2+ View-tree shell (ui/html) ──────────────────────────────────────
+ * LiveView renders View nodes. Phase 3/4 wrap the page body in #shell so
+ * overlays (react-picker) can sit beside the main HBox without a second paint
+ * path. Flex height must flow: #freeq-chat → #shell → #root → #chat_col →
+ * #messages. Direct-child `> #root` alone is wrong once #shell exists —
+ * without this chain #messages collapses to 0 height (empty chat).
  */
 #freeq-chat.ui-view {
     display: flex;
     flex-direction: column;
 }
+/* Overlay host: fills the fixed chat viewport; column stacks root + picker. */
+#freeq-chat.ui-view > #shell,
+#freeq-chat.ui-view > .ui-id-shell {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    overflow: hidden;
+}
+/* Main row (chat column + members). Direct child of #shell or of #freeq-chat. */
 #freeq-chat.ui-view > #root,
-#freeq-chat.ui-view > .chat-body {
+#freeq-chat.ui-view > .chat-body,
+#freeq-chat.ui-view #shell > #root,
+#freeq-chat.ui-view #shell > .chat-body,
+#freeq-chat.ui-view .ui-id-shell > #root,
+#freeq-chat.ui-view .ui-id-shell > .chat-body {
     display: flex;
     flex-direction: row;
     flex: 1 1 0;
@@ -148,6 +167,10 @@ body {
     min-width: 0;
     min-height: 0;
     overflow: hidden;
+}
+/* Ensure AV region doesn't eat the messages flex share when empty is hidden. */
+#freeq-chat.ui-view [data-ls-region="av"] {
+    flex: 0 0 auto;
 }
 #freeq-chat.ui-view nav[data-ls-region="nav"],
 #freeq-chat.ui-view .ui-region-nav,
@@ -184,13 +207,15 @@ body {
     padding: 0.25rem 0.35rem 0.35rem;
 }
 /*
- * Phase 2 rows are plain text labels with class "row msg" so client JS still
- * finds [data-msgid] / .row. Legacy CSS sets display:grid with 3 columns
- * (ts | avatar | body) — a single text node only fills the 3.75rem ts column
- * and looks "empty". Force block layout for the View-tree path.
+ * Phase 3: structured Msg rows use the same grid as legacy freeq CSS
+ * (ts | avatar | body). Empty-state Labels stay block layout.
  */
-#freeq-chat.ui-view #messages .ui-label.row,
-#freeq-chat.ui-view #messages .row.msg,
+#freeq-chat.ui-view #messages > .row {
+    /* Inherit #messages .row grid rules — do not force block. */
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+}
 #freeq-chat.ui-view #messages .ui-label {
     display: block !important;
     grid-template-columns: none !important;
@@ -218,6 +243,53 @@ body {
     padding: 1.25rem 0.5rem;
     color: var(--muted);
     flex: 0 0 auto;
+}
+/* Reply / edit banner above the compose bar */
+#freeq-chat.ui-view .reply-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.5rem;
+    border-radius: 0.35rem;
+    background: color-mix(in srgb, var(--accent, #6c9eff) 12%, transparent);
+    font-size: 0.85rem;
+}
+/* AV invite strip (call present, not joined) */
+#freeq-chat.ui-view .av-invite-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.45rem 0.65rem;
+    margin: 0.15rem 0 0.35rem;
+    border-radius: 0.4rem;
+    background: color-mix(in srgb, var(--accent, #6c9eff) 14%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent, #6c9eff) 35%, transparent);
+    font-size: 0.88rem;
+}
+#freeq-chat.ui-view .av-region.empty {
+    display: none;
+}
+#freeq-chat.ui-view .av-region:not(.empty) {
+    flex: 0 0 auto;
+}
+
+#freeq-chat.ui-view .react-picker-host.open {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.35);
+}
+#freeq-chat.ui-view .react-picker-host.open #react_picker_box,
+#freeq-chat.ui-view .react-picker-host.open .ui-v-box {
+    background: var(--panel, #151a24);
+    border: 1px solid var(--border, #2a3344);
+    border-radius: 0.75rem;
+    padding: 0.75rem 1rem;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
 }
 /* Compose bar under the log */
 #freeq-chat.ui-view #compose-stack,

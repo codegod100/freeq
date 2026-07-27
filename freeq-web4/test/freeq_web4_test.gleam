@@ -589,16 +589,17 @@ pub fn unread_clears_on_part_test() {
 }
 
 pub fn sidebar_shows_unread_badge_test() {
-  // Phase 2: unread is model-only until MsgRow/sidebar chrome lands in the View tree.
+  // Phase 3: unread count appears on channel open buttons in the View tree.
   let before =
     live.mount_model("/chat/freeq")
     |> live.with_my_channels(["#freeq", "#dev"])
   let #(after, _) =
     live.apply(before, live.PushLine(":alice!a@h PRIVMSG #dev :hello"))
   assert live.unread_count(after, "#dev") == 1
-  // Rooms list still patches when my_channels markup changes are not needed;
-  // assert the model counter is the source of truth.
   assert live.unread_count(before, "#dev") == 0
+  let html = ui_html.view_html(live.view_tree(after))
+  assert string.contains(html, "(1)")
+  assert string.contains(html, "open") && string.contains(html, "dev")
 }
 
 pub fn with_api_bearer_test() {
@@ -1829,10 +1830,11 @@ pub fn live_reaction_tagmsg_updates_row_test() {
 }
 
 pub fn channel_shell_has_react_picker_region_test() {
-  // Phase 2: react picker not in View tree yet (Phase 3 MsgRow).
+  // Phase 3: react-picker region is always present (empty until opened).
   let html = live.initial_html("/chat/freeq")
   assert string.contains(html, "data-ls-region=\"messages\"")
   assert string.contains(html, "data-ls-region=\"compose\"")
+  assert string.contains(html, "data-ls-region=\"react-picker\"")
 }
 
 pub fn parse_history_reactions_from_batch_test() {
@@ -1913,8 +1915,7 @@ pub fn chathistory_reaction_batch_one_messages_patch_test() {
       before,
       fn(m, line) { live.apply(m, live.PushLine(line)).0 },
     )
-  // Phase 2: labels omit reaction chips, so hydrate does not change View HTML.
-  // Model still picks up tallies (asserted above via merge paths elsewhere).
+  // Phase 3: reaction chips are in the View tree, so hydrate patches messages once.
   let patches = live.plan_patches(before, after)
   let msg_patches =
     list.filter(patches, fn(p) {
@@ -1923,7 +1924,10 @@ pub fn chathistory_reaction_batch_one_messages_patch_test() {
         _ -> False
       }
     })
-  assert list.length(msg_patches) == 0
+  assert list.length(msg_patches) == 1
+  let assert Ok(diff.Replace(_, msg_html)) = list.first(msg_patches)
+  assert string.contains(msg_html, "reaction-chip")
+  assert string.contains(msg_html, "👍")
   // Reactions still land on the model.
   let assert Ok(r1) = list.find(after.messages, fn(r) { r.msgid == Some("m1") })
   assert dict.get(r1.reactions, "👍") == Ok(["x"])
@@ -2398,10 +2402,67 @@ pub fn av_leave_clears_state_test() {
 }
 
 pub fn av_channel_shell_has_call_button_test() {
-  // Phase 2: AV chrome is not in the View tree yet.
+  // Phase 4: call control lives in the shared View tree (nav + Region av).
   let html = live.initial_html("/chat/freeq")
   assert string.contains(html, "chat-center")
   assert string.contains(html, "id=\"freeq-chat\"")
+  assert string.contains(html, "data-ls-region=\"av\"")
+  assert string.contains(html, "data-ls-click=\"av_start\"")
+  assert string.contains(html, "id=\"av-call-btn\"")
+}
+
+pub fn av_panel_in_view_tree_when_active_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model =
+    live.Model(
+      ..model,
+      av_active: True,
+      av_channel: Some("#freeq"),
+      av_session_id: Some("01SID"),
+      av_token: Some("tok123"),
+      av_participant_count: 2,
+      av_muted: False,
+      av_camera: True,
+      av_instance: "deadbeef",
+    )
+  let html = ui_html.view_html(live.view_tree(model))
+  assert string.contains(html, "id=\"av-call-panel\"")
+  assert string.contains(html, "data-session-id=\"01SID\"")
+  assert string.contains(html, "data-moq-token=\"tok123\"")
+  assert string.contains(html, "data-camera=\"true\"")
+  assert string.contains(html, "data-ls-click=\"av_toggle_mute\"")
+  assert string.contains(html, "data-ls-click=\"av_leave\"")
+  assert string.contains(html, "id=\"av-video-grid\"")
+  assert string.contains(html, "data-ls-click=\"av_leave\"")
+  // Nav shows Leave while active.
+  assert string.contains(html, "av-call-btn in-call")
+}
+
+pub fn av_invite_bar_when_call_present_test() {
+  let model = live.mount_model("/chat/freeq")
+  let model =
+    live.Model(
+      ..model,
+      av_active: False,
+      av_call_present: True,
+      av_channel: Some("#freeq"),
+      av_participant_count: 3,
+    )
+  let html = ui_html.view_html(live.view_tree(model))
+  assert string.contains(html, "av-invite-bar")
+  assert string.contains(html, "data-ls-click=\"av_join\"")
+  assert string.contains(html, "Join")
+}
+
+pub fn ui_to_msg_av_controls_test() {
+  let model = live.mount_model("/chat/freeq")
+  let assert Some(live.AvStart) = live.ui_to_msg(ui.Clicked("av_start"), model)
+  let assert Some(live.AvJoin) = live.ui_to_msg(ui.Clicked("av_join"), model)
+  let assert Some(live.AvLeave) = live.ui_to_msg(ui.Clicked("av_leave"), model)
+  let assert Some(live.AvToggleMute) =
+    live.ui_to_msg(ui.Clicked("av_toggle_mute"), model)
+  let assert Some(live.AvToggleCamera) =
+    live.ui_to_msg(ui.Clicked("av_toggle_camera"), model)
 }
 
 /// MoQ capture/render AudioWorklets load via blob: URLs. CSP without blob:
@@ -2581,10 +2642,14 @@ pub fn patch_embed_renders_link_card_test() {
     )
   let #(with_embed, _) =
     live.apply(with_hist, live.PatchEmbed("m-embed", embed))
-  // Phase 2: embeds are model state only (MsgRow will paint them in Phase 3).
+  // Phase 3: embeds paint as link cards in the View tree.
   let assert Ok(row) =
     list.find(with_embed.messages, fn(r) { r.id == "m-embed" || r.msgid == Some("m-embed") })
   assert row.embed == Some(embed)
+  let html = ui_html.view_html(live.view_tree(with_embed))
+  assert string.contains(html, "link-embed")
+  assert string.contains(html, "Example Domain")
+  assert string.contains(html, "https://example.com/x")
 }
 
 // ── Message search ───────────────────────────────────────────────────────────
@@ -2890,8 +2955,11 @@ pub fn jump_to_msg_renders_highlight_class_test() {
   let model = live.mount_model("/chat/freeq")
   let model = live.apply(model, live.SetHistory([row])).0
   let jumped = live.apply(model, live.JumpToMsg("mid-hl", Some(1000))).0
-  // Phase 2: scroll target is model-only until MsgRow carries data-msgid.
+  // Phase 3: MsgRow carries data-msgid + highlight class.
   assert jumped.scroll_to_msgid == Some("mid-hl")
+  let html = ui_html.view_html(live.view_tree(jumped))
+  assert string.contains(html, "data-msgid=\"mid-hl\"")
+  assert string.contains(html, "highlight")
 }
 
 pub fn unread_case_insensitive_test() {
@@ -3234,7 +3302,10 @@ pub fn set_history_appears_in_view_tree_test() {
   let html = ui_html.view_html(live.view_tree(with_hist))
   assert string.contains(html, "hello from history")
   assert string.contains(html, "data-msgid=\"mid-hist-1\"")
-  assert string.contains(html, "class=\"ui-label row msg")
+  assert string.contains(html, "class=\"row msg\"")
+  assert string.contains(html, "class=\"nick")
+  assert string.contains(html, "open_react_picker")
+  assert string.contains(html, "reply-btn")
   // Diff from cold open → history must patch messages region.
   let patches = live.plan_patches(model, with_hist)
   let htmls =
@@ -3246,6 +3317,40 @@ pub fn set_history_appears_in_view_tree_test() {
     })
     |> string.concat
   assert string.contains(htmls, "hello from history")
+}
+
+pub fn ui_to_msg_react_reply_edit_test() {
+  let model = live.mount_model("/chat/freeq")
+  let assert Some(live.ToggleReaction("m1", "👍")) =
+    live.ui_to_msg(ui.Clicked("react:m1:👍"), model)
+  let assert Some(live.StartReply("m1")) =
+    live.ui_to_msg(ui.Clicked("reply:m1"), model)
+  let assert Some(live.StartEdit("m1")) =
+    live.ui_to_msg(ui.Clicked("edit:m1"), model)
+  let assert Some(live.OpenReactPicker("m1")) =
+    live.ui_to_msg(ui.Clicked("open_react:m1"), model)
+  let assert Some(live.CloseReactPicker) =
+    live.ui_to_msg(ui.Clicked("close_react"), model)
+  let assert Some(live.CancelReply) =
+    live.ui_to_msg(ui.Clicked("cancel_compose"), model)
+}
+
+pub fn msg_row_compose_banner_test() {
+  let row =
+    render.history_row(
+      "me!m@h",
+      "own text",
+      Some("mid-edit"),
+      Some(100),
+      None,
+      dict.new(),
+    )
+  let model = live.mount_model("/chat/freeq")
+  let model = live.apply(model, live.SetHistory([row])).0
+  let model = live.apply(model, live.StartReply("mid-edit")).0
+  let html = ui_html.view_html(live.view_tree(model))
+  assert string.contains(html, "compose_banner") || string.contains(html, "reply-banner")
+  assert string.contains(html, "cancel_compose") || string.contains(html, "cancel_reply")
 }
 
 pub fn empty_channel_cache_reopens_cold_test() {

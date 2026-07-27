@@ -121,6 +121,8 @@ Without the flake: Gleam 1.17+, OTP 26+.
 - [x] Message search (REST `/api/v1/search` modal)
 - [x] System channel tab (connection status + server notices)
 - [x] PWA
+- [x] Phase 3 View tree `Msg` rows (reactions, reply/edit, embeds, unread, react picker) shared with freeq-gtk
+- [x] Phase 4 View tree `Av` panel (call chrome + MoQ host island) shared with freeq-gtk
 
 ## Idioms
 

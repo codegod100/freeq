@@ -135,6 +135,14 @@ pub fn is_room(p: Pane) -> Bool {
   }
 }
 
+/// True when the active room has confirmed JOIN (353 / self JOIN).
+pub fn is_joined(p: Pane) -> Bool {
+  case p {
+    InRoom(RoomState(membership: Joined, ..)) -> True
+    _ -> False
+  }
+}
+
 /// Canonical channel when focused on a room.
 pub fn channel(p: Pane) -> Option(String) {
   case p {

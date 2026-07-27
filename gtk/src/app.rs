@@ -10,7 +10,7 @@ use gtk::prelude::{ActionMapExt, GtkWindowExt, IsA, WidgetExt};
 use relm4::prelude::*;
 
 use crate::dist::{DistCommand, DistEvent, DistHandle, DistOptions, Inbound, spawn_dist_node};
-use crate::render;
+use crate::iso::IsoMount;
 use crate::view::{Node, UiEvent, View};
 
 const APP_ID: &str = "at.freeq.gtk";
@@ -29,6 +29,8 @@ pub struct AppModel {
     ui_tx: mpsc::Sender<UiEvent>,
     /// Generation counter so we can skip no-op remounts.
     view_gen: u64,
+    /// Isomorphic mount: reuses log_scroll when only messages change.
+    iso: IsoMount,
 }
 
 #[derive(Debug)]
@@ -125,6 +127,7 @@ impl Component for AppModel {
             debug: "init".into(),
             ui_tx,
             view_gen: 0,
+            iso: IsoMount::default(),
         };
 
         let (event_tx, event_rx) = mpsc::channel::<DistEvent>();
@@ -170,16 +173,12 @@ impl Component for AppModel {
         // Defer first mount until the window is realized — avoids
         // gtk_widget_is_ancestor assertions during early init.
         {
-            let host = widgets.content_host.clone();
-            let view = model.view.clone();
-            let drafts = model.entry_drafts.clone();
-            let ui_tx = model.ui_tx.clone();
-            let root = root.clone();
-            glib::idle_add_local_once(move || {
-                render::mount_view(&root, &host, &view, &drafts, ui_tx);
-            });
+            // First paint deferred until realized; iso applied in update_with_view.
+            let _ = widgets.content_host.clone();
+            let _ = root.clone();
         }
-        model.dirty = false;
+        // Keep dirty so first update_with_view paints.
+        model.dirty = true;
 
         ComponentParts { model, widgets }
     }
@@ -200,9 +199,9 @@ impl Component for AppModel {
         if self.dirty {
             let gen = self.view_gen;
             let summary = view_summary(&self.view);
-            tracing::info!(gen, %summary, "remount view");
-            self.debug = format!("remount #{gen} · {summary}");
-            render::mount_view(
+            tracing::info!(gen, %summary, "apply view (iso)");
+            self.debug = format!("iso #{gen} · {summary}");
+            self.iso.apply(
                 root,
                 &widgets.content_host,
                 &self.view,
@@ -289,13 +288,46 @@ impl AppModel {
 
     fn on_ui(&mut self, ev: UiEvent) {
         // Local drafts only — do not ship every keystroke over dist (flood + remount).
+        // Gleam `model.compose` is therefore stale until Activate / Send with text.
         if let UiEvent::Changed { id, text } = &ev {
             self.entry_drafts.insert(id.clone(), text.clone());
             return;
         }
-        if let UiEvent::Activate { id, .. } = &ev {
-            self.entry_drafts.remove(id);
-        }
+
+        // Send button: Gleam maps Clicked("send") → Send(model.compose), but
+        // compose is never updated from GTK typing. Convert to Activate(input, text)
+        // so the draft actually goes out (same path as pressing Enter).
+        let ev = match &ev {
+            UiEvent::Clicked { id } if id == "send" => {
+                let text = self
+                    .entry_drafts
+                    .get("input")
+                    .cloned()
+                    .unwrap_or_default();
+                self.entry_drafts.remove("input");
+                UiEvent::Activate {
+                    id: "input".into(),
+                    text,
+                }
+            }
+            UiEvent::Clicked { id } if id == "join" => {
+                let text = self
+                    .entry_drafts
+                    .get("join_input")
+                    .cloned()
+                    .unwrap_or_default();
+                self.entry_drafts.remove("join_input");
+                UiEvent::Activate {
+                    id: "join_input".into(),
+                    text,
+                }
+            }
+            UiEvent::Activate { id, .. } => {
+                self.entry_drafts.remove(id);
+                ev
+            }
+            _ => ev,
+        };
 
         let Some(dist) = &self.dist else {
             self.debug = "ui event but no dist".into();
@@ -305,7 +337,9 @@ impl AppModel {
         let peer = self.last_peer.as_ref().and_then(|p| p.parse().ok());
         let label = match &ev {
             UiEvent::Clicked { id } => format!("click {id}"),
-            UiEvent::Activate { id, .. } => format!("activate {id}"),
+            UiEvent::Activate { id, text } => {
+                format!("activate {id} ({} chars)", text.chars().count())
+            }
             UiEvent::Changed { id, .. } => format!("change {id}"),
             UiEvent::Selected { id, index, .. } => format!("select {id}[{index}]"),
         };

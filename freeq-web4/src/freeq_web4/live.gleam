@@ -3032,11 +3032,10 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
 
 // ── Patches ──────────────────────────────────────────────────────────────────
 
-/// Region Diffs from the canonical View tree (`ui.from_model` → `ui/html`).
+/// Region Diffs from the canonical View tree (`view_tree` → `ui/html`).
 ///
-/// Phase 2: browser and freeq-gtk share one presentation AST. Rich web-only
-/// chrome (search modal, react picker, AV panel, unread badges) is not in the
-/// tree yet — see Phase 3 `MsgRow` / Host nodes.
+/// Region Diffs from the shared View tree. Msg rows, AV panel, compose banner,
+/// unread, and react-picker are all in the tree. Search modal is still model-only.
 pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
   ui_html.plan_patches(view_tree(before), view_tree(after))
 }
@@ -4801,7 +4800,10 @@ fn message_preview(
 
 // ── Model → View ─────────────────────────────────────────────────────────────
 
-/// Canonical View tree for GTK dist + LiveView HTML (Phase 2).
+/// Canonical View tree for GTK dist + LiveView HTML (Phase 2/3).
+///
+/// Phase 3: structured `Msg` rows (reactions, edit/reply, embeds), compose
+/// reply/edit banner, unread badges, react-picker region.
 pub fn view_tree(model: Model) -> ui.View {
   let subtitle = case view(model) {
     Index -> "directory · " <> tree_ws_label(model.ws)
@@ -4817,13 +4819,61 @@ pub fn view_tree(model: Model) -> ui.View {
     System -> tree_system_body(model)
     Channel -> tree_channel_body(model)
   }
+  // Overlays (react picker) wrap the main body so both web and GTK see them.
+  let body = tree_with_overlays(model, body)
   ui.View(
     title: "freeq",
     subtitle: subtitle,
     width: 1100,
     height: 720,
+    // GTK remounts the whole tree on each push — scroll cannot stay in the
+    // client alone. Web also uses this for data-scroll-to / stick-to-bottom.
+    scroll: tree_scroll_policy(model),
     body: body,
   )
+}
+
+/// Message-log scroll intent for this paint.
+///
+/// - Jump/highlight → pin that msgid
+/// - Channel / system with a message stream → bottom (live tail + own send)
+/// - Directory has no log → preserve (no-op on GTK)
+fn tree_scroll_policy(model: Model) -> ui.Scroll {
+  case model.scroll_to_msgid {
+    Some(mid) if mid != "" -> ui.ScrollTo(mid)
+    _ ->
+      case view(model) {
+        Channel | System -> ui.ScrollBottom
+        Index -> ui.ScrollPreserve
+      }
+  }
+}
+
+fn tree_with_overlays(model: Model, body: ui.Node) -> ui.Node {
+  let picker = tree_react_picker_region(model)
+  ui.VBox(id: "shell", spacing: 0, children: [body, picker])
+}
+
+fn tree_react_picker_region(model: Model) -> ui.Node {
+  let child = case model.react_picker_msgid {
+    None -> ui.Spacer
+    Some(msgid) -> {
+      let buttons =
+        list.map(render.react_emojis(), fn(emoji) {
+          ui.Button(
+            id: "react:" <> msgid <> ":" <> emoji,
+            label: emoji,
+            style: ui.Normal,
+          )
+        })
+      ui.VBox(id: "react_picker_box", spacing: 8, children: [
+        ui.Label(id: "react_picker_hdr", text: "React", dim: False),
+        ui.HBox(id: "react_picker_row", spacing: 6, children: buttons),
+        ui.Button(id: "close_react", label: "Close", style: ui.Normal),
+      ])
+    }
+  }
+  ui.Region(name: "react-picker", child: child)
 }
 
 // ── Directory ────────────────────────────────────────────────────────────────
@@ -4831,13 +4881,22 @@ pub fn view_tree(model: Model) -> ui.View {
 fn tree_directory_body(model: Model) -> ui.Node {
   let mine =
     list.map(model.my_channels, fn(ch) {
-      ui.Button(id: "open:" <> ch, label: ch, style: ui.Normal)
+      ui.Button(
+        id: "open:" <> ch,
+        label: tree_channel_label(model, ch, False),
+        style: ui.Normal,
+      )
     })
   let all =
     list.map(model.all_channels, fn(info: rest.ChannelInfo) {
-      let label = case info.members > 0 {
+      let base = case info.members > 0 {
         True -> info.name <> "  ·  " <> int.to_string(info.members)
         False -> info.name
+      }
+      let n = unread_count(model, info.name)
+      let label = case n {
+        0 -> base
+        c -> base <> "  (" <> int.to_string(c) <> ")"
       }
       ui.Button(id: "open:" <> info.name, label: label, style: ui.Normal)
     })
@@ -4886,20 +4945,24 @@ fn tree_directory_body(model: Model) -> ui.Node {
 // ── System ───────────────────────────────────────────────────────────────────
 
 fn tree_system_body(model: Model) -> ui.Node {
-  let lines = tree_message_labels(model.system_messages)
+  let lines = tree_message_nodes(model, model.system_messages)
+  let nav_kids =
+    list.flatten([
+      [ui.Button(id: "go_index", label: "← Directory", style: ui.Normal)],
+      tree_av_nav_buttons(model),
+    ])
   ui.HBox(id: "root", spacing: 12, children: [
     ui.VBox(id: "chat_col", spacing: 10, children: [
       ui.Region(
         name: "nav",
-        child: ui.HBox(id: "nav", spacing: 8, children: [
-          ui.Button(id: "go_index", label: "← Directory", style: ui.Normal),
-        ]),
+        child: ui.HBox(id: "nav", spacing: 8, children: nav_kids),
       ),
       ui.Region(
         name: "main",
         child: ui.Label(id: "sys_hdr", text: "System", dim: False),
       ),
       tree_flash_region(model),
+      tree_av_region(model),
       tree_messages_region(model, system_key, lines),
       ui.Region(name: "compose", child: tree_composer_row(model, "/join #channel")),
     ]),
@@ -4918,14 +4981,15 @@ fn tree_channel_body(model: Model) -> ui.Node {
     "" -> "(no topic)"
     t -> t
   }
-  let lines = tree_message_labels(model.messages)
+  let lines = tree_message_nodes(model, model.messages)
   let joined =
     list.map(model.my_channels, fn(name) {
-      let mark = case name == ch {
-        True -> "● "
-        False -> "○ "
-      }
-      ui.Button(id: "open:" <> name, label: mark <> name, style: ui.Normal)
+      let active = name == ch
+      ui.Button(
+        id: "open:" <> name,
+        label: tree_channel_label(model, name, active),
+        style: ui.Normal,
+      )
     })
   let msg_lines = case lines {
     [] ->
@@ -4947,15 +5011,20 @@ fn tree_channel_body(model: Model) -> ui.Node {
       }
     xs -> xs
   }
+  let nav_kids =
+    list.flatten([
+      [
+        ui.Button(id: "go_index", label: "← Directory", style: ui.Normal),
+        ui.Button(id: "go_system", label: "System", style: ui.Normal),
+      ],
+      tree_av_nav_buttons(model),
+      [ui.Button(id: "part", label: "Part", style: ui.Destructive)],
+    ])
   ui.HBox(id: "root", spacing: 12, children: [
     ui.VBox(id: "chat_col", spacing: 8, children: [
       ui.Region(
         name: "nav",
-        child: ui.HBox(id: "nav", spacing: 8, children: [
-          ui.Button(id: "go_index", label: "← Directory", style: ui.Normal),
-          ui.Button(id: "go_system", label: "System", style: ui.Normal),
-          ui.Button(id: "part", label: "Part", style: ui.Destructive),
-        ]),
+        child: ui.HBox(id: "nav", spacing: 8, children: nav_kids),
       ),
       ui.Region(
         name: "main",
@@ -4965,16 +5034,84 @@ fn tree_channel_body(model: Model) -> ui.Node {
         ]),
       ),
       tree_flash_region(model),
+      // AV lives in the tree: one Av node under Region("av"), same ETF as GTK.
+      tree_av_region(model),
       tree_messages_region(model, ch, msg_lines),
-      ui.Region(name: "compose", child: tree_composer_row(model, "Message…")),
+      ui.Region(name: "compose", child: tree_compose_stack(model, "Message…")),
     ]),
     ui.Region(name: "members", child: tree_user_panel(model, joined)),
   ])
 }
 
+/// Nav call control — Start / Join / Leave as a single Button in the tree.
+fn tree_av_nav_buttons(model: Model) -> List(ui.Node) {
+  let show = case view(model) {
+    Channel -> True
+    Index | System -> model.av_active
+  }
+  case show {
+    False -> []
+    True -> {
+      let #(id, label, style) = case model.av_active, model.av_call_present {
+        True, _ -> #("av_leave", "📞 Leave", ui.Destructive)
+        False, True -> {
+          let n = model.av_participant_count
+          let badge = case n {
+            0 -> "!"
+            c -> int.to_string(c)
+          }
+          #("av_join", "🔊 Join (" <> badge <> ")", ui.Suggested)
+        }
+        False, False -> #("av_start", "🎙️ Call", ui.Normal)
+      }
+      [ui.Button(id: id, label: label, style: style)]
+    }
+  }
+}
+
+/// Always emit Region("av") so patches target a stable boundary.
+fn tree_av_region(model: Model) -> ui.Node {
+  ui.Region(name: "av", child: ui.Av(tree_av_panel(model)))
+}
+
+fn tree_av_panel(model: Model) -> ui.AvPanel {
+  let channel = case model.av_channel {
+    Some(c) -> c
+    None -> option.unwrap(current_channel(model), "")
+  }
+  ui.AvPanel(
+    active: model.av_active,
+    call_present: model.av_call_present,
+    channel: channel,
+    session_id: option.unwrap(model.av_session_id, ""),
+    token: option.unwrap(model.av_token, ""),
+    nick: model.nick,
+    instance: model.av_instance,
+    participant_count: model.av_participant_count,
+    muted: model.av_muted,
+    camera: model.av_camera,
+    authenticated: identity.is_bound(model.identity),
+    av_origin: config.av_origin(),
+  )
+}
+
+fn tree_channel_label(model: Model, name: String, active: Bool) -> String {
+  let mark = case active {
+    True -> "● "
+    False -> "○ "
+  }
+  let n = unread_count(model, name)
+  case n {
+    0 -> mark <> name
+    c -> mark <> name <> "  (" <> int.to_string(c) <> ")"
+  }
+}
+
 fn tree_flash_region(model: Model) -> ui.Node {
+  // Empty flash must NOT be Spacer — GTK Spacer used to vexpand and steal
+  // height from the message log. Zero-size empty label keeps layout stable.
   let child = case string.trim(model.flash) {
-    "" -> ui.Spacer
+    "" -> ui.Label(id: "flash_empty", text: "", dim: True)
     f -> ui.Label(id: "flash", text: f, dim: False)
   }
   ui.Region(name: "flash", child: child)
@@ -5013,6 +5150,50 @@ fn tree_messages_region(
   )
 }
 
+fn tree_compose_stack(model: Model, placeholder: String) -> ui.Node {
+  let banner = tree_compose_banner(model)
+  let row = tree_composer_row(model, placeholder)
+  case banner {
+    None -> row
+    Some(b) ->
+      ui.VBox(id: "compose_stack_inner", spacing: 6, children: [b, row])
+  }
+}
+
+fn tree_compose_banner(model: Model) -> Option(ui.Node) {
+  case model.edit_to, model.reply_to {
+    Some(_), _ -> {
+      let preview = case model.reply_preview_text {
+        "" -> "Editing message"
+        t -> "Editing: " <> t
+      }
+      Some(
+        ui.HBox(id: "compose_banner", spacing: 8, children: [
+          ui.Label(id: "compose_banner_text", text: "✎ " <> preview, dim: False),
+          ui.Button(id: "cancel_compose", label: "Cancel", style: ui.Normal),
+        ]),
+      )
+    }
+    None, Some(_) -> {
+      let who = case model.reply_preview_nick {
+        "" -> "message"
+        n -> n
+      }
+      let preview = case model.reply_preview_text {
+        "" -> "Replying to " <> who
+        t -> "↪ " <> who <> ": " <> t
+      }
+      Some(
+        ui.HBox(id: "compose_banner", spacing: 8, children: [
+          ui.Label(id: "compose_banner_text", text: preview, dim: False),
+          ui.Button(id: "cancel_compose", label: "Cancel", style: ui.Normal),
+        ]),
+      )
+    }
+    None, None -> None
+  }
+}
+
 fn tree_composer_row(model: Model, placeholder: String) -> ui.Node {
   ui.HBox(id: "composer", spacing: 8, children: [
     ui.Entry(
@@ -5025,22 +5206,187 @@ fn tree_composer_row(model: Model, placeholder: String) -> ui.Node {
   ])
 }
 
-fn tree_message_labels(rows: List(render.Row)) -> List(ui.Node) {
+/// Phase 3: structured Msg nodes (reactions, embeds, edit/reply affordances).
+fn tree_message_nodes(
+  model: Model,
+  rows: List(render.Row),
+) -> List(ui.Node) {
+  let lookup = parent_lookup_from_rows(rows)
+  let aliases = my_reaction_aliases(model)
+  let scroll_mid = option.unwrap(model.scroll_to_msgid, "")
+  let my_nick = model.nick
   list.index_map(rows, fn(row, i) {
-    // Prefer msgid for client scroll/jump; fall back to row.id.
-    let mid = case row.msgid {
-      Some(m) if m != "" -> m
-      _ -> row.id
-    }
-    ui.Label(
-      id: "msg:" <> mid <> ":" <> int.to_string(i),
-      text: tree_row_line(row),
-      dim: case row.kind {
-        render.Msg -> False
-        _ -> True
-      },
-    )
+    ui.Msg(tree_msg_row(model, row, i, lookup, aliases, scroll_mid, my_nick))
   })
+}
+
+fn tree_msg_row(
+  model: Model,
+  row: render.Row,
+  index: Int,
+  lookup: Dict(String, #(String, String)),
+  aliases: List(String),
+  scroll_mid: String,
+  my_nick: String,
+) -> ui.MsgRow {
+  let mid = case row.msgid {
+    Some(m) if m != "" -> m
+    _ -> row.id
+  }
+  let nick = option.unwrap(row.nick, "")
+  let is_own = is_own_row(row, my_nick)
+  let highlight = case scroll_mid {
+    "" -> False
+    target -> mid == target || row.id == target
+  }
+  let #(parent_msgid, parent_nick, parent_preview) = case row.parent {
+    Some(p) if p != "" -> {
+      let #(pn, pt) = case dict.get(lookup, p) {
+        Ok(#(n, t)) -> #(n, render.preview_text(t))
+        Error(_) -> #("", "")
+      }
+      #(p, pn, pt)
+    }
+    _ -> #("", "", "")
+  }
+  let avatar_url = case resolve_avatar_url(model, resolve_row_did(model, row)) {
+    Some(u) -> u
+    None ->
+      case nick {
+        "" -> ""
+        n -> profiles.fallback_avatar_data_uri(n, row.color)
+      }
+  }
+  let reactions =
+    list.map(render.reaction_entries(row.reactions), fn(entry) {
+      let #(emoji, nicks) = entry
+      ui.ReactionChip(
+        emoji: emoji,
+        label: render.reaction_chip_label(emoji, nicks),
+        mine: nick_in_aliases(nicks, aliases),
+      )
+    })
+  let can_reply =
+    !row.deleted && row.kind == render.Msg && mid != ""
+  let can_edit =
+    is_own && !row.deleted && row.kind == render.Msg && mid != ""
+  let time = case row.timestamp {
+    Some(sec) -> render.time_label_local_from_unix(sec)
+    None -> row.time_label
+  }
+  let text = case row.deleted {
+    True -> "(deleted)"
+    False -> row.text
+  }
+  let #(
+    embed_kind,
+    embed_href,
+    embed_title,
+    embed_description,
+    embed_site,
+    embed_domain,
+    embed_image_url,
+    bsky_display,
+    bsky_handle,
+    bsky_text,
+    bsky_likes,
+    bsky_reposts,
+    bsky_time,
+    bsky_avatar,
+  ) = tree_embed_fields(row)
+
+  ui.MsgRow(
+    id: "msg:" <> mid <> ":" <> int.to_string(index),
+    msgid: mid,
+    kind: render.kind_class(row.kind),
+    nick: nick,
+    color: row.color,
+    time: time,
+    text: text,
+    own: is_own,
+    edited: row.edited,
+    deleted: row.deleted,
+    highlight: highlight,
+    parent_msgid: parent_msgid,
+    parent_nick: parent_nick,
+    parent_preview: parent_preview,
+    avatar_url: avatar_url,
+    reactions: reactions,
+    can_reply: can_reply,
+    can_edit: can_edit,
+    embed_kind: embed_kind,
+    embed_href: embed_href,
+    embed_title: embed_title,
+    embed_description: embed_description,
+    embed_site: embed_site,
+    embed_domain: embed_domain,
+    embed_image_url: embed_image_url,
+    bsky_display: bsky_display,
+    bsky_handle: bsky_handle,
+    bsky_text: bsky_text,
+    bsky_likes: bsky_likes,
+    bsky_reposts: bsky_reposts,
+    bsky_time: bsky_time,
+    bsky_avatar: bsky_avatar,
+  )
+}
+
+fn tree_embed_fields(
+  row: render.Row,
+) -> #(
+  String,
+  String,
+  String,
+  String,
+  String,
+  String,
+  String,
+  String,
+  String,
+  String,
+  Int,
+  Int,
+  String,
+  String,
+) {
+  case row.deleted, row.embed {
+    True, _ | _, None -> #("", "", "", "", "", "", "", "", "", "", 0, 0, "", "")
+    False, Some(e) -> {
+      let kind = case e.kind {
+        render.Youtube -> "youtube"
+        render.Bsky -> "bsky"
+        render.Og -> "og"
+      }
+      let #(bd, bh, bt, bl, br, btime, bav) = case e.bsky {
+        Some(b) -> #(
+          b.display,
+          b.handle,
+          b.text,
+          b.likes,
+          b.reposts,
+          b.time,
+          option.unwrap(b.avatar_url, ""),
+        )
+        None -> #("", "", "", 0, 0, "", "")
+      }
+      #(
+        kind,
+        e.href,
+        option.unwrap(e.title, ""),
+        option.unwrap(e.description, ""),
+        option.unwrap(e.site_name, ""),
+        option.unwrap(e.domain, ""),
+        option.unwrap(e.image_url, ""),
+        bd,
+        bh,
+        bt,
+        bl,
+        br,
+        btime,
+        bav,
+      )
+    }
+  }
 }
 
 fn tree_user_panel(model: Model, joined_buttons: List(ui.Node)) -> ui.Node {
@@ -5125,38 +5471,6 @@ fn tree_short_did(did: String) -> String {
   }
 }
 
-fn tree_row_line(row: render.Row) -> String {
-  let nick = case row.nick {
-    Some(n) -> n
-    None -> "*"
-  }
-  let prefix = case row.kind {
-    render.Msg -> ""
-    render.Notice -> "· notice · "
-    render.Join -> "→ "
-    render.Part -> "← "
-    render.Quit -> "✕ "
-    render.System -> "· "
-  }
-  let body = case row.deleted {
-    True -> "(deleted)"
-    False -> row.text
-  }
-  let edited = case row.edited {
-    True -> "  (edited)"
-    False -> ""
-  }
-  let time = case row.timestamp {
-    Some(sec) -> render.time_label_local_from_unix(sec) <> "  "
-    None ->
-      case row.time_label {
-        "" -> ""
-        t -> t <> "  "
-      }
-  }
-  time <> prefix <> nick <> ": " <> body <> edited
-}
-
 fn tree_ws_label(ws: WsLabel) -> String {
   case ws {
     WsDisconnected -> "offline"
@@ -5186,10 +5500,26 @@ pub fn ui_to_msg(event: ui.Event, model: Model) -> Option(Msg) {
         Some(ch) -> Some(Part(ch))
         None -> None
       }
+    ui.Clicked("cancel_compose") -> Some(CancelReply)
+    ui.Clicked("close_react") -> Some(CloseReactPicker)
+    ui.Clicked("av_start") -> Some(AvStart)
+    ui.Clicked("av_join") -> Some(AvJoin)
+    ui.Clicked("av_leave") -> Some(AvLeave)
+    ui.Clicked("av_toggle_mute") -> Some(AvToggleMute)
+    ui.Clicked("av_toggle_camera") -> Some(AvToggleCamera)
 
     ui.Clicked(id) ->
       case string.split_once(id, ":") {
         Ok(#("open", bare)) -> Some(OpenChannel(bare))
+        Ok(#("reply", mid)) -> Some(StartReply(mid))
+        Ok(#("edit", mid)) -> Some(StartEdit(mid))
+        Ok(#("open_react", mid)) -> Some(OpenReactPicker(mid))
+        Ok(#("react", rest)) ->
+          case string.split_once(rest, ":") {
+            Ok(#(mid, emoji)) if mid != "" && emoji != "" ->
+              Some(ToggleReaction(mid, emoji))
+            _ -> None
+          }
         _ -> None
       }
 

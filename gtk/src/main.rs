@@ -2,7 +2,9 @@
 
 mod app;
 mod dist;
+mod iso;
 mod render;
+mod scroll_state;
 mod view;
 
 use std::path::PathBuf;
