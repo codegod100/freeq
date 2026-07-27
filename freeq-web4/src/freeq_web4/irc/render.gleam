@@ -499,6 +499,17 @@ pub fn time_label_from_unix(sec: Int) -> String {
   format_12h(h, m)
 }
 
+/// Host-local 12-hour clock for a unix timestamp (same shape as UTC labels).
+/// freeq-gtk has no browser rewrite step, so GTK views use this instead of
+/// `time_label_from_unix` / the stored UTC `Row.time_label`.
+pub fn time_label_local_from_unix(sec: Int) -> String {
+  let #(h, m) = local_hour_minute(sec)
+  format_12h(h, m)
+}
+
+@external(erlang, "freeq_web4_ffi", "local_hour_minute")
+fn local_hour_minute(sec: Int) -> #(Int, Int)
+
 /// `hour` 0–23, `minute` 0–59 → `"12:05 PM"` (NBSP before meridiem, web3 parity).
 fn format_12h(hour24: Int, minute: Int) -> String {
   let period = case hour24 >= 12 {

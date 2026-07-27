@@ -1,0 +1,37 @@
+# Standalone crate (not a freeq workspace member — avoids pulling GTK into the monorepo build).
+[workspace]
+members = ["."]
+
+[package]
+name = "freeq-gtk"
+version = "0.1.0"
+edition = "2021"
+description = "Relm4 GTK client for freeq, spoken to over Erlang distribution"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "freeq-gtk"
+path = "src/main.rs"
+
+[dependencies]
+# Elm-style GTK4 UI (versions must match relm4 0.11's pins)
+relm4 = { version = "0.11", features = ["libadwaita", "gnome_47"] }
+gtk = { version = "0.11", package = "gtk4", features = ["v4_14"] }
+adw = { version = "0.9", package = "libadwaita", features = ["v1_6"] }
+
+# Erlang Distribution Protocol (foreign / hidden node)
+erl_dist = "0.8"
+eetf = "0.11"
+futures = "0.3"
+smol = "2"
+
+# Config / CLI
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hostname = "0.4"
+
+[dev-dependencies]
+# MCP server for BEAM introspection over dist (agent / local debugging)
+erl_dist_mcp = "0.1"

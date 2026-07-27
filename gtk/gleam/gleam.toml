@@ -1,0 +1,14 @@
+name = "freeq_gtk_view"
+version = "0.1.0"
+description = "Gleam-owned full view trees for freeq-gtk over Erlang dist"
+licences = ["Apache-2.0"]
+target = "erlang"
+
+[dependencies]
+gleam_stdlib = ">= 0.60.0 and < 2.0.0"
+gleam_erlang = ">= 1.0.0 and < 2.0.0"
+gleam_otp = ">= 1.0.0 and < 2.0.0"
+argv = ">= 1.0.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"

@@ -6,6 +6,7 @@
     ed25519_sign/2,
     lookup_txt/1,
     system_time_seconds/0,
+    local_hour_minute/1,
     strong_rand_bytes/1
 ]).
 
@@ -55,6 +56,12 @@ txt_strings(_) ->
 
 system_time_seconds() ->
     erlang:system_time(second).
+
+%% {Hour24, Minute} in the host local timezone for a unix epoch second.
+%% Used by freeq-gtk (no browser localizeTimes rewrite).
+local_hour_minute(Sec) when is_integer(Sec) ->
+    {{_Y, _Mo, _D}, {H, M, _S}} = calendar:system_time_to_local_time(Sec, second),
+    {H, M}.
 
 strong_rand_bytes(N) when is_integer(N), N > 0 ->
     crypto:strong_rand_bytes(N).

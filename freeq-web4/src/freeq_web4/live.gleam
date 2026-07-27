@@ -12,6 +12,8 @@ import freeq_web4/ls_form
 import freeq_web4/pane
 import freeq_web4/profiles
 import freeq_web4/rest
+import freeq_web4/ui
+import freeq_web4/ui/html as ui_html
 import gleam/bit_array
 import gleam/crypto
 import gleam/dict.{type Dict}
@@ -306,6 +308,8 @@ pub type Msg {
   ClearScrollTo
   /// No-op / ignored.
   Nop
+  /// Server/GTK: update compose draft without sending (freeq-gtk `changed`).
+  SetCompose(String)
 }
 
 /// Side effects the session host should perform after a handle.
@@ -443,6 +447,8 @@ fn handle(model: Model, msg: Msg) -> #(Model, List(component.Command(Msg))) {
 pub fn handle_effect(model: Model, msg: Msg) -> #(Model, Effect) {
   case msg {
     Nop -> #(model, NoEffect)
+
+    SetCompose(text) -> #(Model(..model, compose: text), NoEffect)
 
     Send(text) -> {
       let text = string.trim(text)
@@ -961,16 +967,22 @@ fn open_channel_navigate(model: Model, ch: String) -> #(Model, Effect) {
   let dir_topic = rest.topic_for(model.all_channels, ch)
   let cached = get_channel_page(model, ch)
 
+  // Empty cache is not a hit — re-fetch REST (stale open that got [] must not
+  // permanently hide channel history).
   let #(messages, members, topic, next_pane) = case cached {
-    Some(page) -> #(
-      page.messages,
-      page.members,
-      case page.topic {
-        "" -> dir_topic
-        t -> t
-      },
-      pane.open_cached(ch, page.history_exhausted),
-    )
+    Some(page) ->
+      case page.messages {
+        [] -> #([], page.members, dir_topic, pane.open_cold(ch))
+        msgs -> #(
+          msgs,
+          page.members,
+          case page.topic {
+            "" -> dir_topic
+            t -> t
+          },
+          pane.open_cached(ch, page.history_exhausted),
+        )
+      }
     None -> #([], [], dir_topic, pane.open_cold(ch))
   }
 
@@ -3020,76 +3032,23 @@ fn routes() -> List(stateful.EventRoute(Msg)) {
 
 // ── Patches ──────────────────────────────────────────────────────────────────
 
+/// Region Diffs from the canonical View tree (`ui.from_model` → `ui/html`).
+///
+/// Phase 2: browser and freeq-gtk share one presentation AST. Rich web-only
+/// chrome (search modal, react picker, AV panel, unread badges) is not in the
+/// tree yet — see Phase 3 `MsgRow` / Host nodes.
 pub fn plan_patches(before: Model, after: Model) -> List(diff.Patch) {
-  case before == after {
-    True -> []
-    False -> {
-      let acc = []
-      let acc = maybe_region(before, after, "nav", nav_region, acc)
-      let acc = maybe_region(before, after, "sidebar", sidebar_region, acc)
-      // Channel / System chat: patch messages (and compose on Channel) so
-      // the compose input is not remounted on every PRIVMSG.
-      // Index, or view switches: replace the whole main region.
-      let acc = case view(before), view(after) {
-        Channel, Channel -> {
-          let acc = maybe_region(before, after, "flash", flash_region, acc)
-          let acc =
-            maybe_region(before, after, "messages", messages_region, acc)
-          maybe_region(before, after, "compose", compose_region, acc)
-        }
-        System, System -> {
-          let acc = maybe_region(before, after, "flash", flash_region, acc)
-          let acc =
-            maybe_region(before, after, "messages", messages_region, acc)
-          // Compose stays mounted; only patch if structure changes (rare).
-          maybe_region(before, after, "compose", compose_region, acc)
-        }
-        _, _ -> maybe_region(before, after, "main", main_region, acc)
-      }
-      // AV panel is a sibling of main so directory browse keeps the call.
-      let acc = maybe_region(before, after, "av", av_region, acc)
-      let acc = maybe_region(before, after, "members", members_region, acc)
-      let acc =
-        maybe_region(before, after, "react-picker", react_picker_region, acc)
-      // Search: open/close replaces the host; while open, patch form and body
-      // separately so keystrokes do not remount the input (would drop focus).
-      let acc = case before.search_open, after.search_open {
-        True, True -> {
-          let acc =
-            maybe_region(before, after, "search-form", search_form_region, acc)
-          maybe_region(before, after, "search-body", search_body_region, acc)
-        }
-        _, _ -> maybe_region(before, after, "search", search_region, acc)
-      }
-      list.reverse(acc)
-    }
-  }
-}
-
-fn region_selector(name: String) -> String {
-  "[data-ls-region=\"" <> name <> "\"]"
-}
-
-fn maybe_region(
-  before: Model,
-  after: Model,
-  name: String,
-  render_fn: fn(Model) -> String,
-  acc: List(diff.Patch),
-) -> List(diff.Patch) {
-  let next = render_fn(after)
-  case render_fn(before) == next {
-    True -> acc
-    False -> [diff.Replace(target: region_selector(name), html: next), ..acc]
-  }
+  ui_html.plan_patches(view_tree(before), view_tree(after))
 }
 
 // ── Render ───────────────────────────────────────────────────────────────────
 
 fn render(model: Model) -> component.Rendered {
-  component.html(shell(model))
+  component.html(ui_html.view_html(view_tree(model)))
 }
 
+/// Legacy full shell (pre–Phase 2). Kept for reference / gradual deletion;
+/// LiveView no longer calls this.
 fn shell(model: Model) -> String {
   // Center column = main + av so AV survives index↔channel main swaps
   // (sibling region) while staying a vertical flex child of the chat column.
@@ -4574,10 +4533,14 @@ pub fn merge_my_channels(
 
 /// Merge REST history with any live rows already on the model.
 ///
-/// REST is the chronological base; live-only rows (msgid not in REST) are
-/// appended so a post-SASL backfill does not drop messages that arrived
-/// while the first anonymous fetch was empty.
+/// REST is the chronological base for the latest page. Live-only rows
+/// (msgid not in REST) are merged by timestamp so:
+/// - newer live PRIVMSGs stay at the bottom (chat order)
+/// - older rows (scroll-up pages, long-lived LiveView state, GTK bridge
+///   races) are *not* blindly appended after REST — that put "old messages
+///   at the bottom"
 ///
+/// Empty REST must not clobber live (failed private-channel fetch).
 /// When a msgid exists in both, reaction tallies are unioned so live TAGMSG /
 /// CHATHISTORY hydration is not wiped by a later REST backfill that still
 /// lacks `+freeq.at/reactions` (older freeq-server).
@@ -4587,13 +4550,7 @@ pub fn merge_history_rows(
 ) -> List(render.Row) {
   case rest_rows {
     [] -> live_rows
-    _ ->
-      list.fold(live_rows, rest_rows, fn(acc, row) {
-        case row_msgid_known(acc, row) {
-          True -> union_reactions_into(acc, row)
-          False -> list.append(acc, [row])
-        }
-      })
+    _ -> merge_rows_chronological(rest_rows, live_rows)
   }
 }
 
@@ -4837,5 +4794,408 @@ fn message_preview(
   {
     Ok(row) -> #(option.unwrap(row.nick, ""), row.text)
     Error(_) -> #("message", "")
+  }
+}
+
+// ── Canonical View tree (Phase 2: shared with freeq-gtk) ───────────────
+
+// ── Model → View ─────────────────────────────────────────────────────────────
+
+/// Canonical View tree for GTK dist + LiveView HTML (Phase 2).
+pub fn view_tree(model: Model) -> ui.View {
+  let subtitle = case view(model) {
+    Index -> "directory · " <> tree_ws_label(model.ws)
+    System -> "system · " <> tree_ws_label(model.ws)
+    Channel ->
+      case current_channel(model) {
+        Some(ch) -> ch <> " · " <> tree_ws_label(model.ws)
+        None -> "channel · " <> tree_ws_label(model.ws)
+      }
+  }
+  let body = case view(model) {
+    Index -> tree_directory_body(model)
+    System -> tree_system_body(model)
+    Channel -> tree_channel_body(model)
+  }
+  ui.View(
+    title: "freeq",
+    subtitle: subtitle,
+    width: 1100,
+    height: 720,
+    body: body,
+  )
+}
+
+// ── Directory ────────────────────────────────────────────────────────────────
+
+fn tree_directory_body(model: Model) -> ui.Node {
+  let mine =
+    list.map(model.my_channels, fn(ch) {
+      ui.Button(id: "open:" <> ch, label: ch, style: ui.Normal)
+    })
+  let all =
+    list.map(model.all_channels, fn(info: rest.ChannelInfo) {
+      let label = case info.members > 0 {
+        True -> info.name <> "  ·  " <> int.to_string(info.members)
+        False -> info.name
+      }
+      ui.Button(id: "open:" <> info.name, label: label, style: ui.Normal)
+    })
+  let main_children =
+    list.flatten([
+      [ui.Label(id: "hdr", text: "Channels", dim: False)],
+      [ui.Label(id: "mine_hdr", text: "Joined", dim: True)],
+      case mine {
+        [] -> [ui.Label(id: "mine_empty", text: "(none yet — join below)", dim: True)]
+        xs -> [ui.HBox(id: "mine", spacing: 6, children: xs)]
+      },
+      [ui.Separator, ui.Label(id: "all_hdr", text: "Directory", dim: True)],
+      [
+        ui.Scrolled(
+          id: "dir_scroll",
+          child: ui.VBox(id: "dir_list", spacing: 2, children: case all {
+            [] -> [ui.Label(id: "dir_empty", text: "Loading channels…", dim: True)]
+            xs -> xs
+          }),
+        ),
+      ],
+      [
+        ui.HBox(id: "join_row", spacing: 8, children: [
+          ui.Entry(
+            id: "join_input",
+            text: model.compose,
+            placeholder: "#channel",
+            password: False,
+          ),
+          ui.Button(id: "join", label: "Join", style: ui.Suggested),
+        ]),
+      ],
+    ])
+  ui.HBox(id: "root", spacing: 12, children: [
+    ui.VBox(id: "chat_col", spacing: 10, children: [
+      tree_flash_region(model),
+      ui.Region(
+        name: "main",
+        child: ui.VBox(id: "main", spacing: 10, children: main_children),
+      ),
+    ]),
+    ui.Region(name: "members", child: tree_user_panel(model, [])),
+  ])
+}
+
+// ── System ───────────────────────────────────────────────────────────────────
+
+fn tree_system_body(model: Model) -> ui.Node {
+  let lines = tree_message_labels(model.system_messages)
+  ui.HBox(id: "root", spacing: 12, children: [
+    ui.VBox(id: "chat_col", spacing: 10, children: [
+      ui.Region(
+        name: "nav",
+        child: ui.HBox(id: "nav", spacing: 8, children: [
+          ui.Button(id: "go_index", label: "← Directory", style: ui.Normal),
+        ]),
+      ),
+      ui.Region(
+        name: "main",
+        child: ui.Label(id: "sys_hdr", text: "System", dim: False),
+      ),
+      tree_flash_region(model),
+      tree_messages_region(model, system_key, lines),
+      ui.Region(name: "compose", child: tree_composer_row(model, "/join #channel")),
+    ]),
+    ui.Region(name: "members", child: tree_user_panel(model, [])),
+  ])
+}
+
+// ── Channel chat ─────────────────────────────────────────────────────────────
+
+fn tree_channel_body(model: Model) -> ui.Node {
+  let ch = case current_channel(model) {
+    Some(c) -> c
+    None -> "?"
+  }
+  let topic = case string.trim(model.topic) {
+    "" -> "(no topic)"
+    t -> t
+  }
+  let lines = tree_message_labels(model.messages)
+  let joined =
+    list.map(model.my_channels, fn(name) {
+      let mark = case name == ch {
+        True -> "● "
+        False -> "○ "
+      }
+      ui.Button(id: "open:" <> name, label: mark <> name, style: ui.Normal)
+    })
+  let msg_lines = case lines {
+    [] ->
+      case history_loading(model) {
+        True -> [
+          ui.Label(
+            id: "log_empty",
+            text: "Loading messages…",
+            dim: True,
+          ),
+        ]
+        False -> [
+          ui.Label(
+            id: "log_empty",
+            text: "No messages yet — say hello.",
+            dim: True,
+          ),
+        ]
+      }
+    xs -> xs
+  }
+  ui.HBox(id: "root", spacing: 12, children: [
+    ui.VBox(id: "chat_col", spacing: 8, children: [
+      ui.Region(
+        name: "nav",
+        child: ui.HBox(id: "nav", spacing: 8, children: [
+          ui.Button(id: "go_index", label: "← Directory", style: ui.Normal),
+          ui.Button(id: "go_system", label: "System", style: ui.Normal),
+          ui.Button(id: "part", label: "Part", style: ui.Destructive),
+        ]),
+      ),
+      ui.Region(
+        name: "main",
+        child: ui.VBox(id: "ch_header", spacing: 4, children: [
+          ui.Label(id: "ch_title", text: ch, dim: False),
+          ui.Label(id: "topic", text: topic, dim: True),
+        ]),
+      ),
+      tree_flash_region(model),
+      tree_messages_region(model, ch, msg_lines),
+      ui.Region(name: "compose", child: tree_composer_row(model, "Message…")),
+    ]),
+    ui.Region(name: "members", child: tree_user_panel(model, joined)),
+  ])
+}
+
+fn tree_flash_region(model: Model) -> ui.Node {
+  let child = case string.trim(model.flash) {
+    "" -> ui.Spacer
+    f -> ui.Label(id: "flash", text: f, dim: False)
+  }
+  ui.Region(name: "flash", child: child)
+}
+
+fn tree_messages_region(
+  model: Model,
+  channel: String,
+  lines: List(ui.Node),
+) -> ui.Node {
+  let bare = case string.trim(channel) {
+    "" -> ""
+    "system" -> "system"
+    c -> render.bare_channel(c)
+  }
+  // Encode loading/exhausted for HTML data-attrs (GTK ignores id).
+  let loading = case history_loading(model) {
+    True -> "L1"
+    False -> "L0"
+  }
+  let exhausted = case history_exhausted(model) {
+    True -> "E1"
+    False -> "E0"
+  }
+  let log_id = case bare {
+    "" -> "log@" <> loading <> exhausted
+    b -> "log@" <> b <> "@" <> loading <> exhausted
+  }
+  // Scrolled keeps GTK happy; ui/html flattens so rows are #messages children.
+  ui.Region(
+    name: "messages",
+    child: ui.Scrolled(
+      id: "log_scroll",
+      child: ui.VBox(id: log_id, spacing: 4, children: lines),
+    ),
+  )
+}
+
+fn tree_composer_row(model: Model, placeholder: String) -> ui.Node {
+  ui.HBox(id: "composer", spacing: 8, children: [
+    ui.Entry(
+      id: "input",
+      text: model.compose,
+      placeholder: placeholder,
+      password: False,
+    ),
+    ui.Button(id: "send", label: "Send", style: ui.Suggested),
+  ])
+}
+
+fn tree_message_labels(rows: List(render.Row)) -> List(ui.Node) {
+  list.index_map(rows, fn(row, i) {
+    // Prefer msgid for client scroll/jump; fall back to row.id.
+    let mid = case row.msgid {
+      Some(m) if m != "" -> m
+      _ -> row.id
+    }
+    ui.Label(
+      id: "msg:" <> mid <> ":" <> int.to_string(i),
+      text: tree_row_line(row),
+      dim: case row.kind {
+        render.Msg -> False
+        _ -> True
+      },
+    )
+  })
+}
+
+fn tree_user_panel(model: Model, joined_buttons: List(ui.Node)) -> ui.Node {
+  let handle = identity.handle(model.identity)
+  let did = identity.did(model.identity)
+  let auth = case model.identity {
+    identity.Bound(_, _) -> "signed in"
+    identity.AwaitingSasl(_, _) -> "signing in…"
+    identity.NeedsReauth(_, _, _) -> "re-auth needed"
+    identity.Guest -> "guest"
+  }
+  let did_line = case did {
+    "" -> "no DID"
+    d -> tree_short_did(d)
+  }
+  let handle_line = case handle {
+    "" -> "—"
+    h -> h
+  }
+  let members = case view(model) {
+    Channel -> model.members
+    _ -> []
+  }
+  let member_nodes =
+    list.map(list.take(members, 40), fn(m: render.Member) {
+      let badges = case m.op, m.halfop, m.voice {
+        True, _, _ -> "@"
+        _, True, _ -> "%"
+        _, _, True -> "+"
+        _, _, _ -> " "
+      }
+      let extra = case m.did {
+        Some(d) -> "  " <> tree_short_did(d)
+        None -> ""
+      }
+      ui.Label(
+        id: "member:" <> m.nick,
+        text: badges <> " " <> m.nick <> extra,
+        dim: False,
+      )
+    })
+  let n_members = list.length(members)
+  let member_hdr = case n_members {
+    0 -> "Members"
+    n -> "Members (" <> int.to_string(n) <> ")"
+  }
+
+  ui.VBox(id: "user_panel", spacing: 10, children: list.flatten([
+    [
+      ui.Label(id: "you_hdr", text: "You", dim: False),
+      ui.Label(id: "you_nick", text: model.nick, dim: False),
+      ui.Label(id: "you_handle", text: handle_line, dim: True),
+      ui.Label(id: "you_auth", text: auth <> " · " <> tree_ws_label(model.ws), dim: True),
+      ui.Label(id: "you_did", text: did_line, dim: True),
+      ui.Separator,
+      ui.Label(id: "members_hdr", text: member_hdr, dim: False),
+    ],
+    case member_nodes {
+      [] -> [ui.Label(id: "members_empty", text: "(none)", dim: True)]
+      xs -> [
+        ui.Scrolled(
+          id: "members_scroll",
+          child: ui.VBox(id: "members_list", spacing: 4, children: xs),
+        ),
+      ]
+    },
+    case joined_buttons {
+      [] -> []
+      xs ->
+        list.flatten([
+          [ui.Separator, ui.Label(id: "rooms_hdr", text: "Rooms", dim: False)],
+          [ui.VBox(id: "rooms_list", spacing: 4, children: xs)],
+        ])
+    },
+  ]))
+}
+
+fn tree_short_did(did: String) -> String {
+  case string.length(did) > 22 {
+    True -> string.slice(did, 0, 18) <> "…"
+    False -> did
+  }
+}
+
+fn tree_row_line(row: render.Row) -> String {
+  let nick = case row.nick {
+    Some(n) -> n
+    None -> "*"
+  }
+  let prefix = case row.kind {
+    render.Msg -> ""
+    render.Notice -> "· notice · "
+    render.Join -> "→ "
+    render.Part -> "← "
+    render.Quit -> "✕ "
+    render.System -> "· "
+  }
+  let body = case row.deleted {
+    True -> "(deleted)"
+    False -> row.text
+  }
+  let edited = case row.edited {
+    True -> "  (edited)"
+    False -> ""
+  }
+  let time = case row.timestamp {
+    Some(sec) -> render.time_label_local_from_unix(sec) <> "  "
+    None ->
+      case row.time_label {
+        "" -> ""
+        t -> t <> "  "
+      }
+  }
+  time <> prefix <> nick <> ": " <> body <> edited
+}
+
+fn tree_ws_label(ws: WsLabel) -> String {
+  case ws {
+    WsDisconnected -> "offline"
+    WsConnecting -> "connecting"
+    WsRegistering -> "registering"
+    WsReady -> "ready"
+  }
+}
+
+// ── Event → Msg ─────────────────────────────────────────────────────────
+
+/// Map a GTK / View-tree event onto a LiveView Msg.
+pub fn ui_to_msg(event: ui.Event, model: Model) -> Option(Msg) {
+  case event {
+    ui.Changed("input", text) | ui.Changed("join_input", text) ->
+      Some(SetCompose(text))
+
+    ui.Activate("input", text) -> Some(Send(text))
+    ui.Activate("join_input", text) -> Some(Join(text))
+
+    ui.Clicked("send") -> Some(Send(model.compose))
+    ui.Clicked("join") -> Some(Join(model.compose))
+    ui.Clicked("go_index") -> Some(GoIndex)
+    ui.Clicked("go_system") -> Some(OpenSystem)
+    ui.Clicked("part") ->
+      case current_channel(model) {
+        Some(ch) -> Some(Part(ch))
+        None -> None
+      }
+
+    ui.Clicked(id) ->
+      case string.split_once(id, ":") {
+        Ok(#("open", bare)) -> Some(OpenChannel(bare))
+        _ -> None
+      }
+
+    ui.Selected(_, _, _) -> None
+    ui.Unknown(_) -> None
+    ui.Activate(_, _) -> None
+    ui.Changed(_, _) -> None
   }
 }

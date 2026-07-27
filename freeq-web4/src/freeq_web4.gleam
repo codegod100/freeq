@@ -11,6 +11,7 @@ import filepath
 import freeq_web4/auth
 import freeq_web4/config
 import freeq_web4/cookie_session
+import freeq_web4/gtk_bridge
 import freeq_web4/link_preview
 import freeq_web4/live
 import freeq_web4/rest
@@ -703,6 +704,9 @@ pub fn main() -> Nil {
   let icon_192_png = load_asset_bits("icon-192.png")
   let icon_512_png = load_asset_bits("icon-512.png")
 
+  // freeq-gtk: Erlang dist + freeq_view bridge (no-op unless FREEQ_GTK_NODE).
+  gtk_bridge.start()
+
   // Log before bind so Eaddrinuse (etc.) still shows which port we tried.
   io_println(
     "freeq-web4 listening on port "
@@ -747,6 +751,18 @@ fn echo_banner(port: Int) -> Nil {
   io_println("  GET  /health          ok")
   io_println("  POST /upload          image upload proxy")
   io_println("  GET  /api/v1/sessions/:id   AV roster proxy")
+  case config.gtk_enabled() {
+    True ->
+      io_println(
+        "  GTK  dist "
+        <> config.dist_node()
+        <> " → "
+        <> config.gtk_node()
+        <> " (full View snapshots)",
+      )
+    False ->
+      io_println("  GTK  off (set FREEQ_GTK_NODE=freeq_gtk@localhost to enable)")
+  }
   io_println("  GET  /av/assets/*     MoQ asset proxy")
   io_println("  upstream " <> config.upstream_ws())
   io_println("  rest     " <> config.upstream_rest())

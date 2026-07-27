@@ -120,6 +120,200 @@ body {
     min-width: 0;
     min-height: 0;
 }
+
+/* ── Phase 2 View-tree shell (ui/html) ───────────────────────────────────────
+ * LiveView renders View nodes: #root h-box → #chat_col + members aside.
+ * Without this, flex height collapses and #messages looks empty.
+ */
+#freeq-chat.ui-view {
+    display: flex;
+    flex-direction: column;
+}
+#freeq-chat.ui-view > #root,
+#freeq-chat.ui-view > .chat-body {
+    display: flex;
+    flex-direction: row;
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    width: 100%;
+    align-items: stretch;
+    /* gap comes from style= on the node; keep layout predictable */
+}
+#freeq-chat.ui-view #chat_col,
+#freeq-chat.ui-view .ui-chat-col-flex {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+}
+#freeq-chat.ui-view nav[data-ls-region="nav"],
+#freeq-chat.ui-view .ui-region-nav,
+#freeq-chat.ui-view [data-ls-region="flash"],
+#freeq-chat.ui-view .ui-region-flash,
+#freeq-chat.ui-view [data-ls-region="main"],
+#freeq-chat.ui-view .ui-region-main,
+#freeq-chat.ui-view .ui-channel-header,
+#freeq-chat.ui-view #compose-stack,
+#freeq-chat.ui-view [data-ls-region="compose"] {
+    flex: 0 0 auto;
+    min-height: 0;
+}
+#freeq-chat.ui-view .ui-channel-header {
+    padding: 0.35rem 0.5rem 0.25rem;
+    border-bottom: 1px solid var(--border);
+}
+#freeq-chat.ui-view .ui-channel-header #ch_title {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
+#freeq-chat.ui-view .ui-channel-header #topic {
+    font-size: 0.8rem;
+    color: var(--muted);
+}
+/* Message stream: #messages scrolls; rows are direct children (.row.msg). */
+#freeq-chat.ui-view #messages {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    padding: 0.25rem 0.35rem 0.35rem;
+}
+/*
+ * Phase 2 rows are plain text labels with class "row msg" so client JS still
+ * finds [data-msgid] / .row. Legacy CSS sets display:grid with 3 columns
+ * (ts | avatar | body) — a single text node only fills the 3.75rem ts column
+ * and looks "empty". Force block layout for the View-tree path.
+ */
+#freeq-chat.ui-view #messages .ui-label.row,
+#freeq-chat.ui-view #messages .row.msg,
+#freeq-chat.ui-view #messages .ui-label {
+    display: block !important;
+    grid-template-columns: none !important;
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: 0.25rem 0.45rem;
+    margin: 0;
+    border-radius: 0.25rem;
+    word-break: break-word;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    color: var(--fg);
+    min-height: 0;
+}
+#freeq-chat.ui-view #messages .ui-label-dim {
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+#freeq-chat.ui-view #messages #log_empty {
+    text-align: center;
+    padding: 1.25rem 0.5rem;
+    color: var(--muted);
+    flex: 0 0 auto;
+}
+/* Compose bar under the log */
+#freeq-chat.ui-view #compose-stack,
+#freeq-chat.ui-view #send-bar {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.4rem;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+}
+#freeq-chat.ui-view #send-form {
+    flex: 1 1 auto;
+    display: flex;
+    min-width: 0;
+    margin: 0;
+}
+#freeq-chat.ui-view #send-form input,
+#freeq-chat.ui-view #input {
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 100%;
+}
+#freeq-chat.ui-view #send {
+    flex: 0 0 auto;
+}
+/* Right rail */
+#freeq-chat.ui-view [data-ls-region="members"],
+#freeq-chat.ui-view .members-panel {
+    flex: 0 0 12rem;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    border-left: 1px solid var(--border);
+    padding: 0.4rem 0.45rem;
+    font-size: 0.8rem;
+    background: var(--bg);
+}
+#freeq-chat.ui-view #user_panel {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 0;
+    min-height: 0;
+    gap: 0.25rem;
+}
+#freeq-chat.ui-view #members_scroll {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+}
+#freeq-chat.ui-view #rooms_list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    max-height: 40%;
+    overflow-y: auto;
+}
+#freeq-chat.ui-view .ui-btn {
+    cursor: pointer;
+    border: 1px solid var(--border);
+    border-radius: 0.35rem;
+    background: #161b22;
+    color: var(--fg);
+    padding: 0.3rem 0.55rem;
+    text-align: left;
+}
+#freeq-chat.ui-view .ui-btn:hover {
+    border-color: #7ab7ff;
+}
+#freeq-chat.ui-view .ui-btn-suggested {
+    background: color-mix(in srgb, #7ab7ff 22%, #161b22);
+    border-color: color-mix(in srgb, #7ab7ff 45%, var(--border));
+}
+#freeq-chat.ui-view .ui-btn-destructive {
+    color: #f78b6c;
+}
+#freeq-chat.ui-view nav[data-ls-region="nav"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    padding: 0.3rem 0.4rem;
+    border-bottom: 1px solid var(--border);
+}
+/* Directory list scroll */
+#freeq-chat.ui-view #dir_scroll {
+    flex: 1 1 0;
+    min-height: 0;
+    overflow-y: auto;
+}
+#freeq-chat.ui-view #dir_list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
 #freeq-chat [data-ls-region="av"] {
     flex: 0 0 auto;
     min-height: 0;

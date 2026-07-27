@@ -58,10 +58,20 @@ pub fn fetch_history(
     <> int.to_string(limit)
     <> before_q
   case get_json(url, bearer) {
-    Ok(body) -> decode_history(body)
-    Error(reason) -> {
+    Ok(body) -> {
+      let rows = decode_history(body)
       logging.log(
         logging.Info,
+        "fetch_history "
+          <> channel
+          <> " ok n="
+          <> int.to_string(list.length(rows)),
+      )
+      rows
+    }
+    Error(reason) -> {
+      logging.log(
+        logging.Warning,
         "fetch_history " <> channel <> " failed: " <> reason,
       )
       []

@@ -106,3 +106,56 @@ fn trim_trailing_slash(s: String) -> String {
     False -> s
   }
 }
+
+// ── freeq-gtk (Erlang distribution) ──────────────────────────────────────────
+
+/// When set (non-empty), freeq-web4 starts a dist node and pushes full GTK
+/// view snapshots to this peer (e.g. `freeq_gtk@localhost`).
+pub fn gtk_node() -> String {
+  case envoy.get("FREEQ_GTK_NODE") {
+    Ok(n) -> string.trim(n)
+    Error(_) -> ""
+  }
+}
+
+/// Whether the GTK bridge should run.
+pub fn gtk_enabled() -> Bool {
+  gtk_node() != ""
+}
+
+/// Local short node name for this BFF (default `web4@localhost`).
+pub fn dist_node() -> String {
+  case envoy.get("FREEQ_DIST_NODE") {
+    Ok(n) ->
+      case string.trim(n) {
+        "" -> "web4@localhost"
+        v -> v
+      }
+    Error(_) -> "web4@localhost"
+  }
+}
+
+/// Shared Erlang cookie for dist with freeq-gtk.
+pub fn dist_cookie() -> String {
+  case envoy.get("FREEQ_COOKIE") {
+    Ok(c) ->
+      case string.trim(c) {
+        "" -> default_cookie()
+        v -> v
+      }
+    Error(_) -> default_cookie()
+  }
+}
+
+fn default_cookie() -> String {
+  // Prefer ~/.erlang.cookie when present (same as freeq-gtk default).
+  case envoy.get("HOME") {
+    Ok(home) -> {
+      // Avoid pulling simplifile into config — cookie file is optional.
+      // Callers can set FREEQ_COOKIE explicitly in production.
+      let _ = home
+      "freeq_dev"
+    }
+    Error(_) -> "freeq_dev"
+  }
+}

@@ -7,7 +7,9 @@
 //// 4. Effects: EnsureUpstream / IrcSend / FetchHistory / FetchChannels
 
 import freeq_web4/atproto/oauth_session.{type OAuthSession}
+import freeq_web4/gtk_bridge
 import freeq_web4/identity
+import freeq_web4/ui
 import freeq_web4/irc/render
 import freeq_web4/irc/upstream
 import freeq_web4/link_preview
@@ -66,6 +68,8 @@ pub type Push {
     embeds: List(#(String, render.Embed)),
     avatars: List(#(String, String)),
   )
+  /// freeq-gtk UI event over Erlang dist (full-view remote control).
+  GtkUiEvent(ui.Event)
 }
 
 /// One connected LiveView browser session: model, IRC upstream, OAuth.
@@ -91,6 +95,8 @@ pub type Session {
     irc_batch_depth: Int,
     /// Model snapshot at outermost BATCH open — `plan_patches` baseline.
     irc_batch_before: Option(live.Model),
+    /// Receives freeq-gtk events from `gtk_bridge` (registered as freeq_view).
+    gtk_events: Subject(ui.Event),
   )
 }
 
@@ -130,6 +136,10 @@ pub fn mount(
     None -> identity.Guest
   }
   let #(model, _) = live.apply(model, live.SetIdentity(next_id))
+  let gtk_events = process.new_subject()
+  gtk_bridge.register(gtk_events)
+  // Initial paint for freeq-gtk (full View snapshot).
+  gtk_bridge.publish(model)
   let session =
     Session(
       model: model,
@@ -142,6 +152,7 @@ pub fn mount(
       events: process.new_subject(),
       irc_batch_depth: 0,
       irc_batch_before: None,
+      gtk_events: gtk_events,
     )
 
   #(session, [protocol.encode(protocol.hello())])
@@ -304,6 +315,48 @@ pub fn handle_push(session: Session, push: Push) -> #(Session, List(String)) {
         }
       }
     }
+    GtkUiEvent(ev) -> apply_gtk_event(session, ev)
+  }
+}
+
+fn apply_gtk_event(
+  session: Session,
+  event: ui.Event,
+) -> #(Session, List(String)) {
+  case live.ui_to_msg(event, session.model) {
+    None -> #(session, [])
+    Some(msg) -> {
+      let before = session.model
+      let #(model, effect) = live.apply(before, msg)
+      let session = Session(..session, model: model)
+      let session = case msg {
+        live.Join(_) | live.OpenChannel(_) | live.Part(_) -> {
+          session_store.save_channels(
+            session.session_id,
+            session.model.my_channels,
+          )
+          session
+        }
+        _ -> session
+      }
+      // gtk_bridge owns IRC for GTK-originated sends (its own guest upstream).
+      // Still run EnsureUpstream/JOIN so this browser tab receives live echoes.
+      let effect = case effect {
+        live.IrcSend(_) -> live.NoEffect
+        other -> other
+      }
+      let session = run_effect(session, effect)
+      let session = case msg {
+        live.Join(_) | live.OpenChannel(_) -> after_join(session)
+        live.GoIndex -> {
+          let chs = rest.fetch_channels()
+          let #(model, _) = live.apply(session.model, live.SetAllChannels(chs))
+          Session(..session, model: model)
+        }
+        _ -> session
+      }
+      finish(session, before, session.model)
+    }
   }
 }
 
@@ -351,6 +404,8 @@ fn apply_client_event(
         [] -> session
         _ -> Session(..session, next_ref: session.next_ref + 1)
       }
+      // Keep freeq-gtk in sync with browser-driven model changes.
+      gtk_bridge.publish(session.model)
       #(session, frames)
     }
   }
@@ -382,10 +437,13 @@ fn after_join(session: Session) -> Session {
         }
         None -> Nil
       }
-      case live.history_loading(session.model) {
-        True -> schedule_channel_open_rest(session, ch)
-        False ->
-          // Cached page: light AV probe only (no history re-fetch).
+      case live.history_loading(session.model), session.model.messages {
+        // Cold open (or empty cache treated as cold).
+        True, _ -> schedule_channel_open_rest(session, ch)
+        // Cache hit with body still empty — force REST (do not stick on []).
+        False, [] -> schedule_channel_open_rest(session, ch)
+        False, _ ->
+          // Cached page with messages: light AV probe only.
           case session.model.av_active {
             True -> Nil
             False -> schedule_av_probe_only(session, ch)
@@ -436,28 +494,44 @@ fn schedule_channel_open_rest(session: Session, channel: String) -> Nil {
   let ch = channel
   let _ =
     process.spawn_unlinked(fn() {
+      // 1) History first — never block the message body on OG/avatar warm
+      //    (warm can hang on AppView/SSRF and left the pane empty forever).
       let rows =
         rest.fetch_history(ch, live.history_page_size, bearer, None)
-      // Public list first; private rooms need a second REST round-trip.
       let topic = rest.resolve_topic(all, ch)
-      let av_call = case probe_av {
-        True -> Some(rest.probe_active_call(ch, bearer))
-        False -> None
-      }
-      // Server-side prefetch: OG/YT/Bsky cards (disk image cache) + AppView
-      // avatar URLs. Caps keep open latency bounded; leftovers still warm
-      // async via SetHistory → media_warmup_effect.
-      let #(rows, avatars) = warm_open_media(rows)
+      // Cache-only embeds for instant paint; full warm runs after SetHistory
+      // via media_warmup_effect (and optional second push below).
+      let rows = link_preview.attach_many_cache_only(rows)
       process.send(
         subject,
         RestChannelOpen(
           channel: ch,
           rows: rows,
           topic: topic,
-          av_call: av_call,
-          avatars: avatars,
+          av_call: None,
+          avatars: [],
         ),
       )
+      // 2) Slow path: AV probe + avatar warm (second Diff if still on channel).
+      let av_call = case probe_av {
+        True -> Some(rest.probe_active_call(ch, bearer))
+        False -> None
+      }
+      let #(_warmed, avatars) = warm_open_media(rows)
+      case av_call, avatars {
+        None, [] -> Nil
+        _, _ ->
+          process.send(
+            subject,
+            RestChannelOpen(
+              channel: ch,
+              rows: [],
+              topic: "",
+              av_call: av_call,
+              avatars: avatars,
+            ),
+          )
+      }
     })
   Nil
 }
@@ -498,12 +572,15 @@ fn apply_rest_channel_open(
               m
             }
           }
-          // Cache-hit opens send empty rows + AV only — never wipe restored
-          // messages or flip history_exhausted from a dummy SetHistory([]).
+          // Apply REST body when:
+          // - cold open (history loading), or
+          // - we got a non-empty page (refresh / empty-cache recovery).
+          // Never apply [] on a cache-hit AV-only probe (would wipe the stream).
           let need_history = live.history_loading(before)
-          let #(model, effect) = case need_history {
-            True -> live.apply(before, live.SetHistory(rows))
-            False -> #(before, live.NoEffect)
+          let #(model, effect) = case need_history, rows {
+            True, _ -> live.apply(before, live.SetHistory(rows))
+            False, [] -> #(before, live.NoEffect)
+            False, _ -> live.apply(before, live.SetHistory(rows))
           }
           // Prefer REST topic when we have one; keep directory/IRC seed otherwise.
           let #(model, _) = case topic {
@@ -515,8 +592,7 @@ fn apply_rest_channel_open(
             Some(call) -> live.apply(model, live.AvProbe(channel, call))
           }
           // Reaction tallies ride CHATHISTORY (not REST) — after first body.
-          // Cache hits already requested CHATHISTORY in after_join.
-          case need_history, session.upstream {
+          case need_history || rows != [], session.upstream {
             True, Some(handle) -> request_chathistory(handle, channel)
             _, _ -> Nil
           }
@@ -867,6 +943,9 @@ fn finish(
   after: live.Model,
 ) -> #(Session, List(String)) {
   let session = Session(..session, model: after)
+  // Always push a full View to freeq-gtk when the model changes (even if the
+  // browser Diff is empty — e.g. compose-only SetCompose from GTK).
+  gtk_bridge.publish(after)
   let patches = live.plan_patches(before, after)
   case patches {
     [] -> #(session, [])
@@ -1279,6 +1358,7 @@ pub fn push_selector(session: Session) -> process.Selector(Push) {
   process.new_selector()
   |> process.select(session.self_subject)
   |> process.select_map(session.events, UpstreamEvent)
+  |> process.select_map(session.gtk_events, GtkUiEvent)
 }
 
 /// Send outbound protocol frames.
@@ -1294,6 +1374,7 @@ pub fn push_frames(
 
 /// Tear down IRC on socket close (leave AV first so peers see us drop).
 pub fn close(session: Session) -> Nil {
+  gtk_bridge.unregister(session.gtk_events)
   case session.model.av_active, session.upstream {
     True, Some(handle) -> {
       let ch = case session.model.av_channel {
