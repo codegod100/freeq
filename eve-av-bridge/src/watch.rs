@@ -9,7 +9,8 @@
 //!    H.264 encode on the tokio runtime must not starve the audio path.
 //! 3. **Wall-clock paced enqueue** + small prebuffer so MoQ never underruns
 //!    and we never dump a 6s HLS catch-up burst into the speaker queue.
-//! 4. Video is best-effort hold-last-frame at a low encode cadence.
+//! 4. Video is best-effort hold-last-frame at a continuous encode cadence
+//!    (≥15 fps) matched to `AV_VIDEO_FPS` / freeq preset dimensions.
 
 use std::fs;
 use std::io::Read as _;
@@ -30,12 +31,14 @@ use tokio::process::Command;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
-/// Tile size for freeq MoQ H.264 (`VideoPreset::P180`).
+/// Tile size for freeq MoQ H.264 (`VideoPreset::P180` → 320×180).
+/// Must match watch-plane `AV_VIDEO_PRESET=180p` encoder dimensions.
 pub const WATCH_W: u32 = 320;
 pub const WATCH_H: u32 = 180;
 
-/// Encoder pop cadence (hold-last-frame). Keep low so Opus isn't starved.
-const FPS: u32 = 8;
+/// Demux fps filter + hold-last pop cadence + encoder target.
+/// Aligned with watch-plane `AV_VIDEO_FPS` (default 15).
+pub const WATCH_FPS: u32 = 15;
 
 const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 20; // 50ms
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
@@ -47,6 +50,27 @@ const PRIME_SECS: f32 = 2.0;
 const MAX_AHEAD_SECS: f32 = 10.0;
 /// Absolute safety valve (seconds of PCM in Speaker ring).
 const MAX_QUEUE_SECS: f32 = 15.0;
+
+/// RGBA frame length for a given tile size (pure helper for tests + demux).
+#[inline]
+pub fn rgba_frame_bytes(width: u32, height: u32) -> usize {
+    (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4)
+}
+
+/// Wall-clock due time (ms since start) for hold-last frame `frame_index` at `fps`.
+#[inline]
+pub fn frame_due_ms(frame_index: u64, fps: u32) -> u64 {
+    let fps = u64::from(fps.max(1));
+    frame_index.saturating_mul(1000 / fps)
+}
+
+/// Whether an RGBA buffer length matches the tile (rejects silent encoder drops).
+#[inline]
+pub fn accepts_rgba_len(len: usize, width: u32, height: u32) -> bool {
+    len == rgba_frame_bytes(width, height)
+}
 
 const FRAME_BYTES: usize = (WATCH_W as usize) * (WATCH_H as usize) * 4;
 
@@ -78,7 +102,7 @@ impl WatchTile {
     }
 
     pub fn push_rgba_bytes(&self, bytes: Bytes) {
-        if bytes.len() != FRAME_BYTES {
+        if !accepts_rgba_len(bytes.len(), WATCH_W, WATCH_H) {
             return;
         }
         *self.inner.latest.lock().expect("latest") = Some(bytes);
@@ -102,7 +126,7 @@ impl VideoSource for WatchVideoSource {
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
         let elapsed = self.tile.inner.t0.elapsed();
-        let due = Duration::from_millis(self.frame_index.saturating_mul(1000 / u64::from(FPS)));
+        let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
         if elapsed + Duration::from_millis(1) < due {
             return Ok(None);
         }
@@ -566,10 +590,10 @@ async fn run_video_demux(
     let _ = fs::remove_file(&video_fifo);
     mkfifo(&video_fifo)?;
 
-    // fps filter limited — less decode/scale load; hold-last covers gaps.
+    // fps filter matches encoder + hold-last pop cadence (WATCH_FPS).
     let vf = format!(
         "scale={WATCH_W}:{WATCH_H}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
-pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
+pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={WATCH_FPS},format=rgba"
     );
     let v_out = video_fifo.to_str().context("video fifo utf8")?.to_string();
 
@@ -658,7 +682,7 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
         tile.push_rgba_bytes(Bytes::from(frame));
         frames += 1;
         if last_log.elapsed().as_secs() >= 10 {
-            info!(frames, fps = FPS, "watch video feed");
+            info!(frames, fps = WATCH_FPS, "watch video feed");
             last_log = Instant::now();
         }
     }
@@ -666,4 +690,81 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={FPS},format=rgba"
     let _ = child.kill().await;
     let _ = child.wait().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use iroh_live::media::traits::VideoSource;
+    use std::thread;
+
+    #[test]
+    fn rgba_frame_bytes_matches_p180_tile() {
+        // VideoPreset::P180 is 320×180; wrong size → silent encoder frame drops.
+        assert_eq!(WATCH_W, 320);
+        assert_eq!(WATCH_H, 180);
+        assert_eq!(rgba_frame_bytes(WATCH_W, WATCH_H), 320 * 180 * 4);
+        assert_eq!(rgba_frame_bytes(WATCH_W, WATCH_H), FRAME_BYTES);
+        assert!(accepts_rgba_len(FRAME_BYTES, WATCH_W, WATCH_H));
+        assert!(!accepts_rgba_len(FRAME_BYTES - 1, WATCH_W, WATCH_H));
+        assert!(!accepts_rgba_len(640 * 360 * 4, WATCH_W, WATCH_H)); // 360p mismatch
+    }
+
+    #[test]
+    fn watch_fps_is_at_least_15() {
+        assert!(
+            WATCH_FPS >= 15,
+            "watch demux/pop cadence must be ≥15 fps (got {WATCH_FPS})"
+        );
+    }
+
+    #[test]
+    fn frame_due_ms_produces_target_fps_interval() {
+        // 15 fps → 1000/15 = 66 ms between frames (integer division).
+        assert_eq!(frame_due_ms(0, 15), 0);
+        assert_eq!(frame_due_ms(1, 15), 66);
+        assert_eq!(frame_due_ms(2, 15), 132);
+        assert_eq!(frame_due_ms(15, 15), 990);
+        // fps=0 clamps to 1 to avoid div-by-zero.
+        assert_eq!(frame_due_ms(3, 0), 3000);
+    }
+
+    #[test]
+    fn push_rejects_wrong_sized_rgba() {
+        let tile = WatchTile::new();
+        tile.push_rgba_bytes(Bytes::from(vec![0u8; FRAME_BYTES - 4]));
+        let mut src = tile.video_source();
+        src.start().unwrap();
+        // No frame stored → pop yields None even though due time is 0.
+        assert!(src.pop_frame().unwrap().is_none());
+
+        tile.push_rgba_bytes(Bytes::from(vec![1u8; FRAME_BYTES]));
+        let f = src.pop_frame().unwrap();
+        assert!(f.is_some());
+        let frame = f.unwrap();
+        assert_eq!(frame.dimensions, [WATCH_W, WATCH_H]);
+        let img = frame.rgba_image();
+        assert_eq!(img.width(), WATCH_W);
+        assert_eq!(img.height(), WATCH_H);
+        assert_eq!(img.as_raw().len(), FRAME_BYTES);
+    }
+
+    #[test]
+    fn hold_last_pop_respects_fps_cadence() {
+        let tile = WatchTile::new();
+        tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
+        let mut src = tile.video_source();
+        src.start().unwrap();
+
+        // Frame 0 is due immediately.
+        assert!(src.pop_frame().unwrap().is_some());
+        // Frame 1 not yet due (needs ~66ms at 15 fps).
+        assert!(src.pop_frame().unwrap().is_none());
+
+        let period = Duration::from_millis(frame_due_ms(1, WATCH_FPS) + 5);
+        thread::sleep(period);
+        assert!(src.pop_frame().unwrap().is_some());
+        // Next not due yet.
+        assert!(src.pop_frame().unwrap().is_none());
+    }
 }
