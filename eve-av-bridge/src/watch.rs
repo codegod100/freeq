@@ -99,7 +99,6 @@ struct WatchInner {
     pushed: AtomicU64,
     /// Frames handed to the encoder (monotonic).
     popped: AtomicU64,
-    t0: Instant,
 }
 
 impl WatchTile {
@@ -109,7 +108,6 @@ impl WatchTile {
                 queue: Mutex::new(VecDeque::with_capacity(FRAME_QUEUE_CAP)),
                 pushed: AtomicU64::new(0),
                 popped: AtomicU64::new(0),
-                t0: Instant::now(),
             }),
         }
     }
@@ -118,9 +116,6 @@ impl WatchTile {
         WatchVideoSource {
             tile: self.clone(),
             frame_index: 0,
-            last_emit: Instant::now()
-                .checked_sub(Duration::from_secs(1))
-                .unwrap_or_else(|| Instant::now()),
         }
     }
 
@@ -151,8 +146,8 @@ impl WatchTile {
 
 pub struct WatchVideoSource {
     tile: WatchTile,
+    /// Monotonic frame index for PTS only (never jump / catch-up).
     frame_index: u64,
-    last_emit: Instant,
 }
 
 impl VideoSource for WatchVideoSource {
@@ -166,40 +161,30 @@ impl VideoSource for WatchVideoSource {
         }
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
-        // Wall-clock cadence. Only emit when the demux queue has a *new* frame —
-        // never re-send held pixels (that was the freeq "still frame" look).
-        let min_gap = Duration::from_millis(1000 / u64::from(WATCH_FPS.max(1)));
-        if self.last_emit.elapsed() + Duration::from_millis(1) < min_gap {
-            return Ok(None);
-        }
-
+        // Drain the demux queue as fast as the publisher asks. Cadence is
+        // owned by iroh-live's SharedVideoSource (vshr-*): it sleeps on our
+        // PTS. Do **not** rate-limit here and do **not** jump PTS to wall
+        // clock — catch-up made vshr sleep multi-second gaps (freezes).
+        //
+        // On empty queue we must sleep before Ok(None): vshr spins on None
+        // with no backoff and pinned ~100% of a core on 2-vCPU boxd, starving
+        // H.264 encode so freeq held a still even while demux was live.
         let pixels = {
             let mut q = self.tile.inner.queue.lock().expect("queue");
-            match q.pop_front() {
-                Some(bytes) => bytes,
-                None => return Ok(None),
-            }
+            q.pop_front()
+        };
+        let Some(pixels) = pixels else {
+            std::thread::sleep(Duration::from_millis(5));
+            return Ok(None);
         };
         self.tile.inner.popped.fetch_add(1, Ordering::Relaxed);
 
-        // Catch up timestamps if encode lagged.
-        let elapsed = self.tile.inner.t0.elapsed();
-        let period_ms = (1000 / WATCH_FPS.max(1)) as u64;
-        let target_index = elapsed.as_millis() as u64 / period_ms.max(1);
-        if target_index > self.frame_index {
-            self.frame_index = target_index;
-        }
-
         let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
         self.frame_index = self.frame_index.saturating_add(1);
-        self.last_emit = Instant::now();
         Ok(Some(VideoFrame::new_rgba(pixels, WATCH_W, WATCH_H, due)))
     }
     fn start(&mut self) -> Result<()> {
         self.frame_index = 0;
-        self.last_emit = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .unwrap_or_else(|| Instant::now());
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
@@ -901,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn pop_drains_queue_at_fps_cap_without_hold() {
+    fn pop_drains_queue_in_order_without_hold() {
         let tile = WatchTile::new();
         let mut src = tile.video_source();
         src.start().unwrap();
@@ -909,21 +894,18 @@ mod tests {
         tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
         tile.push_rgba_bytes(Bytes::from(vec![43u8; FRAME_BYTES]));
         assert_eq!(tile.queue_len(), 2);
-        assert!(src.pop_frame().unwrap().is_some());
+        // No local rate limit — publisher (vshr) paces on PTS.
+        let f0 = src.pop_frame().unwrap().expect("first");
+        assert_eq!(f0.rgba_image().as_raw()[0], 42);
         assert_eq!(tile.queue_len(), 1);
-        // fps cap — not due yet
-        assert!(src.pop_frame().unwrap().is_none());
-        assert_eq!(tile.queue_len(), 1);
-
-        let period = Duration::from_millis(1000 / u64::from(WATCH_FPS) + 5);
-        thread::sleep(period);
-        // Second queued frame, not a re-hold of the first.
-        let f = src.pop_frame().unwrap().expect("second frame");
-        assert_eq!(f.rgba_image().as_raw()[0], 43);
+        let f1 = src.pop_frame().unwrap().expect("second");
+        assert_eq!(f1.rgba_image().as_raw()[0], 43);
         assert_eq!(tile.queue_len(), 0);
+        // Sequential PTS at WATCH_FPS (ms).
+        assert_eq!(f0.timestamp, Duration::from_millis(0));
+        assert_eq!(f1.timestamp, Duration::from_millis(1000 / u64::from(WATCH_FPS)));
 
-        thread::sleep(period);
-        // Queue empty → None (do not re-encode held pixels).
+        // Empty → None after a short backoff (does not re-hold pixels).
         assert!(src.pop_frame().unwrap().is_none());
     }
 
