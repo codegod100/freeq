@@ -9,14 +9,16 @@
 //!    H.264 encode on the tokio runtime must not starve the audio path.
 //!    Audio uses a *comfortable* prebuffer + wall-clock paced enqueue so
 //!    MoQ never underruns (do not tighten this — audio was already solid).
-//! 3. **Video demux on a dedicated OS thread** is a pure pump. ffmpeg is
-//!    started with **`-re`** so multi-second HLS segments play through at
-//!    media time (without `-re`, a segment dumps in ms and “latest” freezes
-//!    for ~8s). We do **not** sleep/pace in the demux loop — that starved
-//!    the pipe and left watch-video nearly idle.
-//! 4. **Encode only new demux frames** (seq counter), rate-capped at
-//!    `WATCH_FPS`. Never re-encode the same held pixels.
+//! 3. **Video demux on a dedicated OS thread** pumps RGBA into a **bounded
+//!    frame queue**. stream.place ~8s HLS segments often decode as a burst;
+//!    a “latest only” tile then freezes on the last frame of the burst until
+//!    the next segment. The queue absorbs the burst and playout is paced at
+//!    `WATCH_FPS` in `pop_frame` (wall clock). ffmpeg does **not** use `-re`
+//!    (stalls this source) or `realtime` (still left multi-second holds).
+//! 4. **Encode only frames popped from the queue** — never re-encode the
+//!    same held pixels at `WATCH_FPS` (that looked like a continuous still).
 
+use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
@@ -41,8 +43,13 @@ pub const WATCH_W: u32 = 320;
 pub const WATCH_H: u32 = 180;
 
 /// Max encode rate for stream-watch (matches watch-plane `AV_VIDEO_FPS`).
-/// Demux runs as fast as source delivers; we drop to this rate on encode.
+/// Demux may burst; playout is capped here in `pop_frame`.
 pub const WATCH_FPS: u32 = 15;
+
+/// How many RGBA frames the demux may queue ahead of encode.
+/// ~8s of 15fps absorbs one stream.place segment dump without freezing on
+/// the last frame of the burst. ~27 MiB at 320×180.
+const FRAME_QUEUE_CAP: usize = (WATCH_FPS as usize) * 8;
 
 const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 20; // 50ms
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
@@ -85,10 +92,13 @@ pub struct WatchTile {
 }
 
 struct WatchInner {
-    /// Latest demuxed RGBA + sequence (monotonic). Encode only advances when
-    /// `seq` changes — never re-sends the same held frame.
-    latest: Mutex<Option<(u64, Bytes)>>,
-    seq: AtomicU64,
+    /// Demux → encode queue. Front is next to encode; push drops oldest when
+    /// full so we stay near the live edge of a burst dump.
+    queue: Mutex<VecDeque<Bytes>>,
+    /// Frames accepted from demux (monotonic).
+    pushed: AtomicU64,
+    /// Frames handed to the encoder (monotonic).
+    popped: AtomicU64,
     t0: Instant,
 }
 
@@ -96,8 +106,9 @@ impl WatchTile {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(WatchInner {
-                latest: Mutex::new(None),
-                seq: AtomicU64::new(0),
+                queue: Mutex::new(VecDeque::with_capacity(FRAME_QUEUE_CAP)),
+                pushed: AtomicU64::new(0),
+                popped: AtomicU64::new(0),
                 t0: Instant::now(),
             }),
         }
@@ -107,7 +118,6 @@ impl WatchTile {
         WatchVideoSource {
             tile: self.clone(),
             frame_index: 0,
-            last_seq: 0,
             last_emit: Instant::now()
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(|| Instant::now()),
@@ -118,15 +128,30 @@ impl WatchTile {
         if !accepts_rgba_len(bytes.len(), WATCH_W, WATCH_H) {
             return;
         }
-        let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed) + 1;
-        *self.inner.latest.lock().expect("latest") = Some((seq, bytes));
+        let mut q = self.inner.queue.lock().expect("queue");
+        while q.len() >= FRAME_QUEUE_CAP {
+            q.pop_front();
+        }
+        q.push_back(bytes);
+        self.inner.pushed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn queue_len(&self) -> usize {
+        self.inner.queue.lock().expect("queue").len()
+    }
+
+    pub fn pushed(&self) -> u64 {
+        self.inner.pushed.load(Ordering::Relaxed)
+    }
+
+    pub fn popped(&self) -> u64 {
+        self.inner.popped.load(Ordering::Relaxed)
     }
 }
 
 pub struct WatchVideoSource {
     tile: WatchTile,
     frame_index: u64,
-    last_seq: u64,
     last_emit: Instant,
 }
 
@@ -141,21 +166,21 @@ impl VideoSource for WatchVideoSource {
         }
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
-        // Sample *latest demux* at a steady WATCH_FPS. Content advances because
-        // demux continuously overwrites latest under `-re`. Steady encode cadence
-        // keeps freeq clients from stalling between irregular demux arrivals.
+        // Wall-clock cadence. Only emit when the demux queue has a *new* frame —
+        // never re-send held pixels (that was the freeq "still frame" look).
         let min_gap = Duration::from_millis(1000 / u64::from(WATCH_FPS.max(1)));
         if self.last_emit.elapsed() + Duration::from_millis(1) < min_gap {
             return Ok(None);
         }
 
-        let (seq, pixels) = {
-            let g = self.tile.inner.latest.lock().expect("latest");
-            match g.as_ref() {
-                Some((seq, bytes)) => (*seq, bytes.clone()),
+        let pixels = {
+            let mut q = self.tile.inner.queue.lock().expect("queue");
+            match q.pop_front() {
+                Some(bytes) => bytes,
                 None => return Ok(None),
             }
         };
+        self.tile.inner.popped.fetch_add(1, Ordering::Relaxed);
 
         // Catch up timestamps if encode lagged.
         let elapsed = self.tile.inner.t0.elapsed();
@@ -167,13 +192,11 @@ impl VideoSource for WatchVideoSource {
 
         let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
         self.frame_index = self.frame_index.saturating_add(1);
-        self.last_seq = seq;
         self.last_emit = Instant::now();
         Ok(Some(VideoFrame::new_rgba(pixels, WATCH_W, WATCH_H, due)))
     }
     fn start(&mut self) -> Result<()> {
         self.frame_index = 0;
-        self.last_seq = 0;
         self.last_emit = Instant::now()
             .checked_sub(Duration::from_secs(1))
             .unwrap_or_else(|| Instant::now());
@@ -322,10 +345,9 @@ fn hls_input_args(url: &str) -> Vec<String> {
 
 /// Video-only HLS flags.
 ///
-/// stream.place uses ~8s fMP4 segments. Without realtime pacing, ffmpeg
-/// decodes an entire segment as fast as the CPU allows; a “latest frame”
-/// consumer then shows one still until the next segment. `-re` / `-readrate 1`
-/// makes decode follow presentation timestamps so motion plays through.
+/// Decode as fast as the source allows. Playout pacing is **not** done in
+/// ffmpeg (`-re` stalls this HLS; `realtime` still held frames between
+/// segments). The Rust frame queue + `pop_frame` wall clock own the cadence.
 fn hls_video_input_args(url: &str) -> Vec<String> {
     [
         "-hide_banner",
@@ -335,9 +357,6 @@ fn hls_video_input_args(url: &str) -> Vec<String> {
         // and never emits video (freeq holds a still forever). Confirmed via
         // strace: read(0,"",1)=0 in a tight loop.
         "-nostdin",
-        // Do NOT use -re here: with this HLS source it stalls after connect
-        // and writes zero rawvideo frames (watch-video stuck in pipe_read).
-        // Realtime pacing is done with the `realtime` filter after decode.
         "-fflags",
         "+genpts+flush_packets",
         "-flags",
@@ -422,7 +441,7 @@ pub fn start_watch(
             })
             .expect("spawn watch-audio thread");
 
-        // --- Video: dedicated OS thread — drain pipe, keep only latest ---
+        // --- Video: dedicated OS thread — drain pipe into playout queue ---
         let stop_v = stop_task.clone();
         let alive_flag_v = alive_flag.clone();
         let tile_v = tile.clone();
@@ -668,10 +687,8 @@ fn video_thread_main(
 }
 
 /// Blocking video demux on a dedicated thread — pure pump via **stdout pipe**
-/// (same pattern as audio). Named fifos were leaving watch-video asleep with
-/// no data while freeq held a still.
-///
-/// ffmpeg `-re` is the only clock so multi-second HLS segments play through.
+/// into the tile frame queue. Named fifos left watch-video asleep; `-re` /
+/// `realtime` either stalled or still held between ~8s segments.
 fn run_video_blocking(
     ffmpeg: &str,
     url: &str,
@@ -680,12 +697,12 @@ fn run_video_blocking(
     session_alive: &AtomicBool,
     _run_dir: &Path,
 ) -> Result<()> {
-    // `realtime` slows emission to media timestamps so ~8s HLS segments play
-    // through instead of dumping into a single “latest” still. No `fps=` —
-    // that invents/duplicates frames and freezes motion.
+    // `fps=WATCH_FPS` thins the source so a segment dump is ~15×N frames, not
+    // 30–60×N. Playout pacing is the Rust queue + pop_frame wall clock — do
+    // **not** put `realtime` here (still held freeq on this source).
     let vf = format!(
         "scale={WATCH_W}:{WATCH_H}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
-pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,format=rgba,realtime=speed=1"
+pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={WATCH_FPS},format=rgba"
     );
 
     let mut args = hls_video_input_args(url);
@@ -742,11 +759,11 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,format=rgba,realtime=speed=1"
     }
 
     let mut v_reader = child.stdout.take().context("ffmpeg video stdout")?;
-    // Blocking reads: -re already paces; non-blocking + sleep starved the pump.
-    // Enlarge pipe for a few frames of jitter under encode load.
+    // Enlarge pipe so a short burst of frames does not block ffmpeg on write
+    // while the queue is being drained by the encoder.
     {
         let fd = v_reader.as_raw_fd();
-        let want = (FRAME_BYTES * 8 + 4096) as libc::c_int;
+        let want = (FRAME_BYTES * 16 + 4096) as libc::c_int;
         let _ = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, want) };
     }
 
@@ -760,7 +777,7 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,format=rgba,realtime=speed=1"
             break;
         }
 
-        // Blocking read of one full frame (ffmpeg `-re` is the clock).
+        // Blocking read of one full frame; push into the playout queue.
         if let Err(e) = read_exact_blocking(&mut v_reader, &mut buf, stop, session_alive) {
             if e.kind() == std::io::ErrorKind::UnexpectedEof
                 || e.kind() == std::io::ErrorKind::Interrupted
@@ -780,8 +797,10 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,format=rgba,realtime=speed=1"
             info!(
                 frames_in,
                 demux_fps,
-                seq = tile.inner.seq.load(Ordering::Relaxed),
-                "watch video feed (stdout -re pump)"
+                queue = tile.queue_len(),
+                pushed = tile.pushed(),
+                popped = tile.popped(),
+                "watch video feed (queue pump)"
             );
             frames_in = 0;
             log_t0 = Instant::now();
@@ -882,19 +901,43 @@ mod tests {
     }
 
     #[test]
-    fn pop_samples_latest_at_fps_cap() {
+    fn pop_drains_queue_at_fps_cap_without_hold() {
         let tile = WatchTile::new();
         let mut src = tile.video_source();
         src.start().unwrap();
 
         tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
+        tile.push_rgba_bytes(Bytes::from(vec![43u8; FRAME_BYTES]));
+        assert_eq!(tile.queue_len(), 2);
         assert!(src.pop_frame().unwrap().is_some());
+        assert_eq!(tile.queue_len(), 1);
         // fps cap — not due yet
         assert!(src.pop_frame().unwrap().is_none());
+        assert_eq!(tile.queue_len(), 1);
 
         let period = Duration::from_millis(1000 / u64::from(WATCH_FPS) + 5);
         thread::sleep(period);
-        // Still has latest (hold for cadence) even without a new demux push.
-        assert!(src.pop_frame().unwrap().is_some());
+        // Second queued frame, not a re-hold of the first.
+        let f = src.pop_frame().unwrap().expect("second frame");
+        assert_eq!(f.rgba_image().as_raw()[0], 43);
+        assert_eq!(tile.queue_len(), 0);
+
+        thread::sleep(period);
+        // Queue empty → None (do not re-encode held pixels).
+        assert!(src.pop_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn queue_drops_oldest_when_full() {
+        let tile = WatchTile::new();
+        for i in 0..(FRAME_QUEUE_CAP + 3) {
+            tile.push_rgba_bytes(Bytes::from(vec![i as u8; FRAME_BYTES]));
+        }
+        assert_eq!(tile.queue_len(), FRAME_QUEUE_CAP);
+        // Oldest three dropped; front should be byte value 3.
+        let mut src = tile.video_source();
+        src.start().unwrap();
+        let f = src.pop_frame().unwrap().expect("front");
+        assert_eq!(f.rgba_image().as_raw()[0], 3);
     }
 }
