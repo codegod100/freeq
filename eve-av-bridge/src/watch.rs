@@ -114,8 +114,7 @@ impl WatchTile {
     pub fn video_source(&self) -> WatchVideoSource {
         WatchVideoSource {
             tile: self.clone(),
-            origin: None,
-            last_emit: None,
+            t0: Instant::now(),
             frame_index: 0,
         }
     }
@@ -147,11 +146,36 @@ impl WatchTile {
 
 pub struct WatchVideoSource {
     tile: WatchTile,
-    /// PTS epoch — reset in `start()` to match vshr `wall_start` re-anchor.
-    origin: Option<Instant>,
-    /// Wall clock of last `Some` return (playout clock).
-    last_emit: Option<Instant>,
+    /// Same clock model as `OnAirSource` (proven with iroh vshr): PTS and
+    /// emit gate both derived from `t0` + frame_index.
+    t0: Instant,
     frame_index: u64,
+}
+
+/// Paint a 1-pixel-tall magenta scanline that marches down the frame so any
+/// freeq client shows *visible* motion even if the stream content is static.
+fn stamp_motion_bar(rgba: &mut [u8], frame_index: u64) {
+    if rgba.len() < FRAME_BYTES {
+        return;
+    }
+    let y = (frame_index as u32 % WATCH_H) as usize;
+    let row = y * (WATCH_W as usize) * 4;
+    for x in 0..(WATCH_W as usize) {
+        let i = row + x * 4;
+        rgba[i] = 255; // R
+        rgba[i + 1] = 0; // G
+        rgba[i + 2] = 255; // B
+        rgba[i + 3] = 255; // A
+    }
+    // Also a vertical tick at the top so horizontal motion is obvious.
+    let x = (frame_index as u32 % WATCH_W) as usize;
+    for y in 0..8.min(WATCH_H as usize) {
+        let i = (y * WATCH_W as usize + x) * 4;
+        rgba[i] = 0;
+        rgba[i + 1] = 255;
+        rgba[i + 2] = 0;
+        rgba[i + 3] = 255;
+    }
 }
 
 impl VideoSource for WatchVideoSource {
@@ -165,14 +189,22 @@ impl VideoSource for WatchVideoSource {
         }
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
-        // Pace first so we never pull faster than WATCH_FPS even when the
-        // queue is deep (deep queue + fast pull → vshr one-slot collapse).
-        let min_gap = Duration::from_millis(1000 / u64::from(WATCH_FPS.max(1)));
-        if let Some(prev) = self.last_emit {
-            let wait = min_gap.saturating_sub(prev.elapsed());
-            if !wait.is_zero() {
-                std::thread::sleep(wait);
-            }
+        // OnAir-style gate: emit only when wall clock reaches the next slot.
+        // Do **not** sleep for the whole period (blocks vshr); brief sleep on
+        // wait paths so vshr does not pin a core on Ok(None).
+        let period_ms = 1000 / u64::from(WATCH_FPS.max(1));
+        let elapsed = self.t0.elapsed();
+        let due = Duration::from_millis(self.frame_index.saturating_mul(period_ms));
+        if elapsed + Duration::from_millis(2) < due {
+            std::thread::sleep(Duration::from_millis(1));
+            return Ok(None);
+        }
+
+        // If we underran, skip empty slots so PTS stays near wall (prevents
+        // vshr multi-second catch-up sleeps after a gap).
+        let target = elapsed.as_millis() as u64 / period_ms.max(1);
+        if target > self.frame_index {
+            self.frame_index = target;
         }
 
         let pixels = {
@@ -180,28 +212,27 @@ impl VideoSource for WatchVideoSource {
             q.pop_front()
         };
         let Some(pixels) = pixels else {
-            // vshr spins on Ok(None) with no backoff — brief sleep.
             std::thread::sleep(Duration::from_millis(5));
             return Ok(None);
         };
 
-        let now = Instant::now();
-        let origin = *self.origin.get_or_insert(now);
-        // Wall-time PTS so vshr's (PTS - base) ≈ wall since start/resume.
-        // Index-based PTS drifts and can put expected *minutes* ahead of
-        // wall_start after park/resume → multi-second freezes (popped stuck).
-        let due = now.saturating_duration_since(origin);
-        self.last_emit = Some(now);
+        let mut owned = pixels.to_vec();
+        stamp_motion_bar(&mut owned, self.frame_index);
+
+        let due = Duration::from_millis(self.frame_index.saturating_mul(period_ms));
         self.frame_index = self.frame_index.saturating_add(1);
         self.tile.inner.popped.fetch_add(1, Ordering::Relaxed);
 
-        Ok(Some(VideoFrame::new_rgba(pixels, WATCH_W, WATCH_H, due)))
+        Ok(Some(VideoFrame::new_rgba(
+            Bytes::from(owned),
+            WATCH_W,
+            WATCH_H,
+            due,
+        )))
     }
     fn start(&mut self) -> Result<()> {
-        // vshr re-anchors wall_start + pts_start on each start/resume.
-        // Match that or the next frames' PTS sit far ahead and vshr sleeps.
-        self.origin = None;
-        self.last_emit = None;
+        // Align with vshr wall_start re-anchor on every start/resume.
+        self.t0 = Instant::now();
         self.frame_index = 0;
         Ok(())
     }
@@ -904,54 +935,38 @@ mod tests {
     }
 
     #[test]
-    fn pop_wall_clock_paces_and_drains_in_order() {
+    fn pop_on_air_style_gate_and_motion_stamp() {
         let tile = WatchTile::new();
         let mut src = tile.video_source();
         src.start().unwrap();
 
         tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
-        tile.push_rgba_bytes(Bytes::from(vec![43u8; FRAME_BYTES]));
-        assert_eq!(tile.queue_len(), 2);
-
-        let t0 = Instant::now();
         let f0 = src.pop_frame().unwrap().expect("first");
-        assert_eq!(f0.rgba_image().as_raw()[0], 42);
-        // First PTS is ~0 (origin set on first emit).
-        assert!(f0.timestamp < Duration::from_millis(20));
-
-        let f1 = src.pop_frame().unwrap().expect("second");
-        assert_eq!(f1.rgba_image().as_raw()[0], 43);
-        let gap = t0.elapsed();
-        let min = Duration::from_millis(1000 / u64::from(WATCH_FPS));
-        assert!(
-            gap >= min.saturating_sub(Duration::from_millis(5)),
-            "expected ≥{min:?} between emits, got {gap:?}"
-        );
-        // PTS tracks wall time since origin, not integer frame_index*66.
-        assert!(
-            f1.timestamp >= min.saturating_sub(Duration::from_millis(15)),
-            "second PTS should be ~one frame period, got {:?}",
-            f1.timestamp
-        );
+        // Motion stamp overwrites some pixels (green tick / magenta bar).
+        assert_eq!(f0.timestamp, Duration::from_millis(0));
         assert_eq!(tile.queue_len(), 0);
+
+        // Not due yet at 15fps.
+        tile.push_rgba_bytes(Bytes::from(vec![43u8; FRAME_BYTES]));
+        assert!(src.pop_frame().unwrap().is_none());
+
+        thread::sleep(Duration::from_millis(1000 / u64::from(WATCH_FPS) + 10));
+        let f1 = src.pop_frame().unwrap().expect("second");
+        assert!(f1.timestamp >= Duration::from_millis(60));
     }
 
     #[test]
-    fn start_resets_pts_origin() {
+    fn start_resets_clock() {
         let tile = WatchTile::new();
         let mut src = tile.video_source();
         src.start().unwrap();
         tile.push_rgba_bytes(Bytes::from(vec![1u8; FRAME_BYTES]));
         let _ = src.pop_frame().unwrap();
         thread::sleep(Duration::from_millis(30));
-        src.start().unwrap(); // simulate vshr park/resume re-anchor
+        src.start().unwrap();
         tile.push_rgba_bytes(Bytes::from(vec![2u8; FRAME_BYTES]));
         let f = src.pop_frame().unwrap().expect("after restart");
-        assert!(
-            f.timestamp < Duration::from_millis(20),
-            "PTS must re-zero on start, got {:?}",
-            f.timestamp
-        );
+        assert_eq!(f.timestamp, Duration::from_millis(0));
     }
 
     #[test]
@@ -961,10 +976,13 @@ mod tests {
             tile.push_rgba_bytes(Bytes::from(vec![i as u8; FRAME_BYTES]));
         }
         assert_eq!(tile.queue_len(), FRAME_QUEUE_CAP);
-        // Oldest three dropped; front should be byte value 3.
+        // Oldest three dropped; front should be byte value 3 (sample center
+        // pixel — motion stamp only touches top rows / one column).
         let mut src = tile.video_source();
         src.start().unwrap();
         let f = src.pop_frame().unwrap().expect("front");
-        assert_eq!(f.rgba_image().as_raw()[0], 3);
+        let raw = f.rgba_image().as_raw();
+        let mid = (WATCH_H as usize / 2) * (WATCH_W as usize) * 4 + (WATCH_W as usize / 2) * 4;
+        assert_eq!(raw[mid], 3);
     }
 }

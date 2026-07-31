@@ -353,8 +353,12 @@ where
         if let Some(bps) = env_u64("AV_VIDEO_BITRATE") {
             enc_config = enc_config.bitrate(bps.max(32_000));
         }
-        // ~1s IDR at configured fps (was hard-coded 15 @ 30fps).
-        let ki = enc_config.framerate.max(1);
+        // Keyframe interval: env override, else every ~200ms of frames
+        // (was 1s — remote freeq clients looked "held" between IDRs).
+        let ki = env_u32("AV_VIDEO_KEYFRAME_INTERVAL").unwrap_or_else(|| {
+            let fps = enc_config.framerate.max(1);
+            (fps / 5).max(1)
+        });
         enc_config = enc_config.keyframe_interval(ki);
         tracing::info!(
             %preset,
