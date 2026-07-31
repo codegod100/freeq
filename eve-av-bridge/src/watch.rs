@@ -12,12 +12,11 @@
 //! 3. **Video demux on a dedicated OS thread** pumps RGBA into a **bounded
 //!    frame queue**. stream.place ~8s HLS segments decode as a burst; the
 //!    queue absorbs them. ffmpeg does **not** use `-re` (stalls this HLS).
-//! 4. **`pop_frame` wall-clock paces at `WATCH_FPS`**. iroh-live’s
-//!    SharedVideoSource (`vshr-*`) paces with `PTS - first_pts` vs
-//!    `wall_since_start`. After HLS connect delay, `wall >> PTS` so it
-//!    dumps the whole queue in milliseconds into a **single-slot** watch
-//!    channel — only the last frame survives → freeq holds a still. We
-//!    sleep in `pop_frame` so each frame is published ~66ms apart.
+//! 4. **`pop_frame` is the only clock**. iroh `vshr-*` sleeps when
+//!    `PTS - base > wall_since_start`. Index-based PTS drifts and after
+//!    park/resume can sleep for **tens of seconds** (queue fills, freeq
+//!    holds a still). We pace emits at `WATCH_FPS`, stamp PTS as wall
+//!    time since `start()`, and reset origin on `start()` to match vshr.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -47,10 +46,9 @@ pub const WATCH_H: u32 = 180;
 /// Demux may burst; playout is capped here in `pop_frame`.
 pub const WATCH_FPS: u32 = 15;
 
-/// How many RGBA frames the demux may queue ahead of encode.
-/// ~8s of 15fps absorbs one stream.place segment dump without freezing on
-/// the last frame of the burst. ~27 MiB at 320×180.
-const FRAME_QUEUE_CAP: usize = (WATCH_FPS as usize) * 8;
+/// Demux queue depth. stream.place segments are ~1s; 3s of 15fps is enough
+/// jitter buffer without multi-second live lag. ~10 MiB at 320×180.
+const FRAME_QUEUE_CAP: usize = (WATCH_FPS as usize) * 3;
 
 const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 20; // 50ms
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
@@ -116,8 +114,9 @@ impl WatchTile {
     pub fn video_source(&self) -> WatchVideoSource {
         WatchVideoSource {
             tile: self.clone(),
-            frame_index: 0,
+            origin: None,
             last_emit: None,
+            frame_index: 0,
         }
     }
 
@@ -148,10 +147,11 @@ impl WatchTile {
 
 pub struct WatchVideoSource {
     tile: WatchTile,
-    /// Monotonic frame index for PTS (strictly sequential, no catch-up).
-    frame_index: u64,
-    /// Wall clock of last `Some` return — we are the playout clock.
+    /// PTS epoch — reset in `start()` to match vshr `wall_start` re-anchor.
+    origin: Option<Instant>,
+    /// Wall clock of last `Some` return (playout clock).
     last_emit: Option<Instant>,
+    frame_index: u64,
 }
 
 impl VideoSource for WatchVideoSource {
@@ -165,22 +165,8 @@ impl VideoSource for WatchVideoSource {
         }
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
-        // Empty: short sleep so vshr does not spin a whole core (iroh
-        // SharedVideoSource has no backoff on Ok(None)).
-        let pixels = {
-            let mut q = self.tile.inner.queue.lock().expect("queue");
-            q.pop_front()
-        };
-        let Some(pixels) = pixels else {
-            std::thread::sleep(Duration::from_millis(5));
-            return Ok(None);
-        };
-
-        // Wall-clock pace at WATCH_FPS **before** handing the frame to vshr.
-        // Without this, after HLS startup lag vshr compares small sequential
-        // PTS against large wall_since_start and flushes the whole queue into
-        // a one-slot watch channel in one go — freeq only ever sees the last
-        // frame of each burst (looks like a permanent still).
+        // Pace first so we never pull faster than WATCH_FPS even when the
+        // queue is deep (deep queue + fast pull → vshr one-slot collapse).
         let min_gap = Duration::from_millis(1000 / u64::from(WATCH_FPS.max(1)));
         if let Some(prev) = self.last_emit {
             let wait = min_gap.saturating_sub(prev.elapsed());
@@ -188,16 +174,35 @@ impl VideoSource for WatchVideoSource {
                 std::thread::sleep(wait);
             }
         }
-        self.last_emit = Some(Instant::now());
+
+        let pixels = {
+            let mut q = self.tile.inner.queue.lock().expect("queue");
+            q.pop_front()
+        };
+        let Some(pixels) = pixels else {
+            // vshr spins on Ok(None) with no backoff — brief sleep.
+            std::thread::sleep(Duration::from_millis(5));
+            return Ok(None);
+        };
+
+        let now = Instant::now();
+        let origin = *self.origin.get_or_insert(now);
+        // Wall-time PTS so vshr's (PTS - base) ≈ wall since start/resume.
+        // Index-based PTS drifts and can put expected *minutes* ahead of
+        // wall_start after park/resume → multi-second freezes (popped stuck).
+        let due = now.saturating_duration_since(origin);
+        self.last_emit = Some(now);
+        self.frame_index = self.frame_index.saturating_add(1);
         self.tile.inner.popped.fetch_add(1, Ordering::Relaxed);
 
-        let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
-        self.frame_index = self.frame_index.saturating_add(1);
         Ok(Some(VideoFrame::new_rgba(pixels, WATCH_W, WATCH_H, due)))
     }
     fn start(&mut self) -> Result<()> {
-        // Do not reset frame_index / last_emit on re-start — MoQ reconnects
-        // recreate the source; a fresh handle starts at 0 via video_source().
+        // vshr re-anchors wall_start + pts_start on each start/resume.
+        // Match that or the next frames' PTS sit far ahead and vshr sleeps.
+        self.origin = None;
+        self.last_emit = None;
+        self.frame_index = 0;
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
@@ -911,23 +916,42 @@ mod tests {
         let t0 = Instant::now();
         let f0 = src.pop_frame().unwrap().expect("first");
         assert_eq!(f0.rgba_image().as_raw()[0], 42);
-        assert_eq!(f0.timestamp, Duration::from_millis(0));
+        // First PTS is ~0 (origin set on first emit).
+        assert!(f0.timestamp < Duration::from_millis(20));
 
         let f1 = src.pop_frame().unwrap().expect("second");
         assert_eq!(f1.rgba_image().as_raw()[0], 43);
-        // Second frame must not be returned instantly (would dump into vshr).
         let gap = t0.elapsed();
         let min = Duration::from_millis(1000 / u64::from(WATCH_FPS));
         assert!(
             gap >= min.saturating_sub(Duration::from_millis(5)),
             "expected ≥{min:?} between emits, got {gap:?}"
         );
-        assert_eq!(
-            f1.timestamp,
-            Duration::from_millis(1000 / u64::from(WATCH_FPS))
+        // PTS tracks wall time since origin, not integer frame_index*66.
+        assert!(
+            f1.timestamp >= min.saturating_sub(Duration::from_millis(15)),
+            "second PTS should be ~one frame period, got {:?}",
+            f1.timestamp
         );
         assert_eq!(tile.queue_len(), 0);
-        assert!(src.pop_frame().unwrap().is_none());
+    }
+
+    #[test]
+    fn start_resets_pts_origin() {
+        let tile = WatchTile::new();
+        let mut src = tile.video_source();
+        src.start().unwrap();
+        tile.push_rgba_bytes(Bytes::from(vec![1u8; FRAME_BYTES]));
+        let _ = src.pop_frame().unwrap();
+        thread::sleep(Duration::from_millis(30));
+        src.start().unwrap(); // simulate vshr park/resume re-anchor
+        tile.push_rgba_bytes(Bytes::from(vec![2u8; FRAME_BYTES]));
+        let f = src.pop_frame().unwrap().expect("after restart");
+        assert!(
+            f.timestamp < Duration::from_millis(20),
+            "PTS must re-zero on start, got {:?}",
+            f.timestamp
+        );
     }
 
     #[test]
