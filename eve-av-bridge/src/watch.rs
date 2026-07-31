@@ -9,16 +9,13 @@
 //!    H.264 encode on the tokio runtime must not starve the audio path.
 //!    Audio uses a *comfortable* prebuffer + wall-clock paced enqueue so
 //!    MoQ never underruns (do not tighten this — audio was already solid).
-//! 3. **Video demux on a dedicated OS thread** pumps RGBA into a **bounded
-//!    frame queue**. stream.place ~8s HLS segments decode as a burst; the
-//!    queue absorbs them. ffmpeg does **not** use `-re` (stalls this HLS).
-//! 4. **`pop_frame` is the only clock**. iroh `vshr-*` sleeps when
-//!    `PTS - base > wall_since_start`. Index-based PTS drifts and after
-//!    park/resume can sleep for **tens of seconds** (queue fills, freeq
-//!    holds a still). We pace emits at `WATCH_FPS`, stamp PTS as wall
-//!    time since `start()`, and reset origin on `start()` to match vshr.
+//! 3. **Video demux → latest-only slot** (drop frames, never deep-buffer).
+//!    HLS bursts overwrite a single “newest” RGBA; encode samples at
+//!    `WATCH_FPS` and **drops** intermediates so freeq stays near live
+//!    edge instead of playing a multi-second backlog (looks like holds).
+//! 4. **`pop_frame` uses the OnAir clock** (`t0` + frame_index PTS, re-anchor
+//!    on `start()`) so iroh vshr does not multi-second sleep.
 
-use std::collections::VecDeque;
 use std::fs;
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
@@ -43,12 +40,8 @@ pub const WATCH_W: u32 = 320;
 pub const WATCH_H: u32 = 180;
 
 /// Max encode rate for stream-watch (matches watch-plane `AV_VIDEO_FPS`).
-/// Demux may burst; playout is capped here in `pop_frame`.
+/// Demux may burst; we **drop** to this rate (latest-only).
 pub const WATCH_FPS: u32 = 15;
-
-/// Demux queue depth. stream.place segments are ~1s; 3s of 15fps is enough
-/// jitter buffer without multi-second live lag. ~10 MiB at 320×180.
-const FRAME_QUEUE_CAP: usize = (WATCH_FPS as usize) * 3;
 
 const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 20; // 50ms
 const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
@@ -91,22 +84,25 @@ pub struct WatchTile {
 }
 
 struct WatchInner {
-    /// Demux → encode queue. Front is next to encode; push drops oldest when
-    /// full so we stay near the live edge of a burst dump.
-    queue: Mutex<VecDeque<Bytes>>,
+    /// Newest demuxed RGBA only. Push **overwrites** — intermediates are
+    /// dropped so we never play a multi-second backlog.
+    latest: Mutex<Option<(u64, Bytes)>>,
     /// Frames accepted from demux (monotonic).
     pushed: AtomicU64,
     /// Frames handed to the encoder (monotonic).
     popped: AtomicU64,
+    /// Demux frames discarded because a newer one already arrived.
+    dropped: AtomicU64,
 }
 
 impl WatchTile {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(WatchInner {
-                queue: Mutex::new(VecDeque::with_capacity(FRAME_QUEUE_CAP)),
+                latest: Mutex::new(None),
                 pushed: AtomicU64::new(0),
                 popped: AtomicU64::new(0),
+                dropped: AtomicU64::new(0),
             }),
         }
     }
@@ -116,23 +112,25 @@ impl WatchTile {
             tile: self.clone(),
             t0: Instant::now(),
             frame_index: 0,
+            last_seq: 0,
         }
     }
 
+    /// Keep only the newest frame (drop any not-yet-encoded prior frame).
     pub fn push_rgba_bytes(&self, bytes: Bytes) {
         if !accepts_rgba_len(bytes.len(), WATCH_W, WATCH_H) {
             return;
         }
-        let mut q = self.inner.queue.lock().expect("queue");
-        while q.len() >= FRAME_QUEUE_CAP {
-            q.pop_front();
+        let seq = self.inner.pushed.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut g = self.inner.latest.lock().expect("latest");
+        if g.is_some() {
+            self.inner.dropped.fetch_add(1, Ordering::Relaxed);
         }
-        q.push_back(bytes);
-        self.inner.pushed.fetch_add(1, Ordering::Relaxed);
+        *g = Some((seq, bytes));
     }
 
-    pub fn queue_len(&self) -> usize {
-        self.inner.queue.lock().expect("queue").len()
+    pub fn has_latest(&self) -> bool {
+        self.inner.latest.lock().expect("latest").is_some()
     }
 
     pub fn pushed(&self) -> u64 {
@@ -142,40 +140,19 @@ impl WatchTile {
     pub fn popped(&self) -> u64 {
         self.inner.popped.load(Ordering::Relaxed)
     }
+
+    pub fn dropped(&self) -> u64 {
+        self.inner.dropped.load(Ordering::Relaxed)
+    }
 }
 
 pub struct WatchVideoSource {
     tile: WatchTile,
-    /// Same clock model as `OnAirSource` (proven with iroh vshr): PTS and
-    /// emit gate both derived from `t0` + frame_index.
+    /// Same clock model as `OnAirSource` (proven with iroh vshr).
     t0: Instant,
     frame_index: u64,
-}
-
-/// Paint a 1-pixel-tall magenta scanline that marches down the frame so any
-/// freeq client shows *visible* motion even if the stream content is static.
-fn stamp_motion_bar(rgba: &mut [u8], frame_index: u64) {
-    if rgba.len() < FRAME_BYTES {
-        return;
-    }
-    let y = (frame_index as u32 % WATCH_H) as usize;
-    let row = y * (WATCH_W as usize) * 4;
-    for x in 0..(WATCH_W as usize) {
-        let i = row + x * 4;
-        rgba[i] = 255; // R
-        rgba[i + 1] = 0; // G
-        rgba[i + 2] = 255; // B
-        rgba[i + 3] = 255; // A
-    }
-    // Also a vertical tick at the top so horizontal motion is obvious.
-    let x = (frame_index as u32 % WATCH_W) as usize;
-    for y in 0..8.min(WATCH_H as usize) {
-        let i = (y * WATCH_W as usize + x) * 4;
-        rgba[i] = 0;
-        rgba[i + 1] = 255;
-        rgba[i + 2] = 0;
-        rgba[i + 3] = 255;
-    }
+    /// Last demux seq we encoded — skip re-encoding the same still.
+    last_seq: u64,
 }
 
 impl VideoSource for WatchVideoSource {
@@ -190,8 +167,6 @@ impl VideoSource for WatchVideoSource {
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
         // OnAir-style gate: emit only when wall clock reaches the next slot.
-        // Do **not** sleep for the whole period (blocks vshr); brief sleep on
-        // wait paths so vshr does not pin a core on Ok(None).
         let period_ms = 1000 / u64::from(WATCH_FPS.max(1));
         let elapsed = self.t0.elapsed();
         let due = Duration::from_millis(self.frame_index.saturating_mul(period_ms));
@@ -200,40 +175,45 @@ impl VideoSource for WatchVideoSource {
             return Ok(None);
         }
 
-        // If we underran, skip empty slots so PTS stays near wall (prevents
-        // vshr multi-second catch-up sleeps after a gap).
+        // Skip empty slots after underrun so PTS stays near wall.
         let target = elapsed.as_millis() as u64 / period_ms.max(1);
         if target > self.frame_index {
             self.frame_index = target;
         }
 
-        let pixels = {
-            let mut q = self.tile.inner.queue.lock().expect("queue");
-            q.pop_front()
+        // Take **latest** only. Any frames demux wrote since last pop that
+        // were overwritten are already counted in `dropped`.
+        let (seq, pixels) = {
+            let mut g = self.tile.inner.latest.lock().expect("latest");
+            match g.take() {
+                Some(pair) => pair,
+                None => {
+                    std::thread::sleep(Duration::from_millis(5));
+                    return Ok(None);
+                }
+            }
         };
-        let Some(pixels) = pixels else {
+        if seq == self.last_seq {
             std::thread::sleep(Duration::from_millis(5));
             return Ok(None);
-        };
-
-        let mut owned = pixels.to_vec();
-        stamp_motion_bar(&mut owned, self.frame_index);
+        }
+        self.last_seq = seq;
 
         let due = Duration::from_millis(self.frame_index.saturating_mul(period_ms));
         self.frame_index = self.frame_index.saturating_add(1);
         self.tile.inner.popped.fetch_add(1, Ordering::Relaxed);
 
         Ok(Some(VideoFrame::new_rgba(
-            Bytes::from(owned),
+            pixels,
             WATCH_W,
             WATCH_H,
             due,
         )))
     }
     fn start(&mut self) -> Result<()> {
-        // Align with vshr wall_start re-anchor on every start/resume.
         self.t0 = Instant::now();
         self.frame_index = 0;
+        self.last_seq = 0;
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
@@ -475,7 +455,7 @@ pub fn start_watch(
             })
             .expect("spawn watch-audio thread");
 
-        // --- Video: dedicated OS thread — drain pipe into playout queue ---
+        // --- Video: dedicated OS thread — drain pipe into latest-only slot ---
         let stop_v = stop_task.clone();
         let alive_flag_v = alive_flag.clone();
         let tile_v = tile.clone();
@@ -831,10 +811,10 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={WATCH_FPS},format=rgba"
             info!(
                 frames_in,
                 demux_fps,
-                queue = tile.queue_len(),
                 pushed = tile.pushed(),
                 popped = tile.popped(),
-                "watch video feed (queue pump)"
+                dropped = tile.dropped(),
+                "watch video feed (latest-drop)"
             );
             frames_in = 0;
             log_t0 = Instant::now();
@@ -935,24 +915,30 @@ mod tests {
     }
 
     #[test]
-    fn pop_on_air_style_gate_and_motion_stamp() {
+    fn pop_latest_only_drops_intermediates() {
         let tile = WatchTile::new();
         let mut src = tile.video_source();
         src.start().unwrap();
 
-        tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
-        let f0 = src.pop_frame().unwrap().expect("first");
-        // Motion stamp overwrites some pixels (green tick / magenta bar).
-        assert_eq!(f0.timestamp, Duration::from_millis(0));
-        assert_eq!(tile.queue_len(), 0);
+        // Burst of three — only the last survives.
+        tile.push_rgba_bytes(Bytes::from(vec![1u8; FRAME_BYTES]));
+        tile.push_rgba_bytes(Bytes::from(vec![2u8; FRAME_BYTES]));
+        tile.push_rgba_bytes(Bytes::from(vec![3u8; FRAME_BYTES]));
+        assert_eq!(tile.dropped(), 2);
+        assert_eq!(tile.pushed(), 3);
 
-        // Not due yet at 15fps.
-        tile.push_rgba_bytes(Bytes::from(vec![43u8; FRAME_BYTES]));
+        let f0 = src.pop_frame().unwrap().expect("latest");
+        assert_eq!(f0.rgba_image().as_raw()[0], 3);
+        assert_eq!(f0.timestamp, Duration::from_millis(0));
+        assert!(!tile.has_latest());
+
+        // Not due yet at 15fps even if demux has more.
+        tile.push_rgba_bytes(Bytes::from(vec![4u8; FRAME_BYTES]));
         assert!(src.pop_frame().unwrap().is_none());
 
         thread::sleep(Duration::from_millis(1000 / u64::from(WATCH_FPS) + 10));
         let f1 = src.pop_frame().unwrap().expect("second");
-        assert!(f1.timestamp >= Duration::from_millis(60));
+        assert_eq!(f1.rgba_image().as_raw()[0], 4);
     }
 
     #[test]
@@ -967,22 +953,5 @@ mod tests {
         tile.push_rgba_bytes(Bytes::from(vec![2u8; FRAME_BYTES]));
         let f = src.pop_frame().unwrap().expect("after restart");
         assert_eq!(f.timestamp, Duration::from_millis(0));
-    }
-
-    #[test]
-    fn queue_drops_oldest_when_full() {
-        let tile = WatchTile::new();
-        for i in 0..(FRAME_QUEUE_CAP + 3) {
-            tile.push_rgba_bytes(Bytes::from(vec![i as u8; FRAME_BYTES]));
-        }
-        assert_eq!(tile.queue_len(), FRAME_QUEUE_CAP);
-        // Oldest three dropped; front should be byte value 3 (sample center
-        // pixel — motion stamp only touches top rows / one column).
-        let mut src = tile.video_source();
-        src.start().unwrap();
-        let f = src.pop_frame().unwrap().expect("front");
-        let raw = f.rgba_image().as_raw();
-        let mid = (WATCH_H as usize / 2) * (WATCH_W as usize) * 4 + (WATCH_W as usize / 2) * 4;
-        assert_eq!(raw[mid], 3);
     }
 }
