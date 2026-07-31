@@ -1,7 +1,7 @@
-//! Radio video tile: waveform / spectrum bars + ICY StreamTitle.
+//! Radio / slide video tile for freeq-av H.264.
 //!
-//! Renders RGBA frames for freeq-av's H.264 path. Audio analysis is fed from
-//! the radio PCM path (same samples that go to the Speaker).
+//! Default: waveform / spectrum bars + ICY StreamTitle (radio).
+//! Slide mode: presentation card with headline + wrapped body (quiz slides).
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ pub const VIDEO_W: u32 = 640;
 pub const VIDEO_H: u32 = 360;
 const FPS: u64 = 15;
 
-/// Shared state written by the radio feeder, read by the video source.
+/// Shared state written by the radio feeder / slide controller, read by the video source.
 #[derive(Clone)]
 pub struct RadioViz {
     inner: Arc<VizInner>,
@@ -34,6 +34,11 @@ struct VizInner {
     station: Mutex<String>,
     /// Smoothed peak 0..1 for glow.
     peak: Mutex<f32>,
+    /// When true, render a presentation slide instead of radio viz.
+    slide_active: AtomicBool,
+    slide_headline: Mutex<String>,
+    slide_body: Mutex<String>,
+    slide_footer: Mutex<String>,
     running: AtomicBool,
     latest: Mutex<Option<VideoFrame>>,
     started: AtomicBool,
@@ -53,6 +58,10 @@ impl RadioViz {
                 title: Mutex::new(String::new()),
                 station: Mutex::new(label),
                 peak: Mutex::new(0.0),
+                slide_active: AtomicBool::new(false),
+                slide_headline: Mutex::new(String::new()),
+                slide_body: Mutex::new(String::new()),
+                slide_footer: Mutex::new(String::new()),
                 running: AtomicBool::new(true),
                 latest: Mutex::new(None),
                 started: AtomicBool::new(false),
@@ -73,6 +82,32 @@ impl RadioViz {
 
     pub fn title(&self) -> String {
         self.inner.title.lock().expect("title").clone()
+    }
+
+    /// Show a presentation slide on the freeq AV video tile.
+    pub fn set_slide(
+        &self,
+        headline: impl Into<String>,
+        body: impl Into<String>,
+        footer: impl Into<String>,
+    ) {
+        *self.inner.slide_headline.lock().expect("slide_headline") = headline.into();
+        *self.inner.slide_body.lock().expect("slide_body") = body.into();
+        *self.inner.slide_footer.lock().expect("slide_footer") = footer.into();
+        self.inner.slide_active.store(true, Ordering::Relaxed);
+        self.ensure_renderer();
+    }
+
+    /// Return to radio (or idle) viz.
+    pub fn clear_slide(&self) {
+        self.inner.slide_active.store(false, Ordering::Relaxed);
+        *self.inner.slide_headline.lock().expect("slide_headline") = String::new();
+        *self.inner.slide_body.lock().expect("slide_body") = String::new();
+        *self.inner.slide_footer.lock().expect("slide_footer") = String::new();
+    }
+
+    pub fn slide_active(&self) -> bool {
+        self.inner.slide_active.load(Ordering::Relaxed)
     }
 
     /// Feed mono PCM (any rate — we only need shape). Call from radio path.
@@ -174,6 +209,10 @@ impl RadioViz {
     }
 
     fn render_frame(&self, elapsed: Duration) -> VideoFrame {
+        if self.inner.slide_active.load(Ordering::Relaxed) {
+            return self.render_slide_frame(elapsed);
+        }
+
         let w = VIDEO_W as usize;
         let h = VIDEO_H as usize;
         let mut rgba = vec![0u8; w * h * 4];
@@ -286,6 +325,173 @@ impl RadioViz {
             elapsed,
         )
     }
+
+    /// Presentation slide: dark card, headline, wrapped body, footer.
+    fn render_slide_frame(&self, elapsed: Duration) -> VideoFrame {
+        let w = VIDEO_W as usize;
+        let h = VIDEO_H as usize;
+        let mut rgba = vec![0u8; w * h * 4];
+        let t = elapsed.as_secs_f32();
+        let headline = self.inner.slide_headline.lock().expect("slide_headline").clone();
+        let body = self.inner.slide_body.lock().expect("slide_body").clone();
+        let footer = self.inner.slide_footer.lock().expect("slide_footer").clone();
+
+        // Deep slate gradient with slow color drift.
+        for y in 0..h {
+            let fy = y as f32 / h as f32;
+            for x in 0..w {
+                let fx = x as f32 / w as f32;
+                let i = (y * w + x) * 4;
+                let drift = (fx * 2.0 + t * 0.15).sin().abs() * 12.0;
+                rgba[i] = (14.0 + 28.0 * (1.0 - fy) + drift * 0.4).clamp(0.0, 255.0) as u8;
+                rgba[i + 1] = (10.0 + 18.0 * (1.0 - fy) + drift * 0.2).clamp(0.0, 255.0) as u8;
+                rgba[i + 2] = (32.0 + 55.0 * (1.0 - fy) + drift).clamp(0.0, 255.0) as u8;
+                rgba[i + 3] = 255;
+            }
+        }
+
+        // Outer frame accent
+        fill_rect(&mut rgba, w, h, 0, 0, w, 4, 90, 200, 255, 255);
+        fill_rect(&mut rgba, w, h, 0, h - 4, w, 4, 90, 200, 255, 200);
+
+        // Card panel
+        let card_x = 28usize;
+        let card_y = 36usize;
+        let card_w = w.saturating_sub(56);
+        let card_h = h.saturating_sub(72);
+        fill_rect(
+            &mut rgba, w, h, card_x, card_y, card_w, card_h, 18, 16, 36, 230,
+        );
+        // Accent bar under headline
+        fill_rect(
+            &mut rgba,
+            w,
+            h,
+            card_x + 18,
+            card_y + 46,
+            card_w.saturating_sub(36),
+            3,
+            120,
+            90,
+            220,
+            255,
+        );
+
+        // Brand chip
+        draw_text(
+            &mut rgba, w, h, card_x + 18, card_y + 12, "EVE  SLIDE", 160, 180, 230, 2,
+        );
+
+        // Headline (e.g. SLIDE 1/10)
+        let head = if headline.is_empty() {
+            "QUESTION".to_string()
+        } else {
+            headline.to_uppercase()
+        };
+        draw_text(
+            &mut rgba,
+            w,
+            h,
+            card_x + 18,
+            card_y + 58,
+            &head,
+            240,
+            245,
+            255,
+            2,
+        );
+
+        // Body — wrap to card width at scale 3 (glyph ~18px wide)
+        let scale = 3usize;
+        let char_w = 6 * scale;
+        let max_chars = ((card_w.saturating_sub(40)) / char_w).max(8);
+        let lines = wrap_text(&body, max_chars);
+        let line_h = 7 * scale + 8;
+        let mut y = card_y + 100;
+        for line in lines.iter().take(7) {
+            if y + line_h > card_y + card_h - 40 {
+                break;
+            }
+            draw_text(
+                &mut rgba, w, h, card_x + 22, y, line, 235, 240, 255, scale,
+            );
+            y += line_h;
+        }
+
+        // Footer strip
+        fill_rect(
+            &mut rgba,
+            w,
+            h,
+            card_x,
+            card_y + card_h.saturating_sub(34),
+            card_w,
+            34,
+            10,
+            12,
+            24,
+            240,
+        );
+        let foot = if footer.is_empty() {
+            "answer in the freeq channel".to_string()
+        } else {
+            footer
+        };
+        draw_text(
+            &mut rgba,
+            w,
+            h,
+            card_x + 18,
+            card_y + card_h.saturating_sub(22),
+            &foot,
+            150,
+            200,
+            255,
+            2,
+        );
+
+        VideoFrame::new_rgba(Bytes::from(rgba), VIDEO_W, VIDEO_H, elapsed)
+    }
+}
+
+/// Word-wrap `text` to lines of at most `max_chars` (ASCII-ish width).
+fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
+    let max_chars = max_chars.max(4);
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        if word.chars().count() > max_chars {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let mut chunk = String::new();
+            for ch in word.chars() {
+                if chunk.chars().count() >= max_chars {
+                    lines.push(std::mem::take(&mut chunk));
+                }
+                chunk.push(ch);
+            }
+            if !chunk.is_empty() {
+                cur = chunk;
+            }
+            continue;
+        }
+        let next_len = cur.chars().count() + if cur.is_empty() { 0 } else { 1 } + word.chars().count();
+        if !cur.is_empty() && next_len > max_chars {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// VideoSource the H.264 encoder pulls — latest rendered frame.

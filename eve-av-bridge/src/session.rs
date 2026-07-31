@@ -70,6 +70,16 @@ pub enum SessionCmd {
     StopCallEgress {
         reply: Option<oneshot::Sender<Result<EgressStatus, String>>>,
     },
+    /// Paint a presentation slide on the radio-plane video tile.
+    ShowSlide {
+        headline: String,
+        body: String,
+        footer: String,
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    },
+    ClearSlide {
+        reply: Option<oneshot::Sender<Result<(), String>>>,
+    },
     Status {
         reply: Option<oneshot::Sender<StatusSnapshot>>,
     },
@@ -182,6 +192,28 @@ impl SessionManager {
     pub async fn stop_call_egress(&self) -> Result<EgressStatus, String> {
         let (tx, rx) = oneshot::channel();
         self.send(SessionCmd::StopCallEgress { reply: Some(tx) });
+        rx.await.map_err(|_| "session manager gone".to_string())?
+    }
+
+    pub async fn show_slide(
+        &self,
+        headline: String,
+        body: String,
+        footer: String,
+    ) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(SessionCmd::ShowSlide {
+            headline,
+            body,
+            footer,
+            reply: Some(tx),
+        });
+        rx.await.map_err(|_| "session manager gone".to_string())?
+    }
+
+    pub async fn clear_slide(&self) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.send(SessionCmd::ClearSlide { reply: Some(tx) });
         rx.await.map_err(|_| "session manager gone".to_string())?
     }
 
@@ -420,6 +452,41 @@ async fn run_manager(
                     );
                 }
             }
+            SessionCmd::ShowSlide {
+                headline,
+                body,
+                footer,
+                reply,
+            } => {
+                let g = live.lock().await;
+                let result = if let Some(l) = g.as_ref() {
+                    if let Some(ref viz) = l.viz {
+                        viz.set_slide(headline, body, footer);
+                        Ok(())
+                    } else {
+                        Err(
+                            "no video tile on this session (reconnect with audio_only=false on radio plane)"
+                                .into(),
+                        )
+                    }
+                } else {
+                    Err("no active session — connect first".into())
+                };
+                if let Some(r) = reply {
+                    let _ = r.send(result);
+                }
+            }
+            SessionCmd::ClearSlide { reply } => {
+                let g = live.lock().await;
+                if let Some(l) = g.as_ref() {
+                    if let Some(ref viz) = l.viz {
+                        viz.clear_slide();
+                    }
+                }
+                if let Some(r) = reply {
+                    let _ = r.send(Ok(()));
+                }
+            }
             SessionCmd::PlayRadio { url, reply } => {
                 let role = plane_role();
                 if role != "radio" && role != "all" {
@@ -446,7 +513,7 @@ async fn run_manager(
                     }
                     continue;
                 };
-                // Stop previous radio / watch (no munge).
+                // Stop previous radio / watch (no munge). Slides yield the tile.
                 if let Some(h) = l.radio.take() {
                     h.stop();
                 }
@@ -455,6 +522,9 @@ async fn run_manager(
                 }
                 l.watch_url = None;
                 l.speaker.clear();
+                if let Some(ref viz) = l.viz {
+                    viz.clear_slide();
+                }
                 let alive_rx = l.alive.subscribe();
                 let viz = l.viz.clone();
                 if l.info.audio_only {

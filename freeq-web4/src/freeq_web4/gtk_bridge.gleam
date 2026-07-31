@@ -336,23 +336,24 @@ fn merge_publish_pane(bridge: pane.Pane, browser: pane.Pane) -> pane.Pane {
   }
 }
 
-/// Before Send: clear Blocked / stale Joined, re-assert JOIN.
+/// Before Send: clear Blocked, re-assert JOIN.
 ///
-/// PRIVMSG is held in `pending_out` until `on_channel` (Joined + self in
-/// roster when the roster is non-empty). Always re-sends JOIN — safe if
-/// already present, recovers after silent PART/reconnect.
+/// PRIVMSG is held in `pending_out` until pane membership is Joined.
+/// Always re-sends JOIN (idempotent if already a member). Do **not** require
+/// self-on-NAMES: LiveView Publish can replace `members` with a browser roster
+/// that omits the bridge nick, which used to strand messages forever.
 fn ensure_joined_for_send(state: State) -> State {
   case live.current_channel(state.model) {
     None -> state
     Some(ch) -> {
-      let on_chan = on_channel(state)
+      let already = pane.is_joined(state.model.pane)
       let state = ensure_upstream(state, ch, other_channels(state, ch))
       // Always re-assert JOIN (idempotent when already a member).
       let state = join_channel(state, ch)
-      case on_chan {
+      case already {
         True -> state
         False -> {
-          // Clear Blocked / stale Joined so live.Send emits IrcSend → queue.
+          // Clear Blocked so live.Send emits IrcSend → queue until Joined.
           let model =
             live.Model(
               ..state.model,
@@ -369,31 +370,9 @@ fn ensure_joined_for_send(state: State) -> State {
   }
 }
 
-/// True when this bridge socket is safe to PRIVMSG the active room.
-///
-/// Requires pane Joined **and**, once a NAMES roster has arrived, that our
-/// nick is on it. Stale `Joined` after a silent leave used to fire 404 +n.
+/// Safe to PRIVMSG when the bridge has confirmed JOIN (353 / self JOIN).
 fn on_channel(state: State) -> Bool {
-  case pane.is_joined(state.model.pane) {
-    False -> False
-    True ->
-      case state.model.members {
-        // Roster not loaded yet — trust the Joined flag from 353/self JOIN.
-        [] -> True
-        _ -> self_in_roster(state.model)
-      }
-  }
-}
-
-fn self_in_roster(model: live.Model) -> Bool {
-  let nick = string.lowercase(string.trim(model.nick))
-  case nick == "" {
-    True -> False
-    False ->
-      list.any(model.members, fn(m) {
-        string.lowercase(m.nick) == nick
-      })
-  }
+  pane.is_joined(state.model.pane)
 }
 
 /// Build a plain PRIVMSG when `live.Send` did not emit IrcSend.
@@ -531,13 +510,8 @@ fn send_or_queue(state: State, lines: List(String)) -> State {
             logging.Info,
             "gtk irc queue "
               <> int.to_string(list.length(lines))
-              <> " line(s) until on-channel (membership="
+              <> " line(s) until Joined (membership="
               <> membership_label(state.model.pane)
-              <> " roster_self="
-              <> case self_in_roster(state.model) {
-                True -> "yes"
-                False -> "no"
-              }
               <> " ws="
               <> ws_label(state.model.ws)
               <> ")",

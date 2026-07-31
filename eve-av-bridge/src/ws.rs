@@ -59,6 +59,8 @@ pub async fn serve(
         .route("/v1/watch/stop", post(http_watch_stop))
         .route("/v1/call-egress/start", post(http_call_egress_start))
         .route("/v1/call-egress/stop", post(http_call_egress_stop))
+        .route("/v1/slide/show", post(http_slide_show))
+        .route("/v1/slide/clear", post(http_slide_clear))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -229,6 +231,59 @@ async fn http_call_egress_stop(State(state): State<AppState>) -> impl IntoRespon
     }
 }
 
+#[derive(Deserialize)]
+struct SlideBody {
+    #[serde(default)]
+    headline: String,
+    #[serde(default)]
+    body: String,
+    #[serde(default)]
+    footer: String,
+    /// Alias for body (question text).
+    #[serde(default)]
+    question: Option<String>,
+    /// Alias for headline.
+    #[serde(default)]
+    title: Option<String>,
+}
+
+async fn http_slide_show(
+    State(state): State<AppState>,
+    Json(body): Json<SlideBody>,
+) -> impl IntoResponse {
+    let headline = body
+        .title
+        .filter(|s| !s.is_empty())
+        .unwrap_or(body.headline);
+    let text = body
+        .question
+        .filter(|s| !s.is_empty())
+        .unwrap_or(body.body);
+    match state
+        .sessions
+        .show_slide(headline, text, body.footer)
+        .await
+    {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+async fn http_slide_clear(State(state): State<AppState>) -> impl IntoResponse {
+    match state.sessions.clear_slide().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 // ── WebSocket ───────────────────────────────────────────────────────
 
 async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -248,6 +303,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         "vad_utterances".into(),
         "speak_pcm".into(),
         "radio".into(),
+        "slide".into(),
         "call_egress".into(),
         "http_v1".into(),
     ];
@@ -375,6 +431,21 @@ async fn handle_text(state: &AppState, text: &str) -> anyhow::Result<()> {
         }
         ClientMsg::StopCallEgress => {
             state.sessions.send(SessionCmd::StopCallEgress { reply: None });
+        }
+        ClientMsg::ShowSlide {
+            headline,
+            body,
+            footer,
+        } => {
+            state.sessions.send(SessionCmd::ShowSlide {
+                headline,
+                body,
+                footer,
+                reply: None,
+            });
+        }
+        ClientMsg::ClearSlide => {
+            state.sessions.send(SessionCmd::ClearSlide { reply: None });
         }
         ClientMsg::Status => {
             state.sessions.send(SessionCmd::Status { reply: None });

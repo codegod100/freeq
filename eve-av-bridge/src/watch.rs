@@ -7,18 +7,24 @@
 //!    block the audio demux graph).
 //! 2. **Audio pump runs on a dedicated OS thread** with blocking reads —
 //!    H.264 encode on the tokio runtime must not starve the audio path.
-//! 3. **Wall-clock paced enqueue** + small prebuffer so MoQ never underruns
-//!    and we never dump a 6s HLS catch-up burst into the speaker queue.
-//! 4. Video is best-effort hold-last-frame at a continuous encode cadence
-//!    (≥15 fps) matched to `AV_VIDEO_FPS` / freeq preset dimensions.
+//!    Audio uses a *comfortable* prebuffer + wall-clock paced enqueue so
+//!    MoQ never underruns (do not tighten this — audio was already solid).
+//! 3. **Video demux on a dedicated OS thread** is a pure pump. ffmpeg is
+//!    started with **`-re`** so multi-second HLS segments play through at
+//!    media time (without `-re`, a segment dumps in ms and “latest” freezes
+//!    for ~8s). We do **not** sleep/pace in the demux loop — that starved
+//!    the pipe and left watch-video nearly idle.
+//! 4. **Encode only new demux frames** (seq counter), rate-capped at
+//!    `WATCH_FPS`. Never re-encode the same held pixels.
 
 use std::fs;
-use std::io::Read as _;
+use std::io::Read;
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command as StdCommand, Stdio as StdStdio};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -26,8 +32,6 @@ use bytes::Bytes;
 use freeq_av::{SPEAK_RATE, Speaker};
 use iroh_live::media::format::{PixelFormat, VideoFormat, VideoFrame};
 use iroh_live::media::traits::VideoSource;
-use tokio::io::AsyncReadExt;
-use tokio::process::Command;
 use tokio::sync::watch;
 use tracing::{info, warn};
 
@@ -36,8 +40,8 @@ use tracing::{info, warn};
 pub const WATCH_W: u32 = 320;
 pub const WATCH_H: u32 = 180;
 
-/// Demux fps filter + hold-last pop cadence + encoder target.
-/// Aligned with watch-plane `AV_VIDEO_FPS` (default 15).
+/// Max encode rate for stream-watch (matches watch-plane `AV_VIDEO_FPS`).
+/// Demux runs as fast as source delivers; we drop to this rate on encode.
 pub const WATCH_FPS: u32 = 15;
 
 const CHUNK_SAMPLES: usize = SPEAK_RATE as usize / 20; // 50ms
@@ -45,6 +49,7 @@ const CHUNK_BYTES: usize = CHUNK_SAMPLES * 4;
 
 /// Prebuffer before MoQ starts hearing stream audio.
 /// Large enough to absorb multi-second HLS / MoQ jitter.
+/// (Matches production on eve.boxd — do not shrink; audio was already good.)
 const PRIME_SECS: f32 = 2.0;
 /// How far ahead of wall-clock we allow enqueued playout to run.
 const MAX_AHEAD_SECS: f32 = 10.0;
@@ -80,7 +85,10 @@ pub struct WatchTile {
 }
 
 struct WatchInner {
-    latest: Mutex<Option<Bytes>>,
+    /// Latest demuxed RGBA + sequence (monotonic). Encode only advances when
+    /// `seq` changes — never re-sends the same held frame.
+    latest: Mutex<Option<(u64, Bytes)>>,
+    seq: AtomicU64,
     t0: Instant,
 }
 
@@ -89,6 +97,7 @@ impl WatchTile {
         Self {
             inner: Arc::new(WatchInner {
                 latest: Mutex::new(None),
+                seq: AtomicU64::new(0),
                 t0: Instant::now(),
             }),
         }
@@ -98,6 +107,10 @@ impl WatchTile {
         WatchVideoSource {
             tile: self.clone(),
             frame_index: 0,
+            last_seq: 0,
+            last_emit: Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(|| Instant::now()),
         }
     }
 
@@ -105,13 +118,16 @@ impl WatchTile {
         if !accepts_rgba_len(bytes.len(), WATCH_W, WATCH_H) {
             return;
         }
-        *self.inner.latest.lock().expect("latest") = Some(bytes);
+        let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        *self.inner.latest.lock().expect("latest") = Some((seq, bytes));
     }
 }
 
 pub struct WatchVideoSource {
     tile: WatchTile,
     frame_index: u64,
+    last_seq: u64,
+    last_emit: Instant,
 }
 
 impl VideoSource for WatchVideoSource {
@@ -125,20 +141,42 @@ impl VideoSource for WatchVideoSource {
         }
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
-        let elapsed = self.tile.inner.t0.elapsed();
-        let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
-        if elapsed + Duration::from_millis(1) < due {
+        // Sample *latest demux* at a steady WATCH_FPS. Content advances because
+        // demux continuously overwrites latest under `-re`. Steady encode cadence
+        // keeps freeq clients from stalling between irregular demux arrivals.
+        let min_gap = Duration::from_millis(1000 / u64::from(WATCH_FPS.max(1)));
+        if self.last_emit.elapsed() + Duration::from_millis(1) < min_gap {
             return Ok(None);
         }
-        let pixels = self.tile.inner.latest.lock().expect("latest").clone();
-        let Some(pixels) = pixels else {
-            return Ok(None);
+
+        let (seq, pixels) = {
+            let g = self.tile.inner.latest.lock().expect("latest");
+            match g.as_ref() {
+                Some((seq, bytes)) => (*seq, bytes.clone()),
+                None => return Ok(None),
+            }
         };
+
+        // Catch up timestamps if encode lagged.
+        let elapsed = self.tile.inner.t0.elapsed();
+        let period_ms = (1000 / WATCH_FPS.max(1)) as u64;
+        let target_index = elapsed.as_millis() as u64 / period_ms.max(1);
+        if target_index > self.frame_index {
+            self.frame_index = target_index;
+        }
+
+        let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
         self.frame_index = self.frame_index.saturating_add(1);
+        self.last_seq = seq;
+        self.last_emit = Instant::now();
         Ok(Some(VideoFrame::new_rgba(pixels, WATCH_W, WATCH_H, due)))
     }
     fn start(&mut self) -> Result<()> {
         self.frame_index = 0;
+        self.last_seq = 0;
+        self.last_emit = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(|| Instant::now());
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
@@ -209,22 +247,6 @@ fn which_ok(path: &str) -> bool {
             .unwrap_or(false)
 }
 
-fn mkfifo(path: &Path) -> Result<()> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("mkfifo path {}", path.display()))?;
-    let rc = unsafe { libc::mkfifo(c.as_ptr(), 0o600) };
-    if rc != 0 {
-        bail!(
-            "mkfifo {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        );
-    }
-    Ok(())
-}
-
 /// Prefer stream.place AAC media playlist (track=3) over the master.
 /// Master demux with multi-audio is fragile; the AAC rendition is reliable.
 fn resolve_audio_hls_url(master_url: &str) -> String {
@@ -264,11 +286,13 @@ fn resolve_audio_hls_url(master_url: &str) -> String {
 }
 
 
+/// Audio demux HLS flags — comfortable buffer, do not tighten (audio was good).
 fn hls_input_args(url: &str) -> Vec<String> {
     [
         "-hide_banner",
         "-loglevel",
         "error",
+        "-nostdin",
         // Do NOT use discardcorrupt — on stream.place fMP4 it drops every
         // audio packet ("Nothing was written into output file").
         "-fflags",
@@ -285,9 +309,53 @@ fn hls_input_args(url: &str) -> Vec<String> {
         "1",
         "-reconnect_delay_max",
         "5",
-        // Stay further behind live edge so the big ring can fill smoothly.
+        // Stay further behind live edge so the audio ring can fill smoothly.
         "-live_start_index",
         "-2",
+        "-i",
+        url,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+/// Video-only HLS flags.
+///
+/// stream.place uses ~8s fMP4 segments. Without realtime pacing, ffmpeg
+/// decodes an entire segment as fast as the CPU allows; a “latest frame”
+/// consumer then shows one still until the next segment. `-re` / `-readrate 1`
+/// makes decode follow presentation timestamps so motion plays through.
+fn hls_video_input_args(url: &str) -> Vec<String> {
+    [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        // Critical: without this, ffmpeg spins on read(stdin)→/dev/null EOF
+        // and never emits video (freeq holds a still forever). Confirmed via
+        // strace: read(0,"",1)=0 in a tight loop.
+        "-nostdin",
+        // Do NOT use -re here: with this HLS source it stalls after connect
+        // and writes zero rawvideo frames (watch-video stuck in pipe_read).
+        // Realtime pacing is done with the `realtime` filter after decode.
+        "-fflags",
+        "+genpts+flush_packets",
+        "-flags",
+        "low_delay",
+        "-probesize",
+        "2000000",
+        "-analyzeduration",
+        "1000000",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_on_network_error",
+        "1",
+        "-reconnect_delay_max",
+        "5",
+        "-live_start_index",
+        "-1",
         "-i",
         url,
     ]
@@ -318,11 +386,31 @@ pub fn start_watch(
     let run_dir_task = run_dir.clone();
 
     let task = tokio::spawn(async move {
-        info!(%url, "watch demux (split A/V; audio on OS thread)");
+        info!(%url, "watch demux (split A/V; both demuxes on OS threads)");
+
+        // Shared "session still live" flag for the OS threads (watch channel
+        // is not Sync across std threads without a clone+poll task).
+        let alive_flag = Arc::new(AtomicBool::new(true));
+        let alive_watch = session_alive.clone();
+        let alive_flag_poll = alive_flag.clone();
+        let stop_poll = stop_task.clone();
+        let alive_poll = tokio::spawn(async move {
+            let mut rx = alive_watch;
+            loop {
+                if stop_poll.load(Ordering::Relaxed) || !*rx.borrow() {
+                    alive_flag_poll.store(false, Ordering::Relaxed);
+                    break;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    _ = rx.changed() => {}
+                }
+            }
+            alive_flag_poll.store(false, Ordering::Relaxed);
+        });
 
         // --- Audio: dedicated OS thread (must not share tokio with H.264) ---
         let stop_a = stop_task.clone();
-        let alive_flag = Arc::new(AtomicBool::new(true));
         let alive_flag_a = alive_flag.clone();
         let speaker_a = speaker.clone();
         let ffmpeg_a = ffmpeg.clone();
@@ -334,16 +422,19 @@ pub fn start_watch(
             })
             .expect("spawn watch-audio thread");
 
-        // --- Video: async best-effort on tokio ---
+        // --- Video: dedicated OS thread — drain pipe, keep only latest ---
         let stop_v = stop_task.clone();
-        let mut alive_v = session_alive.clone();
+        let alive_flag_v = alive_flag.clone();
         let tile_v = tile.clone();
         let ffmpeg_v = ffmpeg.clone();
         let url_v = url.clone();
         let run_dir_v = run_dir_task.clone();
-        let video = tokio::spawn(async move {
-            video_loop(ffmpeg_v, url_v, tile_v, stop_v, &mut alive_v, run_dir_v).await;
-        });
+        let video_thread = std::thread::Builder::new()
+            .name("watch-video".into())
+            .spawn(move || {
+                video_thread_main(ffmpeg_v, url_v, tile_v, stop_v, alive_flag_v, run_dir_v);
+            })
+            .expect("spawn watch-video thread");
 
         loop {
             if stop_task.load(Ordering::Relaxed) || !*session_alive.borrow() {
@@ -361,8 +452,9 @@ pub fn start_watch(
 
         stop_task.store(true, Ordering::Relaxed);
         alive_flag.store(false, Ordering::Relaxed);
-        let _ = video.await;
+        let _ = alive_poll.await;
         let _ = audio_thread.join();
+        let _ = video_thread.join();
         let _ = fs::remove_dir_all(&run_dir_task);
     });
 
@@ -555,49 +647,48 @@ fn run_audio_blocking(
     Ok(())
 }
 
-async fn video_loop(
+fn video_thread_main(
     ffmpeg: String,
     url: String,
     tile: WatchTile,
     stop: Arc<AtomicBool>,
-    session_alive: &mut watch::Receiver<bool>,
+    session_alive: Arc<AtomicBool>,
     run_dir: PathBuf,
 ) {
-    while !stop.load(Ordering::Relaxed) && *session_alive.borrow() {
-        match run_video_demux(&ffmpeg, &url, tile.clone(), stop.clone(), session_alive, &run_dir)
-            .await
-        {
-            Ok(()) => {}
-            Err(e) => warn!(error = %e, "watch video demux ended"),
+    while !stop.load(Ordering::Relaxed) && session_alive.load(Ordering::Relaxed) {
+        if let Err(e) = run_video_blocking(&ffmpeg, &url, &tile, &stop, &session_alive, &run_dir) {
+            warn!(error = %e, "watch video demux ended");
         }
-        if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
+        if stop.load(Ordering::Relaxed) || !session_alive.load(Ordering::Relaxed) {
             break;
         }
         info!("watch video demux restart in 500ms");
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        std::thread::sleep(Duration::from_millis(500));
     }
 }
 
-async fn run_video_demux(
+/// Blocking video demux on a dedicated thread — pure pump via **stdout pipe**
+/// (same pattern as audio). Named fifos were leaving watch-video asleep with
+/// no data while freeq held a still.
+///
+/// ffmpeg `-re` is the only clock so multi-second HLS segments play through.
+fn run_video_blocking(
     ffmpeg: &str,
     url: &str,
-    tile: WatchTile,
-    stop: Arc<AtomicBool>,
-    session_alive: &mut watch::Receiver<bool>,
-    run_dir: &Path,
+    tile: &WatchTile,
+    stop: &AtomicBool,
+    session_alive: &AtomicBool,
+    _run_dir: &Path,
 ) -> Result<()> {
-    let video_fifo = run_dir.join("v.rgba");
-    let _ = fs::remove_file(&video_fifo);
-    mkfifo(&video_fifo)?;
-
-    // fps filter matches encoder + hold-last pop cadence (WATCH_FPS).
+    // `realtime` slows emission to media timestamps so ~8s HLS segments play
+    // through instead of dumping into a single “latest” still. No `fps=` —
+    // that invents/duplicates frames and freezes motion.
     let vf = format!(
         "scale={WATCH_W}:{WATCH_H}:force_original_aspect_ratio=decrease:flags=fast_bilinear,\
-pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={WATCH_FPS},format=rgba"
+pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,format=rgba,realtime=speed=1"
     );
-    let v_out = video_fifo.to_str().context("video fifo utf8")?.to_string();
 
-    let mut args = hls_input_args(url);
+    let mut args = hls_video_input_args(url);
     args.insert(0, "-y".to_string());
     args.extend(
         [
@@ -608,87 +699,128 @@ pad={WATCH_W}:{WATCH_H}:(ow-iw)/2:(oh-ih)/2:black,fps={WATCH_FPS},format=rgba"
             &vf,
             "-pix_fmt",
             "rgba",
+            "-fps_mode",
+            "passthrough",
             "-f",
             "rawvideo",
-            &v_out,
+            "pipe:1",
         ]
         .into_iter()
         .map(str::to_string),
     );
 
-    let v_path = video_fifo.to_path_buf();
-    let open_v =
-        tokio::task::spawn_blocking(move || fs::OpenOptions::new().read(true).open(v_path));
-
-    let mut child = Command::new(ffmpeg)
+    let mut child = StdCommand::new(ffmpeg)
         .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
+        .stdin(StdStdio::null())
+        .stdout(StdStdio::piped())
+        // MUST drain or null stderr: a full stderr pipe stalls ffmpeg forever
+        // (looks like "holding frames" — no new RGBA ever arrives).
+        .stderr(StdStdio::piped())
         .spawn()
         .with_context(|| format!("spawn {ffmpeg} watch video"))?;
 
-    let v_std = match tokio::time::timeout(Duration::from_secs(20), async {
-        let joined = open_v.await.context("join video fifo open")?;
-        let f = joined.context("open video fifo")?;
-        Ok::<_, anyhow::Error>(f)
-    })
-    .await
-    {
-        Ok(Ok(f)) => f,
-        Ok(Err(e)) => {
-            let _ = child.kill().await;
-            bail!("open watch video fifo: {e}");
-        }
-        Err(_) => {
-            let _ = child.kill().await;
-            bail!("timeout opening watch video fifo");
-        }
-    };
+    if let Some(mut err) = child.stderr.take() {
+        std::thread::Builder::new()
+            .name("watch-v-err".into())
+            .spawn(move || {
+                let mut buf = [0u8; 512];
+                loop {
+                    match err.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            let line = String::from_utf8_lossy(&buf[..n]);
+                            for l in line.lines() {
+                                if !l.trim().is_empty() {
+                                    warn!(target: "watch_video_ffmpeg", "{l}");
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
 
-    let mut v_reader = tokio::fs::File::from_std(v_std);
+    let mut v_reader = child.stdout.take().context("ffmpeg video stdout")?;
+    // Blocking reads: -re already paces; non-blocking + sleep starved the pump.
+    // Enlarge pipe for a few frames of jitter under encode load.
+    {
+        let fd = v_reader.as_raw_fd();
+        let want = (FRAME_BYTES * 8 + 4096) as libc::c_int;
+        let _ = unsafe { libc::fcntl(fd, libc::F_SETPIPE_SZ, want) };
+    }
+
     let mut buf = vec![0u8; FRAME_BYTES];
-    let mut frames = 0u64;
+    let mut frames_in: u64 = 0;
     let mut last_log = Instant::now();
+    let mut log_t0 = Instant::now();
 
     loop {
-        if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
+        if stop.load(Ordering::Relaxed) || !session_alive.load(Ordering::Relaxed) {
             break;
         }
-        let mut filled = 0usize;
-        while filled < FRAME_BYTES {
-            if stop.load(Ordering::Relaxed) || !*session_alive.borrow() {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Ok(());
+
+        // Blocking read of one full frame (ffmpeg `-re` is the clock).
+        if let Err(e) = read_exact_blocking(&mut v_reader, &mut buf, stop, session_alive) {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof
+                || e.kind() == std::io::ErrorKind::Interrupted
+            {
+                break;
             }
-            match v_reader.read(&mut buf[filled..]).await {
-                Ok(0) => {
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Ok(());
-                }
-                Ok(n) => filled += n,
-                Err(e) => {
-                    warn!(error = %e, "watch video read");
-                    let _ = child.kill().await;
-                    let _ = child.wait().await;
-                    return Ok(());
-                }
-            }
+            warn!(error = %e, "watch video read");
+            break;
         }
+        frames_in += 1;
         let frame = std::mem::replace(&mut buf, vec![0u8; FRAME_BYTES]);
         tile.push_rgba_bytes(Bytes::from(frame));
-        frames += 1;
-        if last_log.elapsed().as_secs() >= 10 {
-            info!(frames, fps = WATCH_FPS, "watch video feed");
+
+        if last_log.elapsed().as_secs() >= 5 {
+            let secs = log_t0.elapsed().as_secs_f32().max(0.001);
+            let demux_fps = frames_in as f32 / secs;
+            info!(
+                frames_in,
+                demux_fps,
+                seq = tile.inner.seq.load(Ordering::Relaxed),
+                "watch video feed (stdout -re pump)"
+            );
+            frames_in = 0;
+            log_t0 = Instant::now();
             last_log = Instant::now();
         }
     }
 
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(())
+}
+
+/// Blocking read of exactly `buf.len()` bytes. Polls `stop` between partial
+/// reads. Prefer this over non-blocking+sleep: WouldBlock sleep starved the
+/// demux (watch-video stuck in nanosleep, freeq held a still).
+fn read_exact_blocking(
+    r: &mut impl Read,
+    buf: &mut [u8],
+    stop: &AtomicBool,
+    session_alive: &AtomicBool,
+) -> std::io::Result<()> {
+    use std::io::ErrorKind;
+    let mut filled = 0usize;
+    while filled < buf.len() {
+        if stop.load(Ordering::Relaxed) || !session_alive.load(Ordering::Relaxed) {
+            return Err(std::io::Error::new(ErrorKind::Interrupted, "watch stop"));
+        }
+        match r.read(&mut buf[filled..]) {
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "video pipe eof",
+                ));
+            }
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
     Ok(())
 }
 
@@ -735,7 +867,7 @@ mod tests {
         tile.push_rgba_bytes(Bytes::from(vec![0u8; FRAME_BYTES - 4]));
         let mut src = tile.video_source();
         src.start().unwrap();
-        // No frame stored → pop yields None even though due time is 0.
+        // No frame stored → pop yields None.
         assert!(src.pop_frame().unwrap().is_none());
 
         tile.push_rgba_bytes(Bytes::from(vec![1u8; FRAME_BYTES]));
@@ -750,21 +882,19 @@ mod tests {
     }
 
     #[test]
-    fn hold_last_pop_respects_fps_cadence() {
+    fn pop_samples_latest_at_fps_cap() {
         let tile = WatchTile::new();
-        tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
         let mut src = tile.video_source();
         src.start().unwrap();
 
-        // Frame 0 is due immediately.
+        tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
         assert!(src.pop_frame().unwrap().is_some());
-        // Frame 1 not yet due (needs ~66ms at 15 fps).
+        // fps cap — not due yet
         assert!(src.pop_frame().unwrap().is_none());
 
-        let period = Duration::from_millis(frame_due_ms(1, WATCH_FPS) + 5);
+        let period = Duration::from_millis(1000 / u64::from(WATCH_FPS) + 5);
         thread::sleep(period);
+        // Still has latest (hold for cadence) even without a new demux push.
         assert!(src.pop_frame().unwrap().is_some());
-        // Next not due yet.
-        assert!(src.pop_frame().unwrap().is_none());
     }
 }

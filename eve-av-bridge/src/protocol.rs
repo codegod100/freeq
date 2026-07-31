@@ -47,6 +47,16 @@ pub enum ClientMsg {
         rtmp_url: String,
     },
     StopCallEgress,
+    /// Presentation slide on the freeq AV video tile.
+    ShowSlide {
+        #[serde(default)]
+        headline: String,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        footer: String,
+    },
+    ClearSlide,
     Status,
 }
 

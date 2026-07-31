@@ -112,6 +112,8 @@ pub struct LinkPreview {
     pub description: Option<String>,
     /// Thumbnail image URL.
     pub thumb_url: Option<String>,
+    /// Site name (`og:site_name`), when present.
+    pub site_name: Option<String>,
 }
 
 impl LinkPreview {
@@ -131,6 +133,9 @@ impl LinkPreview {
         if let Some(ref thumb) = self.thumb_url {
             tags.insert("link-thumb".to_string(), thumb.clone());
         }
+        if let Some(ref site) = self.site_name {
+            tags.insert("link-site".to_string(), site.clone());
+        }
         tags
     }
 
@@ -143,7 +148,25 @@ impl LinkPreview {
             title: tags.get("link-title").cloned(),
             description: tags.get("link-desc").cloned(),
             thumb_url: tags.get("link-thumb").cloned(),
+            site_name: tags.get("link-site").cloned(),
         })
+    }
+
+    /// True when at least one useful display field is present.
+    pub fn has_content(&self) -> bool {
+        self.title.as_ref().is_some_and(|s| !s.trim().is_empty())
+            || self
+                .description
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .thumb_url
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
+            || self
+                .site_name
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty())
     }
 }
 
@@ -198,11 +221,16 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreview> {
 
     let resp = client
         .get(url)
-        .header("User-Agent", "irc-at-bot/0.1 (link preview)")
-        .header("Accept", "text/html")
+        // Match freeq-server OG proxy UA; some sites 403 opaque bot strings.
+        .header("User-Agent", "freeq/1.0 (link preview)")
+        .header("Accept", "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.9")
         .send()
         .await?
         .error_for_status()?;
+
+    // Prefer the final URL after redirects for relative image resolution.
+    let final_url = resp.url().clone();
 
     let content_type = resp
         .headers()
@@ -210,87 +238,160 @@ pub async fn fetch_link_preview(url: &str) -> Result<LinkPreview> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if !content_type.contains("text/html") {
+    if !content_type.contains("text/html") && !content_type.contains("application/xhtml") {
         anyhow::bail!("Not an HTML page: {content_type}");
     }
 
-    // Only read first 64KB to avoid downloading huge pages
+    // Cap body size (parity with freeq-server OG endpoint at 256 KiB).
     let body = resp.text().await?;
-    let body = if body.len() > 65536 {
-        &body[..65536]
+    let body = if body.len() > 256 * 1024 {
+        &body[..256 * 1024]
     } else {
         &body
     };
 
-    let mut title = None;
-    let mut description = None;
-    let mut thumb_url = None;
-
-    // Simple regex-free OG tag parser — look for <meta property="og:..." content="...">
-    for segment in body.split("<meta ") {
-        let seg_lower = segment.to_lowercase();
-        if let Some(og_prop) = extract_meta_property(&seg_lower, segment) {
-            match og_prop.0.as_str() {
-                "og:title" => title = Some(og_prop.1),
-                "og:description" => description = Some(og_prop.1),
-                "og:image" => thumb_url = Some(og_prop.1),
-                _ => {}
-            }
-        }
-    }
-
-    // Fallback to <title> tag if no OG title
-    if title.is_none()
-        && let Some(start) = body.find("<title>").or_else(|| body.find("<title "))
-        && let Some(end) = body[start..].find("</title>")
-    {
-        let t = &body[start..start + end];
-        let t = t.split('>').nth(1).unwrap_or(t);
-        title = Some(html_decode(t.trim()));
-    }
-
-    if title.is_none() && description.is_none() {
+    let preview = parse_link_preview_html(final_url.as_str(), body);
+    if !preview.has_content() {
         anyhow::bail!("No OpenGraph or title metadata found");
     }
+    Ok(preview)
+}
 
-    Ok(LinkPreview {
-        url: url.to_string(),
+/// Parse Open Graph / Twitter / HTML meta from a page body (testable, no I/O).
+///
+/// Field priority (first non-empty wins per field):
+/// - title: `og:title` → `twitter:title` → `<title>`
+/// - description: `og:description` → `twitter:description` → `description`
+/// - thumb: `og:image` / `og:image:url` / `og:image:secure_url` → `twitter:image`
+/// - site_name: `og:site_name` → `application-name`
+pub fn parse_link_preview_html(page_url: &str, body: &str) -> LinkPreview {
+    let meta = collect_meta_tags(body);
+
+    let pick = |keys: &[&str]| -> Option<String> {
+        for k in keys {
+            if let Some(v) = meta.get(*k) {
+                let t = v.trim();
+                if !t.is_empty() {
+                    return Some(html_decode(t));
+                }
+            }
+        }
+        None
+    };
+
+    let mut title = pick(&["og:title", "twitter:title"]);
+    let description = pick(&["og:description", "twitter:description", "description"]);
+    let mut thumb_url = pick(&[
+        "og:image",
+        "og:image:url",
+        "og:image:secure_url",
+        "twitter:image",
+        "twitter:image:src",
+    ]);
+    let site_name = pick(&["og:site_name", "application-name"]);
+
+    if title.is_none() {
+        title = extract_html_title(body);
+    }
+
+    // Resolve relative / protocol-relative image URLs against the page URL.
+    if let Some(ref thumb) = thumb_url {
+        thumb_url = Some(resolve_against(page_url, thumb));
+    }
+
+    LinkPreview {
+        url: page_url.to_string(),
         title,
         description,
         thumb_url,
-    })
+        site_name,
+    }
 }
 
-/// Extract a meta property="og:..." content="..." pair from a <meta> tag fragment.
-fn extract_meta_property(seg_lower: &str, seg_original: &str) -> Option<(String, String)> {
-    // Find property="og:..."
-    let prop_start = seg_lower
-        .find("property=\"og:")
-        .or_else(|| seg_lower.find("property='og:"))?;
-    let quote_char = if seg_lower.as_bytes().get(prop_start + 10) == Some(&b'\'') {
-        '\''
-    } else {
-        '"'
-    };
-    let prop_val_start = prop_start + 10; // length of 'property="'
-    let prop_val_end = seg_lower[prop_val_start..].find(quote_char)?;
-    let prop_name = seg_original[prop_val_start..prop_val_start + prop_val_end].to_string();
+/// Collect `property`/`name` → `content` pairs from `<meta>` tags (case-insensitive).
+fn collect_meta_tags(body: &str) -> HashMap<String, String> {
+    let lower = body.to_ascii_lowercase();
+    let mut out: HashMap<String, String> = HashMap::new();
+    let mut i = 0;
+    while let Some(rel) = lower[i..].find("<meta") {
+        let start = i + rel;
+        let after_lower = &lower[start..];
+        // End of tag (meta is void; ignore rare `>` inside quotes for simplicity).
+        let end_rel = after_lower.find('>').unwrap_or(after_lower.len());
+        let seg_lower = &lower[start..start + end_rel];
+        let seg_orig = &body[start..start + end_rel];
+        if let Some((key, val)) = extract_meta_kv(seg_lower, seg_orig) {
+            // First occurrence wins so early <head> OG tags beat late duplicates.
+            out.entry(key).or_insert(val);
+        }
+        i = start + end_rel.max(1);
+    }
+    out
+}
 
-    // Find content="..."
-    let content_start = seg_lower
-        .find("content=\"")
-        .or_else(|| seg_lower.find("content='"))?;
-    let cq = if seg_lower.as_bytes().get(content_start + 8) == Some(&b'\'') {
-        '\''
-    } else {
-        '"'
-    };
-    let content_val_start = content_start + 9;
-    let content_val_end = seg_lower[content_val_start..].find(cq)?;
-    let content_val =
-        html_decode(&seg_original[content_val_start..content_val_start + content_val_end]);
+/// Extract `(property|name, content)` from a single `<meta …` fragment.
+fn extract_meta_kv(seg_lower: &str, seg_original: &str) -> Option<(String, String)> {
+    let key = extract_attr(seg_lower, seg_original, "property")
+        .or_else(|| extract_attr(seg_lower, seg_original, "name"))?;
+    let content = extract_attr(seg_lower, seg_original, "content")?;
+    let key = key.trim().to_ascii_lowercase();
+    if key.is_empty() || content.trim().is_empty() {
+        return None;
+    }
+    Some((key, content))
+}
 
-    Some((prop_name, content_val))
+/// Read a double- or single-quoted HTML attribute value.
+fn extract_attr(seg_lower: &str, seg_original: &str, attr: &str) -> Option<String> {
+    let needle_dq = format!("{attr}=\"");
+    let needle_sq = format!("{attr}='");
+    let (start, quote) = if let Some(p) = seg_lower.find(&needle_dq) {
+        (p + needle_dq.len(), '"')
+    } else if let Some(p) = seg_lower.find(&needle_sq) {
+        (p + needle_sq.len(), '\'')
+    } else {
+        return None;
+    };
+    let end = seg_lower[start..].find(quote)?;
+    Some(seg_original[start..start + end].to_string())
+}
+
+fn extract_html_title(body: &str) -> Option<String> {
+    let lower = body.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let after = &body[start..];
+    let gt = after.find('>')?;
+    let rest = &after[gt + 1..];
+    let rest_lower = &lower[start + gt + 1..];
+    let end = rest_lower.find("</title")?;
+    let t = rest[..end].trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(html_decode(t))
+    }
+}
+
+fn resolve_against(base: &str, href: &str) -> String {
+    let href = href.trim();
+    if href.is_empty() {
+        return href.to_string();
+    }
+    // Already absolute.
+    if href.starts_with("https://") || href.starts_with("http://") {
+        return href.to_string();
+    }
+    let Ok(base_url) = url::Url::parse(base) else {
+        return href.to_string();
+    };
+    // Protocol-relative: //cdn.example.com/img.png
+    if let Some(rest) = href.strip_prefix("//") {
+        return format!("{}://{rest}", base_url.scheme());
+    }
+    base_url
+        .join(href)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| href.to_string())
 }
 
 /// Basic HTML entity decoding.
@@ -302,6 +403,8 @@ fn html_decode(s: &str) -> String {
         .replace("&#39;", "'")
         .replace("&#x27;", "'")
         .replace("&apos;", "'")
+        .replace("&#x2F;", "/")
+        .replace("&nbsp;", " ")
 }
 
 /// Upload a media file to an AT Protocol PDS, pin it with a record, and return
@@ -582,6 +685,7 @@ mod tests {
             title: Some("Great Article".to_string()),
             description: Some("An interesting read".to_string()),
             thumb_url: Some("https://example.com/thumb.jpg".to_string()),
+            site_name: Some("Example News".to_string()),
         };
 
         let tags = preview.to_tags();
@@ -590,6 +694,62 @@ mod tests {
         assert_eq!(parsed.url, preview.url);
         assert_eq!(parsed.title.as_deref(), Some("Great Article"));
         assert_eq!(parsed.description.as_deref(), Some("An interesting read"));
+        assert_eq!(parsed.thumb_url.as_deref(), Some("https://example.com/thumb.jpg"));
+        assert_eq!(parsed.site_name.as_deref(), Some("Example News"));
+        assert!(parsed.has_content());
+    }
+
+    #[test]
+    fn parse_og_with_site_name_and_relative_image() {
+        let html = r#"
+            <html><head>
+            <meta property="og:title" content="Hello &amp; Co" />
+            <meta property="og:description" content="A fine page" />
+            <meta property="og:image" content="/img/thumb.jpg" />
+            <meta property="og:site_name" content="Acme" />
+            <title>Ignored when OG title present</title>
+            </head></html>
+        "#;
+        let p = parse_link_preview_html("https://example.com/posts/1", html);
+        assert_eq!(p.title.as_deref(), Some("Hello & Co"));
+        assert_eq!(p.description.as_deref(), Some("A fine page"));
+        assert_eq!(
+            p.thumb_url.as_deref(),
+            Some("https://example.com/img/thumb.jpg")
+        );
+        assert_eq!(p.site_name.as_deref(), Some("Acme"));
+    }
+
+    #[test]
+    fn parse_falls_back_to_twitter_and_meta_description() {
+        let html = r#"
+            <meta name="twitter:title" content="Tweet Title">
+            <meta name="twitter:image" content="https://cdn.example.com/a.png">
+            <meta name="description" content="Plain desc">
+            <meta content="Flip Order Site" property="og:site_name">
+        "#;
+        let p = parse_link_preview_html("https://example.com/", html);
+        assert_eq!(p.title.as_deref(), Some("Tweet Title"));
+        assert_eq!(p.description.as_deref(), Some("Plain desc"));
+        assert_eq!(
+            p.thumb_url.as_deref(),
+            Some("https://cdn.example.com/a.png")
+        );
+        assert_eq!(p.site_name.as_deref(), Some("Flip Order Site"));
+    }
+
+    #[test]
+    fn parse_title_tag_and_protocol_relative_image() {
+        let html = r#"
+            <TITLE>Doc Title</TITLE>
+            <META PROPERTY="og:image" CONTENT="//cdn.example.com/x.webp">
+        "#;
+        let p = parse_link_preview_html("https://example.com/page", html);
+        assert_eq!(p.title.as_deref(), Some("Doc Title"));
+        assert_eq!(
+            p.thumb_url.as_deref(),
+            Some("https://cdn.example.com/x.webp")
+        );
     }
 
     #[test]
