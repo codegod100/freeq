@@ -10,13 +10,14 @@
 //!    Audio uses a *comfortable* prebuffer + wall-clock paced enqueue so
 //!    MoQ never underruns (do not tighten this — audio was already solid).
 //! 3. **Video demux on a dedicated OS thread** pumps RGBA into a **bounded
-//!    frame queue**. stream.place ~8s HLS segments often decode as a burst;
-//!    a “latest only” tile then freezes on the last frame of the burst until
-//!    the next segment. The queue absorbs the burst and playout is paced at
-//!    `WATCH_FPS` in `pop_frame` (wall clock). ffmpeg does **not** use `-re`
-//!    (stalls this source) or `realtime` (still left multi-second holds).
-//! 4. **Encode only frames popped from the queue** — never re-encode the
-//!    same held pixels at `WATCH_FPS` (that looked like a continuous still).
+//!    frame queue**. stream.place ~8s HLS segments decode as a burst; the
+//!    queue absorbs them. ffmpeg does **not** use `-re` (stalls this HLS).
+//! 4. **`pop_frame` wall-clock paces at `WATCH_FPS`**. iroh-live’s
+//!    SharedVideoSource (`vshr-*`) paces with `PTS - first_pts` vs
+//!    `wall_since_start`. After HLS connect delay, `wall >> PTS` so it
+//!    dumps the whole queue in milliseconds into a **single-slot** watch
+//!    channel — only the last frame survives → freeq holds a still. We
+//!    sleep in `pop_frame` so each frame is published ~66ms apart.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -116,6 +117,7 @@ impl WatchTile {
         WatchVideoSource {
             tile: self.clone(),
             frame_index: 0,
+            last_emit: None,
         }
     }
 
@@ -146,8 +148,10 @@ impl WatchTile {
 
 pub struct WatchVideoSource {
     tile: WatchTile,
-    /// Monotonic frame index for PTS only (never jump / catch-up).
+    /// Monotonic frame index for PTS (strictly sequential, no catch-up).
     frame_index: u64,
+    /// Wall clock of last `Some` return — we are the playout clock.
+    last_emit: Option<Instant>,
 }
 
 impl VideoSource for WatchVideoSource {
@@ -161,14 +165,8 @@ impl VideoSource for WatchVideoSource {
         }
     }
     fn pop_frame(&mut self) -> Result<Option<VideoFrame>> {
-        // Drain the demux queue as fast as the publisher asks. Cadence is
-        // owned by iroh-live's SharedVideoSource (vshr-*): it sleeps on our
-        // PTS. Do **not** rate-limit here and do **not** jump PTS to wall
-        // clock — catch-up made vshr sleep multi-second gaps (freezes).
-        //
-        // On empty queue we must sleep before Ok(None): vshr spins on None
-        // with no backoff and pinned ~100% of a core on 2-vCPU boxd, starving
-        // H.264 encode so freeq held a still even while demux was live.
+        // Empty: short sleep so vshr does not spin a whole core (iroh
+        // SharedVideoSource has no backoff on Ok(None)).
         let pixels = {
             let mut q = self.tile.inner.queue.lock().expect("queue");
             q.pop_front()
@@ -177,6 +175,20 @@ impl VideoSource for WatchVideoSource {
             std::thread::sleep(Duration::from_millis(5));
             return Ok(None);
         };
+
+        // Wall-clock pace at WATCH_FPS **before** handing the frame to vshr.
+        // Without this, after HLS startup lag vshr compares small sequential
+        // PTS against large wall_since_start and flushes the whole queue into
+        // a one-slot watch channel in one go — freeq only ever sees the last
+        // frame of each burst (looks like a permanent still).
+        let min_gap = Duration::from_millis(1000 / u64::from(WATCH_FPS.max(1)));
+        if let Some(prev) = self.last_emit {
+            let wait = min_gap.saturating_sub(prev.elapsed());
+            if !wait.is_zero() {
+                std::thread::sleep(wait);
+            }
+        }
+        self.last_emit = Some(Instant::now());
         self.tile.inner.popped.fetch_add(1, Ordering::Relaxed);
 
         let due = Duration::from_millis(frame_due_ms(self.frame_index, WATCH_FPS));
@@ -184,7 +196,8 @@ impl VideoSource for WatchVideoSource {
         Ok(Some(VideoFrame::new_rgba(pixels, WATCH_W, WATCH_H, due)))
     }
     fn start(&mut self) -> Result<()> {
-        self.frame_index = 0;
+        // Do not reset frame_index / last_emit on re-start — MoQ reconnects
+        // recreate the source; a fresh handle starts at 0 via video_source().
         Ok(())
     }
     fn stop(&mut self) -> Result<()> {
@@ -886,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn pop_drains_queue_in_order_without_hold() {
+    fn pop_wall_clock_paces_and_drains_in_order() {
         let tile = WatchTile::new();
         let mut src = tile.video_source();
         src.start().unwrap();
@@ -894,18 +907,26 @@ mod tests {
         tile.push_rgba_bytes(Bytes::from(vec![42u8; FRAME_BYTES]));
         tile.push_rgba_bytes(Bytes::from(vec![43u8; FRAME_BYTES]));
         assert_eq!(tile.queue_len(), 2);
-        // No local rate limit — publisher (vshr) paces on PTS.
+
+        let t0 = Instant::now();
         let f0 = src.pop_frame().unwrap().expect("first");
         assert_eq!(f0.rgba_image().as_raw()[0], 42);
-        assert_eq!(tile.queue_len(), 1);
+        assert_eq!(f0.timestamp, Duration::from_millis(0));
+
         let f1 = src.pop_frame().unwrap().expect("second");
         assert_eq!(f1.rgba_image().as_raw()[0], 43);
+        // Second frame must not be returned instantly (would dump into vshr).
+        let gap = t0.elapsed();
+        let min = Duration::from_millis(1000 / u64::from(WATCH_FPS));
+        assert!(
+            gap >= min.saturating_sub(Duration::from_millis(5)),
+            "expected ≥{min:?} between emits, got {gap:?}"
+        );
+        assert_eq!(
+            f1.timestamp,
+            Duration::from_millis(1000 / u64::from(WATCH_FPS))
+        );
         assert_eq!(tile.queue_len(), 0);
-        // Sequential PTS at WATCH_FPS (ms).
-        assert_eq!(f0.timestamp, Duration::from_millis(0));
-        assert_eq!(f1.timestamp, Duration::from_millis(1000 / u64::from(WATCH_FPS)));
-
-        // Empty → None after a short backoff (does not re-hold pixels).
         assert!(src.pop_frame().unwrap().is_none());
     }
 
