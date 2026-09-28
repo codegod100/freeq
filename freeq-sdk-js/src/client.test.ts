@@ -75,6 +75,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // A test that times out never reaches its own `finally`, so a fake clock
+  // it installed would stay for every test after it; put the real one back.
+  vi.useRealTimers();
 });
 
 async function flushAsync(): Promise<void> {
@@ -2070,9 +2073,12 @@ describe('outbound: sendAct', () => {
         actTags('handoff', 'progress', TASK, 'did:plc:eliza', { note: 'halfway' }),
       );
       // `setImmediate` is not faked, so this pumps the real work queue the
-      // signature resolves on without moving the window's clock.
+      // signature resolves on without moving the window's clock. It waits
+      // for the event itself, however long signing takes: the window's timer
+      // is armed as the event goes out, so moving the clock before then
+      // moves nothing and leaves the send waiting for good.
       const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
-      for (let i = 0; i < 200 && events(ws).length === 0; i++) await tick();
+      while (events(ws).length === 0) await tick();
       await vi.advanceTimersByTimeAsync(4_999);
       expect(lines(ws)).toHaveLength(0);
       await vi.advanceTimersByTimeAsync(1);
@@ -2105,6 +2111,32 @@ describe('outbound: sendAct', () => {
     await settled(ws, 'TAGMSG');
     expect(events(ws)).toHaveLength(1);
     expect(lines(ws)).toHaveLength(0);
+  });
+
+  it('puts events on the wire in call order when the first one signs slower', async () => {
+    const { client, ws } = await signingClient();
+    // Signing runs off the main thread and takes as long as it takes; here
+    // the first event's signature is held back until the second's is done.
+    const realSign = crypto.subtle.sign.bind(crypto.subtle);
+    let calls = 0;
+    vi.spyOn(crypto.subtle, 'sign').mockImplementation(async (...a: Parameters<typeof realSign>) => {
+      if (calls++ === 0) {
+        for (let i = 0; i < 50; i++) await new Promise((r) => setImmediate(r));
+      }
+      return realSign(...a);
+    });
+    const first = client.sendAct(
+      '#ops',
+      actTags('handoff', 'progress', TASK, 'did:plc:eliza', { note: 'first' }),
+      { humanText: '' },
+    );
+    const second = client.sendAct(
+      '#ops',
+      actTags('handoff', 'progress', TASK, 'did:plc:eliza', { note: 'second' }),
+      { humanText: '' },
+    );
+    await Promise.all([first, second]);
+    expect(events(ws).map((l) => /act-note=(\w+)/.exec(l)?.[1])).toEqual(['first', 'second']);
   });
 
   it('keeps the next event off the wire until the one before it is answered', async () => {
