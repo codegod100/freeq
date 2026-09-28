@@ -573,8 +573,10 @@ pub async fn run(cfg: RunConfig) -> Result<()> {
             "version": env!("CARGO_PKG_VERSION"),
             "runtime": "freeq-sdk/rust",
             "capabilities": ["av-transcription", "summary"],
-            // Provenance: who owns this being. (Soft today — a verifiable
-            // owner→bot delegation cert needs the Bluesky-OAuth onboarding.)
+            // Provenance: who owns this being. A free-form declaration the
+            // server stores unverified; to be verified, a bot sends a
+            // FreeqBotDelegation/v1 certificate and its owner adds it under
+            // Settings → Agents or with `freeq-bot-id register`.
             "owner": owner.clone(),
             "persona": nick.clone(),
         }))

@@ -98,10 +98,10 @@ function defaultFetchActor(did: string): Promise<CreatorChainActorResp | null> {
 }
 
 export function ProvenanceBlock({ provenance }: { provenance: NonNullable<ActorInfo['provenance']> }) {
-  // Walks the creator lineage to render e.g. "Creator: lobot ← Nap"
-  // so the chain of trust is visible at a glance for nested bot
-  // hierarchies (panel-2 owned by lobot owned by a human). See
-  // `walkCreatorChain` for the walk logic + stop conditions.
+  // Walks the creator lineage to render e.g. "Creator: Nap", the person
+  // who owns this agent. An owner is a person; an agent that needs
+  // helpers spawns them. The walk still follows a longer chain if one
+  // exists. See `walkCreatorChain` for the walk logic + stop conditions.
   const [creatorChain, setCreatorChain] = useState<CreatorChainLink[]>([]);
   // A creator is shown only when the server has proven the claim: by the
   // owner's agent record or a certificate signed by a key on file.

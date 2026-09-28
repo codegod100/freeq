@@ -267,7 +267,7 @@ time.sleep(1)
 # ─── Feature 3: Provenance Declaration ─────────────────────────
 bot.say(CHAN, "")
 bot.say(CHAN, "━━━ Feature 3: Provenance Declaration ━━━")
-bot.say(CHAN, "Now I'll declare where I came from. This is cryptographically signed metadata about my origin.")
+bot.say(CHAN, "Now I'll declare where I came from. This is metadata about my origin as I state it: a claim, not a proof.")
 
 provenance = {
     "actor_did": did,
@@ -288,7 +288,7 @@ bot.say(CHAN, f"   creator_did: did:plc:4qsyxmnsblo4luuycm3572bq (that's you, ch
 bot.say(CHAN, f"   source_repo: https://github.com/freeq-irc/freeq")
 bot.say(CHAN, f"   implementation: freeq/demo-phase1.py@HEAD")
 bot.say(CHAN, f"   revocation_authority: chadfowler.com")
-bot.say(CHAN, "Anyone can verify this at the REST endpoint. Try it:")
+bot.say(CHAN, "Anyone can read it at the REST endpoint, where the server stores it as unverified. Try it:")
 bot.say(CHAN, f"   GET https://irc.freeq.at/api/v1/actors/{did}")
 time.sleep(1)
 
