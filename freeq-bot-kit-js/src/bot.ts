@@ -92,10 +92,15 @@ export interface FreeqBotCreateOptions {
   // ── Optional ─────────────────────────────────────────────────────────
   /** Override the parent dir for bot state. Defaults to `~/.freeq/bots`. */
   root?: string;
-  /** Path to the owner's ed25519 seed (32 bytes; the file `freeq-bot-id
-   *  --creator-key` reads). When set, the delegation cert is SIGNED by the
-   *  owner — the server shows `_verified: true` provided the owner has
-   *  registered this key via MSGSIG. Unset → unsigned/declarative cert. */
+  /** The older way to prove ownership. Path to the owner's ed25519 seed
+   *  (32 bytes; the file `freeq-bot-id --creator-key` reads). When set, the
+   *  delegation cert is SIGNED by the owner — the server shows
+   *  `_verified: true` provided the owner has registered this key via
+   *  MSGSIG. Unset → an unsigned cert naming the owner, which the server
+   *  verifies from the owner's agent record: the owner adds the bot's DID
+   *  in the freeq web app under Settings → Agents, or with
+   *  `freeq-bot-id register --owner <handle> <bot-did>`, and no key of
+   *  theirs is kept with the bot. */
   creatorKeyPath?: string;
   /** Actor class declared via AGENT REGISTER. Default `"agent"`. */
   actorClass?: ActorClass;

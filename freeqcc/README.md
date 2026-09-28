@@ -93,9 +93,9 @@ If anyone *else* tries to DM `sourdough-bot`, they get:
 freeqcc is built on freeq's agent-native Phase 1 design ([docs](https://freeq.at/docs/agent-native/)) with two cryptographic layers:
 
 1. **Agent identity (verified today).** A fresh ed25519 keypair lives at `~/.freeqcc/agent.key` (mode 0600). The agent connects via SASL ATPROTO-CHALLENGE — freeq's server cryptographically verifies the agent owns its `did:key:z…` on every connection.
-2. **Creator binding (declarative today, verified soon).** A [`FreeqBotDelegation/v1`](https://github.com/freeq-irc/freeq/blob/main/freeq-server/src/connection/provenance.rs) cert at `~/.freeqcc/delegation.json` declares `bot_did = <agent>`, `creator_did = <your-DID>`, `revocation_authority = <your-DID>`. v1.0 ships **unsigned** — the freeq web client doesn't yet expose your MSGSIG signing key in a way the daemon can consume. Server stores the cert and surfaces it via `/api/v1/actors/{did}` with `_verified: false, _verification_reason: "Cert has no signature; declarative only"`. v1.1 adds an in-browser signing flow; this same daemon then auto-upgrades to verified provenance with no client-side change.
+2. **Creator binding (verified by your agent record).** A [`FreeqBotDelegation/v1`](https://github.com/freeq-irc/freeq/blob/main/freeq-server/src/connection/provenance.rs) cert at `~/.freeqcc/delegation.json` declares `bot_did = <agent>`, `creator_did = <your-DID>`, `revocation_authority = <your-DID>`, unsigned. You prove it by adding the agent's DID as one of your agents, from your own device: in the freeq web app under Settings → Agents, or with `freeq-bot-id register --owner <handle> <agent-did>`. That writes an `at.freeq.agentKey` record to your account; the server reads it when the daemon connects and marks the cert verified (`_verified: true` on `/api/v1/actors/{did}`), with no change to the daemon. Until the record exists the cert is stored with `_verified: false`. Removing the agent under Settings → Agents ends the link.
 
-The full server-side verification machinery is already deployed (see [freeq-server commit history](../freeq-server/src/connection/provenance.rs)) — it's the cert mint side that needs polish. The format matches the Rust struct in [`freeq-bot-id/src/main.rs`](../freeq-bot-id/src/main.rs) so signed certs from either source are interchangeable.
+The server-side verification is in [`provenance.rs`](../freeq-server/src/connection/provenance.rs). The older way, a certificate signed by your own key and checked against the keys you registered with the server, still verifies; the cert format matches the Rust struct in [`freeq-bot-id/src/main.rs`](../freeq-bot-id/src/main.rs), so certs from either source are interchangeable.
 
 ## Security
 
@@ -109,7 +109,7 @@ The full server-side verification machinery is already deployed (see [freeq-serv
 **v1.0** (this release):
 
 - ✅ did:key SASL identity, server-verified
-- ✅ FreeqBotDelegation/v1 cert format, declarative
+- ✅ FreeqBotDelegation/v1 cert, verified from your agent record on a server that reads agent records (see above)
 - ✅ owner-DID-only gate, refusal once per hour
 - ✅ persistent Claude Code session via `claude -p --resume`
 - ✅ presence + heartbeat (auto-degrade on crash)
@@ -117,7 +117,6 @@ The full server-side verification machinery is already deployed (see [freeq-serv
 
 **v1.1** (next):
 
-- in-browser signing flow → verified provenance from day one of *that* release
 - bot↔bot conversation (allowlist + per-peer rate limit)
 - channel mention mode (rate-limited public replies)
 - delegation: granting a third-party DID a *narrowed* capability set
