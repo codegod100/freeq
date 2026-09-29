@@ -898,6 +898,22 @@ pub struct SharedState {
     pub session_actor_class: Mutex<HashMap<String, crate::connection::ActorClass>>,
     /// Provenance declarations: DID → provenance JSON.
     pub provenance_declarations: Mutex<HashMap<String, serde_json::Value>>,
+    /// (owner DID, bot DID) → when the owner's records were found to claim
+    /// the bot, and the uri of the claim. Once an entry is `record_cache_secs`
+    /// old the owner's records are read again (`recheck_agent_links`); an
+    /// unverified lookup is not kept.
+    pub agent_links: Mutex<HashMap<(String, String), (std::time::Instant, String)>>,
+    /// Per owner DID, the one read of their records at a time and the last
+    /// answer, reused while younger than `owner_read_reuse_ms`
+    /// (`provenance::read_owner_links`).
+    pub(crate) owner_reads: Mutex<HashMap<String, crate::connection::OwnerReadCell>>,
+    /// How long a finished read of an owner's records is reused, in ms.
+    pub(crate) owner_read_reuse_ms: std::sync::atomic::AtomicU64,
+    /// Per bot DID, the sequence number of its stored declaration, written by
+    /// each PROVENANCE, so a lookup can tell an identical resubmission apart.
+    pub(crate) provenance_seqs: Mutex<HashMap<String, u64>>,
+    /// The next declaration sequence number.
+    pub(crate) provenance_seq_next: std::sync::atomic::AtomicU64,
     /// Agent presence state: session_id → AgentPresence.
     pub agent_presence: Mutex<HashMap<String, crate::connection::AgentPresence>>,
     /// Agent heartbeat tracking: session_id → (last_heartbeat_unix, ttl_seconds).
@@ -2158,6 +2174,13 @@ impl Server {
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
+            agent_links: Mutex::new(HashMap::new()),
+            owner_reads: Mutex::new(HashMap::new()),
+            owner_read_reuse_ms: std::sync::atomic::AtomicU64::new(
+                crate::connection::OWNER_READ_REUSE.as_millis() as u64,
+            ),
+            provenance_seqs: Mutex::new(HashMap::new()),
+            provenance_seq_next: std::sync::atomic::AtomicU64::new(0),
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
             av_instances_per_conn: Mutex::new(HashMap::new()),
@@ -2571,6 +2594,27 @@ impl Server {
                     } else {
                         tracing::info!("CRDT compacted successfully");
                     }
+                }
+            });
+        }
+
+        // Bots verified from their owner's agent record: once the kept result
+        // is `record_cache_secs` old, read the owner's records again, so a
+        // removal ends a connected bot's verification within the hour. Checked
+        // every minute, so a result is re-read at most a minute past its hour.
+        {
+            let recheck_state = Arc::clone(&state);
+            tokio::spawn(async move {
+                let older_than =
+                    std::time::Duration::from_secs(recheck_state.config.record_cache_secs);
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                // A run that outlasts the minute (many owners, slow PDSes) is
+                // followed by the next tick, never by a burst of missed ones.
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                interval.tick().await; // skip first tick
+                loop {
+                    interval.tick().await;
+                    crate::connection::recheck_agent_links(&recheck_state, older_than).await;
                 }
             });
         }
@@ -8753,6 +8797,13 @@ mod s2s_adversarial_tests {
             server_opers: Mutex::new(HashSet::new()),
             session_actor_class: Mutex::new(HashMap::new()),
             provenance_declarations: Mutex::new(HashMap::new()),
+            agent_links: Mutex::new(HashMap::new()),
+            owner_reads: Mutex::new(HashMap::new()),
+            owner_read_reuse_ms: std::sync::atomic::AtomicU64::new(
+                crate::connection::OWNER_READ_REUSE.as_millis() as u64,
+            ),
+            provenance_seqs: Mutex::new(HashMap::new()),
+            provenance_seq_next: std::sync::atomic::AtomicU64::new(0),
             agent_presence: Mutex::new(HashMap::new()),
             agent_heartbeats: Mutex::new(HashMap::new()),
             av_instances_per_conn: Mutex::new(HashMap::new()),

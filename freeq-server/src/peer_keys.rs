@@ -692,6 +692,89 @@ pub(crate) async fn stub_pds_counting(
     )
 }
 
+/// A PDS on a loopback port serving each of `repos`, which may hold device
+/// and agent records alike, and a resolver whose documents name it. The stub
+/// counts its listings per collection; while `hold` is set, a listing waits;
+/// while `fail` is set, an agent record listing is answered 500.
+#[cfg(test)]
+pub(crate) struct StubPds {
+    pub resolver: DidResolver,
+    pub listings: Arc<Mutex<HashMap<String, usize>>>,
+    pub hold: Arc<std::sync::atomic::AtomicBool>,
+    pub fail: Arc<std::sync::atomic::AtomicBool>,
+    /// Listing requests received, counted before `hold` is waited on.
+    pub arrivals: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[cfg(test)]
+pub(crate) async fn stub_pds_repos(
+    repos: Vec<Arc<Mutex<freeq_sdk::test_support::StubRepo>>>,
+) -> StubPds {
+    use axum::response::IntoResponse;
+    use std::sync::atomic::Ordering;
+    let listings = Arc::new(Mutex::new(HashMap::<String, usize>::new()));
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let arrivals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let arrived = arrivals.clone();
+    let (counted, held, failing) = (listings.clone(), hold.clone(), fail.clone());
+    let answering = repos.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new().fallback(
+        move |uri: axum::http::Uri,
+              axum::extract::Query(q): axum::extract::Query<HashMap<String, String>>| {
+            let (counted, held, answering) = (counted.clone(), held.clone(), answering.clone());
+            let failing = failing.clone();
+            let arrived = arrived.clone();
+            async move {
+                if uri.path() == "/xrpc/com.atproto.repo.listRecords" {
+                    arrived.fetch_add(1, Ordering::SeqCst);
+                    while held.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    let collection = q.get("collection").cloned().unwrap_or_default();
+                    let refused = failing.load(Ordering::SeqCst)
+                        && collection == freeq_sdk::identity_records::AGENT_KEY_TYPE;
+                    *counted.lock().entry(collection).or_default() += 1;
+                    if refused {
+                        return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
+                }
+                let answer = answering
+                    .iter()
+                    .find_map(|repo| repo.lock().respond(uri.path(), &q));
+                match answer {
+                    Some((status, content_type, body)) => (
+                        axum::http::StatusCode::from_u16(status).unwrap(),
+                        [("content-type", content_type)],
+                        body,
+                    )
+                        .into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        },
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    let documents = repos
+        .iter()
+        .map(|repo| {
+            let repo = repo.lock();
+            (repo.did().to_string(), repo.document(&base))
+        })
+        .collect();
+    StubPds {
+        resolver: DidResolver::static_map(documents),
+        listings,
+        hold,
+        fail,
+        arrivals,
+    }
+}
+
 /// Whether a `(did, kid)` lookup is currently remembered — in flight, or
 /// recently finished without a key.
 #[cfg(test)]
