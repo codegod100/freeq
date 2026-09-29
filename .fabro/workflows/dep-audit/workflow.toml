@@ -4,5 +4,5 @@ _version = 1
 graph = "workflow.fabro"
 
 # Inherits PR policy, default model (sonnet), and the boxd-docker environment
-# from .fabro/project.toml. The warm image (freeq-fabro:warm) already bakes
+# from .fabro/project.toml. The freeq-fabro:tools image already bakes
 # cargo-audit + the full toolchain, so no per-workflow prepare steps are needed.

@@ -1,0 +1,21 @@
+# Shared compiler cache for Fabro run containers.
+#
+# Fabro's docker provider has no volume mounts, so each run starts cold.
+# sccache inside the run container (RUSTC_WRAPPER=sccache, see
+# .fabro/project.toml) talks WebDAV to this server on the docker bridge,
+# so compiled crates survive across runs. Disk-backed, not RAM-backed:
+# the 16 GB VM needs its memory for the builds themselves.
+[Unit]
+Description=sccache WebDAV store for Fabro runs
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=boxd
+ExecStart=/usr/bin/rclone serve webdav /var/cache/sccache --addr 172.17.0.1:8090
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

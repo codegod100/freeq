@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Run any `fabro` command against the Fabro server on the boxd executor VM.
+#
+#   scripts/fabro-remote ps
+#   scripts/fabro-remote run .fabro/workflows/feature/workflow.toml --goal-file plan.md --detach
+#   scripts/fabro-remote attach <run-id>
+#
+# The server only listens on the VM's loopback. This opens (and reuses) an
+# SSH tunnel to it on localhost:$FABRO_TUNNEL_PORT, logs the CLI in with the
+# VM's dev token on first use, then execs fabro with FABRO_SERVER pointed at
+# the tunnel. The web UI is at http://127.0.0.1:$FABRO_TUNNEL_PORT while the
+# tunnel is up. Close the laptop whenever — runs live on the VM.
+set -euo pipefail
+
+VM_HOST="${FABRO_VM_HOST:-fabro-freeq.boxd}"
+PORT="${FABRO_TUNNEL_PORT:-32277}"
+CTL="${TMPDIR:-/tmp}/fabro-remote-${VM_HOST}.sock"
+export FABRO_SERVER="http://127.0.0.1:${PORT}"
+
+if ! ssh -S "$CTL" -O check "$VM_HOST" 2>/dev/null; then
+  ssh -fN -M -S "$CTL" -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
+    -L "127.0.0.1:${PORT}:127.0.0.1:32276" "$VM_HOST" 2>/dev/null
+fi
+
+if [ "${1:-}" = "--close" ]; then
+  ssh -S "$CTL" -O exit "$VM_HOST" 2>/dev/null || true
+  exit 0
+fi
+
+# Log in once per tunnel target; the token never touches argv history files.
+if ! fabro auth status 2>/dev/null | grep -q "127.0.0.1:${PORT}"; then
+  token="$(ssh "$VM_HOST" 'cat ~/.fabro/storage/server.dev-token' 2>/dev/null)"
+  fabro auth login --quiet --dev-token "$token" >/dev/null
+fi
+
+exec fabro "$@"

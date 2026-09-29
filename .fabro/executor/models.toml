@@ -1,0 +1,25 @@
+# Custom model catalog entries for the executor's ~/.fabro/settings.toml.
+# Fabro 0.254 (latest stable) predates the Claude 5.5 family; without these,
+# `model="claude-opus-5-5"` in a workflow fails to resolve. provision.sh
+# appends this file to the server settings if the entries are missing.
+# Pricing: Anthropic first-party API rates, per MTok (cost reporting only).
+
+[llm.models."claude-opus-5-5"]
+provider = "anthropic"
+api_id = "claude-opus-5-5"
+family = "claude-5"
+display_name = "Claude Opus 5.5"
+limits = { context_window = 1000000, max_output = 128000 }
+features = { tools = true, vision = true, reasoning = true, reasoning_effort = "levels", prompt_cache = true }
+costs = { input_cost_per_mtok = 4.0, output_cost_per_mtok = 20.0, cache_input_cost_per_mtok = 0.2 }
+estimated_output_tps = 30.0
+
+[llm.models."claude-sonnet-5-5"]
+provider = "anthropic"
+api_id = "claude-sonnet-5-5"
+family = "claude-5"
+display_name = "Claude Sonnet 5.5"
+limits = { context_window = 1000000, max_output = 128000 }
+features = { tools = true, vision = true, reasoning = true, reasoning_effort = "levels", prompt_cache = true }
+costs = { input_cost_per_mtok = 2.0, output_cost_per_mtok = 10.0, cache_input_cost_per_mtok = 0.2 }
+estimated_output_tps = 60.0

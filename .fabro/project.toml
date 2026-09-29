@@ -18,33 +18,38 @@ auto_merge = false
 merge_strategy = "squash"
 
 # ── Default model ────────────────────────────────────────────────────────
-# Sonnet is the default workhorse (good quality/cost). Individual nodes that
-# need deeper reasoning (e.g. the bug-hunt finder) override to opus in their
-# graph via `model=`.
+# Sonnet 5.5 is the default workhorse. Nodes that need deeper reasoning (bug
+# hunt, feature explore/plan/implement) override to claude-opus-5-5 in their
+# graph via `model=`. Fabro 0.254's built-in catalog predates the 5.5 family,
+# so both are declared as custom models in the executor's
+# ~/.fabro/settings.toml (see .fabro/executor/models.toml).
 [run.model]
-name = "claude-sonnet-4-6"
+name = "claude-sonnet-5-5"
 
 # ── Execution environment ────────────────────────────────────────────────
 # Runs execute in a Docker container on the always-on boxd VM that hosts the
-# Fabro server (boxd ships Docker, no sudo). The docker provider is
-# clone-based: each run gets its own fresh clone on a run branch, so Fabro
-# owns the branch → commit → push → PR lifecycle and runs can safely overlap.
+# Fabro server. The docker provider is clone-based: each run gets its own
+# fresh clone on a run branch, so Fabro owns the branch → commit → push → PR
+# lifecycle and runs can safely overlap.
 #
-# (An earlier `provider = "local"` + `clone.enabled = false` setup reused a
-# warm checkout for build-cache speed, but that bypasses Fabro's managed
-# branch/PR machinery — work landed uncommitted on main and no PR opened. The
-# clone-based docker provider is the correct path.)
+# Why Docker and not one boxd fork per run: Fabro only executes runs on its
+# built-in providers (local/docker/daytona), and both automations (cron) and
+# auto-PRs require a clone-based one — `local` is rejected for both. Fabro's
+# sandbox-driver plugins can't execute runs yet. When they can, a boxd plugin
+# forking a warm golden VM per run is the better shape.
 #
-# Base image: `freeq-fabro:tools` (.fabro/Dockerfile.tools) — a SLIM image with
-# just the toolchain baked (rustfmt/clippy, cmake, libasound2-dev, node,
-# cargo-audit), no source/target. Build/rebuild it on the VM:
-#   boxd exec fabro-freeq -- 'cd ~/freeq && git pull && docker build -f .fabro/Dockerfile.tools -t freeq-fabro:tools .'
+# Base image: `freeq-fabro:tools` (.fabro/Dockerfile.tools) — toolchain only
+# (rustfmt/clippy, cmake, libasound2-dev, node, cargo-audit, sccache), no
+# source/target. Built by .fabro/executor/provision.sh.
 #
-# Build profile: CARGO_PROFILE_*_DEBUG=0 turns OFF debug symbols. On this fixed
-# 2 vCPU / 8 GB / 98 GB boxd VM, debug=2 binaries blew the disk and bus-errored
-# the linker; debug=0 keeps the workspace build small and link-safe, and doesn't
-# change check/clippy/test correctness. Builds are cold per run (~20-30 min) but
-# reliable; a persistent cache for warmth is a follow-up (see README).
+# Warm builds: containers start cold and the docker provider has no volume
+# mounts, so sccache caches compiled crates in a WebDAV store on the host
+# (172.17.0.1 is the docker bridge; see .fabro/executor/sccache-webdav.service).
+# sccache can't cache incremental builds, hence CARGO_INCREMENTAL=0.
+#
+# Build profile: CARGO_PROFILE_*_DEBUG=0 turns OFF debug symbols — debug=2
+# binaries blew the disk and bus-errored the linker on the original 2 vCPU VM.
+# It doesn't change check/clippy/test correctness.
 [run.environment]
 id = "boxd-docker"
 
@@ -54,13 +59,49 @@ provider = "docker"
 [environments.boxd-docker.image]
 docker = "freeq-fabro:tools"
 
+# The VM is 4 vCPU / 16 GB; leave headroom for the Fabro server + cache.
 [environments.boxd-docker.resources]
-cpu = 2
-memory = "7GB"
+cpu = 4
+memory = "13GB"
 
 [environments.boxd-docker.env]
 CARGO_TERM_COLOR = "always"
 CARGO_PROFILE_DEV_DEBUG = "0"
 CARGO_PROFILE_TEST_DEBUG = "0"
+CARGO_INCREMENTAL = "0"
+RUSTC_WRAPPER = "sccache"
+SCCACHE_WEBDAV_ENDPOINT = "http://172.17.0.1:8090"
 
 # No prepare steps: the toolchain is baked into freeq-fabro:tools.
+
+# ── Notifications → #freeq-dev ───────────────────────────────────────────
+# HTTP hooks fire from the server host (never the sandbox) to the freeq-fabro
+# relay bot (freeq-fabro/), which posts to #freeq-dev on irc.freeq.at.
+# Loopback-only, hence tls = "off".
+[[run.hooks]]
+name = "freeq-run-start"
+event = "run_start"
+url = "http://127.0.0.1:8091/hook"
+tls = "off"
+blocking = false
+
+[[run.hooks]]
+name = "freeq-run-complete"
+event = "run_complete"
+url = "http://127.0.0.1:8091/hook"
+tls = "off"
+
+[[run.hooks]]
+name = "freeq-run-failed"
+event = "run_failed"
+url = "http://127.0.0.1:8091/hook"
+tls = "off"
+
+# Human gates (hexagon nodes named approve*) — ping when a run is waiting on you.
+[[run.hooks]]
+name = "freeq-awaiting-approval"
+event = "stage_start"
+matcher = "^approve"
+url = "http://127.0.0.1:8091/hook"
+tls = "off"
+blocking = false

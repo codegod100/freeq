@@ -1,0 +1,22 @@
+# Relays Fabro run notifications into #freeq-dev (freeq-fabro/ in the repo).
+# Config: /home/boxd/.config/freeq-fabro.env (written by provision.sh).
+[Unit]
+Description=freeq-fabro — Fabro run notifications to freeq
+After=network-online.target fabro-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=boxd
+Environment=HOME=/home/boxd
+EnvironmentFile=/home/boxd/.config/freeq-fabro.env
+WorkingDirectory=/home/boxd/freeq/freeq-fabro
+ExecStart=/usr/local/bin/node dist/cli.js
+# boxd VMs don't run a persistent journal, so log to a file.
+StandardOutput=append:/home/boxd/.config/freeq-fabro.log
+StandardError=append:/home/boxd/.config/freeq-fabro.log
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

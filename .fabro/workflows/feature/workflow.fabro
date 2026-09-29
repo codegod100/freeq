@@ -24,28 +24,28 @@ digraph Feature {
     exit  [shape=Msquare, label="Exit"]
 
     // ── Research + plan ──────────────────────────────────────────────────
-    explore [shape=box, label="Explore surface", prompt="@prompts/explore.md", model="claude-opus-4-8", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="2400s"]
-    plan    [shape=box, label="Draft plan",      prompt="@prompts/plan.md",    model="claude-opus-4-8", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="2400s"]
+    explore [shape=box, label="Explore surface", prompt="@prompts/explore.md", model="claude-opus-5-5", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="2400s"]
+    plan    [shape=box, label="Draft plan",      prompt="@prompts/plan.md",    model="claude-opus-5-5", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="2400s"]
 
     // ── Parallel plan review (3 independent lenses) ──────────────────────
-    review_security    [shape=box, label="Review: security",      prompt="@prompts/review-security.md",    model="claude-sonnet-4-6", reasoning_effort="high", fidelity="full", timeout="1800s"]
-    review_compat      [shape=box, label="Review: compatibility", prompt="@prompts/review-compat.md",      model="claude-sonnet-4-6", reasoning_effort="high", fidelity="full", timeout="1800s"]
-    review_ops         [shape=box, label="Review: storage/ops",   prompt="@prompts/review-ops.md",         model="claude-sonnet-4-6", reasoning_effort="high", fidelity="full", timeout="1800s"]
+    review_security    [shape=box, label="Review: security",      prompt="@prompts/review-security.md",    model="claude-sonnet-5-5", reasoning_effort="high", fidelity="full", timeout="1800s"]
+    review_compat      [shape=box, label="Review: compatibility", prompt="@prompts/review-compat.md",      model="claude-sonnet-5-5", reasoning_effort="high", fidelity="full", timeout="1800s"]
+    review_ops         [shape=box, label="Review: storage/ops",   prompt="@prompts/review-ops.md",         model="claude-sonnet-5-5", reasoning_effort="high", fidelity="full", timeout="1800s"]
 
-    synthesize [shape=box, label="Revise plan", prompt="@prompts/synthesize.md", model="claude-opus-4-8", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="1800s"]
+    synthesize [shape=box, label="Revise plan", prompt="@prompts/synthesize.md", model="claude-opus-5-5", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="1800s"]
 
     // ── Human approval before any code ───────────────────────────────────
     approve [shape=hexagon, label="Approve plan?", question_type="confirmation", prompt="@prompts/approve.md"]
 
     // ── Implement + verify ───────────────────────────────────────────────
-    implement [shape=box, label="Implement", prompt="@prompts/implement.md", model="claude-opus-4-8", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="5400s"]
+    implement [shape=box, label="Implement", prompt="@prompts/implement.md", model="claude-opus-5-5", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="5400s"]
     verify    [shape=parallelogram, label="CI gate", script="bash .fabro/verify.sh", goal_gate=true, retry_target="implement", max_retries=2, timeout="5400s"]
 
     // ── Parallel adversarial code review (2 lenses) ──────────────────────
-    cr_correctness [shape=box, label="Code review: correctness", prompt="@prompts/cr-correctness.md", model="claude-opus-4-8", reasoning_effort="high", fidelity="full", timeout="2400s"]
-    cr_security    [shape=box, label="Code review: security",    prompt="@prompts/cr-security.md",    model="claude-sonnet-4-6", reasoning_effort="high", fidelity="full", timeout="2400s"]
+    cr_correctness [shape=box, label="Code review: correctness", prompt="@prompts/cr-correctness.md", model="claude-opus-5-5", reasoning_effort="high", fidelity="full", timeout="2400s"]
+    cr_security    [shape=box, label="Code review: security",    prompt="@prompts/cr-security.md",    model="claude-sonnet-5-5", reasoning_effort="high", fidelity="full", timeout="2400s"]
 
-    address [shape=box, label="Address review", prompt="@prompts/address.md", model="claude-opus-4-8", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="3600s"]
+    address [shape=box, label="Address review", prompt="@prompts/address.md", model="claude-opus-5-5", reasoning_effort="high", thread_id="feat", fidelity="full", timeout="3600s"]
     verify2 [shape=parallelogram, label="Final CI gate", script="bash .fabro/verify.sh", goal_gate=true, retry_target="address", max_retries=1, timeout="5400s"]
 
     pr_body [shape=tab, label="PR description", prompt="@prompts/pr_body.md", thread_id="feat", fidelity="full"]

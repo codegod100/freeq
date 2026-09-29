@@ -1,107 +1,117 @@
 # Fabro — agents improving freeq around the clock
 
 This directory configures [Fabro](https://fabro.sh) to run AI-agent workflows
-that continuously improve freeq, each opening a **ready-for-review PR** you
-merge by hand. Workflows are version-controlled DOT graphs — the process is
-code, reviewable and forkable like anything else in the repo.
+that improve freeq, each opening a **ready-for-review PR** you merge by hand.
+Workflows are version-controlled DOT graphs — the process is code, reviewable
+and forkable like anything else in the repo.
+
+Two ways work reaches it:
+
+- **Nightly upkeep** — scheduled workflows (below) run on their own.
+- **Handoff** — you plan on the laptop, hand the plan to the `feature`
+  workflow, close the lid; it keeps going on the boxd VM.
+
+Either way, run lifecycle lands in **#freeq-dev** on irc.freeq.at (started,
+finished + PR link, failed + reason, waiting for your approval).
 
 ## The workflows
 
-| Workflow | What it does | Cadence (when enabled) |
+| Workflow | What it does | Schedule (UTC) |
 |---|---|---|
-| [`test-coverage`](workflows/test-coverage/) | Picks a high-risk, undertested file (via `scripts/hotspots.sh` + the CLAUDE.md hotspot list) and adds focused tests. | Nightly 02:00 UTC |
-| [`bug-hunt`](workflows/bug-hunt/) | Finds one genuine correctness bug, pins it with a failing regression test, fixes it minimally. Uses **opus** for the hunt. | Nightly 04:00 UTC |
-| [`dep-audit`](workflows/dep-audit/) | Runs `cargo audit` + `npm audit`, patches one advisory with the smallest viable bump. | Weekly Mon 06:00 UTC |
+| [`test-coverage`](workflows/test-coverage/) | Picks a high-risk, undertested file (`scripts/hotspots.sh` + the CLAUDE.md hotspot list) and adds focused tests. | Nightly 02:00 |
+| [`bug-hunt`](workflows/bug-hunt/) | Finds one genuine correctness bug, pins it with a failing regression test, fixes it minimally. Opus for the hunt. | Nightly 04:00 |
+| [`dep-audit`](workflows/dep-audit/) | Runs `cargo audit` + `npm audit`, patches one advisory with the smallest viable bump. | Mon 06:00 |
+| [`feature`](workflows/feature/) | Long-horizon: explore → plan → 3 parallel plan reviews → **your approval** → implement → CI gate → 2 parallel code reviews → address → CI gate → PR. Driven by `--goal`/`--goal-file`. | On demand |
 
-Each is the same shape: **select/hunt/audit (read-only) → implement → CI gate →
-PR body**. The CI gate ([`verify.sh`](verify.sh)) mirrors `.github/workflows/ci.yml`
-exactly (rustfmt + `cargo check`/`clippy -D warnings`/`test` with CI's AV-crate
-exclusions, plus `freeq-app` vitest when the app changed). It's a `goal_gate`:
-**a failed gate opens no PR**, and routes back to the implementer for up to 2
-bounded retries first. So a PR only ever appears when the work is genuinely green.
+The upkeep workflows share one shape: **select/hunt/audit (read-only) →
+implement → CI gate → PR body**. The CI gate ([`verify.sh`](verify.sh)) mirrors
+`.github/workflows/ci.yml` (rustfmt + `cargo check`/`clippy -D warnings`/`test`
+with CI's AV-crate exclusions, plus `freeq-app` vitest when the app changed).
+It's a `goal_gate`: **a failed gate opens no PR**, and routes back to the
+implementer for up to 2 bounded retries first.
 
-## PR policy
+## PR policy and models
 
-Set in [`project.toml`](project.toml): PRs are opened **ready for review** (not
-draft), squash-merge, **never auto-merged** — a human clicks merge. Default
-model is `claude-sonnet-4-6`; the bug-hunt finder overrides to `claude-opus-4-8`.
+Set in [`project.toml`](project.toml): PRs open **ready for review**,
+squash-merge, **never auto-merged**. Default model `claude-sonnet-5-5`;
+hunt/explore/plan/implement nodes use `claude-opus-5-5`. Fabro 0.254 (the
+latest stable) predates the 5.5 family, so both are declared as custom models
+on the executor ([`executor/models.toml`](executor/models.toml)).
+
+## Handoff from the laptop
+
+[`scripts/fabro-remote`](../scripts/fabro-remote) is `fabro` pointed at the VM:
+it opens an SSH tunnel to the server (which only listens on the VM's loopback)
+and logs in with the VM's dev token on first use.
+
+```bash
+# plan interactively (Claude Code / pi), save it, then:
+scripts/fabro-remote run .fabro/workflows/feature/workflow.toml \
+  --goal-file docs/plans/my-feature.md --detach
+
+scripts/fabro-remote ps                 # what's running
+scripts/fabro-remote attach <run-id>    # follow along / answer the approval gate
+scripts/fabro-remote inspect <run-id>
+scripts/fabro-remote --close            # drop the tunnel
+```
+
+While the tunnel is up the web UI is at http://127.0.0.1:32277. The run clones
+**GitHub**, not your working tree — push the branch it should start from
+first. The goal file travels with the run, so the plan itself needn't be
+committed. Workflow config (`.fabro/`) is taken from your local checkout.
 
 ## Where it runs
 
-An always-on **boxd VM** (`fabro-freeq`, auto-suspend disabled so cron fires)
-hosts the Fabro server under systemd. The VM is the isolation boundary from your
-laptop — the laptop need not stay awake.
+An always-on **boxd VM**, `fabro-freeq` (4 vCPU / 16 GB, auto-suspend and
+auto-hibernate off so cron fires), runs:
 
-Runs execute via the **docker provider** (boxd ships Docker, no sudo). It's
-clone-based: each run gets its own fresh clone on a run branch, so Fabro owns the
-branch → commit → push → PR lifecycle and runs can safely overlap.
+| Service | What |
+|---|---|
+| `fabro-server` | Fabro 0.254, `127.0.0.1:32276`, automations in `~/.fabro/automations/` |
+| `sccache-webdav` | Disk-backed compiler cache on the docker bridge, `172.17.0.1:8090` |
+| `freeq-fabro` | [`freeq-fabro/`](../freeq-fabro/) relay bot: Fabro HTTP hooks → #freeq-dev |
 
-The base image is **`freeq-fabro:tools`** (`.fabro/Dockerfile.tools`) — a slim
-image with just the toolchain (rustfmt/clippy, cmake, libasound2-dev, Node,
-cargo-audit), no baked source/target. Build/rebuild it on the VM:
+Runs execute in Docker (`freeq-fabro:tools`, [`Dockerfile.tools`](Dockerfile.tools):
+toolchain only, no baked source). The docker provider is clone-based: each run
+gets a fresh clone on `fabro/run/<id>`, and Fabro owns branch → commit → push
+→ PR.
+
+**Why Docker inside boxd, not a boxd fork per run?** Fabro only executes runs
+on its built-in providers (`local`/`docker`/`daytona`); automations and
+auto-PRs both require a clone-based one (`local` is rejected for both), and
+sandbox-driver plugins can't execute runs yet. When they can, a boxd plugin
+forking a warm golden VM per run is the better shape.
+
+**Warm builds.** Containers start cold and the docker provider has no volume
+mounts, so `RUSTC_WRAPPER=sccache` caches compiled crates in the host's WebDAV
+store (`CARGO_INCREMENTAL=0`, which sccache needs). Entries untouched for 14
+days are pruned. Debug symbols stay off (`CARGO_PROFILE_*_DEBUG=0`) — debug=2
+once blew the disk and bus-errored the linker.
+
+**Scheduled runs see `main` on GitHub.** An automation fire clones
+`freeq-irc/freeq@main`, so config changes here only affect nightly runs once
+pushed (laptop handoffs use your local `.fabro/`).
+
+## Executor setup
+
+1. `boxd new --name=fabro-freeq --vcpu 4 --auto-suspend-timeout=0 --auto-hibernate-timeout=0`
+2. On the VM: install Fabro (`curl -fsSL https://fabro.sh/install.sh | bash`),
+   Docker, Node 22+; clone freeq to `~/freeq`.
+3. `fabro install` (GitHub token strategy), `fabro secret set ANTHROPIC_API_KEY …`.
+4. Run `fabro server start --foreground` under systemd as `fabro-server`.
+5. `bash .fabro/executor/provision.sh` — idempotent; installs the cache,
+   custom models, automations, run image, and the relay bot (config in
+   `~/.config/freeq-fabro.env`, log in `~/.config/freeq-fabro.log`). Re-run
+   after pulling changes to `.fabro/` or `freeq-fabro/`.
+
+## Running on the VM directly
 
 ```bash
-boxd exec fabro-freeq -- 'cd ~/freeq && git pull && docker build -f .fabro/Dockerfile.tools -t freeq-fabro:tools .'
+fabro run .fabro/workflows/test-coverage/workflow.toml --detach
+fabro run .fabro/workflows/test-coverage/workflow.toml --dry-run   # simulated LLM, no spend
+fabro preflight .fabro/workflows/bug-hunt/workflow.toml
+fabro events <run-id> / fabro logs <run-id> / fabro inspect <run-id>
 ```
 
-Runs set `CARGO_PROFILE_DEV_DEBUG=0` / `CARGO_PROFILE_TEST_DEBUG=0` (debug
-symbols off). This doesn't change check/clippy/test correctness — it just keeps
-the workspace build small and link-safe.
-
-> **The executor is a fixed 2 vCPU / 8 GB / 98 GB boxd VM** (boxd can't resize),
-> which is marginal for repeatedly building freeq's large Rust workspace. Two
-> things this surfaced and how it's handled:
-> - **debug=2 binaries blew the disk and bus-errored the linker** → `debug=0`
->   (above) keeps builds small/reliable. Each run cold-builds in ~20-30 min.
-> - **Slow builds tempted the agent to yak-shave on build config** → every
->   implement/fix prompt now says: iterate with targeted `cargo test -p <crate>`,
->   run the full `.fabro/verify.sh` gate **once** at the end, and never touch
->   build config.
->
-> **Follow-up (warmth):** a persistent host-mounted cache (`CARGO_TARGET_DIR` +
-> registry as a docker volume) would make repeat builds incremental, once
-> Fabro's volume-mount syntax is pinned down. Baking the target into the image
-> is NOT the way (the layer commit needs ~2× disk and overflows the VM).
->
-> **History:** the first setup used `provider = "local"` + `clone.enabled =
-> false`, which bypassed Fabro's branch/PR machinery (work landed uncommitted on
-> `main`). The docker provider fixed that.
-
-## Running them
-
-```bash
-# One-off manual run (foreground), from the repo root on the executor:
-fabro run .fabro/workflows/test-coverage/workflow.toml
-
-# Background + just print the run id:
-fabro run .fabro/workflows/bug-hunt/workflow.toml --detach
-
-# Watch / inspect:
-fabro events <run-id>      # event stream
-fabro logs   <run-id>      # raw worker log
-fabro inspect <run-id>     # status + stages
-fabro artifact <run-id>    # screenshots / reports / traces
-```
-
-`--dry-run` executes with a simulated LLM (no spend, no real edits) to smoke the
-wiring; `fabro preflight <workflow.toml>` validates config without executing.
-
-## Going from manual → around the clock
-
-The schedules are authored but **disabled**. After you've seen a PR you're happy
-with, enable them by flipping `enabled = false → true` on the `schedule` trigger
-in each [`automations/*.toml`](automations/) and committing — the server picks up
-the change. (`api` triggers are already enabled, which is what manual/test runs
-use.) Five-field cron, evaluated in **UTC**.
-
-## Executor setup (one time)
-
-See the provisioning notes the setup left in the VM, or rebuild from:
-
-1. `boxd new --name=fabro-freeq --auto-suspend-timeout=0`
-2. Install Fabro + a Rust/cmake/Node toolchain + `cargo-audit` on the VM.
-3. `fabro secret set ANTHROPIC_API_KEY …` (+ any other providers) and the
-   GitHub token; clone freeq to the working dir.
-4. Run `fabro server` under systemd so it survives reboots/resumes.
-5. The server reads these `.fabro/automations/*.toml` from `main` — keep this
-   config on `main` so scheduled runs find it.
+`--dry-run` only works from the VM's own checkout: it forces the `local`
+provider, which runs in the submitting client's directory.
