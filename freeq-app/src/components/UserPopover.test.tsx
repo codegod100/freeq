@@ -49,7 +49,7 @@ describe('walkCreatorChain', () => {
     // is a did:plc human (zapnap).
     const fetchActor = vi.fn(async (did: string) => {
       if (did === 'did:key:lobot') {
-        return { nick: 'lobot', provenance: { creator_did: 'did:plc:zap' } };
+        return { nick: 'lobot', provenance: { creator_did: 'did:plc:zap', _verified: true } };
       }
       if (did === 'did:plc:zap') {
         // Humans declare no provenance — walk terminates here.
@@ -91,7 +91,7 @@ describe('walkCreatorChain', () => {
     // Pathological data: bot1 claims itself as its own creator.
     const fetchActor = vi.fn(async (did: string) => ({
       nick: did.slice('did:key:'.length),
-      provenance: { creator_did: did }, // points back to self
+      provenance: { creator_did: did, _verified: true }, // points back to self
     }));
     const fetchProfile = vi.fn(async () => null);
 
@@ -116,7 +116,7 @@ describe('walkCreatorChain', () => {
       counter++;
       return {
         nick: `bot${counter}`,
-        provenance: { creator_did: `did:key:bot${counter + 1000}` },
+        provenance: { creator_did: `did:key:bot${counter + 1000}`, _verified: true },
       };
     });
     const fetchProfile = vi.fn(async () => null);
@@ -130,6 +130,20 @@ describe('walkCreatorChain', () => {
 
     expect(chain).toHaveLength(5);
     expect(fetchActor).toHaveBeenCalledTimes(5);
+  });
+
+  it('stops at a creator the server has not verified', async () => {
+    const fetchActor = vi.fn(async (did: string) =>
+      did === 'did:key:lobot'
+        ? { nick: 'lobot', provenance: { creator_did: 'did:plc:claimed', _verified: false } }
+        : { nick: 'claimed', provenance: null },
+    );
+    const fetchProfile = vi.fn(async () => null);
+
+    const chain = await walkCreatorChain('did:key:lobot', fetchActor, fetchProfile);
+
+    expect(chain.map((l) => l.did)).toEqual(['did:key:lobot']);
+    expect(fetchActor).toHaveBeenCalledTimes(1);
   });
 
   it('default max depth is 8', () => {
@@ -200,7 +214,7 @@ describe('<ProvenanceBlock>', () => {
         return new Response(
           JSON.stringify({
             nick: 'lobot',
-            provenance: { creator_did: 'did:plc:zap' },
+            provenance: { creator_did: 'did:plc:zap', _verified: true },
           }),
           { status: 200 },
         );
@@ -216,7 +230,7 @@ describe('<ProvenanceBlock>', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const { container, findByText } = render(
-      <ProvenanceBlock provenance={{ creator_did: 'did:key:lobot' }} />,
+      <ProvenanceBlock provenance={{ creator_did: 'did:key:lobot', _verified: true }} />,
     );
 
     // Both nicks should appear once the chain resolves.
@@ -238,7 +252,7 @@ describe('<ProvenanceBlock>', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     const { findByText } = render(
-      <ProvenanceBlock provenance={{ creator_did: 'did:key:lobot' }} />,
+      <ProvenanceBlock provenance={{ creator_did: 'did:key:lobot', _verified: true }} />,
     );
 
     const lobotButton = await findByText('lobot');
@@ -250,6 +264,25 @@ describe('<ProvenanceBlock>', () => {
     });
   });
 
+  it('shows no creator for an ownership claim the server has not verified', async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ nick: 'lobot', provenance: null }), { status: 200 }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { container } = render(
+      <ProvenanceBlock provenance={{ creator_did: 'did:key:lobot', _verified: false }} />,
+    );
+    // Give a walk the time it would take to land.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(container.textContent).not.toContain('Creator');
+    // Says the claim is unproven, naming nobody.
+    expect(container.textContent).toContain('Owner not verified.');
+    expect(container.textContent).not.toContain('lobot');
+    expect(container.querySelectorAll('button').length).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('renders nothing when there is no creator_did', () => {
     // ProvenanceBlock should still render its frame (so other
     // provenance fields like source_repo/impl could show), but the
@@ -258,5 +291,7 @@ describe('<ProvenanceBlock>', () => {
     const { container } = render(<ProvenanceBlock provenance={{}} />);
     // No button means no Creator line — chain is empty.
     expect(container.querySelectorAll('button').length).toBe(0);
+    // No owner claimed, so nothing to call unverified.
+    expect(container.textContent).not.toContain('Owner not verified.');
   });
 });

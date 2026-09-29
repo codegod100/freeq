@@ -26,7 +26,7 @@ export const CREATOR_CHAIN_MAX_DEPTH = 8;
 
 interface CreatorChainActorResp {
   nick?: string | null;
-  provenance?: { creator_did?: string | null } | null;
+  provenance?: { creator_did?: string | null; _verified?: boolean } | null;
 }
 
 interface CreatorChainProfile {
@@ -41,7 +41,9 @@ interface CreatorChainProfile {
  *
  * Stops on:
  *  - empty/undefined `rootDid` (returns [])
- *  - actor response with no `provenance.creator_did` (root reached)
+ *  - actor response with no `provenance.creator_did` (root reached), or
+ *    one the server has not verified (`_verified`): an unproven claim
+ *    names nobody
  *  - cycle (DID seen twice)
  *  - hit `maxDepth`
  *
@@ -83,7 +85,8 @@ export async function walkCreatorChain(
       avatar: profile?.avatar ?? null,
       isHuman: !isDidKey,
     });
-    nextDid = actorResp?.provenance?.creator_did ?? null;
+    nextDid =
+      actorResp?.provenance?._verified === true ? (actorResp.provenance.creator_did ?? null) : null;
   }
   return chain;
 }
@@ -100,13 +103,16 @@ export function ProvenanceBlock({ provenance }: { provenance: NonNullable<ActorI
   // hierarchies (panel-2 owned by lobot owned by a human). See
   // `walkCreatorChain` for the walk logic + stop conditions.
   const [creatorChain, setCreatorChain] = useState<CreatorChainLink[]>([]);
+  // A creator is shown only when the server has proven the claim: by the
+  // owner's agent record or a certificate signed by a key on file.
+  const creatorDid = provenance._verified === true ? provenance.creator_did : undefined;
   useEffect(() => {
-    if (!provenance.creator_did) {
+    if (!creatorDid) {
       setCreatorChain([]);
       return;
     }
     let cancelled = false;
-    walkCreatorChain(provenance.creator_did, defaultFetchActor, fetchProfile).then(
+    walkCreatorChain(creatorDid, defaultFetchActor, fetchProfile).then(
       (chain) => {
         if (!cancelled) setCreatorChain(chain);
       },
@@ -114,11 +120,15 @@ export function ProvenanceBlock({ provenance }: { provenance: NonNullable<ActorI
     return () => {
       cancelled = true;
     };
-  }, [provenance.creator_did]);
+  }, [creatorDid]);
 
   return (
     <div className="mt-2 p-2 bg-bg-tertiary rounded-lg text-left">
       <div className="text-[10px] text-fg-dim font-semibold mb-1">Provenance</div>
+      {/* An owner is claimed but not proven: say so, naming nobody. */}
+      {provenance.creator_did && provenance._verified !== true && (
+        <div className="text-[10px] text-fg-dim">Owner not verified.</div>
+      )}
       {creatorChain.length > 0 && (
         <div className="text-[10px] text-fg-dim flex items-center gap-1.5 flex-wrap">
           <span className="text-fg-dim/60">Creator:</span>
@@ -172,6 +182,8 @@ interface ActorInfo {
   task?: string;
   provenance?: {
     creator_did?: string;
+    /** Set by the server when it proved the claim. */
+    _verified?: boolean;
     source_repo?: string;
     implementation_ref?: string;
     revocation_authority?: string;

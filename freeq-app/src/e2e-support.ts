@@ -53,3 +53,7 @@ export function oldestHeldMsgId(channel: string): string | null {
 export function jumpToMessage(msgid: string): void {
   useStore.getState().setScrollToMsgId(msgid);
 }
+
+/** The Agents list's test hooks: a signed-in account with a published
+ *  browser key, and where the list reads its records from. */
+export { __setSignedInForTests, __setAgentListingForTests } from './irc/client';

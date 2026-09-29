@@ -33,6 +33,8 @@ vi.mock('../irc/client', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../irc/client')>();
   return {
     ...actual,
+    // The Agents list beside it reads nothing here.
+    listAgentRows: async () => [],
     listDeviceRows: async (options?: { refresh?: boolean }) => {
       seam.reads.push(options);
       if (seam.hold) await seam.hold;

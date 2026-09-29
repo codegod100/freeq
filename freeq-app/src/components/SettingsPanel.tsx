@@ -8,11 +8,17 @@ import { AudioTest } from './AudioTest';
 import { formatTime } from './MessageList';
 import { useSyncExternalStore } from 'react';
 import {
+  addAgent,
   getDeviceKeyState,
+  listAgentRows,
   listDeviceRows,
+  removeAgent,
+  shortDid,
   signInToPublishKeys,
   signOutDevice,
   subscribeDeviceKey,
+  type AgentRow,
+  type AgentWriteOutcome,
   type DeviceRow,
 } from '../irc/client';
 
@@ -192,6 +198,12 @@ export function SettingsPanel({ open, onClose }: SettingsPanelProps) {
           {authDid && (
             <Section title="Devices">
               <DevicesSection />
+            </Section>
+          )}
+
+          {authDid && (
+            <Section title="Agents">
+              <AgentsSection />
             </Section>
           )}
 
@@ -424,27 +436,272 @@ export function DevicesSection() {
         </Modal>
       )}
 
-      {signIn && (
-        <Modal onClose={() => setSignIn(false)}>
-          <div className="p-3 space-y-2">
-            <p className="text-sm font-semibold">{'Sign in to continue'}</p>
+      {signIn && <SignInPrompt onClose={() => setSignIn(false)} />}
+    </>
+  );
+}
+
+/** The sign-in prompt Devices and Agents share, opened when the account
+ *  provider refuses a write for lack of permission. */
+function SignInPrompt({ onClose }: { onClose: () => void }) {
+  return (
+    <Modal onClose={onClose}>
+      <div className="p-3 space-y-2">
+        <p className="text-sm font-semibold">{'Sign in to continue'}</p>
+        <p className="text-[11px] text-fg-dim leading-relaxed">
+          {'Your account needs a fresh sign-in before freeq can change your devices.'}
+        </p>
+        <div className="flex justify-end gap-3 text-xs">
+          <button onClick={onClose} className="text-fg-dim hover:text-fg">
+            {'Not now'}
+          </button>
+          <button
+            onClick={() => signInToPublishKeys()}
+            className="text-accent font-semibold hover:underline"
+          >
+            {'Sign in'}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/** The one meta line an agent row carries. */
+function agentMeta(row: AgentRow): string {
+  const did = shortDid(row.agentDid);
+  return row.state === 'removed' ? `${did} · Removed · ${day(row.date)}` : `${did} · since ${day(row.date)}`;
+}
+
+/**
+ * The bots the account says are its own, newest first, with "+ Add an agent"
+ * writing a claim and "Remove" writing its removal, each signed by this
+ * device's key. A removed bot can be added again.
+ */
+export function AgentsSection() {
+  const [rows, setRows] = useState<AgentRow[]>([]);
+  // Set by a write, so the next read lists the account afresh.
+  const refreshNext = useRef(false);
+  // Set once this open has listed the account afresh.
+  const listedOnOpen = useRef(false);
+  const [adding, setAdding] = useState(false);
+  const [agentDid, setAgentDid] = useState('');
+  const [name, setName] = useState('');
+  const [ask, setAsk] = useState<AgentRow | null>(null);
+  const [signIn, setSignIn] = useState(false);
+  const [failed, setFailed] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  // Counts finished writes: the list is read on open and once after each
+  // write, not when a write starts.
+  const [written, setWritten] = useState(0);
+
+  // As the Devices list: on open the stored rows show at once, then the
+  // account is listed afresh, so an agent added or removed elsewhere (another
+  // device, freeq-bot-id register) appears. A fresh read that fails leaves
+  // the stored rows.
+  useEffect(() => {
+    let live = true;
+    const refresh = refreshNext.current;
+    refreshNext.current = false;
+    const thenRefresh = !refresh && !listedOnOpen.current;
+    (async () => {
+      try {
+        const read = await listAgentRows({ refresh });
+        if (live) setRows(read);
+      } catch {
+        // Keep what is shown; the refresh below may still fill it.
+      }
+      if (!live || !thenRefresh) return;
+      listedOnOpen.current = true;
+      try {
+        const fresh = await listAgentRows({ refresh: true });
+        if (live) setRows(fresh);
+      } catch {
+        // Keep the stored rows.
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [written]);
+
+  /** Word `outcome`; true when the record was written. */
+  function said(outcome: AgentWriteOutcome, failure: string): boolean {
+    switch (outcome.kind) {
+      case 'notReady':
+        setFailed("To add or remove agents, sign in and publish this device's key first.");
+        return false;
+      case 'noKey':
+        setFailed(
+          "This browser won't let freeq store its key. Change your browser settings to allow this site to store data, or try another browser.",
+        );
+        return false;
+      case 'needsSignIn':
+        setSignIn(true);
+        return false;
+      case 'failed':
+        setFailed(failure);
+        return false;
+      case 'written':
+        return true;
+    }
+  }
+
+  async function write(action: () => Promise<AgentWriteOutcome>, failure: string): Promise<boolean> {
+    setBusy(true);
+    setFailed(null);
+    try {
+      return said(await action(), failure);
+    } catch {
+      setFailed(failure);
+      return false;
+    } finally {
+      refreshNext.current = true;
+      setBusy(false);
+      setWritten((n) => n + 1);
+    }
+  }
+
+  async function confirmAdd() {
+    const did = agentDid.trim();
+    const label = name.trim();
+    // Say what is wrong rather than leave Add doing nothing: a double-click in
+    // a terminal copies only the part of a DID after its last colon.
+    if (!did.startsWith('did:')) {
+      setFailed('An agent DID starts with did:, for example did:key:z6Mk…');
+      return;
+    }
+    if (label === '') {
+      setFailed('Give the agent a name.');
+      return;
+    }
+    // A second claim on a listed bot adds nothing but a record to the
+    // account, and two live agents under one name read as one.
+    const live = rows.filter((row) => row.state === 'active');
+    if (live.some((row) => row.agentDid === did)) {
+      setFailed('DID is already in use.');
+      return;
+    }
+    if (live.some((row) => row.name.toLowerCase() === label.toLowerCase())) {
+      setFailed('Name is already in use.');
+      return;
+    }
+    if (await write(() => addAgent(did, label), `Couldn't add ${label}. Try again.`)) {
+      setAdding(false);
+      setAgentDid('');
+      setName('');
+    }
+  }
+
+  async function confirmRemove(row: AgentRow) {
+    setAsk(null);
+    await write(() => removeAgent(row.agentDid), `Couldn't remove ${row.name}. Try again.`);
+  }
+
+  return (
+    <>
+      {rows.map((row) => (
+        <div key={row.agentDid} data-agent-row className="flex items-center justify-between text-sm gap-2">
+          <span className="flex items-center gap-2 min-w-0">
+            <span aria-hidden className={row.state === 'removed' ? 'opacity-40' : ''}>
+              {'🤖'}
+            </span>
+            <span className="min-w-0">
+              <span data-testid="agent-name" className="block truncate text-fg">
+                {row.name}
+              </span>
+              <span data-agent-meta className="block text-[11px] text-fg-dim" title={row.agentDid}>
+                {agentMeta(row)}
+              </span>
+            </span>
+          </span>
+          <span className="shrink-0 text-xs">
+            {row.state === 'active' && (
+              <button
+                disabled={busy}
+                onClick={() => setAsk(row)}
+                className="text-accent font-semibold hover:underline disabled:opacity-50"
+              >
+                {'Remove'}
+              </button>
+            )}
+          </span>
+        </div>
+      ))}
+
+      {adding ? (
+        <div className="space-y-2">
+          <label className="block text-[11px] text-fg-dim">
+            {'Agent DID'}
+            <input
+              value={agentDid}
+              onChange={(e) => setAgentDid(e.target.value)}
+              className="mt-1 w-full bg-bg-tertiary rounded px-2 py-1 text-xs text-fg font-mono"
+            />
+          </label>
+          <label className="block text-[11px] text-fg-dim">
+            {'Name'}
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="mt-1 w-full bg-bg-tertiary rounded px-2 py-1 text-xs text-fg"
+            />
+          </label>
+          <div className="flex justify-end gap-3 text-xs">
+            <button onClick={() => setAdding(false)} className="text-fg-dim hover:text-fg">
+              {'Cancel'}
+            </button>
+            <button
+              disabled={busy}
+              onClick={() => void confirmAdd()}
+              className="text-accent font-semibold hover:underline disabled:opacity-50"
+            >
+              {'Add'}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          onClick={() => {
+            setFailed(null);
+            setAdding(true);
+          }}
+          className="text-xs text-accent font-semibold hover:underline"
+        >
+          {'+ Add an agent'}
+        </button>
+      )}
+
+      <p className="text-[11px] text-fg-dim leading-relaxed">
+        {"Enter the DID provided by your agent. Adding it writes one note to your account saying it is yours; anyone can check that note."}
+      </p>
+
+      {failed && <p className="text-[11px] text-red-400">{failed}</p>}
+
+      {ask && (
+        <Modal onClose={() => setAsk(null)}>
+          <div role="dialog" className="p-3 space-y-2">
+            <p className="text-sm font-semibold">{`Remove ${ask.name} from your agents?`}</p>
             <p className="text-[11px] text-fg-dim leading-relaxed">
-              {'Your account needs a fresh sign-in before freeq can change your devices.'}
+              {'It will no longer be listed as one of yours. Its past messages are unchanged.'}
             </p>
             <div className="flex justify-end gap-3 text-xs">
-              <button onClick={() => setSignIn(false)} className="text-fg-dim hover:text-fg">
-                {'Not now'}
+              <button onClick={() => setAsk(null)} className="text-fg-dim hover:text-fg">
+                {'Cancel'}
               </button>
               <button
-                onClick={() => signInToPublishKeys()}
-                className="text-accent font-semibold hover:underline"
+                disabled={busy}
+                onClick={() => void confirmRemove(ask)}
+                className="text-accent font-semibold hover:underline disabled:opacity-50"
               >
-                {'Sign in'}
+                {'Remove'}
               </button>
             </div>
           </div>
         </Modal>
       )}
+
+      {signIn && <SignInPrompt onClose={() => setSignIn(false)} />}
     </>
   );
 }
