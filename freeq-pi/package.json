@@ -46,8 +46,8 @@
     "@freeq/sdk": "^0.1.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.84.3",
-    "@earendil-works/pi-tui": "^0.84.4",
+    "@earendil-works/pi-coding-agent": "^0.99.1",
+    "@earendil-works/pi-tui": "^0.99.1",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.2",
     "typebox": "^1.3.19",
