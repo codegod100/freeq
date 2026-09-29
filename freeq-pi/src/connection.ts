@@ -73,6 +73,10 @@ export interface BotLike {
     ): Promise<string>;
     readonly signing: { getPublicKey(): string | null };
   };
+  /** The server's latest answer to PROVENANCE, from bot-kit. */
+  readonly provenance: { verified: boolean; reason: string; text: string } | null;
+  /** Called with each verdict bot-kit reports, when it arrives or changes. */
+  onProvenance?(handler: (verdict: { verified: boolean; reason: string }) => void): () => void;
 }
 
 /** How a bot gets built. Overridden in tests. */
@@ -90,6 +94,8 @@ export type BotFactory = (opts: {
   initialStatus: string;
   onNickCollision: "auto-suffix";
   mention: { matcher: (text: string, nick: string) => string | null };
+  /** False: bot-kit leaves the verdict to `onProvenance` instead of stderr. */
+  logProvenance: boolean;
 }) => Promise<BotLike>;
 
 export interface Peer {
@@ -195,8 +201,6 @@ export class FreeqConnection {
   #peers = new Map<string, Peer>();
   #opts: ConnectionOptions;
   #meta: SessionMeta;
-  /** The server's verdict on our delegation cert, from its PROVENANCE reply. */
-  #provenanceNotice: string | undefined;
   #stopped = false;
   /** Guards against two concurrent start() calls building two bots. */
   #starting = false;
@@ -227,9 +231,12 @@ export class FreeqConnection {
   get did(): string | undefined {
     return this.#bot?.identity.did;
   }
-  /** Latest server verdict on our delegation, if any was seen this connection. */
+  /** The server's latest answer to our PROVENANCE ("Provenance verified:
+   *  …", "Provenance stored (unverified): …", …), as bot-kit read it from
+   *  the server's own NOTICE, so /freeq authorize verify reports the
+   *  server's verdict rather than guessing. */
   get provenanceNotice(): string | undefined {
-    return this.#provenanceNotice;
+    return this.#bot?.provenance?.text;
   }
 
   get meta(): SessionMeta {
@@ -292,8 +299,17 @@ export class FreeqConnection {
         // and the configured one, or a suffixed agent silently stops
         // answering to its own name. (Caught by the M3 room harness.)
         mention: { matcher: (text: string, nick: string) => this.#matchNames(text, nick) },
+        // bot-kit's stderr line would land on top of pi's screen; the verdict
+        // is shown below as a freeq notice instead.
+        logProvenance: false,
       });
       this.#bot = bot;
+      bot.onProvenance?.((v) =>
+        this.#opts.onNotice?.(
+          `freeq: provenance ${v.verified ? "verified" : "unverified"}: ${v.reason}`,
+          v.verified ? "info" : "warning",
+        ),
+      );
 
       bot.on("message", (channel: string, msg: Message) => {
         if (msg.isSelf) return;
@@ -309,14 +325,6 @@ export class FreeqConnection {
       });
 
       bot.on("presence", (p: PresencePayload) => this.#onPresence(p));
-
-      // The server answers PROVENANCE with one NOTICE: "Provenance verified:
-      // ..." or "Provenance stored (unverified): <why>". Keep the latest so
-      // /freeq authorize verify can report the server's own verdict rather
-      // than guessing.
-      bot.on("systemMessage", (_from: string, text: string) => {
-        if (/^Provenance /.test(text)) this.#provenanceNotice = text;
-      });
 
       // Task events (handoffs). Replayed events arrive here too, which is
       // how an offer made while we were offline reaches us.

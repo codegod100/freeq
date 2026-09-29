@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 /**
+ * THE OLDER WAY. An agent's ownership is now proven by an agent record in
+ * the owner's account: add the agent's DID in the freeq web app under
+ * Settings → Agents, or run `freeq-bot-id register --owner <handle> <did>`.
+ * No cert needs signing and no key needs pasting. This script keeps working
+ * for servers from before agent records.
+ *
  * Sign a delegation cert with the OWNER's creator key — on the owner's
  * machine, never on the machine being provisioned.
  *
