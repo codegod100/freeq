@@ -15,6 +15,7 @@ import {
 } from '@atcute/identity-resolver';
 import { decodeMultibaseEd25519 } from './did-key.js';
 import {
+  AGENT_KEY_TYPE,
   DEVICE_KEY_TYPE,
   type DidDocument,
   type Fetch,
@@ -158,6 +159,12 @@ export class KeyLookup {
   private readonly refreshed = new Map<string, number>();
   /** One listing, with its proofs, in flight per DID. */
   private readonly listing = new Map<string, Promise<unknown[]>>();
+  /** For each record type but device keys: each DID's proven records as
+   *  last listed, and the listing in flight. Device records stay in
+   *  `records` and `listing`, which key lookups and the snapshot read; no
+   *  other type is ever put there, nor saved. */
+  private readonly otherRecords = new Map<string, Map<string, { records: unknown[]; at: number }>>();
+  private readonly otherListing = new Map<string, Map<string, Promise<unknown[]>>>();
   /** CIDs of records whose repository proof has checked, so each is fetched once. */
   private readonly proven = new Set<string>();
   /** Proofs in flight by record CID, so listings racing on a record share one fetch. */
@@ -637,7 +644,7 @@ export class KeyLookup {
         const at = Math.min(account.fetchedAt * 1000, Date.now());
         // A listing for key lookups, like the one `deviceRecords` makes,
         // unless a newer one is held.
-        if (this.keepListing(did, records, at) === records) this.refreshed.set(did, at);
+        if (this.keepListing(did, DEVICE_KEY_TYPE, records, at) === records) this.refreshed.set(did, at);
       }),
     ).catch(() => undefined);
     if (accounts.size > 0) await this.save();
@@ -653,7 +660,7 @@ export class KeyLookup {
     const last = this.records.get(did);
     if (last !== undefined && Date.now() - last.at < this.ttlMs) return last.records;
     this.refreshed.set(did, Date.now());
-    return this.listDeviceRecords(did);
+    return this.listRecordsOf(did, DEVICE_KEY_TYPE);
   }
 
   /**
@@ -664,7 +671,49 @@ export class KeyLookup {
   async refreshDeviceRecords(did: string): Promise<unknown[]> {
     await this.load();
     this.refreshed.set(did, Date.now());
-    return this.listDeviceRecords(did, true);
+    return this.listRecordsOf(did, DEVICE_KEY_TYPE, true);
+  }
+
+  /**
+   * `did`'s agent records whose repository proof checks, claims and removals
+   * alike, read as device records are (`provenDeviceRecords`): the held
+   * listing while inside the ttl, else a listing, the home server's copy
+   * first. Held apart from the device records, and never saved.
+   */
+  async provenAgentRecords(did: string): Promise<unknown[]> {
+    await this.load();
+    return this.provenRecordsOf(did, AGENT_KEY_TYPE);
+  }
+
+  /** `did`'s proven agent records listed afresh at the PDS, as
+   *  `refreshDeviceRecords` lists device records. */
+  async refreshAgentRecords(did: string): Promise<unknown[]> {
+    await this.load();
+    return this.listRecordsOf(did, AGENT_KEY_TYPE, true);
+  }
+
+  /** `did`'s proven records of `collection`: the held listing while inside
+   *  the ttl, else a listing. */
+  private provenRecordsOf(did: string, collection: string): Promise<unknown[]> {
+    const last = this.heldOf(collection).get(did);
+    if (last !== undefined && Date.now() - last.at < this.ttlMs) return Promise.resolve(last.records);
+    return this.listRecordsOf(did, collection);
+  }
+
+  /** Where `collection`'s listings are held, per DID. */
+  private heldOf(collection: string): Map<string, { records: unknown[]; at: number }> {
+    if (collection === DEVICE_KEY_TYPE) return this.records;
+    let held = this.otherRecords.get(collection);
+    if (held === undefined) this.otherRecords.set(collection, (held = new Map()));
+    return held;
+  }
+
+  /** Where `collection`'s listings in flight are, per DID. */
+  private listingOf(collection: string): Map<string, Promise<unknown[]>> {
+    if (collection === DEVICE_KEY_TYPE) return this.listing;
+    let listing = this.otherListing.get(collection);
+    if (listing === undefined) this.otherListing.set(collection, (listing = new Map()));
+    return listing;
   }
 
   /**
@@ -714,61 +763,70 @@ export class KeyLookup {
       if (refreshed !== undefined && now - refreshed < this.ttlMs) return last.records;
     }
     this.refreshed.set(did, now);
-    return this.listDeviceRecords(did);
+    return this.listRecordsOf(did, DEVICE_KEY_TYPE);
   }
 
   /**
-   * `did`'s proven device records from the listing in flight, else a new one.
+   * `did`'s proven records of `collection` from the listing in flight, else
+   * a new one. The one read for every record type: device keys, agents.
    * With an origin, the home server is asked first: for an account with no
    * listing held, its records and proofs together; for one held, the listing
    * alone, since its proofs are mostly proven already, then each new
    * record's proof. Whatever it does not serve is read from the PDS. A
    * listing that fails is not kept.
    *
-   * A prefetch in flight for the account is waited for first, and its
-   * listing used when it brought one.
+   * For device records, a prefetch in flight for the account is waited for
+   * first, and its listing used when it brought one.
    *
    * `direct` lists at the PDS, the home server skipped, and always starts a
    * new listing, which lookups starting meanwhile join. Either way a listing
    * is kept only if none newer is held (`keepListing`), and is dated from
    * before its request.
    */
-  private listDeviceRecords(did: string, direct = false): Promise<unknown[]> {
-    // A prefetch in flight for the account brings its listing: wait for it,
-    // and use that listing rather than asking again.
-    const prefetching = direct ? undefined : this.prefetching.get(did);
+  private listRecordsOf(did: string, collection: string, direct = false): Promise<unknown[]> {
+    const held = this.heldOf(collection);
+    const inFlight = this.listingOf(collection);
+    // A prefetch in flight for the account brings its device listing: wait
+    // for it, and use that listing rather than asking again.
+    const prefetching =
+      direct || collection !== DEVICE_KEY_TYPE ? undefined : this.prefetching.get(did);
     if (prefetching !== undefined) {
       return prefetching.then(() => {
-        const held = this.records.get(did);
-        if (held !== undefined && Date.now() - held.at < this.ttlMs) return held.records;
-        return this.listDeviceRecords(did);
+        const last = held.get(did);
+        if (last !== undefined && Date.now() - last.at < this.ttlMs) return last.records;
+        return this.listRecordsOf(did, collection);
       });
     }
-    let pending = direct ? undefined : this.listing.get(did);
+    let pending = direct ? undefined : inFlight.get(did);
     if (pending === undefined) {
       const started: Promise<unknown[]> = (async () => {
         const { fetch, resolveDid } = this.reader;
         const home = direct ? null : this.originBase();
-        if (home !== null && !this.records.has(did)) {
-          const account = (await fetchAccounts(fetch, home, [did], DEVICE_KEY_TYPE)).get(did);
+        if (home !== null && !held.has(did)) {
+          const account = (await fetchAccounts(fetch, home, [did], collection)).get(did);
           if (account !== undefined) {
             const records = await provenRecords(
               fetch,
               resolveDid,
               did,
-              DEVICE_KEY_TYPE,
+              collection,
               account.entries,
               this.proven,
               this.proving,
               account.proofs,
             );
-            const kept = this.keepListing(did, records, Math.min(account.fetchedAt * 1000, Date.now()));
+            const kept = this.keepListing(
+              did,
+              collection,
+              records,
+              Math.min(account.fetchedAt * 1000, Date.now()),
+            );
             await this.save();
             return kept;
           }
         }
         const asked = Date.now();
-        const listed = await listRecordEntriesDated(fetch, resolveDid, did, DEVICE_KEY_TYPE, home);
+        const listed = await listRecordEntriesDated(fetch, resolveDid, did, collection, home);
         // What the home server hands over is dated with its own listing time,
         // never later than now, as the batch route's is; a PDS listing with
         // this client's time from before the request.
@@ -777,20 +835,20 @@ export class KeyLookup {
           fetch,
           resolveDid,
           did,
-          DEVICE_KEY_TYPE,
+          collection,
           listed.entries,
           this.proven,
           this.proving,
           undefined,
           home,
         );
-        const kept = this.keepListing(did, records, at);
+        const kept = this.keepListing(did, collection, records, at);
         await this.save();
         return kept;
       })().finally(() => {
-        if (this.listing.get(did) === started) this.listing.delete(did);
+        if (inFlight.get(did) === started) inFlight.delete(did);
       });
-      this.listing.set(did, started);
+      inFlight.set(did, started);
       pending = started;
     }
     return pending;
@@ -843,7 +901,7 @@ export class KeyLookup {
     await this.load();
     if (did.startsWith('did:key:')) return;
     try {
-      await this.listDeviceRecords(did, true);
+      await this.listRecordsOf(did, DEVICE_KEY_TYPE, true);
     } catch {
       return;
     }
@@ -857,13 +915,14 @@ export class KeyLookup {
   }
 
   /**
-   * Hold `records`, listed at `at`, as `did`'s listing unless a newer one is
-   * held; the listing held after, for a lookup to use.
+   * Hold `records`, listed at `at`, as `did`'s listing of `collection` unless
+   * a newer one is held; the listing held after, for a lookup to use.
    */
-  private keepListing(did: string, records: unknown[], at: number): unknown[] {
-    const held = this.records.get(did);
+  private keepListing(did: string, collection: string, records: unknown[], at: number): unknown[] {
+    const slot = this.heldOf(collection);
+    const held = slot.get(did);
     if (held !== undefined && held.at > at) return held.records;
-    this.records.set(did, { records, at });
+    slot.set(did, { records, at });
     return records;
   }
 

@@ -9,6 +9,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type DidKey, decodeMultibaseEd25519, importDidKey } from './did-key.js';
 import {
   type DidDocument,
+  buildAgentRecord,
+  buildAgentRetirement,
   buildDeviceRecord,
   KEY_LIFETIME_MS,
   buildDeviceRetirement,
@@ -535,6 +537,25 @@ describe('KeyLookup', () => {
       expect((await lookup.keyFor(ALICE, await kidOf(1)))?.source).toBe('IdentityRecord');
     }
     expect(repo.proofReads(genuineEntry)).toBe(1);
+  });
+
+  it('lists every proven agent record, a removal too, and drops an unproven one', async () => {
+    const { stubRepo } = await import('../test/repo-proofs.js');
+    const repo = await stubRepo(ALICE, repoKey);
+    const bot = (await key(20)).did;
+    await repo.add('at.freeq.deviceKey', await buildDeviceRecord(await key(1), ALICE, T0));
+    const claim = await buildAgentRecord(await key(1), ALICE, bot, T0);
+    const removal = await buildAgentRetirement(await key(1), ALICE, bot, T0);
+    await repo.add('at.freeq.agentKey', claim);
+    await repo.add('at.freeq.agentKey', removal);
+    await repo.addForged('at.freeq.agentKey', await buildAgentRecord(await key(1), ALICE, (await key(21)).did, T0), claim);
+    const fetch = vi.fn(
+      async (input: string): Promise<Response> =>
+        (await repo.respond(new URL(input))) ?? new Response('not found', { status: 404 }),
+    );
+    const lookup = new KeyLookup({ fetch, resolveDid: resolver([alice]) }, null, HOUR);
+
+    expect(await lookup.provenAgentRecords(ALICE)).toEqual([claim, removal]);
   });
 
   it('carries the date the origin removed a key', async () => {
@@ -1287,6 +1308,45 @@ describe('KeyLookup through the home server', () => {
 
     await alice.add('at.freeq.deviceKey', await buildDeviceRecord(await key(4), ALICE, T0));
     expect(await lookup.refreshDeviceRecords(ALICE)).toHaveLength(2);
+  });
+
+  it('refreshAgentRecords reads the PDS while the home server serves an older copy', async () => {
+    const { alice, home, fetch, resolveDid } = await homeNetwork();
+    const lookup = new KeyLookup({ fetch, resolveDid }, ORIGIN, HOUR, NO_RETRIES);
+    home.frozen = true;
+    expect(await lookup.provenAgentRecords(ALICE)).toEqual([]);
+
+    const claim = await buildAgentRecord(await key(1), ALICE, (await key(20)).did, T0);
+    await alice.add('at.freeq.agentKey', claim);
+    expect(await lookup.provenAgentRecords(ALICE), 'the stored read still holds the old listing').toEqual([]);
+    expect(await lookup.refreshAgentRecords(ALICE)).toEqual([claim]);
+    expect(await lookup.provenAgentRecords(ALICE), 'the fresh listing is now the one held').toEqual([claim]);
+  });
+
+  it('holds an agent listing for the ttl, as a device listing is held', async () => {
+    const { alice, pds, fetch, resolveDid } = await homeNetwork();
+    const lookup = new KeyLookup({ fetch, resolveDid }, null, HOUR, NO_RETRIES);
+    const claim = await buildAgentRecord(await key(1), ALICE, (await key(20)).did, T0);
+    await alice.add('at.freeq.agentKey', claim);
+    expect(await lookup.provenAgentRecords(ALICE)).toEqual([claim]);
+    const listings = pds.listings;
+    expect(await lookup.provenAgentRecords(ALICE)).toEqual([claim]);
+    expect(pds.listings, 'answered from the held listing').toBe(listings);
+  });
+
+  it('keeps agent records out of the device records and the snapshot', async () => {
+    const { alice, fetch, resolveDid } = await homeNetwork();
+    const store = new MemoryKeyLookupStore();
+    const lookup = new KeyLookup({ fetch, resolveDid }, null, HOUR, NO_RETRIES, store);
+    const device = await buildDeviceRecord(await key(1), ALICE, T0);
+    const claim = await buildAgentRecord(await key(1), ALICE, (await key(20)).did, T0);
+    await alice.add('at.freeq.agentKey', claim);
+
+    expect(await lookup.refreshAgentRecords(ALICE)).toEqual([claim]);
+    expect(await lookup.provenDeviceRecords(ALICE)).toEqual([device]);
+    expect((await lookup.keyFor(ALICE, await kidOf(1)))?.source).toBe('IdentityRecord');
+    await lookup.flush();
+    expect(JSON.stringify((await store.load())?.accounts)).not.toContain((await key(20)).did);
   });
 
   it("dates a listing from the home server's per-DID route with its fetched_at, so it loses to a newer PDS listing", async () => {

@@ -117,6 +117,7 @@ export {
   verifyProof,
   verifyRecord,
   deviceKeyHistory,
+  agentLinkHistory,
   retirementClosure,
 } from './identity-records.js';
 export type {
@@ -126,6 +127,7 @@ export type {
   AgentKeyRecord,
   LiveDeviceKey,
   LiveAgentLink,
+  AgentLinkHistory,
   DidDocument,
   ResolveDid,
   Fetch,

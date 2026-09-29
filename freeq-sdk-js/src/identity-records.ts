@@ -158,7 +158,7 @@ export async function buildDeviceRetirement(
 
 /** Claim `agentDid` as a bot of `ownerDid`, signed by one of its keys. */
 export async function buildAgentRecord(
-  ownerKey: DidKey,
+  ownerKey: Pick<DidKey, 'publicKeyMultibase' | 'signer'>,
   ownerDid: string,
   agentDid: string,
   createdAt: string,
@@ -177,7 +177,7 @@ export async function buildAgentRecord(
 
 /** Withdraw the claim on `agentDid`. */
 export async function buildAgentRetirement(
-  ownerKey: DidKey,
+  ownerKey: Pick<DidKey, 'publicKeyMultibase' | 'signer'>,
   ownerDid: string,
   agentDid: string,
   createdAt: string,
@@ -320,7 +320,12 @@ export function retirementClosure<T>(
 /**
  * The bots `did` claims at `at`, earliest first. A claim counts only if the
  * owner key that signed it was itself live under the device fold when the
- * claim was written.
+ * claim was written; so does a removal.
+ *
+ * A removal ends every claim on that bot dated before it, and a claim dated
+ * after the latest removal starts a new link, so a removed bot can be added
+ * back. Each bot live at `at` is named once, by the earliest claim since its
+ * latest removal.
  */
 export async function foldAgentRecords(
   did: string,
@@ -328,61 +333,102 @@ export async function foldAgentRecords(
   agentRecords: unknown[],
   at: Date,
 ): Promise<LiveAgentLink[]> {
+  const when = at.getTime();
+  const live = (await agentLinks(did, deviceRecords, agentRecords)).filter(
+    (l) => l.createdAt <= when && (l.retiredAt === null || l.retiredAt > when),
+  );
+  // One entry per bot: the earliest claim still live.
+  live.sort((a, b) => compare(a.agentDid, b.agentDid) || a.createdAt - b.createdAt);
+  const unique = firstOfEach(live, (l) => l.agentDid);
+  unique.sort((a, b) => a.createdAt - b.createdAt || compare(a.agentDid, b.agentDid));
+  return unique.map((l) => ({
+    agentDid: l.agentDid,
+    kid: l.kid,
+    createdAt: new Date(l.createdAt),
+    record: l.record,
+  }));
+}
+
+/** One claim on a bot, and the removal that ended it, if any. */
+export interface AgentLinkHistory {
+  agentDid: string;
+  kid: string;
+  label?: string;
+  createdAt: Date;
+  /** The first removal of the bot dated after the claim; null while none is. */
+  removedAt: Date | null;
+  record: unknown;
+}
+
+/**
+ * Every checked claim of `did` on a bot, earliest first, each with the first
+ * counted removal of that bot dated after it. The agent counterpart of
+ * `deviceKeyHistory`: a bot added, removed and added back has two entries.
+ */
+export async function agentLinkHistory(
+  did: string,
+  deviceRecords: unknown[],
+  agentRecords: unknown[],
+): Promise<AgentLinkHistory[]> {
+  const links = await agentLinks(did, deviceRecords, agentRecords);
+  links.sort((a, b) => a.createdAt - b.createdAt || compare(a.agentDid, b.agentDid));
+  return links.map((l) => ({
+    agentDid: l.agentDid,
+    kid: l.kid,
+    ...(l.label === undefined ? {} : { label: l.label }),
+    createdAt: new Date(l.createdAt),
+    removedAt: l.retiredAt === null ? null : new Date(l.retiredAt),
+    record: l.record,
+  }));
+}
+
+/**
+ * Every claim and removal of `did` whose signing key was live at its date and
+ * whose signature checks; each claim ends at the first removal of its bot
+ * dated after it.
+ */
+async function agentLinks(
+  did: string,
+  deviceRecords: unknown[],
+  agentRecords: unknown[],
+): Promise<(LinkCandidate & { label?: string })[]> {
   const devices = await deviceState(did, deviceRecords);
-  const links: LinkCandidate[] = [];
-  const retirements: { record: ParsedRecord; createdAt: number; value: unknown }[] = [];
+  const links: (LinkCandidate & { label?: string })[] = [];
+  const removals: { agentDid: string; createdAt: number }[] = [];
 
   for (const value of agentRecords) {
     const record = parseRecord(value, AGENT_KEY_TYPE, did, ['agentDid', 'revokes', 'label']);
     if (!record) continue;
     const createdAt = parseInstant(record.createdAt);
     if (createdAt === null) continue;
-    if (record.agentDid !== undefined && record.revokes === undefined) {
-      const signer = signerLiveAt(devices, record.kid, createdAt);
-      if (!signer) continue;
-      const message = recordSignedBytes(value as object);
-      if (!(await verifyEd25519(signer, message, record.bindingSig))) continue;
-      links.push({
-        agentDid: record.agentDid,
-        kid: record.kid,
-        createdAt,
-        retiredAt: null,
-        record: value,
-      });
-    } else if (record.agentDid === undefined && record.revokes !== undefined) {
-      retirements.push({ record, createdAt, value });
-    }
-  }
-
-  // One entry per bot: the earliest claim wins, so re-claiming a bot cannot
-  // move the date a retirement is measured against.
-  links.sort((a, b) => compare(a.agentDid, b.agentDid) || a.createdAt - b.createdAt);
-  const unique = firstOfEach(links, (l) => l.agentDid);
-
-  retirements.sort(
-    (a, b) => a.createdAt - b.createdAt || compare(a.record.bindingSig, b.record.bindingSig),
-  );
-  for (const { record, createdAt, value } of retirements) {
-    const revokes = record.revokes!;
-    const target = unique.find((l) => l.agentDid === revokes);
-    if (!target || createdAt <= target.createdAt) continue;
+    const claim = record.agentDid !== undefined && record.revokes === undefined;
+    const removal = record.agentDid === undefined && record.revokes !== undefined;
+    if (!claim && !removal) continue;
     const signer = signerLiveAt(devices, record.kid, createdAt);
     if (!signer) continue;
     const message = recordSignedBytes(value as object);
     if (!(await verifyEd25519(signer, message, record.bindingSig))) continue;
-    if (target.retiredAt === null || target.retiredAt > createdAt) target.retiredAt = createdAt;
+    if (claim) {
+      links.push({
+        agentDid: record.agentDid!,
+        kid: record.kid,
+        createdAt,
+        retiredAt: null,
+        record: value,
+        ...(record.label === undefined ? {} : { label: record.label }),
+      });
+    } else {
+      removals.push({ agentDid: record.revokes!, createdAt });
+    }
   }
 
-  const when = at.getTime();
-  unique.sort((a, b) => a.createdAt - b.createdAt || compare(a.agentDid, b.agentDid));
-  return unique
-    .filter((l) => l.createdAt <= when && (l.retiredAt === null || l.retiredAt > when))
-    .map((l) => ({
-      agentDid: l.agentDid,
-      kid: l.kid,
-      createdAt: new Date(l.createdAt),
-      record: l.record,
-    }));
+  for (const link of links) {
+    for (const r of removals) {
+      if (r.agentDid !== link.agentDid || r.createdAt <= link.createdAt) continue;
+      if (link.retiredAt === null || r.createdAt < link.retiredAt) link.retiredAt = r.createdAt;
+    }
+  }
+  return links;
 }
 
 /**

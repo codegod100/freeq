@@ -7,7 +7,8 @@
 
 use crate::crypto::PublicKey;
 use crate::identity_records::{
-    DEVICE_KEY_TYPE, RecordReader, device_key_history, retirement_closure,
+    AGENT_KEY_TYPE, DEVICE_KEY_TYPE, RecordEntry, RecordReader, device_key_history,
+    retirement_closure,
 };
 use crate::sigtag::derive_kid_bytes;
 use anyhow::{Context, Result};
@@ -78,6 +79,12 @@ pub struct KeyLookup<P: ClientProvider> {
     refreshed: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     /// One listing, with its proofs, in flight per DID.
     listing: Mutex<HashMap<String, Listing>>,
+    /// For each record type but device keys, keyed by (type, DID): each
+    /// DID's proven records as last listed, and the listing in flight.
+    /// Device records stay in `records` and `listing`, which key lookups and
+    /// the snapshot read; no other type is ever put there, nor saved.
+    other_records: Mutex<HashMap<(String, String), HeldEntries>>,
+    other_listing: Mutex<HashMap<(String, String), Listing>>,
     /// The prefetch in flight for each DID, so two batches closing together
     /// make one request. Several DIDs share one entry.
     prefetching: Mutex<HashMap<String, Arc<Prefetch>>>,
@@ -467,7 +474,46 @@ impl KeyLookupStore for FileKeyLookupStore {
 
 /// A listing of one DID's proven device records in flight, which every
 /// lookup for that DID awaits.
-type Listing = Arc<tokio::sync::OnceCell<Result<Vec<serde_json::Value>, Arc<anyhow::Error>>>>;
+type Listing = Arc<tokio::sync::OnceCell<Result<Vec<RecordEntry>, Arc<anyhow::Error>>>>;
+
+/// A held listing of a record type other than device keys: its proven
+/// entries, with their uris, and when it was taken.
+type HeldEntries = (Vec<RecordEntry>, DateTime<Utc>);
+
+/// The records' values, as device callers take them.
+fn values(entries: Vec<RecordEntry>) -> Vec<serde_json::Value> {
+    entries.into_iter().map(|e| e.value).collect()
+}
+
+/// Held values as entries, with no uri or CID: a held device listing keeps
+/// values only.
+fn unnamed(records: Vec<serde_json::Value>) -> Vec<RecordEntry> {
+    records
+        .into_iter()
+        .map(|value| RecordEntry {
+            uri: String::new(),
+            cid: String::new(),
+            value,
+        })
+        .collect()
+}
+
+/// The entries whose values `proven` holds, in listing order:
+/// `proven_records` keeps the listing's order and drops the rest.
+fn proven_entries(entries: Vec<RecordEntry>, proven: &[serde_json::Value]) -> Vec<RecordEntry> {
+    let mut next = proven.iter().peekable();
+    entries
+        .into_iter()
+        .filter(|entry| {
+            if next.peek() == Some(&&entry.value) {
+                next.next();
+                true
+            } else {
+                false
+            }
+        })
+        .collect()
+}
 
 /// One prefetch in flight, shared by every DID it asked for. Setting the
 /// entry and running the request are two steps, so the caller that runs it
@@ -521,6 +567,8 @@ impl<P: ClientProvider> KeyLookup<P> {
             records: Default::default(),
             refreshed: Default::default(),
             listing: Mutex::new(HashMap::new()),
+            other_records: Mutex::new(HashMap::new()),
+            other_listing: Mutex::new(HashMap::new()),
             prefetching: Mutex::new(HashMap::new()),
             prefetching_keys: Mutex::new(HashMap::new()),
             proven: Default::default(),
@@ -955,7 +1003,45 @@ impl<P: ClientProvider> KeyLookup<P> {
     /// proven records, so each record's proof is fetched once.
     pub async fn proven_device_records(&self, did: &str) -> Result<Vec<serde_json::Value>> {
         self.load().await;
-        self.list_device_records(did, false).await
+        Ok(values(
+            self.list_records_of(did, DEVICE_KEY_TYPE, false).await?,
+        ))
+    }
+
+    /// `did`'s proven device records listed afresh at the PDS, for a caller
+    /// that must see a record written since the last listing: the home
+    /// server's copy may predate it.
+    pub async fn refresh_device_records(&self, did: &str) -> Result<Vec<serde_json::Value>> {
+        self.load().await;
+        Ok(values(
+            self.list_records_of(did, DEVICE_KEY_TYPE, true).await?,
+        ))
+    }
+
+    /// `did`'s agent records whose repository proof checks, claims and
+    /// removals alike, each with its uri, read as device records are: the
+    /// held listing while inside the ttl, else a listing, the home server's
+    /// copy first. Held apart from the device records, and never saved.
+    pub async fn proven_agent_records(&self, did: &str) -> Result<Vec<RecordEntry>> {
+        self.load().await;
+        let key = (AGENT_KEY_TYPE.to_string(), did.to_string());
+        let held = self
+            .other_records
+            .lock()
+            .get(&key)
+            .filter(|(_, at)| self.inside_ttl(*at))
+            .map(|(entries, _)| entries.clone());
+        if let Some(entries) = held {
+            return Ok(entries);
+        }
+        self.list_records_of(did, AGENT_KEY_TYPE, false).await
+    }
+
+    /// `did`'s proven agent records listed afresh at the PDS, as
+    /// [`Self::refresh_device_records`] lists device records.
+    pub async fn refresh_agent_records(&self, did: &str) -> Result<Vec<RecordEntry>> {
+        self.load().await;
+        self.list_records_of(did, AGENT_KEY_TYPE, true).await
     }
 
     /// Ask the origin's batch key route for the keys of `pairs`, in one
@@ -1252,7 +1338,7 @@ impl<P: ClientProvider> KeyLookup<P> {
                     .await;
                 let served = !accounts.is_empty();
                 for (did, account) in accounts {
-                    self.proven_from_home(&did, &account).await;
+                    self.proven_from_home(&did, DEVICE_KEY_TYPE, &account).await;
                 }
                 if served {
                     self.save().await;
@@ -1267,13 +1353,14 @@ impl<P: ClientProvider> KeyLookup<P> {
     async fn proven_from_home(
         &self,
         did: &str,
+        collection: &str,
         account: &crate::identity_records::HomeAccount,
-    ) -> Vec<serde_json::Value> {
+    ) -> Vec<RecordEntry> {
         let records = self
             .reader
             .proven_records(
                 did,
-                DEVICE_KEY_TYPE,
+                collection,
                 account.entries.clone(),
                 &self.proven,
                 &self.proving,
@@ -1285,14 +1372,20 @@ impl<P: ClientProvider> KeyLookup<P> {
         let at = DateTime::from_timestamp(account.fetched_at, 0)
             .filter(|at| *at <= Utc::now())
             .unwrap_or_else(Utc::now);
-        let kept = self.keep_listing(did, records, at);
+        let kept = self.keep_entries(
+            did,
+            collection,
+            proven_entries(account.entries.clone(), &records),
+            at,
+        );
         // A listing for key lookups, like the one `device_records` makes,
         // unless a newer one is held.
-        if self
-            .records
-            .lock()
-            .get(did)
-            .is_some_and(|(_, held)| *held == at)
+        if collection == DEVICE_KEY_TYPE
+            && self
+                .records
+                .lock()
+                .get(did)
+                .is_some_and(|(_, held)| *held == at)
         {
             self.refreshed.lock().insert(did.to_string(), at);
         }
@@ -1364,7 +1457,9 @@ impl<P: ClientProvider> KeyLookup<P> {
             }
         }
         self.refreshed.lock().insert(did.to_string(), Utc::now());
-        self.list_device_records(did, false).await
+        Ok(values(
+            self.list_records_of(did, DEVICE_KEY_TYPE, false).await?,
+        ))
     }
 
     /// Whether `at` is less than the ttl ago. A time in the future, from a
@@ -1377,19 +1472,28 @@ impl<P: ClientProvider> KeyLookup<P> {
         }
     }
 
-    /// `did`'s proven device records from the listing in flight, else a new
-    /// one. A listing that fails is not kept.
+    /// `did`'s proven records of `collection`, each with its uri, from the
+    /// listing in flight, else a new one: the one read for every record
+    /// type, device keys and agents. A listing that fails is not kept.
     ///
-    /// A prefetch in flight for the account is waited for first, and its
-    /// listing used when it brought one inside the ttl.
+    /// For device records, a prefetch in flight for the account is waited
+    /// for first, and its listing used when it brought one inside the ttl
+    /// (held device records carry no uri).
     ///
     /// `direct` lists at the PDS, the home server skipped, and always starts
     /// a new listing, which lookups starting meanwhile join. Either way a
-    /// listing is kept only if none newer is held (`keep_listing`), and is
+    /// listing is kept only if none newer is held (`keep_entries`), and is
     /// dated from before its request.
-    async fn list_device_records(&self, did: &str, direct: bool) -> Result<Vec<serde_json::Value>> {
+    async fn list_records_of(
+        &self,
+        did: &str,
+        collection: &str,
+        direct: bool,
+    ) -> Result<Vec<RecordEntry>> {
+        let device = collection == DEVICE_KEY_TYPE;
         let prefetching = self.prefetching.lock().get(did).cloned();
-        if !direct
+        if device
+            && !direct
             && let Some(flight) = prefetching
             && let Some(home) = self.origin_base()
         {
@@ -1401,19 +1505,33 @@ impl<P: ClientProvider> KeyLookup<P> {
                 .filter(|(_, at)| self.inside_ttl(*at))
                 .map(|(records, _)| records.clone());
             if let Some(records) = held {
-                return Ok(records);
+                return Ok(unnamed(records));
             }
         }
-        let cell = if direct {
-            let cell = Listing::default();
-            self.listing.lock().insert(did.to_string(), cell.clone());
-            cell
-        } else {
-            self.listing
+        let key = (collection.to_string(), did.to_string());
+        let cell = match (device, direct) {
+            (true, true) => {
+                let cell = Listing::default();
+                self.listing.lock().insert(did.to_string(), cell.clone());
+                cell
+            }
+            (true, false) => self
+                .listing
                 .lock()
                 .entry(did.to_string())
                 .or_default()
-                .clone()
+                .clone(),
+            (false, true) => {
+                let cell = Listing::default();
+                self.other_listing.lock().insert(key.clone(), cell.clone());
+                cell
+            }
+            (false, false) => self
+                .other_listing
+                .lock()
+                .entry(key.clone())
+                .or_default()
+                .clone(),
         };
         let listed = cell
             .get_or_init(|| async {
@@ -1421,20 +1539,19 @@ impl<P: ClientProvider> KeyLookup<P> {
                 // Nothing held for this account: its records and proofs
                 // together, in one request.
                 if let Some(home) = home
-                    && !self.records.lock().contains_key(did)
+                    && !self.holds(did, collection)
                     && let Some(account) = self
                         .reader
-                        .fetch_accounts(home, &[did.to_string()], DEVICE_KEY_TYPE)
+                        .fetch_accounts(home, &[did.to_string()], collection)
                         .await
                         .remove(did)
                 {
-                    let records = self.proven_from_home(did, &account).await;
-                    return Ok(records);
+                    return Ok(self.proven_from_home(did, collection, &account).await);
                 }
                 let at = Utc::now();
                 match self
                     .reader
-                    .list_record_entries_dated(did, DEVICE_KEY_TYPE, home)
+                    .list_record_entries_dated(did, collection, home)
                     .await
                 {
                     Ok((entries, fetched_at)) => {
@@ -1452,28 +1569,49 @@ impl<P: ClientProvider> KeyLookup<P> {
                             .reader
                             .proven_records(
                                 did,
-                                DEVICE_KEY_TYPE,
-                                entries,
+                                collection,
+                                entries.clone(),
                                 &self.proven,
                                 &self.proving,
                                 None,
                                 home,
                             )
                             .await;
-                        Ok(self.keep_listing(did, records, at))
+                        Ok(self.keep_entries(
+                            did,
+                            collection,
+                            proven_entries(entries, &records),
+                            at,
+                        ))
                     }
                     Err(e) => Err(Arc::new(e)),
                 }
             })
             .await
             .clone();
-        {
+        if device {
             let mut listing = self.listing.lock();
             if listing.get(did).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
                 listing.remove(did);
             }
+        } else {
+            let mut listing = self.other_listing.lock();
+            if listing.get(&key).is_some_and(|c| Arc::ptr_eq(c, &cell)) {
+                listing.remove(&key);
+            }
         }
         listed.map_err(|e| anyhow::anyhow!("{e:#}"))
+    }
+
+    /// Whether a listing of `collection` is held for `did`.
+    fn holds(&self, did: &str, collection: &str) -> bool {
+        if collection == DEVICE_KEY_TYPE {
+            self.records.lock().contains_key(did)
+        } else {
+            self.other_records
+                .lock()
+                .contains_key(&(collection.to_string(), did.to_string()))
+        }
     }
 
     /// Clear a remembered miss for `(did, kid)`, so the next lookup asks the
@@ -1545,7 +1683,7 @@ impl<P: ClientProvider> KeyLookup<P> {
         if did.starts_with("did:key:") {
             return;
         }
-        if let Err(e) = self.list_device_records(did, true).await {
+        if let Err(e) = self.list_records_of(did, DEVICE_KEY_TYPE, true).await {
             tracing::debug!(%did, error = %e, "account not listed again");
             return;
         }
@@ -1573,6 +1711,36 @@ impl<P: ClientProvider> KeyLookup<P> {
     /// How many times `refresh_account` has dropped `did`'s answers.
     fn refresh_count(&self, did: &str) -> u64 {
         self.refreshes.lock().get(did).copied().unwrap_or(0)
+    }
+
+    /// Hold `entries`, listed at `at`, as `did`'s listing of `collection`
+    /// unless a newer one is held; the listing held after, for a lookup to
+    /// use. Device records are held as values only, in `records`.
+    fn keep_entries(
+        &self,
+        did: &str,
+        collection: &str,
+        entries: Vec<RecordEntry>,
+        at: DateTime<Utc>,
+    ) -> Vec<RecordEntry> {
+        if collection == DEVICE_KEY_TYPE {
+            let records = values(entries.clone());
+            let kept = self.keep_listing(did, records.clone(), at);
+            return if kept == records {
+                entries
+            } else {
+                unnamed(kept)
+            };
+        }
+        let mut held = self.other_records.lock();
+        let key = (collection.to_string(), did.to_string());
+        if let Some((kept, held_at)) = held.get(&key)
+            && *held_at > at
+        {
+            return kept.clone();
+        }
+        held.insert(key, (entries.clone(), at));
+        entries
     }
 
     /// Hold `records`, listed at `at`, as `did`'s listing unless a newer one
@@ -4535,5 +4703,87 @@ mod tests {
             None
         );
         assert_eq!(origin.hits(), 2, "past the ttl, asked once");
+    }
+
+    fn agent_claim(bot_seed: u8) -> (String, serde_json::Value) {
+        use crate::identity_records::build_agent_record;
+        let bot = format!("did:key:{}", key(bot_seed).public_key_multibase());
+        let claim = build_agent_record(&key(1), ALICE, &bot, &recent(), None).unwrap();
+        (bot, serde_json::to_value(claim).unwrap())
+    }
+
+    /// Agent records come through the same read as device records: the
+    /// stored read takes the home server's copy, the refresh lists the PDS.
+    #[tokio::test]
+    async fn refresh_agent_records_lists_the_pds_while_the_home_server_serves_an_older_copy() {
+        use crate::identity_records::AGENT_KEY_TYPE;
+        let (home_server, _pds, repos, docs) = three_signers().await;
+        let keys = lookup_at_home(docs, &home_server);
+        home_server.frozen.store(true, Ordering::SeqCst);
+        assert!(keys.proven_agent_records(ALICE).await.unwrap().is_empty());
+
+        let (_, claim) = agent_claim(20);
+        let uri = repos
+            .lock()
+            .get_mut(ALICE)
+            .unwrap()
+            .add(AGENT_KEY_TYPE, &claim);
+        assert!(
+            keys.proven_agent_records(ALICE).await.unwrap().is_empty(),
+            "the home server still serves its old listing"
+        );
+        let fresh = keys.refresh_agent_records(ALICE).await.unwrap();
+        let listed: Vec<(String, serde_json::Value)> =
+            fresh.into_iter().map(|e| (e.uri, e.value)).collect();
+        assert_eq!(listed, vec![(uri, claim)]);
+    }
+
+    /// An agent read never puts agent records where key lookups read device
+    /// records.
+    #[tokio::test]
+    async fn an_agent_read_leaves_the_device_records_as_they_were() {
+        use crate::identity_records::AGENT_KEY_TYPE;
+        let mut repo = crate::test_support::StubRepo::new(ALICE);
+        repo.add(DEVICE_KEY_TYPE, &device_record(1));
+        repo.add(AGENT_KEY_TYPE, &agent_claim(20).1);
+        let pds = pds_holding(repo).await;
+        let keys = lookup(vec![alice_on(&pds)], None, HOUR);
+
+        assert_eq!(keys.refresh_agent_records(ALICE).await.unwrap().len(), 1);
+        assert_eq!(
+            keys.proven_device_records(ALICE).await.unwrap(),
+            vec![device_record(1)],
+            "only device records held"
+        );
+        assert_eq!(
+            keys.key_for(ALICE, &kid_of(1))
+                .await
+                .unwrap()
+                .map(|f| f.source),
+            Some(KeySource::IdentityRecord)
+        );
+    }
+
+    /// ALICE's live agent claims named with their records' uris, folded from
+    /// what the shared read returns: a claim whose proof fails is left out.
+    #[tokio::test]
+    async fn live_agent_claims_are_named_with_their_uris_and_an_unproven_one_is_dropped() {
+        use crate::identity_records::{AGENT_KEY_TYPE, proven_agent_links};
+        let mut repo = crate::test_support::StubRepo::new(ALICE);
+        repo.add(DEVICE_KEY_TYPE, &device_record(1));
+        let (bot, claim) = agent_claim(20);
+        let proven_uri = repo.add(AGENT_KEY_TYPE, &claim);
+        // Listed with a proof that holds another record at its path.
+        repo.add_forged(AGENT_KEY_TYPE, &agent_claim(21).1, &agent_claim(22).1);
+        let pds = pds_holding(repo).await;
+        let keys = lookup(vec![alice_on(&pds)], None, HOUR);
+
+        let devices = keys.refresh_device_records(ALICE).await.unwrap();
+        let agents = keys.refresh_agent_records(ALICE).await.unwrap();
+        let named: Vec<(String, String)> = proven_agent_links(ALICE, &devices, &agents, Utc::now())
+            .into_iter()
+            .map(|l| (l.link.agent_did, l.uri))
+            .collect();
+        assert_eq!(named, vec![(bot, proven_uri)]);
     }
 }

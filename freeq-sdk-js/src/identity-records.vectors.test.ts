@@ -98,7 +98,7 @@ async function rebuild(v: Vector): Promise<Record<string, string>> {
 describe('identity record vectors', () => {
   it('has vectors and folds to check (a silently empty contract is no contract)', () => {
     expect(spec.vectors.length).toBe(6);
-    expect(spec.folds.length).toBe(11);
+    expect(spec.folds.length).toBe(14);
     expect(spec.description).toContain(DEVICE_KEY_TYPE);
     expect(spec.description).toContain(AGENT_KEY_TYPE);
   });

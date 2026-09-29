@@ -17,6 +17,7 @@ import {
   DEVICE_KEY_TYPE,
   KEY_LIFETIME_MS,
   type DidDocument,
+  agentLinkHistory,
   buildAgentRecord,
   buildAgentRetirement,
   buildDeviceRecord,
@@ -215,6 +216,62 @@ describe('agent link fold', () => {
     ];
     expect(await liveAgents(devices, links, '2026-02-15T00:00:00Z')).toEqual([agent]);
     expect(await liveAgents(devices, links, T3)).toEqual([]);
+  });
+});
+
+describe('agent link removal and re-adding', () => {
+  it('a claim dated after the latest removal is live again', async () => {
+    const k1 = await key(1);
+    const agent = await agentDid();
+    const devices = [await buildDeviceRecord(k1, ALICE, T0, 'laptop', LATER)];
+    const links = [
+      await buildAgentRecord(k1, ALICE, agent, T1, 'helper'),
+      await buildAgentRetirement(k1, ALICE, agent, T2),
+      await buildAgentRecord(k1, ALICE, agent, T3, 'helper'),
+    ];
+    expect(await liveAgents(devices, links, '2026-03-15T00:00:00Z')).toEqual([]);
+    expect(await liveAgents(devices, links, T4)).toEqual([agent]);
+  });
+
+  it('builds from the fields a browser key has, as the device builders do', async () => {
+    const k1 = await key(1);
+    const { publicKeyMultibase, signer } = k1;
+    const agent = await agentDid();
+    expect(await buildAgentRecord({ publicKeyMultibase, signer }, ALICE, agent, T1)).toEqual(
+      await buildAgentRecord(k1, ALICE, agent, T1),
+    );
+    expect(await buildAgentRetirement({ publicKeyMultibase, signer }, ALICE, agent, T2)).toEqual(
+      await buildAgentRetirement(k1, ALICE, agent, T2),
+    );
+  });
+});
+
+describe('agent link history', () => {
+  it('lists each claim with the removal that ended it, a re-add as its own entry', async () => {
+    const [k1, k3] = [await key(1), await key(3)];
+    const agent = await agentDid();
+    const other = (await key(10)).did;
+    const devices = [await buildDeviceRecord(k1, ALICE, T0, 'laptop', LATER)];
+    const first = await buildAgentRecord(k1, ALICE, agent, T1, 'helper');
+    const again = await buildAgentRecord(k1, ALICE, agent, T3, 'helper 2');
+    const kept = await buildAgentRecord(k1, ALICE, other, T2);
+    const records = [
+      again,
+      first,
+      kept,
+      await buildAgentRetirement(k1, ALICE, agent, T2),
+      // Signed by a key with no record: not counted.
+      await buildAgentRetirement(k3, ALICE, other, T3),
+    ];
+    const history = await agentLinkHistory(ALICE, devices, records);
+    expect(
+      history.map((h) => [h.agentDid, h.label, h.createdAt.toISOString(), h.removedAt?.toISOString() ?? null]),
+    ).toEqual([
+      [agent, 'helper', '2026-02-01T00:00:00.000Z', '2026-03-01T00:00:00.000Z'],
+      [other, undefined, '2026-03-01T00:00:00.000Z', null],
+      [agent, 'helper 2', '2026-04-01T00:00:00.000Z', null],
+    ]);
+    expect(history[0].record).toEqual(first);
   });
 });
 

@@ -2153,16 +2153,10 @@ fn session_signing_key(
     let stored = match store.load(did) {
         Ok(Some(stored)) => stored,
         Ok(None) => {
-            let key = fresh();
-            let stored = crate::device_key::StoredDeviceKey {
-                seed: key.to_bytes(),
-                created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-                record_uri: None,
-                refused: false,
-            };
+            let stored = crate::device_key::StoredDeviceKey::generate();
             if let Err(e) = store.save(did, &stored) {
                 tracing::warn!(error = %e, "device key not saved; signing with a session key");
-                return (key, None);
+                return (ed25519_dalek::SigningKey::from_bytes(&stored.seed), None);
             }
             stored
         }
@@ -2202,15 +2196,6 @@ fn spawn_relist_if_vouched(
     });
 }
 
-/// Whether a key made at `created_at` (RFC 3339) is past its lifetime now. A
-/// date that does not parse counts as not past it.
-fn past_key_lifetime(created_at: &str) -> bool {
-    chrono::DateTime::parse_from_rfc3339(created_at).is_ok_and(|made| {
-        made.with_timezone(&chrono::Utc) + crate::identity_records::KEY_LIFETIME
-            <= chrono::Utc::now()
-    })
-}
-
 /// Right after a new sign-in, replace a stored key with a new one, saved with
 /// no record URI so this connect publishes it, when the server refused it as
 /// expired, when it is past its lifetime by its own date, or when the
@@ -2234,7 +2219,7 @@ async fn replace_retired_device_key<P: freeq_oauth::ClientProvider>(
     // date: replaced without asking the account. The flag is what makes a
     // server with a shorter lifetime, or a clock ahead of this one, still
     // converge.
-    if stored.refused || past_key_lifetime(&stored.created_at) {
+    if stored.refused || crate::device_key::past_key_lifetime(&stored.created_at) {
         save_replacement(store, did);
         return;
     }
@@ -2260,13 +2245,7 @@ async fn replace_retired_device_key<P: freeq_oauth::ClientProvider>(
 /// Save a new key in place of the stored one, with no record URI, so this
 /// connect presents and publishes it. A store that fails keeps the old key.
 fn save_replacement(store: &dyn crate::device_key::DeviceKeyStore, did: &str) {
-    let key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-    let replacement = crate::device_key::StoredDeviceKey {
-        seed: key.to_bytes(),
-        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-        record_uri: None,
-        refused: false,
-    };
+    let replacement = crate::device_key::StoredDeviceKey::generate();
     if let Err(e) = store.save(did, &replacement) {
         tracing::warn!(error = %e, "replacement device key not saved; keeping the old one");
     }
@@ -2792,7 +2771,7 @@ fn spawn_enrollment(
 ) {
     use crate::device_key::EnrollOutcome;
     // A key past its lifetime would be refused as soon as it is published.
-    if past_key_lifetime(&stored.created_at) {
+    if crate::device_key::past_key_lifetime(&stored.created_at) {
         tracing::warn!("device key past its lifetime; not published");
         return;
     }
