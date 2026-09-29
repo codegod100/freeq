@@ -15,6 +15,8 @@ path = "src/demo_bot.rs"
 
 [dev-dependencies]
 tempfile = "3"
+axum.workspace = true
+freeq-sdk = { path = "../freeq-sdk", features = ["test-support"] }
 
 [dependencies]
 anyhow.workspace = true
@@ -28,5 +30,8 @@ base64.workspace = true
 chrono = { version = "0.4", features = ["serde"] }
 dirs = "6"
 freeq-sdk = { path = "../freeq-sdk" }
+freeq-oauth.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
+whoami = "1"

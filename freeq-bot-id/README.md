@@ -27,9 +27,48 @@ freeq-bot-id did-key --name myagent
 
 # Inspect an existing identity
 freeq-bot-id info --name myagent
+
+# Record bots as yours (run by the owner, not on the bot's machine)
+freeq-bot-id register --owner alice.bsky.social did:key:z6Mk... --name helper
+freeq-bot-id register --owner alice.bsky.social did:key:z6Mk... did:key:z6Mk...
 ```
 
-For did:web identities (org-scoped), pass `--domain example.com` to `create`. For signed delegation certs (v1.1 format), pass `--creator-did` and `--creator-key`.
+For did:web identities (org-scoped), pass `--domain example.com` to `create`.
+
+## Registering bots as yours
+
+A bot names its owner in the certificate it presents when it connects
+(`create --creator-did <owner DID>` writes one, unsigned). The server proves
+that claim by reading the owner's account for an `at.freeq.agentKey` record
+naming the bot. `register` writes those records:
+
+1. It opens your browser once to sign in, asking to create identity records
+   in your account (`atproto repo:at.freeq.deviceKey?action=create
+   repo:at.freeq.agentKey?action=create`).
+2. It loads this machine's device key from its own file,
+   `<config dir>/freeq-bot-id/<handle>.device-key.json` (on Linux
+   `~/.config/freeq-bot-id/`, on macOS `~/Library/Application Support/freeq-bot-id/`),
+   or makes one. A key past its 90-day lifetime, or signed out from another
+   device, is replaced.
+3. If your account has no live record for that key, it publishes one, so the
+   machine shows in your Devices list as `freeq-bot-id on <machine name>`.
+4. It writes one agent record per bot DID, signed by that key, and prints
+   each record's URI. `--name` names the bot in your Agents list; it takes
+   one DID. A bot registered without a name is listed by its DID.
+
+The sign-in is not saved: nothing that can write to your account is left on
+the machine after the run. Nothing is written on the bot's machine either;
+the bot keeps presenting the same unsigned certificate. The web app's
+Settings → Agents does the same from a browser, and removes a bot.
+
+### The older way: a signed certificate
+
+Adding `--creator-key <path>` to `create` signs the certificate with
+a key of the owner's, which the owner must have registered with the server
+(`MSGSIG`). That still works, for owners with no agent record, but the key
+lives on the bot's machine and counts as one of the owner's signing keys,
+and a certificate signed while the key was valid cannot be withdrawn.
+Prefer `register`.
 
 ## File layout
 
@@ -38,6 +77,8 @@ For did:web identities (org-scoped), pass `--domain example.com` to `create`. Fo
 ├── key.ed25519        # 32-byte seed (mode 0600)
 ├── did-document.json  # DID document (did:web only)
 └── delegation.json    # FreeqBotDelegation/v1 cert (when --creator-did given)
+
+<config dir>/freeq-bot-id/<handle>.device-key.json   # the owner's device key (register)
 ```
 
 ## Scope

@@ -2076,15 +2076,21 @@ mod tests {
         const URI: &str = "at://did:plc:k2n3e2vsihf3farequ44t5j7/at.freeq.deviceKey/3l";
         let seen: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let captured = seen.clone();
+        let headers: Arc<Mutex<Option<axum::http::HeaderMap>>> = Arc::new(Mutex::new(None));
+        let captured_headers = headers.clone();
         let router = axum::Router::new().route(
             "/xrpc/com.atproto.repo.createRecord",
-            post(move |Json(body): Json<serde_json::Value>| {
-                let captured = captured.clone();
-                async move {
-                    *captured.lock().unwrap() = Some(body);
-                    Json(json!({ "uri": URI }))
-                }
-            }),
+            post(
+                move |sent: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let captured = captured.clone();
+                    let captured_headers = captured_headers.clone();
+                    async move {
+                        *captured.lock().unwrap() = Some(body);
+                        *captured_headers.lock().unwrap() = Some(sent);
+                        Json(json!({ "uri": URI }))
+                    }
+                },
+            ),
         );
         let base = spawn_stub(router).await;
         let record = value(&build_device_record(&key(1), ALICE, T0, Some("laptop")).unwrap());
@@ -2094,6 +2100,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(uri, URI);
+        // Sent with the session's DPoP-bound token and a proof for this call.
+        let sent = headers
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the stub was called");
+        assert_eq!(sent["authorization"], "DPoP tok");
+        let proof = sent["dpop"].to_str().unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(
+            &base64::Engine::decode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                proof.split('.').nth(1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["htm"], "POST");
+        assert_eq!(
+            claims["htu"],
+            format!("{base}/xrpc/com.atproto.repo.createRecord")
+        );
         let body = seen.lock().unwrap().clone().expect("the stub was called");
         assert_eq!(body["repo"], ALICE);
         // The collection is the record's own `$type`, never a caller's claim.
