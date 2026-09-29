@@ -1,0 +1,27 @@
+{
+  "name": "@freeq/fabro",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Relay Fabro workflow-run notifications into a freeq channel.",
+  "type": "module",
+  "bin": {
+    "freeq-fabro": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@freeq/bot-kit": "file:../freeq-bot-kit-js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "~5.9.3",
+    "vitest": "^4.1.2"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}
