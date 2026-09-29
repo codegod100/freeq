@@ -8,7 +8,12 @@
 
 import { loadConfig, type FreeqMcpConfig } from "./config.js";
 import { FreeqRest } from "./rest.js";
-import { FreeqSession, type SessionClient, type SessionMode } from "./session.js";
+import {
+  FreeqSession,
+  type ProvenanceVerdict,
+  type SessionClient,
+  type SessionMode,
+} from "./session.js";
 
 /** A hand-driven stand-in for the SDK's FreeqClient. */
 export class FakeClient implements SessionClient {
@@ -109,6 +114,7 @@ export function fakeSession(
   env: Record<string, string | undefined> = {},
   mode: SessionMode = "guest",
   onBearerToken?: (t: string | undefined) => void,
+  extra: { provenance?: () => ProvenanceVerdict | null } = {},
 ): FakeSessionSetup {
   const client = new FakeClient();
   const cfg = loadConfig({ FREEQ_SERVER: "http://127.0.0.1:6668", ...env });
@@ -117,6 +123,7 @@ export function fakeSession(
       client,
       mode,
       did: mode === "authenticated" ? "did:key:z1" : undefined,
+      provenance: extra.provenance,
     }),
     onBearerToken,
   });

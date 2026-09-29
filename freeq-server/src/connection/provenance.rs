@@ -91,10 +91,15 @@ pub(super) fn verify_provenance(
     };
     let sig_b64 = match json.get("signature").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s.to_string(),
+        // An unsigned certificate is proven only by the owner's agent record,
+        // read after this reply, so the reason names how to publish one. A
+        // bot that stays unverified is not read again until it reconnects.
         _ => {
-            return Ok(VerificationOutcome::unverified(
-                "Cert has no signature; declarative only",
-            ));
+            return Ok(VerificationOutcome::unverified(format!(
+                "Unsigned certificate: unverified until the owner adds this bot \
+                 ({bot_did}) under Settings → Agents in the freeq web app, or with \
+                 `freeq-bot-id register`, and then restarts the bot"
+            )));
         }
     };
 
@@ -220,6 +225,386 @@ pub(super) fn annotate(json: &mut Value, outcome: &VerificationOutcome) {
         obj.insert(
             "_verifier_key_did".to_string(),
             Value::String(vk_did.clone()),
+        );
+    }
+}
+
+/// The (owner DID, bot DID) of a `FreeqBotDelegation/v1` certificate that
+/// did not verify, whose owner's records may yet prove it.
+pub(super) fn record_lookup_target(
+    json: &Value,
+    outcome: &VerificationOutcome,
+) -> Option<(String, String)> {
+    if outcome.verified
+        || json.get("type").and_then(|v| v.as_str()) != Some("FreeqBotDelegation/v1")
+    {
+        return None;
+    }
+    let field = |name: &str| {
+        json.get(name)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    Some((field("creator_did")?, field("bot_did")?))
+}
+
+/// The outcome of finding the owner's live agent record at `uri`.
+pub(super) fn record_outcome(uri: &str) -> VerificationOutcome {
+    VerificationOutcome {
+        verified: true,
+        reason: format!("Owner's agent record {uri} names this bot"),
+        verifier_key_did: None,
+    }
+}
+
+/// How long a finished read of an owner's records is reused.
+pub(crate) const OWNER_READ_REUSE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One owner's read gate: held for the length of a read, and holding the
+/// last answer with when it was read.
+pub(crate) type OwnerReadCell = std::sync::Arc<
+    tokio::sync::Mutex<
+        Option<(
+            std::time::Instant,
+            Vec<freeq_sdk::identity_records::ProvenAgentLink>,
+        )>,
+    >,
+>;
+
+/// The owner's live agent links, read from their account.
+///
+/// Every read of an owner's records goes through here, from a bot's connect
+/// and from the hourly re-check. Any bot can name any DID as its owner, so
+/// without a bound any connected bot could make this server read any
+/// person's account as often as it sends PROVENANCE. Reads are bounded per
+/// owner: one at a time (a second caller waits for the read in flight and
+/// takes its answer), and an answer finished under `owner_read_reuse_ms`
+/// ago (10 s) is reused, so a "fresh" read on connect is at most that old.
+/// This is a mitigation for now (nap, 2026-09-28), not a limit per bot or
+/// per connection. A failed read is not kept; the next caller tries again.
+async fn read_owner_links(
+    state: &crate::server::SharedState,
+    owner_did: &str,
+) -> anyhow::Result<Vec<freeq_sdk::identity_records::ProvenAgentLink>> {
+    let cell = state
+        .owner_reads
+        .lock()
+        .entry(owner_did.to_string())
+        .or_default()
+        .clone();
+    let reuse = std::time::Duration::from_millis(
+        state
+            .owner_read_reuse_ms
+            .load(std::sync::atomic::Ordering::SeqCst),
+    );
+    let mut last = cell.lock().await;
+    if let Some((at, links)) = last.as_ref()
+        && at.elapsed() < reuse
+    {
+        return Ok(links.clone());
+    }
+    // Both read fresh, at the owner's PDS, through the one record read the
+    // clients use for their own lists.
+    let devices = state.key_lookup.refresh_device_records(owner_did).await?;
+    let agents = state.key_lookup.refresh_agent_records(owner_did).await?;
+    let links = freeq_sdk::identity_records::proven_agent_links(
+        owner_did,
+        &devices,
+        &agents,
+        chrono::Utc::now(),
+    );
+    *last = Some((std::time::Instant::now(), links.clone()));
+    Ok(links)
+}
+
+/// Drop the read gates of owners with no read in flight and no answer still
+/// inside the reuse window, so naming many owners does not grow the map.
+fn prune_owner_reads(state: &crate::server::SharedState) {
+    let reuse = std::time::Duration::from_millis(
+        state
+            .owner_read_reuse_ms
+            .load(std::sync::atomic::Ordering::SeqCst),
+    );
+    state.owner_reads.lock().retain(|_, cell| {
+        std::sync::Arc::strong_count(cell) > 1
+            || match cell.try_lock() {
+                Ok(last) => last.as_ref().is_some_and(|(at, _)| at.elapsed() < reuse),
+                Err(_) => true,
+            }
+    });
+}
+
+/// What a lookup carries to tell whether the stored declaration is still
+/// the one it was started for: the declaration's sequence number, written by
+/// the PROVENANCE that stored it. Not its value, since bot-kit resends the
+/// same certificate on every connect and an unverified declaration carries
+/// no time of its own.
+pub(super) type LookupToken = u64;
+
+/// Store `declaration` as `bot_did`'s, with a new sequence number, and
+/// return that number.
+pub(super) fn store_declaration(
+    state: &crate::server::SharedState,
+    bot_did: &str,
+    declaration: Value,
+) -> LookupToken {
+    let seq = state
+        .provenance_seq_next
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut declarations = state.provenance_declarations.lock();
+    declarations.insert(bot_did.to_string(), declaration);
+    state
+        .provenance_seqs
+        .lock()
+        .insert(bot_did.to_string(), seq);
+    seq
+}
+
+/// The token of `bot_did`'s stored declaration.
+#[cfg(test)]
+pub(super) fn lookup_token(
+    state: &crate::server::SharedState,
+    bot_did: &str,
+) -> Option<LookupToken> {
+    let _declarations = state.provenance_declarations.lock();
+    state.provenance_seqs.lock().get(bot_did).copied()
+}
+
+/// Read the owner's agent and device records, proven (through the per-owner
+/// gate, `read_owner_links`), and when a live link names the bot: keep the
+/// result for the hourly re-check, mark the stored declaration verified if
+/// it is still the one `token` names (a later PROVENANCE may have replaced
+/// it meanwhile), and tell the session. Finding no link takes the bot off
+/// the re-check list and changes nothing else. Every PROVENANCE reads the
+/// records afresh, so a removal published since the last read counts on the
+/// next connect.
+pub(super) async fn verify_from_records(
+    state: std::sync::Arc<crate::server::SharedState>,
+    session_id: String,
+    nick: String,
+    owner_did: String,
+    bot_did: String,
+    token: LookupToken,
+) {
+    let key = (owner_did.clone(), bot_did.clone());
+    let before = state.agent_links.lock().get(&key).cloned();
+    let links = match read_owner_links(&state, &owner_did).await {
+        Ok(links) => links,
+        Err(e) => {
+            tracing::debug!(owner = %owner_did, bot = %bot_did, error = %e, "Could not read the owner's agent records");
+            return;
+        }
+    };
+    let found = links
+        .into_iter()
+        .find(|l| l.link.agent_did == bot_did)
+        .map(|l| l.uri);
+    apply_link(&state, &session_id, &nick, &key, &token, before, found);
+}
+
+/// Act on a connect-time lookup of `key` (owner, bot) that found the link
+/// at `found`, or none. `before` is the kept result when the lookup
+/// started; `token` names the declaration it was started for.
+pub(super) fn apply_link(
+    state: &crate::server::SharedState,
+    session_id: &str,
+    nick: &str,
+    key: &(String, String),
+    token: &LookupToken,
+    before: Option<(std::time::Instant, String)>,
+    found: Option<String>,
+) {
+    let (owner_did, bot_did) = key;
+    let Some(uri) = found else {
+        // No link: nothing left for the hourly re-check to read. Removed
+        // only if still the entry this lookup started from: a newer lookup
+        // or a re-check may have written it meanwhile, and its answer is
+        // the newer one.
+        let mut links = state.agent_links.lock();
+        if links.get(key) == before.as_ref() {
+            links.remove(key);
+        }
+        return;
+    };
+    let outcome = record_outcome(&uri);
+    let annotated = {
+        let mut declarations = state.provenance_declarations.lock();
+        let current = state.provenance_seqs.lock().get(bot_did).copied();
+        match declarations.get_mut(bot_did) {
+            Some(stored) if current == Some(*token) => {
+                annotate(stored, &outcome);
+                true
+            }
+            _ => false,
+        }
+    };
+    {
+        // A declaration marked verified here is kept for the hourly
+        // re-check under the record it names, whatever the entry became
+        // meanwhile: had a re-check removed it during this read, the bot
+        // would stay verified and never be read again. An answer for a
+        // declaration since replaced writes the entry only if it is still
+        // the one this lookup started from.
+        let mut links = state.agent_links.lock();
+        if annotated || links.get(key) == before.as_ref() {
+            links.insert(key.clone(), (std::time::Instant::now(), uri.clone()));
+        }
+    }
+    if !annotated {
+        return;
+    }
+    let reply = crate::irc::Message::from_server(
+        &state.server_name,
+        "NOTICE",
+        vec![nick, &format!("Provenance verified: {}", outcome.reason)],
+    );
+    if let Some(tx) = state.connections.lock().get(session_id) {
+        let _ = tx.try_send(format!("{reply}\r\n"));
+    }
+    tracing::info!(owner = %owner_did, bot = %bot_did, %uri, "Provenance verified from the owner's agent record");
+}
+
+/// A kept result: when the owner's record was found naming the bot, and
+/// its uri.
+type KeptLink = (std::time::Instant, String);
+
+/// Re-read the owner's records for every bot verified from one at least
+/// `older_than` ago, whether or not the bot is connected; each owner is read
+/// once for all their due bots. A live link naming the bot renews the kept
+/// result, under that link's record, which a declaration verified from the
+/// earlier record then names too. None: the result is dropped and, if the bot's stored declaration
+/// is still the one verified from that record, it is marked unverified; the
+/// bot stays in any channel it is in. An entry a connect-time lookup changed
+/// meanwhile is left as it is. A read that fails changes nothing, and the
+/// next run tries again.
+pub(crate) async fn recheck_agent_links(
+    state: &std::sync::Arc<crate::server::SharedState>,
+    older_than: std::time::Duration,
+) {
+    prune_owner_reads(state);
+    // Each due entry as it was when read here, grouped by owner, so an owner
+    // with several bots is read once.
+    let mut due: std::collections::BTreeMap<String, Vec<(String, KeptLink)>> =
+        std::collections::BTreeMap::new();
+    for ((owner_did, bot_did), kept) in state.agent_links.lock().iter() {
+        if kept.0.elapsed() >= older_than {
+            due.entry(owner_did.clone())
+                .or_default()
+                .push((bot_did.clone(), kept.clone()));
+        }
+    }
+    for (owner_did, bots) in due {
+        let links = match read_owner_links(state, &owner_did).await {
+            Ok(links) => links,
+            Err(e) => {
+                tracing::debug!(owner = %owner_did, error = %e, "Could not re-read the owner's agent records");
+                continue;
+            }
+        };
+        for (bot_did, before) in bots {
+            recheck_one(state, &owner_did, &bot_did, before, &links);
+        }
+    }
+}
+
+/// Act on a re-check of one (owner, bot) entry, `before` as it was read.
+fn recheck_one(
+    state: &crate::server::SharedState,
+    owner_did: &str,
+    bot_did: &str,
+    before: (std::time::Instant, String),
+    links: &[freeq_sdk::identity_records::ProvenAgentLink],
+) {
+    let key = (owner_did.to_string(), bot_did.to_string());
+    let uri = before.1.clone();
+    {
+        // Changed only if still the entry this re-check read: a connect-time
+        // lookup may have written a newer one meanwhile.
+        let mut kept = state.agent_links.lock();
+        if kept.get(&key) != Some(&before) {
+            return;
+        }
+        if let Some(live) = links.iter().find(|l| l.link.agent_did == bot_did) {
+            kept.insert(key, (std::time::Instant::now(), live.uri.clone()));
+            drop(kept);
+            if live.uri != uri {
+                follow_record(state, bot_did, &uri, &live.uri);
+            }
+            return;
+        }
+        kept.remove(&key);
+    }
+    let verified_reason = record_outcome(&uri).reason;
+    let reason = format!("Owner's agent record {uri} no longer names this bot");
+    {
+        let mut declarations = state.provenance_declarations.lock();
+        let Some(stored) = declarations.get_mut(bot_did) else {
+            return;
+        };
+        let from_this_record = stored.get("_verified").and_then(|v| v.as_bool()) == Some(true)
+            && stored.get("_verification_reason").and_then(|v| v.as_str())
+                == Some(verified_reason.as_str());
+        if !from_this_record {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        if let Some(obj) = stored.as_object_mut() {
+            obj.insert("_verified".to_string(), Value::Bool(false));
+            obj.insert(
+                "_verification_reason".to_string(),
+                Value::String(reason.clone()),
+            );
+            obj.insert("_verified_at".to_string(), Value::Number(now.into()));
+        }
+    }
+    tell_sessions_of(state, bot_did, &format!("Provenance unverified: {reason}"));
+    tracing::info!(owner = %owner_did, bot = %bot_did, %uri, "Provenance unverified: the owner's agent record is gone");
+}
+
+/// Send `text` as a NOTICE to every session `did` has connected here, if
+/// any. Each map is locked on its own, one after another.
+fn tell_sessions_of(state: &crate::server::SharedState, did: &str, text: &str) {
+    let sessions: Vec<String> = state
+        .did_sessions
+        .lock()
+        .get(did)
+        .map(|s| s.iter().cloned().collect())
+        .unwrap_or_default();
+    for session_id in sessions {
+        let Some(nick) = state
+            .nick_to_session
+            .lock()
+            .get_nick(&session_id)
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let reply =
+            crate::irc::Message::from_server(&state.server_name, "NOTICE", vec![&nick, text]);
+        if let Some(tx) = state.connections.lock().get(&session_id) {
+            let _ = tx.try_send(format!("{reply}\r\n"));
+        }
+    }
+}
+
+/// The bot is live under a different record than the one it was verified
+/// from (the owner removed it and added it again): if the stored
+/// declaration is still verified from `old_uri`, name `new_uri` instead, so
+/// that the next re-check recognises the declaration when the new record
+/// goes.
+fn follow_record(state: &crate::server::SharedState, bot_did: &str, old_uri: &str, new_uri: &str) {
+    let old_reason = record_outcome(old_uri).reason;
+    let mut declarations = state.provenance_declarations.lock();
+    let Some(stored) = declarations.get_mut(bot_did) else {
+        return;
+    };
+    let from_old_record = stored.get("_verified").and_then(|v| v.as_bool()) == Some(true)
+        && stored.get("_verification_reason").and_then(|v| v.as_str()) == Some(old_reason.as_str());
+    if let (true, Some(obj)) = (from_old_record, stored.as_object_mut()) {
+        obj.insert(
+            "_verification_reason".to_string(),
+            Value::String(record_outcome(new_uri).reason),
         );
     }
 }

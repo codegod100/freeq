@@ -20,7 +20,8 @@ import {
   type DoctorCheck,
 } from "@freeq/bot-kit";
 import { paths } from "./paths.js";
-import { loadConfig, saveConfig } from "./config.js";
+import { configToSave, loadConfig, saveConfig } from "./config.js";
+import { DEFAULT_SERVER_URL, actorStatusUrl, healthUrl } from "./server-url.js";
 import { loadOrPromptOwner } from "./owner.js";
 import { runDaemon } from "./daemon.js";
 
@@ -84,11 +85,11 @@ const program = createDaemonCLI<DaemonOpts>({
         },
       );
       nick = String(resp.nick).trim();
-      await saveConfig({ nick, serverUrl: opts.server ?? config?.serverUrl });
-    } else if (cliOverride && cliOverride !== stored) {
-      // CLI --nick differs from stored config — persist the new one.
-      await saveConfig({ nick, serverUrl: opts.server ?? config?.serverUrl });
     }
+    // A prompted nick, or a --nick or --server that differs from the stored
+    // config, is saved.
+    const next = configToSave(config, nick, opts.server);
+    if (next) await saveConfig(next);
 
     return { nick, serverUrl: opts.server ?? config?.serverUrl };
   },
@@ -104,7 +105,7 @@ const program = createDaemonCLI<DaemonOpts>({
       `owner:          ${owner ? `@${owner.handle} (${owner.did})` : "(not configured)"}`,
     );
     lines.push(
-      `server:         ${config?.serverUrl ?? "wss://irc.freeq.at/irc (default)"}`,
+      `server:         ${config?.serverUrl ?? `${DEFAULT_SERVER_URL} (default)`}`,
     );
 
     // Telemetry: how many dispatches, total claude API cost
@@ -126,8 +127,7 @@ const program = createDaemonCLI<DaemonOpts>({
     }
     return lines;
   },
-  actorStatusUrl: (did) =>
-    `https://irc.freeq.at/api/v1/actors/${encodeURIComponent(did)}`,
+  actorStatusUrl: async (did) => actorStatusUrl((await loadConfig())?.serverUrl, did),
   doctorChecks: buildDoctorChecks(),
 });
 
@@ -372,7 +372,7 @@ function buildDoctorChecks(): DoctorCheck[] {
       name: "server health endpoint",
       run: async () => {
         try {
-          const r = await fetch("https://irc.freeq.at/api/v1/health");
+          const r = await fetch(healthUrl((await loadConfig())?.serverUrl));
           return r.ok
             ? { ok: true, detail: `${r.status}` }
             : { ok: false, reason: `${r.status}` };

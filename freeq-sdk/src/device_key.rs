@@ -31,6 +31,45 @@ pub struct StoredDeviceKey {
     pub refused: bool,
 }
 
+impl StoredDeviceKey {
+    /// A new key, dated now, not yet published.
+    pub fn generate() -> Self {
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
+        Self {
+            seed: key.to_bytes(),
+            created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            record_uri: None,
+            refused: false,
+        }
+    }
+}
+
+/// Whether a key made at `created_at` (RFC 3339) is past its lifetime now. A
+/// date that does not parse counts as not past it.
+pub fn past_key_lifetime(created_at: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(created_at).is_ok_and(|made| {
+        made.with_timezone(&chrono::Utc) + crate::identity_records::KEY_LIFETIME
+            <= chrono::Utc::now()
+    })
+}
+
+/// `did`'s key in `store`, ready to sign a record: the stored one, or a new
+/// one saved in its place when none is stored, or the stored one is past its
+/// lifetime or was refused as expired. A store that fails is an error, not a
+/// session key, since a record signed by a key nobody keeps cannot be
+/// retired from this device.
+pub fn load_or_make(store: &dyn DeviceKeyStore, did: &str) -> Result<StoredDeviceKey> {
+    if let Some(stored) = store.load(did)?
+        && !stored.refused
+        && !past_key_lifetime(&stored.created_at)
+    {
+        return Ok(stored);
+    }
+    let made = StoredDeviceKey::generate();
+    store.save(did, &made)?;
+    Ok(made)
+}
+
 /// Where a device keeps its signing keys between connects: one per account,
 /// named by the signed-in DID. The client reads it only once SASL has named
 /// the account.
@@ -203,6 +242,43 @@ mod tests {
             std::env::temp_dir().join(format!("freeq-device-key-{}-{}", std::process::id(), name));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("nested").join("device-key.json")
+    }
+
+    #[test]
+    fn load_or_make_makes_keeps_and_replaces_the_stored_key() {
+        let store = FileDeviceKeyStore::new(temp_path("load-or-make"));
+        let made = load_or_make(&store, DID).unwrap();
+        assert_eq!(
+            store.load(DID).unwrap(),
+            Some(made.clone()),
+            "a new key is saved"
+        );
+        assert_eq!(
+            load_or_make(&store, DID).unwrap(),
+            made,
+            "a live key is kept"
+        );
+
+        let published = StoredDeviceKey {
+            record_uri: Some("at://did:plc:alice/at.freeq.deviceKey/1".to_string()),
+            ..made.clone()
+        };
+        let expired = StoredDeviceKey {
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            ..published.clone()
+        };
+        let refused = StoredDeviceKey {
+            refused: true,
+            ..published
+        };
+        for (name, old) in [("past its lifetime", expired), ("refused", refused)] {
+            store.save(DID, &old).unwrap();
+            let replaced = load_or_make(&store, DID).unwrap();
+            assert_ne!(replaced.seed, old.seed, "a key {name} is replaced");
+            assert_eq!(replaced.record_uri, None, "{name}: unpublished");
+            assert!(!replaced.refused);
+            assert_eq!(store.load(DID).unwrap(), Some(replaced), "{name}: saved");
+        }
     }
 
     #[test]

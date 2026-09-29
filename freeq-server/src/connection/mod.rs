@@ -28,6 +28,7 @@ pub(crate) mod login;
 pub(crate) mod messaging;
 mod policy_cmd;
 mod provenance;
+pub(crate) use provenance::{OWNER_READ_REUSE, OwnerReadCell, recheck_agent_links};
 mod queries;
 pub(crate) mod read_marker;
 mod registration;
@@ -3424,11 +3425,14 @@ where
                                     );
                                 }
                                 Ok(outcome) => {
+                                    // An unverified certificate is proven by its
+                                    // owner's agent record, read afresh in the
+                                    // background on every PROVENANCE.
+                                    let lookup =
+                                        provenance::record_lookup_target(&provenance, &outcome);
                                     provenance::annotate(&mut provenance, &outcome);
-                                    state
-                                        .provenance_declarations
-                                        .lock()
-                                        .insert(did.clone(), provenance);
+                                    let looked_up =
+                                        provenance::store_declaration(&state, did, provenance);
                                     let status = if outcome.verified {
                                         "verified"
                                     } else {
@@ -3449,6 +3453,18 @@ where
                                         reason = %outcome.reason,
                                         "Provenance declaration stored"
                                     );
+                                    if !outcome.verified
+                                        && let Some((owner, bot)) = lookup
+                                    {
+                                        tokio::spawn(provenance::verify_from_records(
+                                            Arc::clone(&state),
+                                            session_id.to_string(),
+                                            nick.clone(),
+                                            owner,
+                                            bot,
+                                            looked_up,
+                                        ));
+                                    }
                                 }
                             }
                         } else {
@@ -4287,7 +4303,7 @@ mod retired_key_tests {
 
     /// A connection to `state` over an in-memory stream, signed in with a web
     /// token carrying `broker_token`.
-    struct Client {
+    pub(super) struct Client {
         reader: BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
         writer: tokio::io::WriteHalf<tokio::io::DuplexStream>,
     }
@@ -4313,13 +4329,42 @@ mod retired_key_tests {
             broker_token: &str,
             before_welcome: Option<&str>,
         ) -> Client {
+            Self::signing_in_as(
+                state,
+                DID,
+                "alice",
+                "WT-RETIRED-KEY",
+                Some(broker_token),
+                before_welcome,
+            )
+            .await
+        }
+
+        /// Signed in as `did` under `nick`, with the web token `web_token`.
+        pub(super) async fn signed_in_as(
+            state: &Arc<SharedState>,
+            did: &str,
+            nick: &str,
+            web_token: &str,
+        ) -> Client {
+            Self::signing_in_as(state, did, nick, web_token, None, None).await
+        }
+
+        async fn signing_in_as(
+            state: &Arc<SharedState>,
+            did: &str,
+            nick: &str,
+            web_token: &str,
+            broker_token: Option<&str>,
+            before_welcome: Option<&str>,
+        ) -> Client {
             state.web_auth_tokens.lock().insert(
-                "WT-RETIRED-KEY".to_string(),
+                web_token.to_string(),
                 (
-                    DID.to_string(),
-                    "alice.test".to_string(),
+                    did.to_string(),
+                    format!("{nick}.test"),
                     std::time::Instant::now(),
-                    Some(broker_token.to_string()),
+                    broker_token.map(str::to_string),
                 ),
             );
             let (client_side, server_side) = tokio::io::duplex(16384);
@@ -4333,8 +4378,8 @@ mod retired_key_tests {
                 writer,
             };
             c.tx("CAP LS 302").await;
-            c.tx("NICK alice").await;
-            c.tx("USER alice 0 * :test").await;
+            c.tx(&format!("NICK {nick}")).await;
+            c.tx(&format!("USER {nick} 0 * :test")).await;
             c.tx("CAP REQ :sasl message-tags").await;
             c.rx(|l| l.contains("ACK")).await.expect("CAP ACK");
             c.tx("AUTHENTICATE ATPROTO-CHALLENGE").await;
@@ -4345,7 +4390,7 @@ mod retired_key_tests {
             let payload = serde_json::json!({
                 "did": "",
                 "method": "web-token",
-                "signature": "WT-RETIRED-KEY",
+                "signature": web_token,
             });
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .encode(payload.to_string().as_bytes());
@@ -4376,7 +4421,7 @@ mod retired_key_tests {
             lines.into_inner().unwrap()
         }
 
-        async fn tx(&mut self, line: &str) {
+        pub(super) async fn tx(&mut self, line: &str) {
             self.writer
                 .write_all(format!("{line}\r\n").as_bytes())
                 .await
@@ -4385,7 +4430,7 @@ mod retired_key_tests {
 
         /// The next line `want` accepts, or None once the server has closed
         /// the connection.
-        async fn rx(&mut self, want: impl Fn(&str) -> bool) -> Option<String> {
+        pub(super) async fn rx(&mut self, want: impl Fn(&str) -> bool) -> Option<String> {
             tokio::time::timeout(std::time::Duration::from_secs(5), async {
                 loop {
                     let mut buf = String::new();
@@ -5028,5 +5073,776 @@ mod retired_key_tests {
             .flatten()
             .unwrap();
         assert_eq!(row.removed_at, None);
+    }
+}
+
+#[cfg(test)]
+mod agent_record_tests {
+    //! Plan step 8.1: a bot's ownership proven by its owner's agent record.
+    use super::retired_key_tests::Client;
+    use super::*;
+    use freeq_sdk::crypto::PrivateKey;
+    use freeq_sdk::identity_records::{
+        AGENT_KEY_TYPE, DEVICE_KEY_TYPE, build_agent_record, build_agent_retirement,
+        build_device_record,
+    };
+    use freeq_sdk::test_support::StubRepo;
+    use std::sync::atomic::Ordering;
+
+    const OWNER: &str = "did:plc:agentowner";
+    const BOT: &str = "did:plc:agentbot";
+    const OTHER_BOT: &str = "did:plc:otherbot";
+
+    /// `hours` before one instant fixed for the test run.
+    fn hours_ago(hours: i64) -> String {
+        static NOW: std::sync::LazyLock<chrono::DateTime<chrono::Utc>> =
+            std::sync::LazyLock::new(chrono::Utc::now);
+        (*NOW - chrono::TimeDelta::hours(hours))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    /// The owner's device key, whose record is filed two days ago.
+    fn owner_key() -> PrivateKey {
+        PrivateKey::ed25519_from_bytes(&[61; 32]).unwrap()
+    }
+
+    fn value(record: &impl serde::Serialize) -> serde_json::Value {
+        serde_json::to_value(record).unwrap()
+    }
+
+    fn claim(bot: &str, hours: i64) -> serde_json::Value {
+        value(&build_agent_record(&owner_key(), OWNER, bot, &hours_ago(hours), None).unwrap())
+    }
+
+    fn removal(bot: &str, hours: i64) -> serde_json::Value {
+        value(&build_agent_retirement(&owner_key(), OWNER, bot, &hours_ago(hours)).unwrap())
+    }
+
+    /// The owner's repository, holding their device record.
+    fn owner_repo() -> Arc<parking_lot::Mutex<StubRepo>> {
+        let mut repo = StubRepo::new(OWNER);
+        repo.add(
+            DEVICE_KEY_TYPE,
+            &value(&build_device_record(&owner_key(), OWNER, &hours_ago(48), None).unwrap()),
+        );
+        Arc::new(parking_lot::Mutex::new(repo))
+    }
+
+    async fn serving(
+        repo: &Arc<parking_lot::Mutex<StubRepo>>,
+    ) -> (Arc<SharedState>, crate::peer_keys::StubPds) {
+        let pds = crate::peer_keys::stub_pds_repos(vec![repo.clone()]).await;
+        let state = crate::server::test_state_with_resolver(
+            crate::config::ServerConfig::default(),
+            pds.resolver.clone(),
+        );
+        // Each test reads fresh unless it sets a reuse window of its own.
+        reuse_for(&state, 0);
+        (state, pds)
+    }
+
+    /// Reuse a finished read of an owner's records for `ms`.
+    fn reuse_for(state: &SharedState, ms: u64) {
+        state.owner_read_reuse_ms.store(ms, Ordering::SeqCst);
+    }
+
+    /// Wait for the stub PDS to receive more than `before` listing requests.
+    async fn arrived_past(pds: &crate::peer_keys::StubPds, before: usize) {
+        for _ in 0..500 {
+            if pds.arrivals.load(Ordering::SeqCst) > before {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!("no listing request arrived");
+    }
+
+    /// The certificate bot-kit sends without a creator key.
+    fn unsigned_cert(bot: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "FreeqBotDelegation/v1",
+            "bot_did": bot,
+            "bot_public_key": "",
+            "creator_did": OWNER,
+            "created_at": "2026-09-01T00:00:00Z",
+            "revocation_authority": OWNER,
+            "signature": null,
+        })
+    }
+
+    fn provenance_line(cert: &serde_json::Value) -> String {
+        use base64::Engine;
+        let encoded =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(cert.to_string().as_bytes());
+        format!("PROVENANCE {encoded}")
+    }
+
+    fn agent_listings(pds: &crate::peer_keys::StubPds) -> usize {
+        pds.listings
+            .lock()
+            .get(AGENT_KEY_TYPE)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn stored_verified(state: &SharedState, bot: &str) -> Option<bool> {
+        state
+            .provenance_declarations
+            .lock()
+            .get(bot)
+            .and_then(|d| d.get("_verified"))
+            .and_then(|v| v.as_bool())
+    }
+
+    /// Present `cert` as `bot`, answered first by the synchronous notice.
+    async fn present(client: &mut Client, cert: &serde_json::Value) -> String {
+        client.tx(&provenance_line(cert)).await;
+        client
+            .rx(|l| l.contains("Provenance "))
+            .await
+            .expect("a provenance notice")
+    }
+
+    /// Wait for the agent listing count to reach `n`, then for the lookup
+    /// that made it to finish.
+    async fn lookup_done(pds: &crate::peer_keys::StubPds, n: usize) {
+        for _ in 0..500 {
+            if agent_listings(pds) >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            agent_listings(pds) >= n,
+            "the owner's agent records were listed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_certificate_with_the_owners_record_ends_verified_and_opens_an_invite_only_channel()
+     {
+        let repo = owner_repo();
+        let uri = repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, _pds) = serving(&repo).await;
+
+        let mut owner = Client::signed_in_as(&state, OWNER, "owner", "WT-OWNER").await;
+        owner.tx("JOIN #den").await;
+        owner
+            .rx(|l| l.contains("JOIN") && l.contains("#den"))
+            .await
+            .expect("owner joined");
+        owner.tx("MODE #den +i").await;
+        owner
+            .rx(|l| l.contains("MODE #den +i"))
+            .await
+            .expect("+i set");
+
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        let first = present(&mut bot, &unsigned_cert(BOT)).await;
+        assert!(first.contains("Provenance stored (unverified)"), "{first}");
+        let verified = bot
+            .rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified from the record");
+        assert!(
+            verified.contains(&uri),
+            "the reason names the record: {verified}"
+        );
+        let stored = state
+            .provenance_declarations
+            .lock()
+            .get(BOT)
+            .cloned()
+            .unwrap();
+        assert_eq!(stored["_verified"], true);
+        assert!(stored["_verified_at"].is_i64());
+
+        bot.tx("JOIN #den").await;
+        let joined = bot
+            .rx(|l| l.contains("JOIN") || l.contains(" 473 "))
+            .await
+            .expect("an answer to JOIN");
+        assert!(
+            joined.contains("JOIN"),
+            "admitted on its owner's presence: {joined}"
+        );
+    }
+
+    async fn stays_unverified(agent_records: Vec<serde_json::Value>, forged: bool) {
+        let repo = owner_repo();
+        for record in &agent_records {
+            if forged {
+                // Listed with a proof that holds another record at its path.
+                let held = claim(OTHER_BOT, 30);
+                repo.lock().add_forged(AGENT_KEY_TYPE, record, &held);
+            } else {
+                repo.lock().add(AGENT_KEY_TYPE, record);
+            }
+        }
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        let first = present(&mut bot, &unsigned_cert(BOT)).await;
+        assert!(first.contains("Provenance stored (unverified)"), "{first}");
+        lookup_done(&pds, 1).await;
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_record_naming_another_bot_leaves_the_certificate_unverified() {
+        stays_unverified(vec![claim(OTHER_BOT, 24)], false).await;
+    }
+
+    #[tokio::test]
+    async fn a_removed_link_leaves_the_certificate_unverified() {
+        stays_unverified(vec![claim(BOT, 24), removal(BOT, 12)], false).await;
+    }
+
+    #[tokio::test]
+    async fn a_record_whose_proof_fails_leaves_the_certificate_unverified() {
+        stays_unverified(vec![claim(BOT, 24)], true).await;
+    }
+
+    #[tokio::test]
+    async fn a_link_removed_and_added_back_is_verified() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 30));
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 24));
+        let uri = repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 12));
+        let (state, _pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        let verified = bot
+            .rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified from the claim made after the removal");
+        assert!(verified.contains(&uri), "{verified}");
+    }
+
+    #[tokio::test]
+    async fn a_signed_certificate_with_no_record_verifies_against_the_key_store_as_before() {
+        use ed25519_dalek::Signer;
+        let repo = owner_repo();
+        let (state, pds) = serving(&repo).await;
+        let creator = ed25519_dalek::SigningKey::from_bytes(&[62; 32]);
+        state
+            .with_db(|db| db.save_signing_key(OWNER, creator.verifying_key().as_bytes()))
+            .expect("the key is on file");
+        let mut cert = unsigned_cert(BOT);
+        cert.as_object_mut().unwrap().remove("signature");
+        let canonical = freeq_sdk::canonical::canonicalize(&cert).unwrap();
+        use base64::Engine;
+        cert["signature"] = serde_json::Value::String(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(creator.sign(canonical.as_bytes()).to_bytes()),
+        );
+
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        let first = present(&mut bot, &cert).await;
+        assert!(
+            first.contains("Provenance verified: Verified against creator key"),
+            "{first}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            agent_listings(&pds),
+            0,
+            "a verified certificate reads no records"
+        );
+    }
+
+    /// A bot verified from its owner's record, connected, with the owner
+    /// in the +i channels `#den` and `#den2`, and the bot in `#den`.
+    async fn verified_bot_in_den() -> (
+        Arc<parking_lot::Mutex<StubRepo>>,
+        Arc<SharedState>,
+        crate::peer_keys::StubPds,
+        Client,
+        Client,
+        String,
+    ) {
+        let repo = owner_repo();
+        let uri = repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        let mut owner = Client::signed_in_as(&state, OWNER, "owner", "WT-OWNER").await;
+        for channel in ["#den", "#den2"] {
+            owner.tx(&format!("JOIN {channel}")).await;
+            owner
+                .rx(|l| l.contains("JOIN") && l.contains(channel))
+                .await
+                .expect("owner joined");
+            owner.tx(&format!("MODE {channel} +i")).await;
+            owner
+                .rx(|l| l.contains(&format!("MODE {channel} +i")))
+                .await
+                .expect("+i set");
+        }
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        bot.rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified");
+        bot.tx("JOIN #den").await;
+        let joined = bot
+            .rx(|l| l.contains("JOIN") || l.contains(" 473 "))
+            .await
+            .expect("an answer to JOIN");
+        assert!(joined.contains("JOIN"), "admitted: {joined}");
+        (repo, state, pds, owner, bot, uri)
+    }
+
+    // ─── review fixes: per-owner reads, conditional writes, sequence ───
+
+    #[tokio::test]
+    async fn many_provenances_naming_one_owner_in_quick_succession_read_the_account_once() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        reuse_for(&state, 10_000);
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        for _ in 0..5 {
+            bot.tx(&provenance_line(&unsigned_cert(BOT))).await;
+        }
+        lookup_done(&pds, 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(agent_listings(&pds), 1, "one read for five PROVENANCEs");
+        assert_eq!(stored_verified(&state, BOT), Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_provenance_after_the_reuse_window_reads_again() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        reuse_for(&state, 50);
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        lookup_done(&pds, 1).await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        lookup_done(&pds, 2).await;
+        assert_eq!(agent_listings(&pds), 2);
+    }
+
+    #[tokio::test]
+    async fn a_removal_hidden_by_a_reused_read_is_caught_by_the_next_read_after_the_window() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        reuse_for(&state, 1_000);
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        bot.rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified");
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+
+        // Inside the window the earlier read answers.
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        bot.rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("the reused read still names the bot");
+        assert_eq!(agent_listings(&pds), 1);
+
+        tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        lookup_done(&pds, 2).await;
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+    }
+
+    /// The ordering is driven, not left to timing: the first lookup is held
+    /// inside its read while the test puts in the entry a newer lookup
+    /// would have written, then released.
+    #[tokio::test]
+    async fn a_slow_lookup_that_finds_no_link_leaves_an_entry_a_newer_lookup_wrote() {
+        let repo = owner_repo();
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        pds.hold.store(true, Ordering::SeqCst);
+        let before = pds.arrivals.load(Ordering::SeqCst);
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        arrived_past(&pds, before).await;
+
+        let newer = (std::time::Instant::now(), "at://newer".to_string());
+        state
+            .agent_links
+            .lock()
+            .insert((OWNER.to_string(), BOT.to_string()), newer.clone());
+        pds.hold.store(false, Ordering::SeqCst);
+        lookup_done(&pds, 1).await;
+
+        assert_eq!(
+            state
+                .agent_links
+                .lock()
+                .get(&(OWNER.to_string(), BOT.to_string()))
+                .cloned(),
+            Some(newer),
+            "the newer entry stays"
+        );
+    }
+
+    /// Driven the same way: the re-check is held inside its read while the
+    /// test puts in the entry a connect-time lookup would have written.
+    #[tokio::test]
+    async fn a_recheck_that_finds_no_link_leaves_an_entry_a_connect_time_lookup_wrote() {
+        let (repo, state, pds, _owner, _bot, _uri) = verified_bot_in_den().await;
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+        pds.hold.store(true, Ordering::SeqCst);
+        let before = pds.arrivals.load(Ordering::SeqCst);
+        let checking = state.clone();
+        let recheck = tokio::spawn(async move {
+            provenance::recheck_agent_links(&checking, std::time::Duration::ZERO).await;
+        });
+        arrived_past(&pds, before).await;
+
+        let newer = (std::time::Instant::now(), "at://re-added".to_string());
+        state
+            .agent_links
+            .lock()
+            .insert((OWNER.to_string(), BOT.to_string()), newer.clone());
+        pds.hold.store(false, Ordering::SeqCst);
+        recheck.await.unwrap();
+
+        assert_eq!(
+            state
+                .agent_links
+                .lock()
+                .get(&(OWNER.to_string(), BOT.to_string()))
+                .cloned(),
+            Some(newer),
+            "the entry the connect-time lookup wrote stays"
+        );
+    }
+
+    /// An older lookup that read the record as present finishes after an
+    /// identical certificate was resubmitted: stored with nothing to tell
+    /// the two apart but when they were sent. The older lookup's answer is
+    /// applied directly, since the per-owner read gate keeps two lookups of
+    /// one owner from overtaking each other on their own.
+    #[tokio::test]
+    async fn an_identical_resubmission_is_not_verified_by_the_older_lookup_finishing_last() {
+        let repo = owner_repo();
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        lookup_done(&pds, 1).await;
+        let older = provenance::lookup_token(&state, BOT).expect("a declaration");
+
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        lookup_done(&pds, 2).await;
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+
+        let key = (OWNER.to_string(), BOT.to_string());
+        provenance::apply_link(
+            &state,
+            "no-session",
+            "helper",
+            &key,
+            &older,
+            None,
+            Some("at://removed-since".to_string()),
+        );
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+    }
+
+    #[tokio::test]
+    async fn a_recheck_reads_an_owner_with_two_bots_due_once() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        repo.lock().add(AGENT_KEY_TYPE, &claim(OTHER_BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        for (did, nick, token) in [(BOT, "helper", "WT-BOT"), (OTHER_BOT, "other", "WT-OTHER")] {
+            let mut bot = Client::signed_in_as(&state, did, nick, token).await;
+            present(&mut bot, &unsigned_cert(did)).await;
+            bot.rx(|l| l.contains("Provenance verified"))
+                .await
+                .expect("verified");
+        }
+        assert_eq!(state.agent_links.lock().len(), 2);
+        let listed = agent_listings(&pds);
+
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+
+        assert_eq!(agent_listings(&pds), listed + 1, "one read for the owner");
+        assert_eq!(state.agent_links.lock().len(), 2, "both renewed");
+    }
+
+    /// From the second review: the owner removes and re-adds the bot within
+    /// the hour (the re-check renews the kept result under the new record's
+    /// uri), then removes it for good. The next re-check must mark the
+    /// connected bot unverified and tell it.
+    #[tokio::test]
+    async fn a_bot_re_added_under_a_new_record_is_unverified_when_removed_again() {
+        let (repo, state, _pds, _owner, mut bot, first_uri) = verified_bot_in_den().await;
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 12));
+        let second_uri = repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 6));
+        assert_ne!(first_uri, second_uri);
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+        assert_eq!(stored_verified(&state, BOT), Some(true), "still owned");
+        let kept_uri = state
+            .agent_links
+            .lock()
+            .get(&(OWNER.to_string(), BOT.to_string()))
+            .map(|(_, uri)| uri.clone());
+        assert_eq!(
+            kept_uri,
+            Some(second_uri.clone()),
+            "renewed under the new record"
+        );
+
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 0));
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+        assert_eq!(kept_at(&state), None, "the kept result is dropped");
+        assert_eq!(
+            stored_verified(&state, BOT),
+            Some(false),
+            "removed for good: the bot must be unverified"
+        );
+        let told = bot
+            .rx(|l| l.contains("Provenance unverified:"))
+            .await
+            .expect("the bot is told it is unverified");
+        assert!(told.contains(&second_uri), "{told}");
+    }
+
+    /// Driven, not timed: a connect-time lookup is held inside its read
+    /// while the kept result it started from is removed (as a re-check that
+    /// found no link would), then released to find the record there again.
+    #[tokio::test]
+    async fn a_lookup_whose_kept_result_changed_meanwhile_never_leaves_a_verified_bot_unkept() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        bot.rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified");
+        assert!(kept_at(&state).is_some());
+
+        pds.hold.store(true, Ordering::SeqCst);
+        let before = pds.arrivals.load(Ordering::SeqCst);
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        arrived_past(&pds, before).await;
+        state
+            .agent_links
+            .lock()
+            .remove(&(OWNER.to_string(), BOT.to_string()));
+        pds.hold.store(false, Ordering::SeqCst);
+        lookup_done(&pds, 2).await;
+
+        if stored_verified(&state, BOT) == Some(true) {
+            assert!(
+                kept_at(&state).is_some(),
+                "a verified bot is kept for the hourly re-check"
+            );
+        }
+    }
+
+    fn kept_at(state: &SharedState) -> Option<std::time::Instant> {
+        state
+            .agent_links
+            .lock()
+            .get(&(OWNER.to_string(), BOT.to_string()))
+            .map(|(at, _)| *at)
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_after_the_owner_removes_the_record_reads_the_account_and_ends_unverified()
+    {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        bot.rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified");
+        assert_eq!(agent_listings(&pds), 1);
+        bot.tx("QUIT").await;
+        drop(bot);
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+
+        let mut again = Client::signed_in_as(&state, BOT, "helper", "WT-BOT-2").await;
+        let first = present(&mut again, &unsigned_cert(BOT)).await;
+        assert!(first.contains("Provenance stored (unverified)"), "{first}");
+        lookup_done(&pds, 2).await;
+        assert_eq!(agent_listings(&pds), 2, "the account is read again");
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+        // The read that found no link takes the bot off the re-check list.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while kept_at(&state).is_some() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(kept_at(&state), None, "no longer re-checked");
+    }
+
+    #[tokio::test]
+    async fn a_connected_bot_whose_record_is_removed_is_unverified_by_the_recheck_and_kept_in_its_channel()
+     {
+        let (repo, state, _pds, mut owner, mut bot, uri) = verified_bot_in_den().await;
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+
+        let stored = state
+            .provenance_declarations
+            .lock()
+            .get(BOT)
+            .cloned()
+            .unwrap();
+        assert_eq!(stored["_verified"], false);
+        let reason = stored["_verification_reason"].as_str().unwrap();
+        assert!(
+            reason.contains(&uri) && reason.contains("no longer"),
+            "{reason}"
+        );
+        assert!(stored["_verified_at"].is_i64());
+        assert_eq!(kept_at(&state), None, "the kept result is dropped");
+
+        // Still in #den: what it says there reaches the owner.
+        bot.tx("PRIVMSG #den :still here").await;
+        owner
+            .rx(|l| l.contains("PRIVMSG #den :still here"))
+            .await
+            .expect("the bot is still in #den");
+        // But its owner's presence no longer opens a +i channel.
+        bot.tx("JOIN #den2").await;
+        let refused = bot
+            .rx(|l| l.contains("JOIN") || l.contains(" 473 "))
+            .await
+            .expect("an answer to JOIN");
+        assert!(refused.contains(" 473 "), "refused: {refused}");
+    }
+
+    #[tokio::test]
+    async fn a_connected_bot_whose_record_is_removed_is_told_by_the_recheck() {
+        let (repo, state, _pds, _owner, mut bot, uri) = verified_bot_in_den().await;
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+
+        let told = bot
+            .rx(|l| l.contains("Provenance unverified:"))
+            .await
+            .expect("the bot is told it is unverified");
+        assert!(
+            told.contains("NOTICE helper :Provenance unverified: "),
+            "{told}"
+        );
+        assert!(told.contains(&uri) && told.contains("no longer"), "{told}");
+    }
+
+    #[tokio::test]
+    async fn a_connected_bot_whose_record_is_still_there_stays_verified_and_its_result_is_renewed()
+    {
+        let (_repo, state, pds, _owner, _bot, _uri) = verified_bot_in_den().await;
+        let before = kept_at(&state).expect("kept");
+        let listed = agent_listings(&pds);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+
+        assert_eq!(stored_verified(&state, BOT), Some(true));
+        assert!(kept_at(&state).expect("kept") > before, "renewed");
+        assert_eq!(agent_listings(&pds), listed + 1, "the account was read");
+    }
+
+    #[tokio::test]
+    async fn a_recheck_whose_read_fails_leaves_the_bot_verified() {
+        let (repo, state, pds, _owner, _bot, _uri) = verified_bot_in_den().await;
+        let before = kept_at(&state).expect("kept");
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+        pds.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+
+        assert_eq!(stored_verified(&state, BOT), Some(true));
+        assert_eq!(
+            kept_at(&state),
+            Some(before),
+            "kept as it was, for the next tick"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_recheck_does_not_read_a_result_younger_than_the_hour() {
+        let (repo, state, pds, _owner, _bot, _uri) = verified_bot_in_den().await;
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+        let listed = agent_listings(&pds);
+
+        provenance::recheck_agent_links(&state, std::time::Duration::from_secs(3600)).await;
+
+        assert_eq!(agent_listings(&pds), listed, "nothing read");
+        assert_eq!(stored_verified(&state, BOT), Some(true));
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_bots_declaration_is_rechecked_the_same_way() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, _pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        bot.rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified");
+        bot.tx("QUIT").await;
+        drop(bot);
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        repo.lock().add(AGENT_KEY_TYPE, &removal(BOT, 1));
+
+        provenance::recheck_agent_links(&state, std::time::Duration::ZERO).await;
+
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+    }
+
+    #[tokio::test]
+    async fn an_owner_who_adds_the_record_after_an_unverified_connect_is_verified_on_the_next_provenance()
+     {
+        let repo = owner_repo();
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        present(&mut bot, &unsigned_cert(BOT)).await;
+        lookup_done(&pds, 1).await;
+        assert_eq!(stored_verified(&state, BOT), Some(false));
+
+        let uri = repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 1));
+        let first = present(&mut bot, &unsigned_cert(BOT)).await;
+        assert!(
+            first.contains("Provenance stored (unverified)"),
+            "not kept: {first}"
+        );
+        let verified = bot
+            .rx(|l| l.contains("Provenance verified"))
+            .await
+            .expect("verified once the record is there");
+        assert!(verified.contains(&uri), "{verified}");
+    }
+
+    #[tokio::test]
+    async fn a_resubmitted_declaration_is_not_overwritten_by_an_older_lookup() {
+        let repo = owner_repo();
+        repo.lock().add(AGENT_KEY_TYPE, &claim(BOT, 24));
+        let (state, pds) = serving(&repo).await;
+        let mut bot = Client::signed_in_as(&state, BOT, "helper", "WT-BOT").await;
+        pds.hold.store(true, Ordering::SeqCst);
+        present(&mut bot, &unsigned_cert(BOT)).await;
+
+        // A declaration of another kind replaces it while the lookup waits.
+        let replacement = serde_json::json!({ "type": "SomethingElse/v1", "note": "later" });
+        let first = present(&mut bot, &replacement).await;
+        assert!(first.contains("Provenance stored (unverified)"), "{first}");
+        pds.hold.store(false, Ordering::SeqCst);
+        lookup_done(&pds, 1).await;
+
+        let stored = state
+            .provenance_declarations
+            .lock()
+            .get(BOT)
+            .cloned()
+            .unwrap();
+        assert_eq!(stored["type"], "SomethingElse/v1");
+        assert_eq!(stored["_verified"], false);
     }
 }

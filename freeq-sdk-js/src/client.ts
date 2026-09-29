@@ -1614,6 +1614,12 @@ export class FreeqClient extends EventEmitter {
   private actAnswerChain: Promise<unknown> = Promise.resolve();
 
   /**
+   * Task events' signatures, one at a time in call order, so each event
+   * reaches the wire (or `actAnswerChain`) in the order `sendAct` was called.
+   */
+  private actSignChain: Promise<unknown> = Promise.resolve();
+
+  /**
    * Resolves once this session's key registration has reached the wire.
    *
    * `null` whenever no registration is coming — a guest, a server that never
@@ -4131,7 +4137,11 @@ export class FreeqClient extends EventEmitter {
     opts: { humanText?: string; taskId?: string } = {},
   ): Promise<string> {
     const eventId = signing.newEventId();
-    const signed = await this.signing.signAct(target, actTags, eventId);
+    // Signed in call order: a signature takes as long as the platform takes,
+    // and an event signed sooner must not go out ahead of one sent before it.
+    const signing_ = this.actSignChain.then(() => this.signing.signAct(target, actTags, eventId));
+    this.actSignChain = signing_.catch(() => undefined);
+    const signed = await signing_;
     if (!signed) {
       throw new Error(
         'a task event must be signed: authenticate, register a signing key, ' +

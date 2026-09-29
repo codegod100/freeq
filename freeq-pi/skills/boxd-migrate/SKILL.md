@@ -1,6 +1,6 @@
 ---
 name: boxd-migrate
-description: Move this pi session onto a boxd.sh cloud VM so it keeps running as an agent on freeq — with its own did:key, a delegation certificate signed by the owner, and a channel to join. Use when the user says "migrate this session to boxd", "put this agent on a VM", "run this session in the cloud", or asks for an always-on agent in a freeq channel.
+description: Move this pi session onto a boxd.sh cloud VM so it keeps running as an agent on freeq — with its own did:key, claimed by the owner as one of their agents, and a channel to join. Use when the user says "migrate this session to boxd", "put this agent on a VM", "run this session in the cloud", or asks for an always-on agent in a freeq channel.
 ---
 
 # Migrating a pi session to a boxd VM
@@ -16,20 +16,20 @@ Everything else is transfer. This is the part to get right:
 - **The VM mints its own agent key.** Copying `~/.freeq/bots/<name>/agent.key`
   from the laptop would put one DID on two machines — not redundancy, a broken
   participant, with two sessions fighting over one nick.
-- **The owner's creator seed never leaves the owner's machine.** bot-kit will
-  sign a delegation at connect time if handed `creatorKeyPath`, which is
-  convenient and wrong here: it means shipping the key that speaks for the
-  human to a cloud box. Instead the VM mints, we sign *here*, and only the
-  signed certificate travels.
-- **An unsigned certificate grants nothing.** `#channel` with `+i` admits an
+- **Nothing of the owner's goes to the VM.** The VM's certificate names the
+  owner and is not signed. The owner claims the VM's DID from their own
+  device: an `at.freeq.agentKey` record in their account, written in the freeq
+  web app (Settings → Agents → + Add an agent) or with
+  `freeq-bot-id register --owner <handle> <did>`.
+- **An unproven certificate grants nothing.** `#channel` with `+i` admits an
   agent only on a *verified* delegation whose owner is present in the channel
   or is its founder/DID-op (`freeq-server/src/connection/channel.rs` —
-  "an agent may go where the person it acts for already is"). Unsigned, the
-  server stores it as "declarative only" and the join is refused.
+  "an agent may go where the person it acts for already is"). The server
+  verifies the certificate when it finds the owner's record naming the agent.
 
-So the certificate chain has to be closed end to end: creator key on the
-laptop → its **public** half registered under the owner's DID via `MSGSIG` →
-signature over the VM's cert → server verifies → channel opens.
+So the chain is: VM mints its did:key → owner adds that DID as one of their
+agents → the agent connects, the server reads the record and verifies →
+channel opens. A record the owner removes ends it within the hour.
 
 ## Do it
 
@@ -53,26 +53,27 @@ any unpushed commits as patches (it never pushes) → install `@freeq/pi` (from
 the checkout when migrating the freeq repo itself, else from npm) → move the
 model API key, `~/.pi/agent/skills`, settings, and the session `.jsonl` (with
 its recorded `cwd` rewritten to the VM's checkout, or `pi -c` won't find it) →
-mint the identity → sign the cert locally → start pi in tmux and join.
+mint the identity → ask you to add its DID as one of your agents → start pi
+in tmux and join.
 
 ## The step only the user can do
 
-If the creator key's public half is not registered under the owner's DID, the
-script prints one line and waits:
+The script prints the VM agent's DID and waits while the user adds it as one
+of their agents, signed in as themselves: in the freeq web app under
+Settings → Agents → + Add an agent, or with
+`freeq-bot-id register --owner <handle> <did>`. Do not try to work around this
+step; only a session that is the user can write to their account.
 
-```
-/raw MSGSIG <base64url-public-key>
-```
+Verify it landed: inside the remote pi, `/freeq authorize verify` reconnects
+and reports "Delegation verified" once the server has read the record.
 
-The user pastes it into any freeq client already authenticated as them (web
-client message box, any channel). It is a public key — nothing secret moves,
-no password, no PDS round-trip. Do not try to work around this step; there is
-no way to register a key under someone's DID without a session that is
-already them.
+### The older way: `--sign-cert`
 
-Verify it landed: `GET https://<server>/api/v1/signing-keys/<did>` should
-return that public key. The server keeps every key a DID has registered, so
-this does not invalidate the user's other clients.
+With `--sign-cert` the script signs the VM's certificate here with the owner's
+creator key instead, and if the server has no copy of that key's public half
+it prints `/raw MSGSIG <base64url-public-key>` for the user to paste into a
+client authenticated as them. That still works, for servers from before agent
+records; the record way needs no key on any machine.
 
 ## Known sharp edges
 
@@ -105,6 +106,7 @@ remote pi prints the owner DID, the joined channels, and any refusals.
 
 - `scripts/mint-identity.mjs` — mint an installation's identity without
   connecting (run on the machine being provisioned).
-- `scripts/sign-delegation.mjs` — sign a cert with the owner's creator key
-  (run on the owner's machine). Both are useful on their own for provisioning
-  agents anywhere, not just boxd.
+- `scripts/sign-delegation.mjs` — the older way: sign a cert with the
+  owner's creator key (run on the owner's machine).
+- `freeq-bot-id register --owner <handle> <did>...` — add agents to your
+  account from a terminal, as Settings → Agents does in the web app.

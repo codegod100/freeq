@@ -27,17 +27,78 @@ describe("status", () => {
     expect(session.status().note).toMatch(/FREEQ_OWNER_DID/);
   });
 
-  it("reports the owner it acts for when authenticated", async () => {
-    const { session } = makeSession({ FREEQ_OWNER_DID: "did:plc:owner" }, "authenticated");
+  it("says the owner link is proven once the server has verified it", async () => {
+    const { session } = makeSession({ FREEQ_OWNER_DID: "did:plc:owner" }, "authenticated", undefined, {
+      provenance: () => ({
+        verified: true,
+        reason: "Owner's agent record at://x names this bot",
+        text: "Provenance verified: Owner's agent record at://x names this bot",
+      }),
+    });
     await session.connect();
     const s = session.status();
     expect(s.mode).toBe("authenticated");
     expect(s.did).toBe("did:key:z1");
+    expect(s.ownerVerified).toBe(true);
     expect(s.note).toContain("did:plc:owner");
+    expect(s.note).toMatch(/verified/);
+  });
+
+  it("says how to prove the owner link while it is not verified", async () => {
+    const reason =
+      "Unsigned certificate: unverified until the owner adds this bot (did:key:z1) under Settings → Agents in the freeq web app, or with `freeq-bot-id register`, and then restarts the bot";
+    const { session } = makeSession({ FREEQ_OWNER_DID: "did:plc:owner" }, "authenticated", undefined, {
+      provenance: () => ({ verified: false, reason, text: `Provenance stored (unverified): ${reason}` }),
+    });
+    await session.connect();
+    const s = session.status();
+    expect(s.ownerVerified).toBe(false);
+    expect(s.note).not.toMatch(/acting for/);
+    expect(s.note).toMatch(/not verified/);
+    for (const step of ["did:key:z1", "did:plc:owner", "Settings → Agents", "freeq-bot-id register", "restart"]) {
+      expect(s.note).toContain(step);
+    }
+    // The server's reason already gives the steps: the note gives them once.
+    expect(s.note.split("Settings → Agents").length - 1).toBe(1);
+    expect(s.note).not.toContain("The server said");
+  });
+
+  it("quotes a reason that is not the steps, such as a removal", async () => {
+    const reason = "Owner's agent record at://did:plc:owner/at.freeq.agentKey/3k no longer names this bot";
+    const { session } = makeSession({ FREEQ_OWNER_DID: "did:plc:owner" }, "authenticated", undefined, {
+      provenance: () => ({ verified: false, reason, text: `Provenance unverified: ${reason}` }),
+    });
+    await session.connect();
+    const s = session.status();
+    expect(s.note).toContain(`The server said: ${reason}.`);
+    expect(s.note.split("Settings → Agents").length - 1).toBe(1);
+  });
+
+  it("says the owner link is not verified before the server has answered", async () => {
+    const { session } = makeSession({ FREEQ_OWNER_DID: "did:plc:owner" }, "authenticated", undefined, {
+      provenance: () => null,
+    });
+    await session.connect();
+    const s = session.status();
+    expect(s.ownerVerified).toBe(false);
+    expect(s.note).not.toMatch(/acting for/);
+    expect(s.note).toContain("Settings → Agents");
   });
 });
 
 describe("connect", () => {
+  it("connects through the factory's own connect when it gives one", async () => {
+    const client = new FakeClient();
+    const connect = vi.fn(() => client.connect());
+    const plain = vi.spyOn(client, "connect");
+    const session = new FreeqSession(loadConfig({ FREEQ_OWNER_DID: "did:plc:owner" }), {
+      createClient: async () => ({ client, mode: "authenticated" as SessionMode, connect }),
+    });
+    await session.connect();
+    expect(connect).toHaveBeenCalledTimes(1);
+    expect(plain).toHaveBeenCalledTimes(1); // only through the factory's connect
+  });
+
   it("resolves once, even when called concurrently", async () => {
     const client = new FakeClient();
     const factory = vi.fn(async () => ({ client, mode: "guest" as SessionMode }));
@@ -282,6 +343,28 @@ describe("close", () => {
   it("is safe to call when never connected", async () => {
     const { session } = makeSession();
     await expect(session.close()).resolves.toBeUndefined();
+  });
+
+  it("stops the bot a session was started through, instead of only its client", async () => {
+    const client = new FakeClient();
+    const stopped: string[] = [];
+    const session = new FreeqSession(loadConfig({ FREEQ_OWNER_DID: "did:plc:owner" }), {
+      createClient: async () => ({
+        client,
+        mode: "authenticated" as SessionMode,
+        connect: () => client.connect(),
+        close: async (reason: string) => {
+          stopped.push(reason);
+          client.quit(reason);
+          client.disconnect();
+        },
+      }),
+    });
+    await session.connect();
+    await session.close("bye");
+    expect(stopped).toEqual(["bye"]);
+    expect(client.connected).toBe(false);
+    expect(session.status().mode).toBe("offline");
   });
 });
 

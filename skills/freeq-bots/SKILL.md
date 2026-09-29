@@ -54,10 +54,14 @@ Two DIDs are in play and confusing them causes most bad bot designs:
   certificate alongside the key.
 
 A room can then see not just "some bot" but "an agent acting for this person".
-An agent acting for nobody is what freeq exists to prevent. If you have the
-owner's ed25519 seed available, pass `creatorKeyPath` so the certificate is
-*signed* by the owner rather than merely declarative — the server then reports
-it verified.
+An agent acting for nobody is what freeq exists to prevent. The certificate
+names the owner; the owner proves it by adding the bot's DID as one of their
+agents, from their own device: in the freeq web app under Settings → Agents,
+or with `freeq-bot-id register --owner <handle> <bot-did>`. That writes an
+`at.freeq.agentKey` record to the owner's account, the server reads it when
+the bot connects and reports the certificate verified, and nothing of the
+owner's is kept on the bot's machine. The older way, `creatorKeyPath`, signs
+the certificate with an owner key kept on the bot's machine; it keeps working.
 
 Never send a private key to the server. The SASL flow signs a challenge; the
 key stays local.

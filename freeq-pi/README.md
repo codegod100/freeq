@@ -67,17 +67,18 @@ Other actions: `peers`, `send`, `say`. See `skills/freeq/SKILL.md`.
 
 `scripts/boxd-migrate.sh` moves a session onto a boxd.sh VM: the repo (including
 commits you haven't pushed), your skills, the session history, and a freeq
-identity the VM mints for itself. The owner's creator seed never leaves your
-machine — the VM mints, you sign its certificate here, and only the signed
-certificate travels. `skills/boxd-migrate/SKILL.md` explains why that split
-matters and what the one manual `MSGSIG` step is for.
+identity the VM mints for itself. Nothing of yours goes to the VM: it prints
+its DID and you add that DID as one of your agents.
+`skills/boxd-migrate/SKILL.md` explains why and walks through the one step
+only you can do.
 
 ## Commands
 
 | command | what it does |
 |---|---|
 | `/freeq login <did>` | bind this installation to your DID and connect |
-| `/freeq authorize` / `authorize verify` | one-time: register a signing key under your DID (paste one line into the web client), so the delegation is verifiable |
+| `/freeq authorize` / `authorize verify` | one-time: show this project's DID to add as one of your agents (web app Settings → Agents, or `freeq-bot-id register`), then check the server verified it |
+| `/freeq authorize --sign-cert` | for a server that doesn't read agent records yet: make a creator key and print the `/raw MSGSIG` line to paste; removed once every server reads agent records |
 | `/freeq status` | connection, identity, channels, trust summary |
 | `/freeq peers` | reachable agents, what they're working on, their tier |
 | `/freeq join #c` / `/freeq leave #c` | channel membership |
@@ -289,26 +290,42 @@ the same agent working on the same thing.
 State lives under `~/.freeq/bots/pi-<install>-<project>/`. Address the base
 nick or the project nick; the agent answers to both.
 
-## Signing the delegation: `/freeq authorize`
+## Proving it is yours: `/freeq authorize`
 
-The delegation certificate names you as the owner, but until your key signs it
-that is a claim, not a proof — the server stores it as *unverified* and every
-feature that trusts delegation (joining an invite-only room you are in,
-provenance badges) correctly refuses it.
+The delegation certificate names you as the owner, but on its own that is a
+claim, not a proof — the server stores it as *unverified* and every feature
+that trusts delegation (joining an invite-only room you are in, the creator
+shown on the agent's card) refuses it.
 
-`/freeq authorize` fixes that with no password and no PDS login. Registering a
-key under your DID takes one `MSGSIG <pubkey>` on a session that is already
-authenticated as you — and the web client is one of those. So:
+You prove it by adding the agent to your account, from your own device:
 
-1. `/freeq authorize` mints a signing key on this machine and prints one line:
+1. `/freeq authorize` prints this project's DID (each project is its own
+   agent, so each has its own DID).
+2. Add that DID as one of your agents: in the freeq web app, Settings →
+   Agents → + Add an agent; or from a terminal,
+   `freeq-bot-id register --owner <your handle> <did>`. Either writes one
+   record to your account saying the agent is yours; anyone can check it.
+3. `/freeq authorize verify` reconnects and waits for the server's verdict:
+   it reads your record and answers "verified".
+
+pi never sees a password and holds nothing of yours. Removing the agent under
+Settings → Agents ends the link within the hour.
+
+### On a server that doesn't read agent records yet: `--sign-cert`
+
+A server from before agent records never verifies an unsigned certificate.
+There, `/freeq authorize --sign-cert` does what `/freeq authorize` used to:
+
+1. It makes a creator key on this machine and prints one line:
    `/raw MSGSIG <public-key>`.
-2. Paste that line into the freeq web client (any channel). It is a public key;
-   nothing secret moves.
+2. Paste that line into the freeq web client (any channel), signed in as you.
+   It is a public key; nothing secret moves.
 3. `/freeq authorize verify` reconnects with the signed certificate and reports
-   the server's own verdict.
+   the server's verdict.
 
-pi never sees a password, never talks to your PDS, and never holds anything
-that could act as you — only the creator seed, which signs certificates.
+An installation with a creator key keeps signing its certificate with it, and
+that verifies on any server that knows the key. `--sign-cert` is removed once
+every server in use reads agent records.
 
 ## One connection per project
 

@@ -25,6 +25,23 @@ export async function loadConfig(): Promise<Config | null> {
   return parsed;
 }
 
+/** The config to save at launch, or null when it is unchanged: `nick` as
+ *  chosen, and the `--server` flag if given, else the stored server. The
+ *  server is saved so `status` and `doctor` ask the server the bot
+ *  connects to. */
+export function configToSave(
+  stored: Config | null,
+  nick: string,
+  server: string | undefined,
+): Config | null {
+  const serverUrl = server ?? stored?.serverUrl;
+  const next: Config = serverUrl === undefined ? { nick } : { nick, serverUrl };
+  if (stored && stored.nick === next.nick && stored.serverUrl === next.serverUrl) {
+    return null;
+  }
+  return next;
+}
+
 export async function saveConfig(cfg: Config): Promise<void> {
   await ensureDir();
   await writeFile(paths.config, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });

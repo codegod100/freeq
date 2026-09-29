@@ -18,6 +18,8 @@ use freeq_sdk::crypto::PrivateKey;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod register;
+
 #[derive(Parser)]
 #[command(
     name = "freeq-bot-id",
@@ -58,6 +60,22 @@ enum Command {
         /// Bot name
         #[arg(long)]
         name: String,
+    },
+
+    /// Record bots as the owner's own: signs in through the browser, then
+    /// writes one agent record per bot DID to the owner's account
+    Register {
+        /// The owner's handle
+        #[arg(long)]
+        owner: String,
+
+        /// The bots' DIDs
+        #[arg(required = true)]
+        bot_dids: Vec<String>,
+
+        /// A name for the bot, shown in your Agents list (one DID only)
+        #[arg(long)]
+        name: Option<String>,
     },
 
     /// Generate a did:key identity (quick one-liner, prints DID and key path)
@@ -126,6 +144,15 @@ fn main() -> Result<()> {
             output.as_ref(),
         ),
         Command::Info { name } => info(&name),
+        Command::Register {
+            owner,
+            bot_dids,
+            name,
+        } => tokio::runtime::Runtime::new()?.block_on(register::register(
+            &owner,
+            &bot_dids,
+            name.as_deref(),
+        )),
         Command::DidKey { name } => did_key(&name),
     }
 }
@@ -310,15 +337,7 @@ fn info(name: &str) -> Result<()> {
         println!("Creator: {creator}");
     }
 
-    if let Some(ref deleg) = identity.delegation {
-        if deleg.signature.is_some() {
-            println!("Delegation: ✅ signed by {}", deleg.creator_did);
-        } else {
-            println!("Delegation: ⚠  unsigned (creator claim unverified)");
-        }
-    } else {
-        println!("Delegation: none");
-    }
+    println!("{}", delegation_line(identity.delegation.as_ref()));
 
     let key_path = key_dir.join("key.ed25519");
     if key_path.exists() {
@@ -346,10 +365,50 @@ fn did_key(name: &str) -> Result<()> {
     create(name, None, None, None, None)
 }
 
+/// What `info` says about the bot's certificate. It reads only local files,
+/// so it says what the certificate is and how the owner proves it, and makes
+/// no claim about whether any server has verified it.
+fn delegation_line(delegation: Option<&BotDelegation>) -> String {
+    match delegation {
+        Some(d) if d.signature.is_some() => format!(
+            "Delegation: signed by {} (checked against keys the owner registered with the server)",
+            d.creator_did
+        ),
+        Some(_) => "Delegation: unsigned; the owner proves it by adding this bot under \
+                    Settings → Agents, or with freeq-bot-id register"
+            .to_string(),
+        None => "Delegation: none".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn info_describes_the_certificate_and_claims_no_verdict() {
+        let mut deleg = BotDelegation {
+            type_tag: "FreeqBotDelegation/v1".to_string(),
+            bot_did: "did:key:z6MkBot".to_string(),
+            bot_public_key: "z6MkBot".to_string(),
+            creator_did: "did:plc:owner".to_string(),
+            created_at: "2026-09-29T00:00:00Z".to_string(),
+            revocation_authority: "did:plc:owner".to_string(),
+            signature: None,
+        };
+        let unsigned = delegation_line(Some(&deleg));
+        assert!(unsigned.contains("Settings → Agents"), "{unsigned}");
+        assert!(!unsigned.contains("unverified"), "{unsigned}");
+        deleg.signature = Some("sig".to_string());
+        let signed = delegation_line(Some(&deleg));
+        assert!(
+            signed.starts_with("Delegation: signed by did:plc:owner"),
+            "{signed}"
+        );
+        assert!(!signed.contains('✅'), "{signed}");
+        assert_eq!(delegation_line(None), "Delegation: none");
+    }
 
     #[test]
     fn test_create_did_key() {

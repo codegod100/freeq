@@ -1,33 +1,20 @@
 /**
- * The owner's signing key — what makes "this agent acts for me" provable.
+ * Proving that this installation acts for its owner.
  *
- * A delegation certificate names an owner, but until the owner's key signs
- * it, that is a string the agent chose. The server stores such a cert as
- * `_verified: false, "Cert has no signature; declarative only"`, and every
- * downstream feature that trusts delegation (channel access for an owner's
- * agent, provenance badges, handoff authority) correctly refuses it.
+ * A delegation certificate names an owner, but on its own that is a string
+ * the agent chose. The server proves it by reading the owner's account for
+ * an `at.freeq.agentKey` record naming this installation's DID; the owner
+ * writes that record from their own device, in the web app's Settings →
+ * Agents or with `freeq-bot-id register`. Nothing of the owner's is kept on
+ * this machine. Until the record exists the server stores the certificate
+ * as unverified, and every feature that trusts delegation refuses it.
  *
- * This module gives the owner a persistent ed25519 key on this machine.
- * bot-kit signs the installation's certificate with it (`creatorKeyPath`),
- * and the server verifies that signature against a key registered under the
- * owner's DID.
- *
- * REGISTERING THE KEY — WHY THERE IS NO PASSWORD PROMPT. Putting a key on
- * file under your DID takes exactly one `MSGSIG <pubkey>` on a session that is
- * already authenticated as you. You have one of those open whenever the web
- * client is logged in, and it has a `/raw` command. So the ceremony is:
- *
- *     pi prints:   /raw MSGSIG <your-public-key>
- *     you paste it into the web client, in any channel
- *     pi reconnects, presents the signed cert, and the server says verified
- *
- * Nothing secret moves. The line you paste is a public key. pi never sees a
- * password, never talks to your PDS, and never holds anything that could act
- * as you — only the creator seed, which signs certificates and nothing else.
- *
- * The earlier design asked for an AT Protocol app password to do this
- * through `pds-session` SASL. That was a second credential to protect for a
- * one-time job, and it is gone.
+ * THE OLDER WAY. An installation can instead sign its certificate with a
+ * creator key kept here (`creatorKeyPath`), whose public half the owner
+ * registers with the server by sending `MSGSIG <pubkey>` from a session
+ * signed in as them. That still verifies, and an installation that already
+ * has such a key keeps signing with it; `/freeq authorize` no longer makes
+ * one. The key functions below stay for that, and for the helper scripts.
  */
 
 import { mkdir, readFile, writeFile, chmod, access } from "node:fs/promises";
@@ -87,8 +74,10 @@ export interface AuthorizeInstructions {
 }
 
 /**
- * Step one of the ceremony: make sure the key exists, and say what to paste
- * where. Pure and local — no network.
+ * `/freeq authorize --sign-cert`, the way for a server that does not read
+ * agent records yet: make sure the creator key exists, and say what to paste
+ * where. Pure and local — no network. Removed once every server in use reads
+ * agent records.
  */
 export async function authorizeInstructions(opts: {
   ownerDid: string;
@@ -113,11 +102,60 @@ export async function authorizeInstructions(opts: {
   };
 }
 
+export interface AgentInstructions {
+  ownerDid: string;
+  botDid: string;
+  /** What to tell the user. */
+  steps: string[];
+}
+
 /**
- * Has the server got a key on file for this owner that verifies our cert?
- * Answered by the server itself: after reconnecting, the PROVENANCE reply is
- * either "Provenance verified" or says why not. Callers pass in whatever
- * the connection layer observed.
+ * What `/freeq authorize` says: this installation's DID and the two places
+ * the owner can add it as one of their agents. Local only: nothing is made
+ * or sent.
+ */
+export async function agentInstructions(opts: {
+  ownerDid: string;
+  botDid: string;
+  root: string;
+}): Promise<AgentInstructions> {
+  const steps = [
+    `This installation's DID: ${opts.botDid}`,
+    "",
+    `To prove it acts for you, add it as one of your agents, signed in as ${opts.ownerDid}:`,
+    "  - in the freeq web app: Settings → Agents → + Add an agent, with the DID above; or",
+    `  - from a terminal: freeq-bot-id register --owner <your handle> ${opts.botDid}`,
+    "",
+    "Then run:  /freeq authorize verify",
+    "",
+    "On a server that doesn't read agent records yet, use /freeq authorize --sign-cert instead.",
+  ];
+  let legacy = false;
+  try {
+    await access(creatorKeyPath(opts.root, opts.ownerDid));
+    legacy = true;
+  } catch {
+    // No creator key: the record is the only way.
+  }
+  if (legacy) {
+    steps.push(
+      "",
+      "This installation also signs its certificate with an older creator key; that keeps working.",
+    );
+  }
+  return { ownerDid: opts.ownerDid, botDid: opts.botDid, steps };
+}
+
+/** What an unverified certificate means now: the owner's record is not there yet. */
+const WAITING_FOR_RECORD =
+  "Not verified yet: the server found no agent record naming this installation. Add its DID (shown by /freeq authorize) in the freeq web app under Settings → Agents, or with freeq-bot-id register, then run /freeq authorize verify again. On a server that doesn't read agent records yet, /freeq authorize --sign-cert is the way.";
+
+/**
+ * Read the server's verdict on this installation's certificate. After
+ * reconnecting, the PROVENANCE reply is "Provenance verified: …",
+ * "Provenance stored (unverified): …", or a rejection. An unverified reply
+ * comes first; a verified one can follow once the server has read the
+ * owner's records.
  */
 export function interpretProvenanceNotice(notice: string | undefined): {
   verified: boolean;
@@ -130,29 +168,31 @@ export function interpretProvenanceNotice(notice: string | undefined): {
         "No provenance reply seen yet. Reconnect and try again; if it persists, the cert may not have been re-sent.",
     };
   }
-  if (/Provenance verified/i.test(notice)) {
+  if (/^Provenance verified/i.test(notice)) {
     return { verified: true, message: "Delegation verified — this installation provably acts for you." };
   }
-  if (/No registered MSGSIG key/i.test(notice)) {
-    return {
-      verified: false,
-      message:
-        "The server has no signing key on file for your DID yet. Paste the /raw MSGSIG line into a client logged in as you, then run /freeq authorize verify again.",
-    };
-  }
-  if (/did not verify against/i.test(notice)) {
-    return {
-      verified: false,
-      message:
-        "A key is on file for your DID, but not this one. Paste the /raw MSGSIG line from /freeq authorize (it must be this machine's key), then verify again.",
-    };
-  }
-  if (/no signature/i.test(notice)) {
-    return {
-      verified: false,
-      message:
-        "The cert went out unsigned — the creator key was not found at connect time. Run /freeq authorize to create it, then verify again.",
-    };
+  if (/^Provenance stored \(unverified\)/i.test(notice)) {
+    return { verified: false, message: WAITING_FOR_RECORD };
   }
   return { verified: false, message: `Server said: ${notice}` };
+}
+
+/**
+ * Wait for the server's verdict: poll `read` (the latest PROVENANCE reply)
+ * until it says verified or rejected, or `timeoutMs` passes, and return the
+ * last reply seen. The unverified reply comes first and a verified one may
+ * follow, so it is not an answer on its own.
+ */
+export async function waitForProvenance(
+  read: () => string | undefined,
+  opts: { timeoutMs: number; pollMs: number },
+): Promise<string | undefined> {
+  const deadline = Date.now() + opts.timeoutMs;
+  let notice = read();
+  while (Date.now() < deadline) {
+    if (notice && /^Provenance (verified|rejected)/i.test(notice)) return notice;
+    await new Promise((r) => setTimeout(r, opts.pollMs));
+    notice = read();
+  }
+  return notice;
 }

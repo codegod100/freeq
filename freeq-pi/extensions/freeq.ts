@@ -34,7 +34,13 @@ import {
 import { deriveInstallSlug, defaultNick, isDid,
   resolveBotName,
 } from "../src/identity.js";
-import { authorizeInstructions, creatorKeyPath, interpretProvenanceNotice } from "../src/owner-key.js";
+import {
+  agentInstructions,
+  authorizeInstructions,
+  creatorKeyPath,
+  interpretProvenanceNotice,
+  waitForProvenance,
+} from "../src/owner-key.js";
 import { McpStdioClient } from "../src/mcp-stdio.js";
 import { addressedUtterances, parseListenResult, toBridgeCall, type AvParams } from "../src/av.js";
 import { parseVerbositySteer } from "../src/steer.js";
@@ -72,11 +78,12 @@ const FREEQ_ROOT = joinPath(homedir(), ".freeq");
 const BOTS_ROOT = joinPath(FREEQ_ROOT, "bots");
 
 /**
- * The owner's creator key, if `/freeq authorize` has been run. When present,
- * bot-kit signs the installation's delegation certificate with it and the
- * server verifies that signature — which is what turns "this agent claims to
- * be Chad's" into "this agent provably is". Absent, the cert ships unsigned
- * and every delegation-trusting feature correctly refuses it.
+ * The owner's creator key, if an older `/freeq authorize` made one. When
+ * present, bot-kit signs the installation's delegation certificate with it
+ * and the server can verify that signature against a key the owner
+ * registered. Absent, the cert ships unsigned and the server proves it from
+ * the owner's agent record naming this installation (Settings → Agents in
+ * the web app, or `freeq-bot-id register`).
  */
 async function existingCreatorKey(cfg: { ownerDid?: string }): Promise<string | undefined> {
   if (!cfg.ownerDid) return undefined;
@@ -2603,43 +2610,62 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "authorize": {
-          // Two-step, no password. Step one prints a public key to paste into
-          // a client already logged in as the owner; step two reconnects with
-          // the signed cert and reports the server's own verdict.
+          // The owner adds this installation's DID as one of their agents,
+          // from their own device; the server then proves the certificate
+          // from that record. Step two reconnects and reports its verdict.
           if (!cfg.ownerDid) {
             ctx.ui.notify("freeq: run /freeq login <did> first", "warning");
             return;
           }
           if (rest[0] === "verify") {
-            ctx.ui.notify("freeq: reconnecting with the signed delegation…", "info");
-            await conn?.stop("re-signing delegation");
+            ctx.ui.notify("freeq: reconnecting to ask the server…", "info");
+            await conn?.stop("re-presenting delegation");
             conn = undefined;
             await connect(ctx);
             // `conn` is reassigned inside connect(); TS narrowed it to
             // undefined from the line above, so read it through a fresh
             // binding.
             const live = (): FreeqConnection | undefined => conn as FreeqConnection | undefined;
-            // The PROVENANCE reply arrives shortly after 001. Give it a moment.
-            const deadline = Date.now() + 8_000;
-            let notice = live()?.provenanceNotice;
-            while (!notice && Date.now() < deadline) {
-              await new Promise((r) => setTimeout(r, 250));
-              notice = live()?.provenanceNotice;
-            }
+            // An unverified reply comes first; a verified one follows once
+            // the server has read the owner's records.
+            const notice = await waitForProvenance(() => live()?.provenanceNotice, {
+              timeoutMs: 20_000,
+              pollMs: 250,
+            });
             const verdict = interpretProvenanceNotice(notice);
             ctx.ui.notify(`freeq: ${verdict.message}`, verdict.verified ? "info" : "warning");
             return;
           }
-          const ins = await authorizeInstructions({ ownerDid: cfg.ownerDid, root: FREEQ_ROOT });
+          if (rest[0] === "--sign-cert") {
+            // For a server that does not read agent records yet: sign the
+            // certificate with a creator key the owner registers by MSGSIG.
+            const ins = await authorizeInstructions({ ownerDid: cfg.ownerDid, root: FREEQ_ROOT });
+            ctx.ui.notify(
+              [
+                "freeq authorize --sign-cert — sign this installation's delegation",
+                "",
+                ...ins.steps,
+                "",
+                "No password, no PDS login: the line above is a public key, and the",
+                "session you paste it into is already yours.",
+              ].join("\n"),
+              "info",
+            );
+            return;
+          }
+          // The DID is this project's identity, made on its first connect.
+          if (!conn?.did) await connect(ctx);
+          const botDid = (conn as FreeqConnection | undefined)?.did;
+          if (!botDid) {
+            ctx.ui.notify(
+              "freeq: not connected yet, so this installation has no DID to show. Run /freeq status.",
+              "warning",
+            );
+            return;
+          }
+          const ins = await agentInstructions({ ownerDid: cfg.ownerDid, botDid, root: FREEQ_ROOT });
           ctx.ui.notify(
-            [
-              "freeq authorize — sign this installation's delegation",
-              "",
-              ...ins.steps,
-              "",
-              "No password, no PDS login: the line above is a public key, and the",
-              "session you paste it into is already yours.",
-            ].join("\n"),
+            ["freeq authorize — add this installation as one of your agents", "", ...ins.steps].join("\n"),
             "info",
           );
           return;
@@ -2800,7 +2826,7 @@ export default function (pi: ExtensionAPI): void {
             const ok = conn?.join(channel);
             ctx.ui.notify(
               ok
-                ? `freeq: joined ${channel} (mode: ${modeFor(cfg, channel)})`
+                ? `freeq: joining ${channel} (mode: ${modeFor(cfg, channel)})`
                 : `freeq: saved ${channel}; will join when connected`,
               ok ? "info" : "warning",
             );

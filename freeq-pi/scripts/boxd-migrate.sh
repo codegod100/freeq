@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 #
 # Move a pi session onto a boxd.sh VM, with a freeq identity the VM owns and
-# the owner has signed for.
+# the owner has claimed as one of their agents.
 #
 # The interesting part is the identity, not the file copying. A cloud VM must
-# not hold the owner's delegation-signing key, and it must not hold a copy of
-# the laptop's agent key either — two machines answering to one DID is a
-# broken participant, not redundancy. So the VM mints its OWN did:key, we sign
-# its certificate here with the owner's creator key, and only the signed
-# certificate travels. That is what gets the agent into an +i channel the
-# owner is in: freeq admits an agent on a *verified* delegation
-# (freeq-server/src/connection/channel.rs), and an unsigned cert grants
-# nothing.
+# not hold anything of the owner's, and it must not hold a copy of the
+# laptop's agent key either — two machines answering to one DID is a broken
+# participant, not redundancy. So the VM mints its OWN did:key and presents
+# an unsigned certificate naming the owner, and the owner adds that DID as one
+# of their agents (the web app's Settings → Agents, or `freeq-bot-id
+# register`). The server proves the certificate from that record, which is
+# what gets the agent into an +i channel the owner is in: freeq admits an
+# agent on a *verified* delegation (freeq-server/src/connection/channel.rs).
 #
 #   ./scripts/boxd-migrate.sh --vm my-box --channel '#my-room'
+#
+# The older way, `--sign-cert`, signs the VM's certificate here with the
+# owner's creator key, whose public half the server must have on file
+# (MSGSIG). It keeps working for servers from before agent records.
 #
 # Idempotent: safe to re-run against an existing VM. Keys are loaded, not
 # regenerated; a cert that is already signed is left alone.
@@ -27,6 +31,7 @@ SESSION="${PI_SESSION_FILE:-}"
 REPO=""
 START=1
 DRY=0
+SIGN=0
 REMOTE_HOME="/home/boxd"
 
 usage() {
@@ -40,6 +45,8 @@ usage: boxd-migrate.sh [options]
                                                  "none" to start fresh)
   --repo DIR        repo to mirror on the VM    (default: git root of cwd)
   --no-start        provision only, do not launch pi
+  --sign-cert       the older way: sign the VM's certificate with your
+                    creator key here, registered with MSGSIG
   --dry-run         print what would happen
   -h, --help
 EOF
@@ -53,6 +60,7 @@ while [ $# -gt 0 ]; do
     --session) SESSION="$2"; shift 2;;
     --repo) REPO="$2"; shift 2;;
     --no-start) START=0; shift;;
+    --sign-cert) SIGN=1; shift;;
     --dry-run) DRY=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2;;
@@ -258,7 +266,7 @@ print("\n".join(lines))
 PY
 fi
 
-# ── 6. identity: minted on the VM, signed here ──────────────────────────────
+# ── 6. identity: minted on the VM, claimed by the owner ─────────────────────
 say "minting the VM's own did:key"
 MINT=$(vmexec "cd '$PKG_DIR' && node scripts/mint-identity.mjs --owner '$OWNER_DID' --project '$PROJECT'" | tr -d '\r' | grep '^{' | tail -1)
 BOT_DID=$(printf '%s' "$MINT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["did"])')
@@ -266,7 +274,29 @@ CERT_PATH=$(printf '%s' "$MINT" | python3 -c 'import json,sys;print(json.load(sy
 SIGNED=$(printf '%s' "$MINT" | python3 -c 'import json,sys;print(json.load(sys.stdin)["signed"])')
 say "VM agent is $BOT_DID"
 
-if [ "$SIGNED" != "True" ]; then
+if [ "$SIGN" = 0 ]; then
+  cat <<EOF
+
+  ┌─ one-time, and only you can do it ──────────────────────────────────────
+  │ Add the VM's agent as one of yours, signed in as $OWNER_DID:
+  │
+  │     in the freeq web app: Settings → Agents → + Add an agent
+  │       Agent DID: $BOT_DID
+  │     or from a terminal:
+  │       freeq-bot-id register --owner <your handle> $BOT_DID
+  │
+  │ It writes one record to your account saying the agent is yours; the
+  │ server reads it when the agent connects. Nothing goes to the VM.
+  │
+  │ On a server that doesn't read agent records yet, run this script again
+  │ with --sign-cert instead.
+  └──────────────────────────────────────────────────────────────────────────
+
+EOF
+  read -r -p "  press enter once you have added it (or ctrl-c to do it later) " _ || true
+fi
+
+if [ "$SIGN" = 1 ] && [ "$SIGNED" != "True" ]; then
   say "signing its delegation here (the creator seed stays on this machine)"
   TMP_CERT=$(mktemp)
   bx cp "$VM:$CERT_PATH" "$TMP_CERT" >/dev/null
@@ -276,7 +306,9 @@ if [ "$SIGNED" != "True" ]; then
   rm -f "$TMP_CERT"
 fi
 
-# The cert is only worth anything if the server knows the key that signed it.
+# The older way: the cert is only worth anything if the server knows the key
+# that signed it.
+if [ "$SIGN" = 1 ]; then
 PUB=$(node -e '
 import("'"$SCRIPT_DIR"'/../dist/owner-key.js").then(async (m) => {
   const seed = await m.loadOrCreateCreatorSeed(m.creatorKeyPath(process.env.HOME + "/.freeq", process.argv[1]));
@@ -302,6 +334,7 @@ if [ "$REGISTERED" != "$PUB" ]; then
 
 EOF
   read -r -p "  press enter once you have pasted it (or ctrl-c to do it later) " _ || true
+fi
 fi
 
 # ── 7. run it ───────────────────────────────────────────────────────────────

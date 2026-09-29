@@ -108,6 +108,14 @@ pub struct LiveAgentLink {
     pub record: serde_json::Value,
 }
 
+/// A live agent link and the uri of the record that makes it, as a proven
+/// listing named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvenAgentLink {
+    pub link: LiveAgentLink,
+    pub uri: String,
+}
+
 // ─── the signed bytes ───────────────────────────────────────────────────
 
 /// The bytes a record signs: its JCS (RFC 8785) canonical form with the
@@ -365,9 +373,33 @@ pub fn retirement_closure<T>(
         .collect()
 }
 
+/// The live links among `agents` (proven agent records with their uris, as
+/// the shared record read returns them), each named with its record's uri.
+/// Reads nothing: `devices` and `agents` come from the caller's reads.
+pub fn proven_agent_links(
+    did: &str,
+    devices: &[serde_json::Value],
+    agents: &[RecordEntry],
+    at: DateTime<Utc>,
+) -> Vec<ProvenAgentLink> {
+    let values: Vec<serde_json::Value> = agents.iter().map(|e| e.value.clone()).collect();
+    fold_agent_records(did, devices, &values, at)
+        .into_iter()
+        .filter_map(|link| {
+            let uri = agents.iter().find(|e| e.value == link.record)?.uri.clone();
+            Some(ProvenAgentLink { link, uri })
+        })
+        .collect()
+}
+
 /// The bots `did` claims at `at`, earliest first. A claim counts only if the
 /// owner key that signed it was itself live under the device fold when the
-/// claim was written.
+/// claim was written; so does a removal.
+///
+/// A removal ends every claim on that bot dated before it, and a claim dated
+/// after the latest removal starts a new link, so a removed bot can be added
+/// back. Each bot live at `at` is named once, by the earliest claim since its
+/// latest removal.
 pub fn fold_agent_records(
     did: &str,
     device_records: &[serde_json::Value],
@@ -376,63 +408,47 @@ pub fn fold_agent_records(
 ) -> Vec<LiveAgentLink> {
     let devices = device_state(did, device_records);
     let mut links: Vec<LinkCandidate> = Vec::new();
-    let mut retirements: Vec<(AgentKeyRecord, DateTime<Utc>, &serde_json::Value)> = Vec::new();
+    let mut removals: Vec<(String, DateTime<Utc>)> = Vec::new();
 
     for value in agent_records {
         let Some((record, created_at)) = parse_agent(value, did) else {
             continue;
         };
-        match (record.agent_did.as_deref(), record.revokes.as_deref()) {
-            (Some(agent_did), None) => {
-                let Some(public_key) = signer_live_at(&devices, &record.kid, created_at) else {
-                    continue;
-                };
-                if !verify_record_binding(value, public_key) {
-                    continue;
-                }
-                links.push(LinkCandidate {
-                    agent_did: agent_did.to_string(),
-                    kid: record.kid.clone(),
-                    created_at,
-                    retired_at: None,
-                    record: value.clone(),
-                });
-            }
-            (None, Some(_)) => retirements.push((record, created_at, value)),
-            _ => continue,
-        }
-    }
-
-    // One entry per bot: the earliest claim wins, so re-claiming a bot cannot
-    // move the date a retirement is measured against.
-    links.sort_by(|a, b| (&a.agent_did, a.created_at).cmp(&(&b.agent_did, b.created_at)));
-    links.dedup_by(|a, b| a.agent_did == b.agent_did);
-
-    retirements.sort_by(|a, b| (a.1, &a.0.binding_sig).cmp(&(b.1, &b.0.binding_sig)));
-    for (record, created_at, value) in retirements {
-        let revokes = record.revokes.as_deref().unwrap_or_default();
-        let Some(target) = links.iter().position(|l| l.agent_did == revokes) else {
-            continue;
-        };
-        if created_at <= links[target].created_at {
-            continue;
-        }
         let Some(public_key) = signer_live_at(&devices, &record.kid, created_at) else {
             continue;
         };
         if !verify_record_binding(value, public_key) {
             continue;
         }
-        let retired = &mut links[target].retired_at;
-        if retired.is_none_or(|r| r > created_at) {
-            *retired = Some(created_at);
+        match (record.agent_did, record.revokes) {
+            (Some(agent_did), None) => links.push(LinkCandidate {
+                agent_did,
+                kid: record.kid,
+                created_at,
+                retired_at: None,
+                record: value.clone(),
+            }),
+            (None, Some(revokes)) => removals.push((revokes, created_at)),
+            _ => continue,
         }
     }
 
+    // Each claim ends at the first removal of its bot dated after it.
+    for link in &mut links {
+        link.retired_at = removals
+            .iter()
+            .filter(|(bot, removed_at)| *bot == link.agent_did && *removed_at > link.created_at)
+            .map(|(_, removed_at)| *removed_at)
+            .min();
+    }
+
+    links.retain(|l| l.created_at <= at && l.retired_at.is_none_or(|r| r > at));
+    // One entry per bot: the earliest claim still live.
+    links.sort_by(|a, b| (&a.agent_did, a.created_at).cmp(&(&b.agent_did, b.created_at)));
+    links.dedup_by(|a, b| a.agent_did == b.agent_did);
     links.sort_by(|a, b| (a.created_at, &a.agent_did).cmp(&(b.created_at, &b.agent_did)));
     links
         .into_iter()
-        .filter(|l| l.created_at <= at && l.retired_at.is_none_or(|r| r > at))
         .map(|l| LiveAgentLink {
             agent_did: l.agent_did,
             kid: l.kid,
@@ -1697,6 +1713,9 @@ mod tests {
             value(&build_agent_record(&key(1), ALICE, &agent, T1, Some("helper")).unwrap());
         let link_t2 = value(&build_agent_record(&key(1), ALICE, &agent, T2, None).unwrap());
         let link_retirement = value(&build_agent_retirement(&key(1), ALICE, &agent, T2).unwrap());
+        let link_t3 = value(&build_agent_record(&key(1), ALICE, &agent, T3, None).unwrap());
+        let retirement_t3 = value(&build_agent_retirement(&key(1), ALICE, &agent, T3).unwrap());
+        let retirement_t4 = value(&build_agent_retirement(&key(1), ALICE, &agent, T4).unwrap());
 
         vec![
             FoldCase {
@@ -1743,7 +1762,7 @@ mod tests {
                 name: "agent-link-from-a-retired-key",
                 at: T3,
                 device_records: vec![k1_record.clone(), self_retirement],
-                agent_records: vec![link_t2],
+                agent_records: vec![link_t2.clone()],
                 live_device_kids: vec![],
                 live_agent_dids: vec![],
             },
@@ -1753,7 +1772,33 @@ mod tests {
                 name: "agent-link-retired",
                 at: T3,
                 device_records: vec![k1_lasting.clone()],
-                agent_records: vec![link_t1, link_retirement],
+                agent_records: vec![link_t1.clone(), link_retirement.clone()],
+                live_device_kids: vec![kid_of(1)],
+                live_agent_dids: vec![],
+            },
+            // A claim dated after the latest removal starts a new link.
+            FoldCase {
+                name: "agent-link-re-added-after-its-removal",
+                at: T4,
+                device_records: vec![k1_lasting.clone()],
+                agent_records: vec![link_t1.clone(), link_retirement.clone(), link_t3.clone()],
+                live_device_kids: vec![kid_of(1)],
+                live_agent_dids: vec![agent.clone()],
+            },
+            // A removal ends every claim dated before it, a second one too.
+            FoldCase {
+                name: "agent-link-re-added-before-its-removal",
+                at: T4,
+                device_records: vec![k1_lasting.clone()],
+                agent_records: vec![link_t1.clone(), link_t2.clone(), retirement_t3],
+                live_device_kids: vec![kid_of(1)],
+                live_agent_dids: vec![],
+            },
+            FoldCase {
+                name: "agent-link-re-added-and-removed-again",
+                at: T4,
+                device_records: vec![k1_lasting.clone()],
+                agent_records: vec![link_t1, link_retirement, link_t3, retirement_t4],
                 live_device_kids: vec![kid_of(1)],
                 live_agent_dids: vec![],
             },
@@ -1841,6 +1886,21 @@ mod tests {
     #[test]
     fn an_agent_retirement_ends_the_link() {
         run_fold_case("agent-link-retired");
+    }
+
+    #[test]
+    fn an_agent_added_back_after_its_removal_is_live() {
+        run_fold_case("agent-link-re-added-after-its-removal");
+    }
+
+    #[test]
+    fn a_removal_ends_every_claim_dated_before_it() {
+        run_fold_case("agent-link-re-added-before-its-removal");
+    }
+
+    #[test]
+    fn an_agent_added_back_and_removed_again_is_not_live() {
+        run_fold_case("agent-link-re-added-and-removed-again");
     }
 
     #[test]
@@ -1987,7 +2047,7 @@ mod tests {
 
     fn build_fixtures_json() -> serde_json::Value {
         json!({
-            "description": "Identity records a person publishes in their own AT Protocol repository. `at.freeq.deviceKey` announces a signing key a device holds, or retires one; `at.freeq.agentKey` announces a bot the account claims as its own, or retires that claim. `bindingSig` is an ed25519 signature, base64url without padding, over the UTF-8 bytes of the JCS (RFC 8785) canonical form of the record with its `bindingSig` field removed, and `signedBytes` is that canonical form. This is the recipe every freeq document signature uses: chat documents (freeq-sdk/src/chatsig.rs), task events (freeq-sdk/src/act.rs), the bot certificate (freeq-bot-id/src/main.rs, verified in freeq-server/src/connection/provenance.rs and minted in TypeScript by freeq-bot-kit-js/src/delegation.ts) and policy credentials (freeq-server/src/policy/credentials.rs). Absent fields are absent rather than null, so they are not in the canonical form, and `kid` is base64url-nopad(sha256(raw 32-byte ed25519 public key)[0..16]). `cid` is the record's CID as an AT Protocol repository names it: CID v1, dag-cbor codec, SHA-256 of the record's DAG-CBOR encoding. A device key record carries `expiresAt`, RFC 3339: the key is not live from that instant, nor from an earlier retirement that counts, and a retirement it signs at or after that instant does not count. A record without `expiresAt` expires 90 days after its `createdAt`; a record whose `expiresAt` is present but not an RFC 3339 string is dropped. A builder given no expiry writes `createdAt` plus 90 days with milliseconds and `Z`, as `2026-04-01T00:00:00.000Z`; a vector's top-level `expiresAt` is the value its record carries. Every implementation must rebuild each vector's `record`, `signedBytes`, `bindingSig` and `cid` from its `seed`, and must fold each case's records at its `at` into exactly `liveDeviceKids` and `liveAgentDids`.",
+            "description": "Identity records a person publishes in their own AT Protocol repository. `at.freeq.deviceKey` announces a signing key a device holds, or retires one; `at.freeq.agentKey` announces a bot the account claims as its own, or retires that claim. `bindingSig` is an ed25519 signature, base64url without padding, over the UTF-8 bytes of the JCS (RFC 8785) canonical form of the record with its `bindingSig` field removed, and `signedBytes` is that canonical form. This is the recipe every freeq document signature uses: chat documents (freeq-sdk/src/chatsig.rs), task events (freeq-sdk/src/act.rs), the bot certificate (freeq-bot-id/src/main.rs, verified in freeq-server/src/connection/provenance.rs and minted in TypeScript by freeq-bot-kit-js/src/delegation.ts) and policy credentials (freeq-server/src/policy/credentials.rs). Absent fields are absent rather than null, so they are not in the canonical form, and `kid` is base64url-nopad(sha256(raw 32-byte ed25519 public key)[0..16]). `cid` is the record's CID as an AT Protocol repository names it: CID v1, dag-cbor codec, SHA-256 of the record's DAG-CBOR encoding. A device key record carries `expiresAt`, RFC 3339: the key is not live from that instant, nor from an earlier retirement that counts, and a retirement it signs at or after that instant does not count. A record without `expiresAt` expires 90 days after its `createdAt`; a record whose `expiresAt` is present but not an RFC 3339 string is dropped. A builder given no expiry writes `createdAt` plus 90 days with milliseconds and `Z`, as `2026-04-01T00:00:00.000Z`; a vector's top-level `expiresAt` is the value its record carries. An agent claim or removal counts only if the device key that signed it was live at its `createdAt`; a removal ends every claim on that bot dated before it, and a claim dated after the bot's latest removal starts a new link. Every implementation must rebuild each vector's `record`, `signedBytes`, `bindingSig` and `cid` from its `seed`, and must fold each case's records at its `at` into exactly `liveDeviceKids` and `liveAgentDids`.",
             "vectors": vectors(),
             "folds": folds(),
         })
@@ -2016,15 +2076,21 @@ mod tests {
         const URI: &str = "at://did:plc:k2n3e2vsihf3farequ44t5j7/at.freeq.deviceKey/3l";
         let seen: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
         let captured = seen.clone();
+        let headers: Arc<Mutex<Option<axum::http::HeaderMap>>> = Arc::new(Mutex::new(None));
+        let captured_headers = headers.clone();
         let router = axum::Router::new().route(
             "/xrpc/com.atproto.repo.createRecord",
-            post(move |Json(body): Json<serde_json::Value>| {
-                let captured = captured.clone();
-                async move {
-                    *captured.lock().unwrap() = Some(body);
-                    Json(json!({ "uri": URI }))
-                }
-            }),
+            post(
+                move |sent: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let captured = captured.clone();
+                    let captured_headers = captured_headers.clone();
+                    async move {
+                        *captured.lock().unwrap() = Some(body);
+                        *captured_headers.lock().unwrap() = Some(sent);
+                        Json(json!({ "uri": URI }))
+                    }
+                },
+            ),
         );
         let base = spawn_stub(router).await;
         let record = value(&build_device_record(&key(1), ALICE, T0, Some("laptop")).unwrap());
@@ -2034,6 +2100,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(uri, URI);
+        // Sent with the session's DPoP-bound token and a proof for this call.
+        let sent = headers
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the stub was called");
+        assert_eq!(sent["authorization"], "DPoP tok");
+        let proof = sent["dpop"].to_str().unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(
+            &base64::Engine::decode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                proof.split('.').nth(1).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["htm"], "POST");
+        assert_eq!(
+            claims["htu"],
+            format!("{base}/xrpc/com.atproto.repo.createRecord")
+        );
         let body = seen.lock().unwrap().clone().expect("the stub was called");
         assert_eq!(body["repo"], ALICE);
         // The collection is the record's own `$type`, never a caller's claim.
@@ -2092,7 +2179,7 @@ mod tests {
         let spec: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(fixtures_path()).unwrap()).unwrap();
         let cases = spec["folds"].as_array().unwrap();
-        assert_eq!(cases.len(), 11);
+        assert_eq!(cases.len(), 14);
         for case in cases {
             let name = case["name"].as_str().unwrap();
             let device = case["deviceRecords"].as_array().unwrap();

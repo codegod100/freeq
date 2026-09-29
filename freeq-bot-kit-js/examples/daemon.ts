@@ -17,9 +17,14 @@
 
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { createDaemonCLI, FreeqBot } from "../src/index.js";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createDaemonCLI, FreeqBot, serverApiOrigin } from "../src/index.js";
 
 const DIR = join(homedir(), ".freeq", "bots", "daemon-example");
+const DEFAULT_SERVER = "wss://irc.freeq.at/irc";
+// The server `launch` connected to, for `status` and `doctor`, which run in
+// their own process without the launch flags.
+const SERVER_FILE = join(DIR, "server-url");
 
 interface DaemonOpts {
   ownerDid: string;
@@ -55,10 +60,13 @@ const program = createDaemonCLI<DaemonOpts>({
       );
       process.exit(1);
     }
+    const url = p.server ?? DEFAULT_SERVER;
+    await mkdir(DIR, { recursive: true, mode: 0o700 });
+    await writeFile(SERVER_FILE, url + "\n");
     return {
       ownerDid: p.owner!,
       nick: p.nick ?? "daemon-example",
-      url: p.server ?? "wss://irc.freeq.at/irc",
+      url,
       channel: p.channel ?? "#test",
     };
   },
@@ -86,9 +94,12 @@ const program = createDaemonCLI<DaemonOpts>({
     console.log(`[daemon-example] up as ${bot.client.nick} (${bot.identity.did})`);
     return { stop: (reason) => bot.stop(reason) };
   },
-  // Enables the built-in provenance check in `status` + `doctor`.
-  actorStatusUrl: (did) =>
-    `https://irc.freeq.at/api/v1/actors/${encodeURIComponent(did)}`,
+  // Enables the built-in provenance check in `status` + `doctor`, asked of
+  // the server the bot connects to.
+  actorStatusUrl: async (did) => {
+    const url = (await readFile(SERVER_FILE, "utf8").catch(() => DEFAULT_SERVER)).trim();
+    return `${serverApiOrigin(url)}/api/v1/actors/${encodeURIComponent(did)}`;
+  },
   // Caller-added checks run after the built-ins (identity, delegation,
   // server actor record).
   doctorChecks: [

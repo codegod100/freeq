@@ -78,12 +78,13 @@ Around it, the identity rails are real:
 - **Who the human is.** Accounts are AT Protocol DIDs. You authenticate by signing a
   server challenge with the key in your DID document, so the server holds no password
   and didn't issue your identity.
-- **Who the agent is.** An agent has its own keypair, and its creator signs a
-  `FreeqBotDelegation/v1` certificate over the agent's DID and public key. Four
-  rejection paths are tested: tampered signature, DID mismatch, missing signature,
-  creator never registered. That proves one thing precisely, namely that this key was
-  authorised by that key, and nothing about who holds the key now or what software
-  is running.
+- **Who the agent is.** An agent has its own keypair and presents a
+  `FreeqBotDelegation/v1` certificate naming the human it acts for. The human proves
+  it with a record in their own account naming the agent's DID, written from their
+  own device; the server reads that record when the agent connects, and removing
+  it ends the link. That proves one thing precisely, namely that this account
+  claims this agent, and nothing about who holds the agent's key now or what
+  software is running.
 - **What was said.** Every client registers an ed25519 key with `MSGSIG` and signs
   each message. The server verifies and relays the signature unchanged rather than
   re-signing, and keys are stored append-only by `(did, kid)` so a signature stays
@@ -201,7 +202,7 @@ sponsored task into a durable obligation.
 
 | | Status |
 |---|---|
-| Identity rails: DID auth, creator-to-agent certificate, per-message signatures, keys kept by `(did, kid)` | Working |
+| Identity rails: DID auth, agent ownership proven by the owner's account record, per-message signatures, keys kept by `(did, kid)` | Working |
 | Metered model path, credential held server-side | Working |
 | Budget refuses before any upstream call | Working, verified by hit count |
 | Cost from the provider's token counts | Working |

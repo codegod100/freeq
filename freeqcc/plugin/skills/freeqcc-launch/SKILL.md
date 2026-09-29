@@ -24,9 +24,7 @@ The `freeqcc` CLI runs the agent. Your job here:
    state and report:
    - the bot's IRC nick + did:key DID
    - the owner DID we'll only respond to
-   - provenance verified status (expected: `verified=false`,
-     reason "Cert has no signature; declarative only" — that's
-     intentional in v1.0)
+   - provenance verified status: `verified=false` until the owner adds the bot's DID under Settings → Agents in the freeq web app, or with `freeq-bot-id register`, and then restarts the bot (`freeqcc stop`, then `freeqcc launch`)
 
 3. Tell the user how to DM it: from any freeq-connected client
    signed in as the owner handle, send a Bluesky DM to the bot's

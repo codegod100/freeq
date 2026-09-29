@@ -85,13 +85,15 @@ The JSON contains:
 | Field | Purpose |
 |---|---|
 | `origin_type` | `external_import`, `template`, or `delegated_spawn` |
-| `creator_did` | DID of the human or agent that created this agent |
+| `creator_did` | DID of the person who owns this agent. An agent that needs helpers spawns them (see [Spawning Sub-Agents](#spawning-sub-agents)) rather than owning other agents |
 | `implementation_ref` | Source repo, commit hash, image digest |
 | `source_repo` | Public URL to the agent's code |
 | `authority_basis` | Why this agent is trusted ("Operated by server admin") |
 | `revocation_authority` | DID that can revoke this agent |
 
 Provenance is stored server-side and returned in WHOIS, the REST API (`GET /api/v1/actors/{did}`), and the web client's identity card popover.
+
+A declaration like this is free-form: the server stores it and never checks it, so the identity card shows no creator for it. To show one, send a `FreeqBotDelegation/v1` certificate instead, with `"type": "FreeqBotDelegation/v1"`, the agent's DID as `bot_did`, and the owner's DID as `creator_did` (`@freeq/bot-kit` and `@freeq/mcp` send one for you). The owner then adds the agent's DID under Settings → Agents in the freeq web app, or runs `freeq-bot-id register --owner <their-handle> <agent-did>`, and the agent is restarted. The server answers an unsigned certificate with a NOTICE `Provenance stored (unverified): …` first, always; once it has read the owner's records, and if they name the agent, `Provenance verified: …` follows a moment later, so wait a few seconds before taking the first as final. Until it is verified, readers do not see an owner.
 
 ### Presence and Heartbeat
 
@@ -512,6 +514,22 @@ At this point, anyone in the channel sees:
 - A 🤖 badge next to "newsroom" in the member list
 - An identity card (click the nick) showing provenance, presence state, and heartbeat status
 - If the agent crashes, it degrades to "offline" within 60 seconds automatically
+
+The card shows no creator: this declaration is free-form, and the server never checks the `creator_did` in it. To show you as the agent's owner, submit a `FreeqBotDelegation/v1` certificate in step 2 instead:
+
+```rust
+    let provenance = serde_json::json!({
+        "type": "FreeqBotDelegation/v1",
+        "bot_did": did,
+        "bot_public_key": did.strip_prefix("did:key:").unwrap_or(did),
+        "creator_did": "did:plc:your-did-here",
+        "created_at": "2026-09-28T00:00:00Z",
+        "revocation_authority": "did:plc:your-did-here",
+    });
+    handle.submit_provenance(&provenance).await?;
+```
+
+Then add the agent's DID under Settings → Agents in the freeq web app, or run `freeq-bot-id register --owner <your-handle> <agent-did>`, and restart the agent. The server replies `Provenance stored (unverified): …` first and, a moment later, once it has read your records, `Provenance verified: …`; the card then shows you as its creator.
 
 ### The Event Loop: Responding to Commands and Governance
 

@@ -1704,6 +1704,65 @@ async fn enroll_allows_a_legacy_session_whose_refresh_names_no_scope() {
     assert_eq!(cap.lock().unwrap().calls.len(), 1);
 }
 
+#[tokio::test]
+async fn enroll_writes_an_agent_record_and_its_removal() {
+    use freeq_sdk::identity_records::{build_agent_record, build_agent_retirement};
+    let (base, cap) = enroll_setup(Some(ENROLL_SCOPE)).await;
+    let key = device_key(1);
+    let bot = format!("did:key:{}", device_key(9).public_key_multibase());
+    let claim = build_agent_record(
+        &key,
+        "did:plc:alice123",
+        &bot,
+        "2026-09-11T00:00:00Z",
+        Some("helper"),
+    )
+    .unwrap();
+    // A removal takes effect from its date, so it is dated now.
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let removal = build_agent_retirement(&key, "did:plc:alice123", &bot, &now).unwrap();
+
+    for record_text in [
+        serde_json::to_string(&claim).unwrap(),
+        serde_json::to_string(&removal).unwrap(),
+    ] {
+        let resp = enroll_call(&base, &record_text, &key).await;
+        assert_eq!(resp.status(), 200, "{record_text}");
+        let (method, body) = cap.lock().unwrap().calls.last().cloned().unwrap();
+        assert_eq!(method, "com.atproto.repo.createRecord");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["collection"], "at.freeq.agentKey");
+        assert!(
+            body.contains(&format!(r#""record":{record_text}"#)),
+            "the record was not forwarded byte for byte: {body}"
+        );
+    }
+    assert_eq!(cap.lock().unwrap().calls.len(), 2);
+}
+
+#[tokio::test]
+async fn enroll_refuses_an_agent_record_without_the_agent_grant() {
+    use freeq_sdk::identity_records::build_agent_record;
+    // Granted the device collection only.
+    let (base, cap) = enroll_setup(Some("atproto repo:at.freeq.deviceKey?action=create")).await;
+    let key = device_key(1);
+    let bot = format!("did:key:{}", device_key(9).public_key_multibase());
+    let claim =
+        build_agent_record(&key, "did:plc:alice123", &bot, "2026-09-11T00:00:00Z", None).unwrap();
+
+    let resp = enroll_call(&base, &serde_json::to_string(&claim).unwrap(), &key).await;
+    assert_eq!(resp.status(), 403);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json, serde_json::json!({ "error": "insufficient_scope" }));
+    assert!(cap.lock().unwrap().calls.is_empty());
+
+    // The same session may still write a device record.
+    let device =
+        build_device_record(&key, "did:plc:alice123", "2026-09-11T00:00:00Z", None).unwrap();
+    let resp = enroll_call(&base, &serde_json::to_string(&device).unwrap(), &key).await;
+    assert_eq!(resp.status(), 200);
+}
+
 // ═══ SessionStore::delete ═══════════════════════════════════════════════
 
 /// One record, so a store test has something to delete.

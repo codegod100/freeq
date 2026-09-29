@@ -290,8 +290,9 @@ bot.say(CHAN, f"   📦 Source: https://github.com/freeq-irc/freeq")
 bot.say(CHAN, f"   🔧 Code: demo-phase1.py")
 bot.say(CHAN, f"   ⚖️  Revocation authority: chadfowler.com")
 bot.say(CHAN, "")
-bot.say(CHAN, "Anyone can verify this. Try clicking my name in the member list —")
-bot.say(CHAN, "you should see an identity card with this provenance info.")
+bot.say(CHAN, "Anyone can read this. Try clicking my name in the member list —")
+bot.say(CHAN, "you should see an identity card with this provenance info. It is my claim,")
+bot.say(CHAN, "not verified by the server, so the card shows no creator.")
 
 if not bot.wait_for_continue():
     sys.exit(1)

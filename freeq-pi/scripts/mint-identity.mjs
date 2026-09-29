@@ -3,13 +3,15 @@
  * Mint this installation's freeq identity WITHOUT connecting.
  *
  * `FreeqBot.create()` normally does this on first connect, which is fine on a
- * laptop but wrong when provisioning a machine: the cert has to be signed by
- * the owner's creator key, that key must never leave the owner's machine, and
- * the agent must not connect with an unsigned cert first (an unsigned cert
- * grants nothing — no +i channel, no provenance badge).
+ * laptop. When provisioning a machine, mint first so the owner can claim the
+ * DID before the agent connects: the owner adds it as one of their agents,
+ * in the freeq web app's Settings → Agents or with
+ * `freeq-bot-id register --owner <handle> <did>`, and the server proves the
+ * unsigned certificate from that record. Nothing of the owner's comes here.
  *
- * So: mint here, print the did:key, let the owner sign the cert elsewhere
- * (`sign-delegation.mjs`), drop the signed cert back in place, then connect.
+ * The older way: let the owner sign the cert elsewhere
+ * (`sign-delegation.mjs`) and drop the signed cert back in place before
+ * connecting.
  *
  * Run it ON the machine being provisioned, from the freeq-pi package dir:
  *

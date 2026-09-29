@@ -1,4 +1,8 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { FreeqBot } from "@freeq/bot-kit";
 import { FreeqConnection, type BotLike, type ConnectionOptions } from "./connection.js";
 import { PI_HELLO, PI_HELLO_ACK, buildHello, helloTags } from "./discovery.js";
 import { PI_ASK, PI_ASK_REPLY, encodePayload } from "./ask.js";
@@ -18,6 +22,7 @@ class FakeBot implements BotLike {
   startCalls = 0;
   nick: string | null = "pi-test";
   pubkey: string | null = "fake-pubkey";
+  provenance: { verified: boolean; reason: string; text: string } | null = null;
   mentionResult: { kind: string; stripped?: string } = { kind: "ignore" };
   senderDid: string | null = "did:key:zSender";
   failStart = false;
@@ -621,5 +626,137 @@ describe("channels this session means to be in", () => {
     conn.leave("#work");
     bot.emit("channelJoined", "#work");
     expect(bot.sent.some((m) => m.kind === "raw" && String(m.payload).startsWith("PART #work"))).toBe(true);
+  });
+});
+
+describe("the server's provenance verdict", () => {
+  // Through a real bot-kit bot over a mock socket: bot-kit reads the
+  // server's NOTICE and decides it came from the server, not a user.
+  class MockWebSocket {
+    static instances: MockWebSocket[] = [];
+    readyState = 0;
+    bufferedAmount = 0;
+    sent: string[] = [];
+    onopen: ((ev: unknown) => void) | null = null;
+    onmessage: ((ev: { data: string }) => void) | null = null;
+    onclose: ((ev: unknown) => void) | null = null;
+    onerror: ((ev: unknown) => void) | null = null;
+    constructor(readonly url: string) {
+      MockWebSocket.instances.push(this);
+      queueMicrotask(() => {
+        this.readyState = 1;
+        this.onopen?.({});
+      });
+    }
+    send(data: string): void {
+      if (this.readyState === 1) this.sent.push(data);
+    }
+    close(): void {
+      this.readyState = 3;
+      this.onclose?.({});
+    }
+    recv(line: string): void {
+      this.onmessage?.({ data: line + "\r\n" });
+    }
+  }
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+  };
+
+  let root: string;
+  let realWebSocket: unknown;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "freeq-pi-provenance-"));
+    MockWebSocket.instances = [];
+    realWebSocket = globalThis.WebSocket;
+    (globalThis as { WebSocket: unknown }).WebSocket = MockWebSocket;
+  });
+  afterEach(async () => {
+    (globalThis as { WebSocket: unknown }).WebSocket = realWebSocket;
+    await rm(root, { recursive: true, force: true });
+  });
+
+  async function online(
+    notices: string[] = [],
+  ): Promise<{ conn: FreeqConnection; ws: MockWebSocket }> {
+    const conn = new FreeqConnection({
+      onNotice: (text) => notices.push(text),
+      ownerDid: "did:plc:owner",
+      server: "ws://test/irc",
+      slug: "test1234",
+      nick: "pi-test",
+      root,
+      meta: { project: "freeq", branch: "main" },
+      botFactory: (o) =>
+        FreeqBot.create({ ...o, autoMsgSig: false }) as unknown as Promise<BotLike>,
+    });
+    const starting = conn.start();
+    // Wait for the socket however long the bot takes to start; the test's
+    // own timeout bounds it, not a count of ticks that a busy machine can
+    // outrun.
+    while (MockWebSocket.instances.length === 0) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const ws = MockWebSocket.instances[0]!;
+    await flush();
+    ws.recv(":irc.test CAP * LS :");
+    await flush();
+    ws.recv(":irc.test 001 pi-test :Welcome");
+    await flush();
+    ws.recv(":irc.test 376 pi-test :End of MOTD");
+    await starting;
+    return { conn, ws };
+  }
+
+  const STORED = "Provenance stored (unverified): Unsigned certificate: unverified until the owner adds this bot";
+  const VERIFIED =
+    "Provenance verified: Owner's agent record at://did:plc:owner/at.freeq.agentKey/3k names this bot";
+
+  it("takes the notice from bot-kit's verdict, not its own reading of the line", async () => {
+    const { conn, bot } = mk();
+    await conn.start();
+    expect(conn.provenanceNotice).toBeUndefined();
+    bot.provenance = { verified: true, reason: "r", text: "Provenance verified: r" };
+    expect(conn.provenanceNotice).toBe("Provenance verified: r");
+  });
+
+  it("keeps the server's latest Provenance NOTICE, as bot-kit reads it", async () => {
+    const { conn, ws } = await online();
+    ws.recv(`:irc.test NOTICE pi-test :${STORED}`);
+    await flush();
+    expect(conn.provenanceNotice).toBe(STORED);
+    ws.recv(`:irc.test NOTICE pi-test :${VERIFIED}`);
+    await flush();
+    expect(conn.provenanceNotice).toBe(VERIFIED);
+    await conn.stop("done");
+  });
+
+  it("shows the verdict as a freeq notice, and bot-kit writes nothing on pi's screen", async () => {
+    const written: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    });
+    try {
+      const notices: string[] = [];
+      const { conn, ws } = await online(notices);
+      ws.recv(`:irc.test NOTICE pi-test :${VERIFIED}`);
+      await flush();
+      expect(notices).toContain(
+        "freeq: provenance verified: Owner's agent record at://did:plc:owner/at.freeq.agentKey/3k names this bot",
+      );
+      expect(written.filter((l) => /provenance (un)?verified/.test(l))).toEqual([]);
+      await conn.stop("done");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("ignores the same text sent by a user", async () => {
+    const { conn, ws } = await online();
+    ws.recv(`:mallory!m@host NOTICE pi-test :${VERIFIED}`);
+    await flush();
+    expect(conn.provenanceNotice).toBeUndefined();
+    await conn.stop("done");
   });
 });

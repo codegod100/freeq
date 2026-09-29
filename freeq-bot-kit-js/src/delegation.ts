@@ -1,16 +1,23 @@
-// FreeqBotDelegation/v1 cert.
+// FreeqBotDelegation/v1 cert. The server (connection/provenance.rs) proves
+// it one of two ways.
 //
-// Signed when the creator's ed25519 key is available (`creatorKeyPath`, a
-// 32-byte seed file — the same format `freeq-bot-id --creator-key` reads):
-// the cert is JCS-canonicalized (RFC 8785) with the `signature` field
-// omitted and ed25519-signed, exactly mirroring freeq-bot-id/src/main.rs.
-// The server (connection/provenance.rs) verifies against the creator's
-// registered MSGSIG public key, so the creator must have registered that
-// key's public half via MSGSIG for the cert to show `_verified: true`.
+// Unsigned (no `creatorKeyPath`, signature: null): the owner's agent record
+// proves it. The owner adds the bot's DID in the freeq web app under
+// Settings → Agents, or with `freeq-bot-id register --owner <handle>
+// <bot-did>`, which publishes an at.freeq.agentKey record on their account.
+// On each PROVENANCE the server first answers "Provenance stored
+// (unverified): …", reads the owner's records, and if a live record names
+// the bot, marks the cert verified and sends "Provenance verified: …". A bot
+// whose record is added later is verified when it next connects, so it is
+// restarted after adding it. No key of the owner's is kept with the bot.
 //
-// Without a creator key the cert ships unsigned (signature: null) — the
-// server stores it as _verified: false with reason "Cert has no signature;
-// declarative only".
+// Signed (the older way, which keeps working): with the creator's ed25519
+// key (`creatorKeyPath`, a 32-byte seed file — the same format
+// `freeq-bot-id --creator-key` reads) the cert is JCS-canonicalized
+// (RFC 8785) with the `signature` field omitted and ed25519-signed, exactly
+// mirroring freeq-bot-id/src/main.rs. The server verifies it against the
+// creator's registered MSGSIG public keys, so the creator must have
+// registered that key's public half via MSGSIG.
 
 import { importDidKey } from "@freeq/sdk";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
@@ -33,7 +40,7 @@ export interface DelegationCert {
    * Base64url ed25519 signature over the JCS-canonical form of the cert with
    * this field omitted. Signed by the creator's key when one is provided
    * (see `signDelegation` / `creatorKeyPath`); null otherwise, in which
-   * case the server treats the cert as declarative metadata.
+   * case the server proves the cert from the owner's agent record.
    */
   signature: string | null;
 }

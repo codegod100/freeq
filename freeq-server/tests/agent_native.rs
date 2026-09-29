@@ -622,10 +622,18 @@ async fn provenance_freeq_bot_delegation_unsigned() {
         "unsigned cert stored unverified",
     )
     .await;
-    assert!(
-        line.contains("no signature") || line.contains("declarative"),
-        "expected unsigned reason, got: {line}"
-    );
+    // The reason names the fix: the owner adds this bot, then restarts it.
+    for fix in [
+        bot_did.as_str(),
+        "Settings → Agents",
+        "freeq-bot-id register",
+        "restart",
+    ] {
+        assert!(
+            line.contains(fix),
+            "expected {fix:?} in the reason, got: {line}"
+        );
+    }
 
     handle.quit(None).await.unwrap();
     server_handle.abort();

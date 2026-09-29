@@ -309,11 +309,7 @@ pub async fn login(handle: &str, scope: &str) -> Result<OAuthSession> {
     // the freeq-server's `Login` purpose; a caller that needs to write to the
     // account — publishing a device key — asks for the repo scope it needs,
     // and the consent screen names it.
-    let client_id = format!(
-        "http://localhost?redirect_uri={}&scope={}",
-        urlencod(&redirect_uri),
-        urlencod(scope),
-    );
+    let client_id = loopback_client_id(&redirect_uri, scope);
 
     // 4. Generate PKCE and DPoP key
     let (code_verifier, code_challenge) = generate_pkce();
@@ -376,6 +372,17 @@ pub async fn login(handle: &str, scope: &str) -> Result<OAuthSession> {
         dpop_nonce,
         scope: scope.to_string(),
     })
+}
+
+/// The loopback client id: `http://localhost` with query parameters naming
+/// the redirect uri and the scope, from which the authorization server
+/// infers the client's metadata.
+fn loopback_client_id(redirect_uri: &str, scope: &str) -> String {
+    format!(
+        "http://localhost?redirect_uri={}&scope={}",
+        urlencod(redirect_uri),
+        urlencod(scope),
+    )
 }
 
 /// Verify that the DID asserted by the token response (`sub`), when present,
@@ -1450,6 +1457,61 @@ mod tests {
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
+
+    #[test]
+    fn the_loopback_client_id_carries_the_scope_asked_for() {
+        let id = loopback_client_id("http://127.0.0.1:4000/callback", freeq_oauth::ENROLL_SCOPE);
+        assert_eq!(
+            id,
+            format!(
+                "http://localhost?redirect_uri={}&scope={}",
+                urlencod("http://127.0.0.1:4000/callback"),
+                urlencod(freeq_oauth::ENROLL_SCOPE),
+            )
+        );
+        assert!(
+            id.contains("repo%3Aat.freeq.agentKey%3Faction%3Dcreate"),
+            "{id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_par_carries_the_scope_and_the_client_id_asked_for() {
+        let seen: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let captured = seen.clone();
+        let router = Router::new().route(
+            "/par",
+            post(move |Form(form): Form<Vec<(String, String)>>| {
+                *captured.lock().unwrap() = form;
+                async {
+                    axum::Json(serde_json::json!({ "request_uri": "urn:par:1", "expires_in": 60 }))
+                }
+            }),
+        );
+        let base = spawn_app(router).await;
+        let redirect = "http://127.0.0.1:4000/callback";
+        let client_id = loopback_client_id(redirect, freeq_oauth::ENROLL_SCOPE);
+
+        let url = push_authorization_request(
+            &format!("{base}/par"),
+            "https://auth.example/authorize",
+            &client_id,
+            redirect,
+            "challenge",
+            "state",
+            "alice.test",
+            freeq_oauth::ENROLL_SCOPE,
+            &DpopKey::generate(),
+        )
+        .await
+        .unwrap();
+
+        let form = seen.lock().unwrap().clone();
+        let field = |name: &str| form.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone());
+        assert_eq!(field("scope").as_deref(), Some(freeq_oauth::ENROLL_SCOPE));
+        assert_eq!(field("client_id"), Some(client_id.clone()));
+        assert!(url.contains(&urlencod(&client_id)), "{url}");
+    }
 
     #[test]
     fn urlencod_passes_unreserved_and_escapes_the_rest() {

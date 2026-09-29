@@ -9,6 +9,10 @@ import {
   FreeqClient,
   IndexedDbDeviceKeyStore,
   KeyLookup,
+  agentLinkHistory,
+  buildAgentRecord,
+  buildAgentRetirement,
+  buildDeviceRecord,
   buildDeviceRetirement,
   decodeMultibaseEd25519,
   deviceKeyHistory,
@@ -372,6 +376,144 @@ export async function signOutDevice(kid: string): Promise<SignOutOutcome> {
   };
 }
 
+// ── The Agents list ────────────────────────────────────────────────────
+
+/** One row of the Agents list: a bot the account says is its own. */
+export interface AgentRow {
+  agentDid: string;
+  /** The claim's label, or the DID shortened. */
+  name: string;
+  state: 'active' | 'removed';
+  /** Active: when the claim was written. Removed: when it was removed. */
+  date: string;
+}
+
+/** A DID as the Agents list writes it: its first 16 characters, an
+ *  ellipsis, and its last 6. */
+export function shortDid(did: string): string {
+  return did.length <= 22 ? did : `${did.slice(0, 16)}\u2026${did.slice(-6)}`;
+}
+
+/**
+ * The rows for `did`'s agent records, newest first: one per bot. A live bot
+ * is named and dated by its earliest claim since its latest removal, as the
+ * fold names a live link. A bot with no live claim is listed from the claim
+ * its latest removal ended, for 24 hours after that removal, and only the
+ * five most recently removed, as a signed-out device is. The fold decides
+ * which claims and removals count.
+ */
+export async function agentRowsFrom(
+  did: string,
+  deviceRecords: unknown[],
+  agentRecords: unknown[],
+): Promise<AgentRow[]> {
+  type Link = Awaited<ReturnType<typeof agentLinkHistory>>[number];
+  const now = Date.now();
+  const byBot = new Map<string, Link[]>();
+  // Earliest first.
+  for (const link of await agentLinkHistory(did, deviceRecords, agentRecords)) {
+    if (link.createdAt.getTime() > now) continue;
+    byBot.set(link.agentDid, [...(byBot.get(link.agentDid) ?? []), link]);
+  }
+  const ended = (link: Link) => link.removedAt !== null && link.removedAt.getTime() <= now;
+  const shown: { row: AgentRow; since: number }[] = [];
+  const removed: { row: AgentRow; since: number }[] = [];
+  for (const links of byBot.values()) {
+    const live = links.find((l) => !ended(l));
+    // With no live claim: the earliest of the claims the latest removal ended.
+    const lastRemoval = Math.max(...links.map((l) => l.removedAt?.getTime() ?? 0));
+    const link = live ?? links.find((l) => l.removedAt?.getTime() === lastRemoval)!;
+    const name = link.label !== undefined && link.label !== '' ? link.label : shortDid(link.agentDid);
+    const since = link.createdAt.getTime();
+    if (live) {
+      shown.push({ since, row: { agentDid: link.agentDid, name, state: 'active', date: link.createdAt.toISOString() } });
+    } else if (now - lastRemoval <= SIGNED_OUT_LISTED_MS) {
+      removed.push({
+        since,
+        row: { agentDid: link.agentDid, name, state: 'removed', date: new Date(lastRemoval).toISOString() },
+      });
+    }
+  }
+  removed.sort((a, b) => b.row.date.localeCompare(a.row.date));
+  shown.push(...removed.slice(0, SIGNED_OUT_LISTED_MAX));
+  shown.sort((a, b) => b.since - a.since);
+  return shown.map((s) => s.row);
+}
+
+/** Test-only: where `listAgentRows` reads the account's records from, as
+ *  `{ devices, agents }` JSON, in place of the account itself. */
+let agentListingForTests: string | null = null;
+
+/**
+ * Read the account's agent and device records, proven, and lay them out as
+ * rows. The records come through the connection's key lookup, read exactly
+ * as `listDeviceRows` reads device records: its held listing, or the home
+ * server's copy; `refresh` lists the account's PDS afresh, for a read that
+ * must show a record just written.
+ */
+export async function listAgentRows(options: { refresh?: boolean } = {}): Promise<AgentRow[]> {
+  const did = saslState.did;
+  if (!did) return [];
+  if (agentListingForTests !== null) {
+    const listed = (await (await fetch(agentListingForTests)).json()) as {
+      devices: unknown[];
+      agents: unknown[];
+    };
+    return agentRowsFrom(did, listed.devices, listed.agents);
+  }
+  const lookup = keyLookupFor(did);
+  const [devices, agents] = options.refresh
+    ? await Promise.all([lookup.refreshDeviceRecords(did), lookup.refreshAgentRecords(did)])
+    : await Promise.all([lookup.provenDeviceRecords(did), lookup.provenAgentRecords(did)]);
+  return agentRowsFrom(did, devices, agents);
+}
+
+/** What adding or removing an agent came to, for the panel to word. */
+export type AgentWriteOutcome =
+  /** Nobody is signed in, or this device's key is not in the account: a
+   *  record signed by an unpublished key is ignored by every reader, so
+   *  nothing is written. */
+  | { kind: 'notReady' }
+  /** This browser holds no key to sign the record with. */
+  | { kind: 'noKey' }
+  /** The account provider refused the write for lack of permission. */
+  | { kind: 'needsSignIn' }
+  /** The record was not saved, for another reason. */
+  | { kind: 'failed' }
+  | { kind: 'written' };
+
+/** Write an agent record built by `build`, signed by this device's key,
+ *  under the same conditions as signing a device out. */
+async function writeAgentRecord(
+  build: (signer: Awaited<ReturnType<typeof recordKeyOf>>, did: string, now: string) => Promise<object>,
+): Promise<AgentWriteOutcome> {
+  const did = saslState.did;
+  if (!did || !brokerFor()) return { kind: 'notReady' };
+  const stored = await chosenStoreFor(did).load();
+  if (!stored) return { kind: 'noKey' };
+  // Loading the key brought `published` up to date.
+  if (!deviceKeyState.published) return { kind: 'notReady' };
+  const signer = await recordKeyOf(stored.keyPair);
+  const record = await build(signer, did, new Date().toISOString());
+  const answer = await postRecord(record, signer.publicKeyMultibase);
+  if (answer?.status === 401 || answer?.status === 403) return { kind: 'needsSignIn' };
+  if (!answer || !(await uriOf(answer))) return { kind: 'failed' };
+  return { kind: 'written' };
+}
+
+/** Claim `agentDid` as one of this account's bots, named `name`. A bot
+ *  removed earlier is added back: the claim is dated after its removal. */
+export function addAgent(agentDid: string, name: string): Promise<AgentWriteOutcome> {
+  return writeAgentRecord((signer, did, now) =>
+    buildAgentRecord(signer, did, agentDid, now, name === '' ? undefined : name),
+  );
+}
+
+/** Remove `agentDid` from this account's bots, from now. */
+export function removeAgent(agentDid: string): Promise<AgentWriteOutcome> {
+  return writeAgentRecord((signer, did, now) => buildAgentRetirement(signer, did, agentDid, now));
+}
+
 /** This browser's name, for the published record's label. */
 function browserLabel(): string {
   const ua = navigator.userAgent;
@@ -519,6 +661,27 @@ export function __resetAvInstanceForTests(): void {
 /** Test-only: inspect the captured pending rejoin (null when none). */
 export function __getPendingCallRejoinForTests(): PendingCallRejoin | null {
   return pendingCallRejoin;
+}
+
+/**
+ * Test-only: a signed-in account `did` whose key this browser holds and has
+ * published, without a sign-in or a broker. The key is saved in this
+ * browser's key store; its device record is returned, for a spec to list as
+ * the account's own.
+ */
+export async function __setSignedInForTests(did: string): Promise<DeviceKeyRecord> {
+  const keyPair = (await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify'])) as CryptoKeyPair;
+  const createdAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  saslState = { ...saslState, did };
+  await chosenStoreFor(did).save({ keyPair, createdAt, recordUri: `at://${did}/at.freeq.deviceKey/test` });
+  useStore.setState({ authDid: did });
+  return buildDeviceRecord(await recordKeyOf(keyPair), did, createdAt, 'This browser');
+}
+
+/** Test-only: read the Agents list's records from `url` (answering
+ *  `{ devices, agents }`) in place of the account; null to stop. */
+export function __setAgentListingForTests(url: string | null): void {
+  agentListingForTests = url;
 }
 
 /** Test-only: the state a broker that refused to publish the key leaves
