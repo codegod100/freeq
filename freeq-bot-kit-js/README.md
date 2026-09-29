@@ -344,7 +344,7 @@ bot.state       // current PRESENCE state (string)
 For long-running bot daemons, `createDaemonCLI` wires the universal commands (`launch`, `stop`, `status`, `doctor`, `tail`) over a [Commander](https://www.npmjs.com/package/commander) program. The bot supplies a `runDaemon` callback; bot-kit handles pid files, `--detach` forking, signal wiring, and the built-in doctor checks (identity, delegation, server actor record).
 
 ```ts
-import { createDaemonCLI } from '@freeq/bot-kit';
+import { createDaemonCLI, serverApiOrigin } from '@freeq/bot-kit';
 
 const cli = createDaemonCLI({
   name: 'mybot',
@@ -372,8 +372,11 @@ const cli = createDaemonCLI({
   launchOptions: [
     { flags: '--nick <nick>', description: 'Override the bot nick' },
   ],
-  // Server actor URL — enables provenance check in `status` + `doctor`.
-  actorStatusUrl: (did) => `https://irc.freeq.at/api/v1/actors/${encodeURIComponent(did)}`,
+  // Server actor URL on the server the bot connects to — enables the
+  // provenance check in `status` + `doctor`. May be async, e.g. to read the
+  // server from the bot's config.
+  actorStatusUrl: (did) =>
+    `${serverApiOrigin('wss://irc.freeq.at/irc')}/api/v1/actors/${encodeURIComponent(did)}`,
   // Optional bot-specific doctor checks, appended after built-ins.
   doctorChecks: [
     { name: 'claude binary', run: async () => {
@@ -389,7 +392,7 @@ cli.command('grant <did> <action>').description('Grant access').action(/* ... */
 await cli.parseAsync(process.argv);
 ```
 
-**Built-in `doctor` checks:** identity file (32-byte ed25519 seed → did:key), delegation cert (parses + `bot_did === agent.did`), server actor record (if `actorStatusUrl` provided, queries `online` + `provenance.verified`). Each `doctorChecks` entry runs after, in registration order, with `{ ok: true, detail? } | { ok: 'warn', reason } | { ok: false, reason }`. Doctor exits 1 if any check fails (warnings don't fail).
+**Built-in `doctor` checks:** identity file (32-byte ed25519 seed → did:key), delegation cert (parses + `bot_did === agent.did`), server actor record (if `actorStatusUrl` provided, queries `online` + `provenance._verified`). Each `doctorChecks` entry runs after, in registration order, with `{ ok: true, detail? } | { ok: 'warn', reason } | { ok: false, reason }`. Doctor exits 1 if any check fails (warnings don't fail).
 
 **Two-callback launch model:** `preflight` runs in foreground (prompts ok) and re-runs idempotently in the detached child after fork. `runDaemon` only runs in the daemon process and receives `preflight`'s return value. Signal handlers (SIGINT/SIGTERM) are wired by the scaffold; the returned handle's `stop(reason)` is invoked on shutdown.
 

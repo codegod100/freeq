@@ -13,6 +13,7 @@ import { dispatchToClaudeStreaming } from "./dispatch.js";
 import { logRefused } from "./audit.js";
 import { actionsFor, createAccessMap, type AllowlistEntry } from "./allowlist.js";
 import { paths, ensureDir } from "./paths.js";
+import { DEFAULT_SERVER_URL } from "./server-url.js";
 import { writeFile } from "node:fs/promises";
 import { TokenStore, startControlServer, type ControlServerHandle } from "./control.js";
 
@@ -63,8 +64,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<Connected> {
   console.log("─── freeqcc daemon ───");
   console.log(`agent DID:      ${agent.did}${agent.isFresh ? " (fresh)" : ""}`);
   console.log(`owner:          @${owner.handle} (${owner.did})`);
-  console.log(`delegation:     ${delegation.signature ? "signed" : "unsigned (v1.0)"}`);
-  console.log(`server:         ${opts.serverUrl ?? "wss://irc.freeq.at/irc"}`);
+  console.log(`delegation:     ${delegation.signature ? "signed" : "unsigned"}`);
+  console.log(`server:         ${opts.serverUrl ?? DEFAULT_SERVER_URL}`);
   console.log(`nick:           ${nick}`);
   console.log("──────────────────────");
 

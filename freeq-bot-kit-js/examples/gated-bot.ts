@@ -21,7 +21,7 @@
  */
 
 import { homedir } from "node:os";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import writeFileAtomic from "write-file-atomic";
 import {
@@ -29,12 +29,17 @@ import {
   createDaemonCLI,
   createDidMap,
   createTurnGate,
+  serverApiOrigin,
   type TurnGateState,
 } from "../src/index.js";
 
 const STATE_DIR = join(homedir(), ".freeq", "bots", "gated-bot-example");
 const ALLOWLIST_PATH = join(STATE_DIR, "allowlist.json");
 const GATE_PATH = join(STATE_DIR, "gate.json");
+const DEFAULT_SERVER = "wss://irc.freeq.at/irc";
+// The server `launch` connected to, for `status` and `doctor`, which run in
+// their own process without the launch flags.
+const SERVER_FILE = join(STATE_DIR, "server-url");
 
 interface AllowEntry {
   did: string;
@@ -71,9 +76,12 @@ const program = createDaemonCLI<DaemonOpts>({
       );
       process.exit(1);
     }
+    const url = p.server ?? DEFAULT_SERVER;
+    await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+    await writeFile(SERVER_FILE, url + "\n");
     return {
       ownerDid: p.owner!,
-      url: p.server ?? "wss://irc.freeq.at/irc",
+      url,
       channel: p.channel ?? "#test",
       nick: p.nick ?? "gated-bot",
     };
@@ -277,8 +285,10 @@ const program = createDaemonCLI<DaemonOpts>({
       },
     };
   },
-  actorStatusUrl: (did) =>
-    `https://irc.freeq.at/api/v1/actors/${encodeURIComponent(did)}`,
+  actorStatusUrl: async (did) => {
+    const url = (await readFile(SERVER_FILE, "utf8").catch(() => DEFAULT_SERVER)).trim();
+    return `${serverApiOrigin(url)}/api/v1/actors/${encodeURIComponent(did)}`;
+  },
 });
 
 program.parseAsync(process.argv).catch((err) => {

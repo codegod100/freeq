@@ -13,6 +13,7 @@ import {
   type ResolveOpts,
 } from "@freeq/bot-kit";
 import { homedir } from "node:os";
+import { DEFAULT_SERVER_URL } from "./server-url.js";
 
 export interface ConnectOptions {
   identity: AgentIdentity;
@@ -46,7 +47,6 @@ export interface Connected {
   checkMention(channel: string, text: string): MentionResult;
 }
 
-const DEFAULT_URL = "wss://irc.freeq.at/irc";
 
 export async function connect(opts: ConnectOptions): Promise<Connected> {
   // Match freeqcc's historical on-disk layout (~/.freeqcc/agent.key,
@@ -58,7 +58,7 @@ export async function connect(opts: ConnectOptions): Promise<Connected> {
     root: homedir(),
     ownerDid: opts.ownerDid,
     nick: opts.nick,
-    url: opts.serverUrl ?? DEFAULT_URL,
+    url: opts.serverUrl ?? DEFAULT_SERVER_URL,
     heartbeatMs: opts.heartbeatMs,
   });
 

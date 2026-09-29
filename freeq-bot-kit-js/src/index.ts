@@ -99,7 +99,7 @@ export type {
 // for long-running freeq bot daemons. Caller provides runDaemon + paths;
 // bot-kit handles pid files, --detach forking, signal wiring, and the
 // built-in identity/delegation/server doctor checks.
-export { createDaemonCLI, readPidIfAlive } from "./daemon-cli.js";
+export { createDaemonCLI, readPidIfAlive, serverApiOrigin } from "./daemon-cli.js";
 export type {
   CreateDaemonCLIOptions,
   DaemonPaths,

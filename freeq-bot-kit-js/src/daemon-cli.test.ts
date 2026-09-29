@@ -3,7 +3,12 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateDidKey } from "@freeq/sdk";
-import { createDaemonCLI, readPidIfAlive, type DaemonPaths } from "./daemon-cli.js";
+import {
+  createDaemonCLI,
+  readPidIfAlive,
+  serverApiOrigin,
+  type DaemonPaths,
+} from "./daemon-cli.js";
 
 async function tmp(): Promise<string> {
   return await mkdtemp(join(tmpdir(), "bot-kit-cli-test-"));
@@ -236,7 +241,12 @@ describe("createDaemonCLI: doctor", () => {
         JSON.stringify({
           online: true,
           nick: "testbot",
-          provenance: { verified: false, reason: "Cert has no signature" },
+          // The actors route returns the stored declaration as it is.
+          provenance: {
+            type: "FreeqBotDelegation/v1",
+            _verified: false,
+            _verification_reason: "Unsigned certificate: unverified until the owner adds this bot",
+          },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
       ),
@@ -253,7 +263,142 @@ describe("createDaemonCLI: doctor", () => {
       const out = output();
       expect(out).toContain("server actor record");
       expect(out).toContain("online");
-      expect(out).toContain("unverified");
+      // A warning, not a pass, with the reason after a colon.
+      expect(out).toContain(
+        "⚠ server actor record: online, provenance unverified: Unsigned certificate: unverified until the owner adds this bot",
+      );
+      expect(out).not.toContain("(v1.0)");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("reports a verified declaration from the actors route's _verified field", async () => {
+    const paths = pathsIn(dir);
+    const k = await generateDidKey();
+    await mkdir(paths.dir, { recursive: true });
+    await writeFile(paths.agentKey, await k.exportSeed());
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          online: true,
+          provenance: {
+            type: "FreeqBotDelegation/v1",
+            _verified: true,
+            _verification_reason: "Owner's agent record at://x names this bot",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    try {
+      const cli = createDaemonCLI({
+        name: "testbot",
+        paths,
+        runDaemon: async () => ({ stop: async () => {} }),
+        actorStatusUrl: (did) => `https://example.test/actors/${did}`,
+      });
+      await cli.parseAsync(["node", "testbot", "doctor"]);
+      expect(output()).toContain("✓ server actor record: online, provenance verified");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe("createDaemonCLI: status", () => {
+  let dir: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    dir = await tmp();
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    logSpy.mockRestore();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("prints the actors route's _verified and _verification_reason", async () => {
+    const paths = pathsIn(dir);
+    const k = await generateDidKey();
+    await mkdir(paths.dir, { recursive: true });
+    await writeFile(paths.agentKey, await k.exportSeed());
+    // A live pid, so status queries the server.
+    await writeFile(paths.daemonPid, `${process.pid}\n`);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          online: true,
+          nick: "testbot",
+          provenance: {
+            type: "FreeqBotDelegation/v1",
+            _verified: false,
+            _verification_reason: "Owner's agent record at://x no longer names this bot",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    try {
+      const cli = createDaemonCLI({
+        name: "testbot",
+        paths,
+        runDaemon: async () => ({ stop: async () => {} }),
+        actorStatusUrl: (did) => `https://example.test/actors/${did}`,
+      });
+      await cli.parseAsync(["node", "testbot", "status"]);
+      expect(logSpy.mock.calls.map((c) => c.join(" ")).join("\n")).toContain(
+        "provenance:     unverified: Owner's agent record at://x no longer names this bot",
+      );
+      expect(logSpy.mock.calls.map((c) => c.join(" ")).join("\n")).not.toContain("(v1.0)");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe("serverApiOrigin", () => {
+  it("maps the bot's WebSocket URL to its server's HTTP origin", () => {
+    expect(serverApiOrigin("wss://irc.example.test/irc")).toBe("https://irc.example.test");
+    expect(serverApiOrigin("ws://localhost:8080/irc")).toBe("http://localhost:8080");
+  });
+});
+
+describe("createDaemonCLI: actorStatusUrl", () => {
+  let dir: string;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(async () => {
+    dir = await tmp();
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(async () => {
+    logSpy.mockRestore();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("may be async, for a server address read from the bot's config", async () => {
+    const paths = pathsIn(dir);
+    const k = await generateDidKey();
+    await mkdir(paths.dir, { recursive: true });
+    await writeFile(paths.agentKey, await k.exportSeed());
+    await writeFile(paths.daemonPid, `${process.pid}\n`);
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ online: true }), { status: 200 }));
+    try {
+      const cli = createDaemonCLI({
+        name: "testbot",
+        paths,
+        runDaemon: async () => ({ stop: async () => {} }),
+        actorStatusUrl: async (did) => `https://own.example.test/api/v1/actors/${did}`,
+      });
+      await cli.parseAsync(["node", "testbot", "status"]);
+      expect(fetchSpy).toHaveBeenCalledWith(`https://own.example.test/api/v1/actors/${k.did}`);
     } finally {
       fetchSpy.mockRestore();
     }

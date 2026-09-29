@@ -94,8 +94,18 @@ export interface CreateDaemonCLIOptions<O extends DaemonOpts = DaemonOpts> {
 
   /** Optional REST URL to query for live actor state. Receives the
    *  bot's resolved did:key. If omitted, `status` + `doctor` skip the
-   *  provenance check. */
-  actorStatusUrl?: (did: string) => string;
+   *  provenance check. Point it at the server the bot connects to, e.g.
+   *  `${serverApiOrigin(url)}/api/v1/actors/${encodeURIComponent(did)}`;
+   *  it may be async, to read that server from the bot's config. */
+  actorStatusUrl?: (did: string) => string | Promise<string>;
+}
+
+/** The HTTP origin of the server at WebSocket URL `serverUrl`:
+ *  `wss://host/irc` → `https://host`, `ws://host:port/irc` →
+ *  `http://host:port`. */
+export function serverApiOrigin(serverUrl: string): string {
+  const u = new URL(serverUrl);
+  return `${u.protocol === "wss:" ? "https:" : "http:"}//${u.host}`;
 }
 
 /** Construct the Commander program. The returned `Command` is the root
@@ -239,6 +249,14 @@ function registerStop<O extends DaemonOpts>(
 
 // ── status ─────────────────────────────────────────────────────────────
 
+/** The `provenance` field of `GET /api/v1/actors/{did}`: the declaration
+ *  the bot sent, as stored, with the server's verdict in the underscore
+ *  fields it adds. */
+interface StoredProvenance {
+  _verified?: boolean;
+  _verification_reason?: string;
+}
+
 function registerStatus<O extends DaemonOpts>(
   program: Command,
   opts: CreateDaemonCLIOptions<O>,
@@ -260,7 +278,7 @@ function registerStatus<O extends DaemonOpts>(
       );
       console.log(`agent DID:      ${did ?? "(no agent.key)"}`);
       console.log(
-        `delegation:     ${cert ? (cert.signature ? "signed" : "unsigned (v1.0)") : "(none)"}`,
+        `delegation:     ${cert ? (cert.signature ? "signed" : "unsigned") : "(none)"}`,
       );
 
       if (opts.statusExtras) {
@@ -269,19 +287,17 @@ function registerStatus<O extends DaemonOpts>(
       }
 
       if (pid !== null && did && opts.actorStatusUrl) {
-        const url = opts.actorStatusUrl(did);
         try {
-          const resp = await fetch(url);
+          const resp = await fetch(await opts.actorStatusUrl(did));
           if (resp.ok) {
             const json = (await resp.json()) as Record<string, unknown>;
             console.log(`actor.online:   ${json.online}`);
             console.log(`actor.nick:     ${json.nick ?? "(none)"}`);
-            const provenance = json.provenance as
-              | { verified?: boolean; reason?: string }
-              | undefined;
+            const provenance = json.provenance as StoredProvenance | undefined;
             if (provenance) {
+              // The reason after a colon: it may hold parentheses of its own.
               console.log(
-                `provenance:     verified=${provenance.verified} (${provenance.reason ?? "—"})`,
+                `provenance:     ${provenance._verified === true ? "verified" : "unverified"}: ${provenance._verification_reason ?? "—"}`,
               );
             }
           } else {
@@ -358,7 +374,7 @@ function registerDoctor<O extends DaemonOpts>(
             }
             return {
               ok: true,
-              detail: `${cert.signature ? "signed" : "unsigned (v1.0)"} (bot=${cert.bot_did}, creator=${cert.creator_did})`,
+              detail: `${cert.signature ? "signed" : "unsigned"} (bot=${cert.bot_did}, creator=${cert.creator_did})`,
             };
           },
         },
@@ -371,19 +387,23 @@ function registerDoctor<O extends DaemonOpts>(
             const did = await safeReadAgentDid(opts.paths.agentKey);
             if (!did) return { ok: "warn", reason: "no identity to query" };
             try {
-              const resp = await fetch(opts.actorStatusUrl!(did));
+              const resp = await fetch(await opts.actorStatusUrl!(did));
               if (!resp.ok) {
                 return { ok: false, reason: `${resp.status} ${resp.statusText}` };
               }
               const json = (await resp.json()) as Record<string, unknown>;
               const online = json.online === true ? "online" : "offline";
-              const provenance = json.provenance as
-                | { verified?: boolean; reason?: string }
-                | undefined;
-              const verified = provenance?.verified
-                ? "verified"
-                : `unverified (${provenance?.reason ?? "—"})`;
-              return { ok: true, detail: `${online}, provenance ${verified}` };
+              const provenance = json.provenance as StoredProvenance | undefined;
+              // Unverified is a warning, not a pass: the owner link is not
+              // set up. The reason goes after a colon, since it may hold
+              // parentheses of its own.
+              if (provenance?._verified === true) {
+                return { ok: true, detail: `${online}, provenance verified` };
+              }
+              return {
+                ok: "warn",
+                reason: `${online}, provenance unverified: ${provenance?._verification_reason ?? "—"}`,
+              };
             } catch (e) {
               return {
                 ok: false,

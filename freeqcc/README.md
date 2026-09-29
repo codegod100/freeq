@@ -77,7 +77,7 @@ owner:          @chadfowler.com (did:plc:4qsy…)
 agent DID:      did:key:z6Mki…
 delegation:     unsigned (v1.0)
 actor.online:   true
-provenance:     verified=false (Cert has no signature; declarative only)
+provenance:     verified=false (Unsigned certificate: unverified until the owner adds this bot (did:key:z6Mki…) under Settings → Agents in the freeq web app, or with `freeq-bot-id register`, and then restarts the bot)
 ```
 
 Now, from any freeq-connected client signed in as `@chadfowler.com`, send a DM to `sourdough-bot`. The agent dispatches your message to a persistent Claude Code session, captures the reply, and DMs it back. The conversation is one continuous Claude Code session: ask follow-up questions, edit code, ship a PR, all over IRC DMs.
