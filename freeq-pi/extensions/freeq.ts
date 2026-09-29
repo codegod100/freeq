@@ -2826,7 +2826,7 @@ export default function (pi: ExtensionAPI): void {
             const ok = conn?.join(channel);
             ctx.ui.notify(
               ok
-                ? `freeq: joined ${channel} (mode: ${modeFor(cfg, channel)})`
+                ? `freeq: joining ${channel} (mode: ${modeFor(cfg, channel)})`
                 : `freeq: saved ${channel}; will join when connected`,
               ok ? "info" : "warning",
             );
