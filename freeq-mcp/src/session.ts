@@ -11,8 +11,11 @@
  *
  * - **authenticated** — a `did:key` agent identity persisted by
  *   `@freeq/bot-kit` under `~/.freeq/bots/<name>/`, with a delegation
- *   certificate naming the owner. This is the honest mode: the room can see
- *   which human the agent acts for.
+ *   certificate naming the owner. The room sees the owner only once the
+ *   server has verified the certificate: the owner adds this agent's DID
+ *   under Settings → Agents in the freeq web app, or with
+ *   `freeq-bot-id register`, and the agent reconnects. `freeq_whoami` says
+ *   which it is.
  * - **guest** — no SASL, no key, nick only. Zero-config so the server works out
  *   of the box with no `env` block at all, and `freeq_whoami` says plainly that
  *   nothing is proven and how to upgrade.
@@ -53,8 +56,18 @@ export interface SessionStatus {
   channels: string[];
   hasBearerToken: boolean;
   server: string;
+  /** With an owner configured: whether the server has verified that this
+   *  agent acts for that owner. */
+  ownerVerified?: boolean;
   /** Why the identity is what it is, in words a caller can act on. */
   note: string;
+}
+
+/** The server's verdict on the delegation certificate, as bot-kit reads it. */
+export interface ProvenanceVerdict {
+  verified: boolean;
+  reason: string;
+  text: string;
 }
 
 export interface AskResult {
@@ -83,6 +96,15 @@ export interface SessionDeps {
     client: SessionClient;
     mode: SessionMode;
     did?: string;
+    /** Connects in place of `client.connect()`: bot-kit's start, which
+     *  also sends the delegation certificate. */
+    connect?: () => void;
+    /** The server's latest verdict on the certificate, or null. */
+    provenance?: () => ProvenanceVerdict | null;
+    /** Closes in place of `client.quit()` and `client.disconnect()`:
+     *  bot-kit's stop, which also clears its heartbeat, its NOTICE reader
+     *  and its timers. */
+    close?: (reason: string) => Promise<void>;
   }>;
   /** Called whenever a bearer token becomes available (SASL success). */
   onBearerToken?(token: string | undefined): void;
@@ -127,6 +149,8 @@ export class FreeqSession {
   #client?: SessionClient;
   #mode: SessionMode = "offline";
   #did?: string;
+  #provenance?: () => ProvenanceVerdict | null;
+  #closeClient?: (reason: string) => Promise<void>;
   #connected = false;
   #connecting?: Promise<void>;
   #channels = new Set<string>();
@@ -148,6 +172,9 @@ export class FreeqSession {
 
   status(): SessionStatus {
     const mode = this.#mode;
+    const verdict = this.#provenance?.() ?? null;
+    const ownerVerified =
+      mode === "authenticated" && this.#cfg.ownerDid ? verdict?.verified === true : undefined;
     return {
       mode,
       connected: this.#connected,
@@ -157,13 +184,38 @@ export class FreeqSession {
       channels: [...this.#channels],
       hasBearerToken: !!this.#client?.apiBearer,
       server: this.#cfg.baseUrl,
+      ownerVerified,
       note:
         mode === "authenticated"
-          ? `Authenticated as ${this.#did ?? "did:key:…"}, acting for ${this.#cfg.ownerDid}. Messages are signed with a per-session key and verifiable via /api/v1/verify/{msgid}.`
+          ? this.#authenticatedNote(verdict)
           : mode === "guest"
             ? "Connected as a guest: the nick is not proven and nothing you send is attributable. Set FREEQ_OWNER_DID to your DID to connect with a did:key agent identity and a delegation certificate."
             : "Not connected. Read-only tools work over REST without a connection; joining, sending and asking need one.",
     };
+  }
+
+  #authenticatedNote(verdict: ProvenanceVerdict | null): string {
+    const did = this.#did ?? "did:key:…";
+    const signed =
+      "Messages are signed with a per-session key and verifiable via /api/v1/verify/{msgid}.";
+    const owner = this.#cfg.ownerDid;
+    if (!owner) return `Authenticated as ${did}. ${signed}`;
+    if (verdict?.verified) {
+      return `Authenticated as ${did}. The server verified that it acts for ${owner} (${verdict.reason}). ${signed}`;
+    }
+    // The server's reason for an unsigned certificate already gives the
+    // steps below; quote only a reason that says something else, such as a
+    // removal, so the note gives the steps once.
+    const why = !verdict
+      ? " The server has not answered yet."
+      : verdict.reason.includes("Settings → Agents")
+        ? ""
+        : ` The server said: ${verdict.reason}.`;
+    return (
+      `Authenticated as ${did}. The owner link to ${owner} is not verified, so the room does not see an owner.${why} ` +
+      `To verify it, the owner adds this agent's DID (${did}) under Settings → Agents in the freeq web app, ` +
+      `or with \`freeq-bot-id register\`, then restarts this MCP server. ${signed}`
+    );
   }
 
   /** Connect if needed. Concurrent callers share one attempt. */
@@ -180,10 +232,15 @@ export class FreeqSession {
 
   async #doConnect(): Promise<void> {
     const factory = this.#deps.createClient ?? defaultCreateClient;
-    const { client, mode, did } = await factory(this.#cfg, this.#nick);
+    const { client, mode, did, connect, provenance, close } = await factory(
+      this.#cfg,
+      this.#nick,
+    );
     this.#client = client;
     this.#mode = mode;
     this.#did = did;
+    this.#provenance = provenance;
+    this.#closeClient = close;
     this.#wire(client);
 
     const ready = new Promise<void>((resolve, reject) => {
@@ -203,7 +260,8 @@ export class FreeqSession {
       }) as never);
     });
 
-    client.connect();
+    if (connect) connect();
+    else client.connect();
     await ready;
     this.#captureBearer();
     for (const channel of this.#cfg.channels) this.join(channel);
@@ -416,12 +474,19 @@ export class FreeqSession {
     for (const w of this.#waiters.splice(0)) w.resolve(undefined);
     const client = this.#client;
     if (!client) return;
+    const closeClient = this.#closeClient;
     try {
-      client.quit?.(reason);
-      client.disconnect();
+      if (closeClient) {
+        await closeClient(reason);
+      } else {
+        client.quit?.(reason);
+        client.disconnect();
+      }
     } finally {
       this.#connected = false;
       this.#client = undefined;
+      this.#closeClient = undefined;
+      this.#provenance = undefined;
       this.#mode = "offline";
     }
   }
@@ -476,7 +541,7 @@ export function defaultNick(seed?: string): string {
 async function defaultCreateClient(
   cfg: FreeqMcpConfig,
   nick: string,
-): Promise<{ client: SessionClient; mode: SessionMode; did?: string }> {
+): ReturnType<NonNullable<SessionDeps["createClient"]>> {
   if (cfg.ownerDid) {
     // Imported lazily so the guest path doesn't pay for bot-kit's disk I/O.
     const { FreeqBot } = await import("@freeq/bot-kit");
@@ -489,12 +554,20 @@ async function defaultCreateClient(
       channels: cfg.channels,
       actorClass: "agent",
     });
-    // FreeqBot.start() does the announce sequence; the session drives
-    // readiness itself, so hand back the underlying client and let it.
+    // The session drives readiness itself off the client's events, but
+    // connects through FreeqBot.start(): that runs the announce sequence,
+    // whose PROVENANCE sends the delegation certificate, and reads the
+    // server's verdict on it. Its own failures (auth, timeout) reach the
+    // session through the same client events.
     return {
       client: bot.client as unknown as SessionClient,
       mode: "authenticated",
       did: bot.identity.did,
+      connect: () => {
+        bot.start().catch(() => undefined);
+      },
+      provenance: () => bot.provenance,
+      close: (reason) => bot.stop({ reason }),
     };
   }
   const client = new FreeqClient({ url: cfg.wsUrl, nick, channels: cfg.channels });

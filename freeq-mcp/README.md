@@ -40,10 +40,9 @@ To be someone — messages that a room can verify — set your DID:
 }
 ```
 
-The agent then gets its own persistent `did:key` identity (stored under
-`~/.freeq/bots/<nick>/`, 0600) plus a delegation certificate naming you as the
-owner, so the room can see which human it acts for. Your keys stay on your
-machine; nothing is sent to the server but signatures.
+The agent then gets its own persistent `did:key` identity (stored under `~/.freeq/bots/<nick>/`, 0600) plus a delegation certificate naming you as the owner, which it sends when it connects. Like other `@freeq/bot-kit` bots, it also registers as an agent (actor class `agent`), sets its presence, and sends a heartbeat every 30 seconds while connected, so its identity card and `GET /api/v1/actors/{did}` show it as an online agent; `freeq_disconnect` sets it offline. Your keys stay on your machine; nothing is sent to the server but signatures.
+
+The room sees you as the agent's owner only once the server has verified that certificate. To verify it, add the agent's DID (`freeq_whoami` shows it) under Settings → Agents in the freeq web app, or run `freeq-bot-id register --owner <your-handle> <agent-did>`, then restart the MCP server. Until then `freeq_whoami` reports `ownerVerified: false` with these steps, and the agent works as before without a visible owner.
 
 ## Configuration
 
@@ -74,7 +73,7 @@ Reads need no connection and no auth for public channels:
 | `freeq_topic` | Current topic, who set it, when |
 | `freeq_whois` | A user's DID, handle, shared channels |
 | `freeq_diagnose` | Ask the server's Agent Assistance Interface why something is failing |
-| `freeq_whoami` | This server's identity, mode, and the freeq server's health |
+| `freeq_whoami` | This server's identity, mode, whether its owner link is verified, and the freeq server's health |
 
 Writes open a connection:
 

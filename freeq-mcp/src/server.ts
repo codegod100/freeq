@@ -98,7 +98,7 @@ export function createFreeqMcpServer(opts: CreateServerOptions = {}): FreeqMcp {
   // ── Identity ───────────────────────────────────────────────────────
   tool(
     "freeq_whoami",
-    "Who this MCP server is on freeq: identity mode (authenticated did:key agent vs guest), nick, owner DID, joined channels, and the server's health. Call this first when unsure whether writes will be attributable.",
+    "Who this MCP server is on freeq: identity mode (authenticated did:key agent vs guest), nick, owner DID and whether the server has verified it (and how to, if not), joined channels, and the server's health. Call this first when unsure whether writes will be attributable.",
     {},
     () => tools.whoami(ctx),
   );
