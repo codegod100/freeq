@@ -6,6 +6,8 @@
 //   - run the announce sequence (PROVENANCE → AGENT REGISTER → MANIFEST? →
 //     PRESENCE → HEARTBEAT loop) on every `'ready'`, so reconnects re-announce
 //   - own current presence/heartbeat state via `setState()`
+//   - write the server's verdict on the cert to stderr ("provenance
+//     verified: …" / "provenance unverified: …"), once per change
 //   - reject `start()` on auth failures / pre-ready disconnects / timeout
 //
 // Construction is async (the SDK's did-key derivation uses Web Crypto).
@@ -42,6 +44,32 @@ export type MentionResult =
   | { kind: "ignore" }
   | { kind: "cooldown"; remainingMs: number }
   | { kind: "respond"; stripped: string };
+
+/** The server's verdict on the bot's delegation cert. */
+export interface ProvenanceVerdict {
+  /** True only for "Provenance verified". */
+  verified: boolean;
+  /** The server's reason, after the status. */
+  reason: string;
+  /** The server's full NOTICE text, e.g. "Provenance verified: …". */
+  text: string;
+}
+type ProvenanceResult = ProvenanceVerdict;
+
+/** How long, after sending the cert, an "unverified" answer is held back:
+ *  a cert proven by the owner's agent record is first stored unverified,
+ *  and its "verified" follows once the server has read the record. */
+const PROVENANCE_WAIT_MS = 5_000;
+
+/** The verdict in a server NOTICE answering PROVENANCE, or null if the text
+ *  is not one: "Provenance verified: <reason>", "Provenance stored
+ *  (unverified): <reason>", "Provenance unverified: <reason>" (the server's
+ *  hourly re-check) or "Provenance rejected: <reason>". */
+function parseProvenanceNotice(text: string): ProvenanceResult | null {
+  const m = /^Provenance (verified|stored \(unverified\)|unverified|rejected): (.*)$/.exec(text);
+  if (!m) return null;
+  return { verified: m[1] === "verified", reason: m[2]!, text };
+}
 
 /** Signature for the caller-supplied mention matcher. Receives the message
  *  text and the bot's current nick; returns the stripped text on match,
@@ -92,6 +120,11 @@ export interface FreeqBotCreateOptions {
    *  true). Set false to skip the mint — outbound messages then get the
    *  server's fallback signature instead of the bot's own. */
   autoMsgSig?: boolean;
+  /** Write the server's provenance verdict to stderr when it arrives or
+   *  changes (default true). Set false when the program running the bot
+   *  shows it itself through `onProvenance`, as a full-screen host does:
+   *  stderr would land on top of its display. */
+  logProvenance?: boolean;
   /** Sender-DID resolver tuning. Sets defaults on the per-bot resolver
    *  used by `bot.resolveSenderDid()`. Override per-call via the
    *  method's `opts` argument. */
@@ -146,6 +179,7 @@ export class FreeqBot {
   readonly #actorClass: ActorClass;
   readonly #manifest: string | undefined;
   readonly #heartbeatMs: number;
+  readonly #logProvenanceLine: boolean;
   readonly #heartbeatTtlS: number;
 
   #currentState: string;
@@ -153,6 +187,16 @@ export class FreeqBot {
   #currentTask: string | undefined;
   #heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   #readyHandler: (() => void) | null = null;
+  #rawHandler: FreeqEvents["raw"] | null = null;
+  /** The server's latest answer to this connection's PROVENANCE. */
+  #provenanceLatest: ProvenanceResult | null = null;
+  /** The last result written to stderr, across reconnects. */
+  #provenanceLogged: ProvenanceResult | null = null;
+  /** The server's latest answer, across reconnects. */
+  #provenanceCurrent: ProvenanceResult | null = null;
+  readonly #provenanceHandlers = new Set<(verdict: ProvenanceVerdict) => void>();
+  /** Set while waiting, after sending the cert, for a "verified" answer. */
+  #provenanceWait: ReturnType<typeof setTimeout> | null = null;
   #started = false;
   #stopped = false;
   readonly #didResolver: DidResolver;
@@ -170,6 +214,7 @@ export class FreeqBot {
     actorClass: ActorClass;
     manifest: string | undefined;
     heartbeatMs: number;
+    logProvenance: boolean;
     heartbeatTtlS: number;
     initialState: string;
     initialStatus: string | undefined;
@@ -185,6 +230,7 @@ export class FreeqBot {
     this.#actorClass = args.actorClass;
     this.#manifest = args.manifest;
     this.#heartbeatMs = args.heartbeatMs;
+    this.#logProvenanceLine = args.logProvenance;
     this.#heartbeatTtlS = args.heartbeatTtlS;
     this.#currentState = args.initialState;
     this.#currentStatus = args.initialStatus;
@@ -247,6 +293,7 @@ export class FreeqBot {
       actorClass: opts.actorClass ?? "agent",
       manifest: opts.manifest,
       heartbeatMs: opts.heartbeatMs ?? 30_000,
+      logProvenance: opts.logProvenance ?? true,
       heartbeatTtlS: opts.heartbeatTtlS ?? 60,
       initialState: opts.initialState ?? "active",
       initialStatus: opts.initialStatus,
@@ -294,6 +341,27 @@ export class FreeqBot {
     } catch {
       // Socket may be down; next 'ready' will re-announce with current state.
     }
+  }
+
+  /** The server's latest answer to the bot's PROVENANCE, or null before
+   *  one arrives. Taken from the server's own NOTICE, never a user's. Right
+   *  after connecting it may read "stored (unverified)" for a cert whose
+   *  "verified" follows once the server has read the owner's record. */
+  get provenance(): ProvenanceVerdict | null {
+    return this.#provenanceCurrent;
+  }
+
+  /** Call `handler` with the verdict each time the one reported changes:
+   *  the first after connecting (a "verified", or an "unverified" still
+   *  standing 5 seconds after the cert was sent), and any later change,
+   *  such as the server's re-check unverifying the bot. A reconnect that
+   *  gets the same verdict does not call it. These are the verdicts written
+   *  to stderr. Returns a function that removes the handler. */
+  onProvenance(handler: (verdict: ProvenanceVerdict) => void): () => void {
+    this.#provenanceHandlers.add(handler);
+    return () => {
+      this.#provenanceHandlers.delete(handler);
+    };
   }
 
   /** Read the bot's current state (last value passed to `setState()`). */
@@ -377,6 +445,13 @@ export class FreeqBot {
     // Persistent handler: re-runs on every 'ready' so reconnects re-announce.
     this.#readyHandler = (): void => this.#announceAndHeartbeat();
     this.client.on("ready", this.#readyHandler);
+    this.#rawHandler = (_line, msg): void => {
+      // Only the server's own NOTICEs: a user's carries nick!user@host.
+      if (msg.command !== "NOTICE" || msg.prefix.includes("!")) return;
+      const result = parseProvenanceNotice(msg.params[1] ?? "");
+      if (result) this.#onProvenance(result);
+    };
+    this.client.on("raw", this.#rawHandler);
 
     this.client.connect();
 
@@ -443,6 +518,14 @@ export class FreeqBot {
       this.client.off("ready", this.#readyHandler);
       this.#readyHandler = null;
     }
+    if (this.#rawHandler) {
+      this.client.off("raw", this.#rawHandler);
+      this.#rawHandler = null;
+    }
+    if (this.#provenanceWait) {
+      clearTimeout(this.#provenanceWait);
+      this.#provenanceWait = null;
+    }
     try {
       this.client.setPresence("offline");
       this.client.raw(`QUIT :${reason}`);
@@ -459,6 +542,44 @@ export class FreeqBot {
 
   // ── Internal ───────────────────────────────────────────────────────────
 
+  /** A server answer about the cert. "verified" is logged at once; an
+   *  unverified answer during the wait after sending the cert is held until
+   *  the wait ends, and one after it (the server's re-check) is logged at
+   *  once. */
+  #onProvenance(result: ProvenanceResult): void {
+    this.#provenanceLatest = result;
+    this.#provenanceCurrent = result;
+    if (result.verified) {
+      if (this.#provenanceWait) {
+        clearTimeout(this.#provenanceWait);
+        this.#provenanceWait = null;
+      }
+      this.#logProvenance(result);
+    } else if (!this.#provenanceWait) {
+      this.#logProvenance(result);
+    }
+  }
+
+  /** Write the result to stderr (unless `logProvenance` is off) and tell
+   *  the handlers, unless it is the one last reported. */
+  #logProvenance(result: ProvenanceResult): void {
+    const last = this.#provenanceLogged;
+    if (last && last.verified === result.verified && last.reason === result.reason) return;
+    this.#provenanceLogged = result;
+    if (this.#logProvenanceLine) {
+      process.stderr.write(
+        `provenance ${result.verified ? "verified" : "unverified"}: ${result.reason}\n`,
+      );
+    }
+    for (const handler of this.#provenanceHandlers) {
+      try {
+        handler(result);
+      } catch {
+        // A handler's failure is the handler's; the others still hear it.
+      }
+    }
+  }
+
   /** Runs on every `'ready'` (initial + each reconnect). */
   #announceAndHeartbeat(): void {
     // Reset any prior heartbeat — reconnects start fresh.
@@ -466,6 +587,14 @@ export class FreeqBot {
       clearInterval(this.#heartbeatTimer);
       this.#heartbeatTimer = null;
     }
+
+    // Each connect's answer is read afresh, after one wait.
+    this.#provenanceLatest = null;
+    if (this.#provenanceWait) clearTimeout(this.#provenanceWait);
+    this.#provenanceWait = setTimeout(() => {
+      this.#provenanceWait = null;
+      if (this.#provenanceLatest) this.#logProvenance(this.#provenanceLatest);
+    }, PROVENANCE_WAIT_MS);
 
     try {
       this.client.submitProvenance(this.delegation);

@@ -13,6 +13,7 @@
 
 export { FreeqBot } from "./bot.js";
 export type {
+  ProvenanceVerdict,
   ActorClass,
   FreeqBotCreateOptions,
   FreeqBotStartOptions,

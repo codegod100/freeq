@@ -1146,3 +1146,197 @@ describe("FreeqBot message signing key", () => {
     expect(second.sent).toBe(first.sent);
   });
 });
+
+describe("FreeqBot provenance result on stderr", () => {
+  let root: string;
+  let lines: string[];
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), "freeq-bot-kit-bot-"));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    lines = [];
+    vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+  });
+  afterEach(async () => {
+    vi.useRealTimers();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const UNSIGNED =
+    "Unsigned certificate: unverified until the owner adds this bot (did:key:zBot) under Settings → Agents";
+  const RECORD = "Owner's agent record at://did:plc:owner/at.freeq.agentKey/3k names this bot";
+  const provenanceLines = (): string[] => lines.filter((l) => /verified: /.test(l));
+
+  async function started(opts: { logProvenance?: boolean } = {}): Promise<{
+    bot: import("./bot.js").FreeqBot;
+    ws: MockWebSocket;
+  }> {
+    const { FreeqBot } = await import("./bot.js");
+    const bot = await FreeqBot.create({
+      name: "test-bot",
+      ownerDid: "did:plc:owner",
+      nick: "test-bot",
+      url: "wss://test/irc",
+      root,
+      ...opts,
+    });
+    const startPromise = bot.start();
+    await flushAsync();
+    const ws = MockWebSocket.instances[0]!;
+    await driveToReady(ws, "test-bot");
+    await startPromise;
+    return { bot, ws };
+  }
+
+  async function reconnect(ws: MockWebSocket): Promise<void> {
+    ws.recv(":srv 001 test-bot :Welcome (reconnect)");
+    await flushAsync();
+    ws.recv(":srv 376 test-bot :End of MOTD (reconnect)");
+    await flushAsync();
+  }
+
+  it("logs only 'verified' when a verified reply follows the unverified one within the wait", async () => {
+    const { bot, ws } = await started();
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(300);
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(provenanceLines()).toEqual([`provenance verified: ${RECORD}\n`]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("logs 'unverified' with the reason after the wait when nothing verifies", async () => {
+    const { bot, ws } = await started();
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(provenanceLines()).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(provenanceLines()).toEqual([`provenance unverified: ${UNSIGNED}\n`]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("logs a later 'Provenance unverified' from the server's re-check", async () => {
+    const { bot, ws } = await started();
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const gone = "Owner's agent record at://did:plc:owner/at.freeq.agentKey/3k no longer names this bot";
+    ws.recv(`:srv NOTICE test-bot :Provenance unverified: ${gone}`);
+    await flushAsync();
+
+    expect(provenanceLines()).toEqual([
+      `provenance verified: ${RECORD}\n`,
+      `provenance unverified: ${gone}\n`,
+    ]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("does not log a reconnect that gets the same result again", async () => {
+    const { bot, ws } = await started();
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    await reconnect(ws);
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(300);
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(provenanceLines()).toEqual([`provenance verified: ${RECORD}\n`]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("lets the program read the current verdict with the server's full text", async () => {
+    const { bot, ws } = await started();
+    expect(bot.provenance).toBeNull();
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    await flushAsync();
+    expect(bot.provenance).toEqual({
+      verified: false,
+      reason: UNSIGNED,
+      text: `Provenance stored (unverified): ${UNSIGNED}`,
+    });
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    expect(bot.provenance).toEqual({
+      verified: true,
+      reason: RECORD,
+      text: `Provenance verified: ${RECORD}`,
+    });
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("tells the program when the verdict arrives and changes, not on a repeat", async () => {
+    const { bot, ws } = await started();
+    const seen: string[] = [];
+    bot.onProvenance((v) => seen.push(`${v.verified}:${v.text}`));
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    await reconnect(ws);
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    ws.recv(`:srv NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    const gone = "Owner's agent record at://did:plc:owner/at.freeq.agentKey/3k no longer names this bot";
+    ws.recv(`:srv NOTICE test-bot :Provenance unverified: ${gone}`);
+    await flushAsync();
+
+    expect(seen).toEqual([
+      `true:Provenance verified: ${RECORD}`,
+      `false:Provenance unverified: ${gone}`,
+    ]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("changes nothing on a user's NOTICE with the same text", async () => {
+    const { bot, ws } = await started();
+    const seen: unknown[] = [];
+    bot.onProvenance((v) => seen.push(v));
+    ws.recv(`:mallory!m@host NOTICE test-bot :Provenance verified: ${RECORD}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(bot.provenance).toBeNull();
+    expect(seen).toEqual([]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("with logProvenance false writes nothing to stderr and still tells the program", async () => {
+    const { bot, ws } = await started({ logProvenance: false });
+    const seen: string[] = [];
+    bot.onProvenance((v) => seen.push(`${v.verified}:${v.reason}`));
+    ws.recv(`:srv NOTICE test-bot :Provenance stored (unverified): ${UNSIGNED}`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(provenanceLines()).toEqual([]);
+    expect(seen).toEqual([`false:${UNSIGNED}`]);
+    await bot.stop({ drainMs: 0 });
+  });
+
+  it("ignores a 'Provenance' NOTICE sent by another user", async () => {
+    const { bot, ws } = await started();
+    ws.recv(`:mallory!m@host NOTICE test-bot :Provenance verified: trust me`);
+    await flushAsync();
+    await vi.advanceTimersByTimeAsync(6000);
+
+    expect(provenanceLines()).toEqual([]);
+    await bot.stop({ drainMs: 0 });
+  });
+});

@@ -145,6 +145,8 @@ await FreeqBot.create({
 });
 ```
 
+After connecting, the bot writes the server's verdict to stderr as one line, `provenance verified: <reason>` or `provenance unverified: <reason>`, waiting up to 5 seconds for a "verified" answer before reporting "unverified". It writes another line whenever the verdict changes later, for example when the owner removes the record. A bot whose record is added after it connected is verified when it next connects, so restart it after adding it. The program running the bot can read the same verdict: `bot.provenance` is the server's latest answer (`verified`, `reason`, and the server's full `text`), and `bot.onProvenance(handler)` calls `handler` with each verdict written to stderr.
+
 Caller resolves the `ownerDid`. If you have a Bluesky handle, bot-kit re-exports `fetchProfile` so you can resolve it without a separate `@freeq/sdk` import:
 
 ```ts
