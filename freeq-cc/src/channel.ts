@@ -38,6 +38,7 @@ import { AgentRuntime } from "@freeq/harness-kit/runtime";
 import { isDid } from "@freeq/harness-kit/identity";
 import type { BotFactory } from "@freeq/harness-kit/connection";
 import type { Harness, InboundCard } from "@freeq/harness-kit/harness";
+import type { DoctorLine } from "@freeq/harness-kit/doctor";
 import {
   FREEQ_TOOL_DESCRIPTION,
   FREEQ_TOOL_NAME,
@@ -46,6 +47,7 @@ import {
 } from "@freeq/harness-kit/tool";
 
 import { COMMANDS, commandLine } from "./commands.js";
+import { HOOK_EVENTS, installedHooks, settingsFiles } from "./setup-check.js";
 import { FileJournal } from "./journal.js";
 
 export const HOOK_TOOL_NAME = "freeq_hook";
@@ -237,6 +239,37 @@ export async function createChannel(opts: ChannelOptions): Promise<Channel> {
     },
     isIdle: () => idle,
     journal,
+    doctorLines: async () => {
+      const lines: DoctorLine[] = [];
+      lines.push(
+        server?.getClientCapabilities()?.experimental?.["claude/channel"]
+          ? { name: "channel", status: "ok", detail: "Claude Code loaded freeq as a channel" }
+          : {
+              name: "channel",
+              status: "warn",
+              detail:
+                "Claude Code did not declare claude/channel — start it with " +
+                "--dangerously-load-development-channels server:freeq",
+            },
+      );
+      const found = await installedHooks(settingsFiles(opts.cwd()), "freeq", HOOK_TOOL_NAME);
+      const missing = HOOK_EVENTS.filter((e) => !found.has(e));
+      lines.push(
+        missing.length
+          ? {
+              name: "hooks",
+              status: "warn",
+              detail: `missing for ${missing.join(", ")} — add the mcp_tool hooks for ${HOOK_TOOL_NAME} (freeq-cc README)`,
+            }
+          : { name: "hooks", status: "ok", detail: `${HOOK_EVENTS.join(", ")} call ${HOOK_TOOL_NAME}` },
+      );
+      lines.push(
+        relayOwner
+          ? { name: "permission relay", status: "ok", detail: `on — tool approvals go to ${relayOwner} by DM` }
+          : { name: "permission relay", status: "warn", detail: "off — no owner configured (/freeq:login <did>)" },
+      );
+      return lines;
+    },
     // The owner's `yes <id>` / `no <id>` in a DM answers a relayed
     // tool-approval prompt; it is not chat. Only from the owner's DID as the
     // server resolved it, only in a DM, and only when relay was declared.
