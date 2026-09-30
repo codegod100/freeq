@@ -708,10 +708,7 @@ export class AgentRuntime {
     // expiry sweep noticed, days later.
     this.ensureWatchdog(cfg).start({ taskId: rec.id, channel: rec.channel, title: rec.title });
 
-    // Work the owner accepted by hand is delivered at `handoff` even from a
-    // poster trusted less; a poster trusted more keeps their own tier.
-    const posterTier = tierFor(cfg, rec.offerer);
-    const tier = rec.ownerAccepted && !tierAtLeast(posterTier, "handoff") ? "handoff" : posterTier;
+    const tier = this.#posterTier(cfg, rec);
 
     this.deliver({
       kind: "chat",
@@ -744,6 +741,16 @@ export class AgentRuntime {
    * an instruction rather than a notification — an agent that only sees a UI
    * notice keeps the task in its head.
    */
+  /**
+   * The tier a task's poster speaks at, for its brief and its stand-down.
+   * Work the owner accepted by hand is delivered at `handoff` even from a
+   * poster trusted less; a poster trusted more keeps their own tier.
+   */
+  #posterTier(cfg: FreeqConfig, rec: HandoffRecord): Tier {
+    const tier = tierFor(cfg, rec.offerer);
+    return rec.ownerAccepted && !tierAtLeast(tier, "handoff") ? "handoff" : tier;
+  }
+
   #standDown(cfg: FreeqConfig, rec: HandoffRecord, verb: string, fromNick: string): void {
     const held = this.workTask === rec.id;
     if (held) {
@@ -778,7 +785,7 @@ export class AgentRuntime {
         `do not pick this task up again.`,
       addressed: true,
       mode: cfg.muted ? "silent" : "addressed",
-      tier: tierFor(cfg, rec.offerer),
+      tier: this.#posterTier(cfg, rec),
     });
   }
 

@@ -238,6 +238,27 @@ describe("task events", () => {
     `);
   });
 
+  it("tells the model to stand down on owner-accepted work its untrusted poster cancels", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.act(actEvent({ verb: "offer", taskId: "01JOWNC0000000000000000000", did: PEER, from: "peer", fields: { "act-to": SELF, "act-title": "owner took it" } }));
+    await h.command("accept 01JOWNC");
+    await h.act(actEvent({ verb: "accept", taskId: "01JOWNC0000000000000000000", did: SELF, from: NICK }));
+    expect(h.delivered).toHaveLength(1);
+    await h.act(actEvent({ verb: "cancel", taskId: "01JOWNC0000000000000000000", did: PEER, from: "peer", fields: { "act-note": "not needed" } }));
+    expect(h.delivered).toHaveLength(2);
+    expect(h.delivered[1]!.msg.content).toMatch(/^\[freeq — message from peer \(did:plc:peer\) in #work, tier 'handoff' — another person's agent\./);
+    expect(h.delivered[1]!.msg.content).toContain("The freeq task you were working on was cancelled by the agent that offered it.");
+  });
+
+  it("does not deliver a stand-down for an untrusted poster's work the owner did not accept", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.act(actEvent({ verb: "offer", taskId: "01JPLNC0000000000000000000", did: PEER, from: "peer", fields: { "act-to": SELF, "act-title": "plain" } }));
+    // Accepted without the owner (the accept echo only), so ownerAccepted is not set.
+    await h.act(actEvent({ verb: "accept", taskId: "01JPLNC0000000000000000000", did: SELF, from: NICK }));
+    await h.act(actEvent({ verb: "cancel", taskId: "01JPLNC0000000000000000000", did: PEER, from: "peer" }));
+    expect(h.delivered).toEqual([]);
+  });
+
   it("only notes a cancel of an offer we never accepted", async () => {
     const h = await startPi({ config: baseConfig({ trust: { [BOSS]: "handoff" } }), idle: false });
     await h.act(actEvent({ verb: "offer", taskId: "01JNEVER000000000000000000", did: BOSS, from: "boss", fields: { "act-to": SELF, "act-title": "never started" } }));
