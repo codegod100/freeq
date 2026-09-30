@@ -404,7 +404,6 @@ describe("resume on connect", () => {
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
         "info: freeq: resuming 01JRESUME0 — (title not in the server's listing)",
-        "info: freeq: resuming 01JRESUME0 — (title not in the server's listing)",
       ]
     `);
     expect(acts(h)).toMatchInlineSnapshot(`
@@ -449,7 +448,6 @@ describe("resume on connect", () => {
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
         "info: freeq: resuming 01JRESUME0 — (title not in the server's listing)",
-        "info: freeq: resuming 01JRESUME0 — (title not in the server's listing)",
         "warning: freeq: connection dropped — the transport is reconnecting; pi continues normally",
       ]
     `);
@@ -463,7 +461,6 @@ describe("resume on connect", () => {
     expect(h.delivered).toHaveLength(1);
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
-        "info: freeq: resuming 01JFIRST00 — (title not in the server's listing)",
         "info: freeq: resuming 01JFIRST00 — (title not in the server's listing)
       freeq: 1 more still assigned to you, not started (cap is maxResume=1) — /freeq resume <id> to take one",
       ]
@@ -474,7 +471,6 @@ describe("resume on connect", () => {
     await h.command("resume 01JFIRST");
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
-        "info: freeq: resuming 01JSECOND0 — (title not in the server's listing)",
         "info: freeq: resuming 01JSECOND0 — (title not in the server's listing)",
         "info: freeq: 01JFIRST is already in flight here",
       ]

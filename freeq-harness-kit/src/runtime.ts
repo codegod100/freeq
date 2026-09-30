@@ -534,7 +534,6 @@ export class AgentRuntime {
       this.resumed.add(rec.id);
       if (!store.get(rec.id)) store.put(rec);
       lines.push(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`);
-      this.notify(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
       // Say so on the wire too: the offerer watched this go quiet, and a
       // progress note is how they learn it did not stay that way.
       await conn.sendAct(rec.channel, "progress", rec.id, {
