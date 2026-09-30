@@ -113,3 +113,10 @@ jobs:
       - name: Test (freeq-cc)
         working-directory: freeq-cc
         run: npm test
+
+      # The built entry as Claude Code starts it: over stdio, with an empty
+      # state directory, it must declare claude/channel and write nothing
+      # but JSON-RPC to stdout.
+      - name: Stdio smoke (freeq-cc)
+        working-directory: freeq-cc
+        run: node scripts/smoke-stdio.mjs
