@@ -392,9 +392,10 @@ describe("the freeq tool", () => {
     `);
   });
 
-  it("decline: sends a fail with the reason", async () => {
+  it("decline: sends a decline with the reason", async () => {
     const h = await startPi({ config: baseConfig() });
     await offeredToMe(h);
+    h.notices.length = 0;
     expect(await h.tool({ action: "decline", taskId: "01JOFFER", message: "no time today" })).toMatchInlineSnapshot(`"Declined 01JOFFER00 — no time today"`);
     expect(h.bot.of("act").map((a) => a.payload)).toMatchInlineSnapshot(`
       [
@@ -402,11 +403,12 @@ describe("the freeq tool", () => {
           "+freeq.at/act": "handoff",
           "+freeq.at/act-id": "01JOFFER000000000000000000",
           "+freeq.at/act-note": "no time today",
-          "+freeq.at/act-verb": "fail",
+          "+freeq.at/act-verb": "decline",
           "+freeq.at/from": "did:key:zSelf",
         },
       ]
     `);
+    expect(h.noticeTexts()).toEqual(["info: freeq: declined 01JOFFER00 — no time today"]);
   });
 
   it("claim: lists open work, refuses our own and non-open tasks, claims open work", async () => {

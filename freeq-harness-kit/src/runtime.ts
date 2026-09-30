@@ -992,7 +992,7 @@ export class AgentRuntime {
         await queue.save();
         if (params.action === "decline") {
           const why = params.message?.trim() || "declined";
-          await conn.sendAct(rec.channel, "fail", rec.id, { note: why });
+          await this.declineOffer(rec, why);
           this.stateChanged();
           return text(`Declined ${rec.id.slice(0, 10)} — ${why}`);
         }
