@@ -4479,6 +4479,7 @@ fn judge_relayed_task_event(
                     }
                     (TaskEventAction::Park, None)
                 }
+                TaskEventStored::Withheld => (TaskEventAction::Drop, None),
             }
         }
         crate::act_relay::RelayVerdict::Invalid(_) => (TaskEventAction::Drop, None),
@@ -4835,6 +4836,34 @@ fn store_relayed_task_event(
                     &home,
                 );
             }
+            // Posted outside its task's conversation: malformed for every
+            // server, so nobody here is shown it.
+            Some(crate::db::ActWrite::WrongVenue) => {
+                tracing::warn!(
+                    origin = %origin, act_id = %act_id, event_id = %event_id, channel = %target,
+                    "Refused a relayed task event posted outside its task's conversation — \
+                     not delivered"
+                );
+                return TaskEventStored::Withheld;
+            }
+            // Refused on a task this server owns: our refusal is the ruling,
+            // so nobody here is shown the move, the same as local ingress. A
+            // refusal on another server's task is still delivered: the copy
+            // here may only be behind the owner's.
+            Some(crate::db::ActWrite::Refused(ref refusal))
+                if state
+                    .with_db(|db| db.act_task_origin(&act_id))
+                    .flatten()
+                    .as_deref()
+                    == Some("") =>
+            {
+                tracing::warn!(
+                    origin = %origin, act_id = %act_id, event_id = %event_id, verb = %verb,
+                    reason = %refusal,
+                    "Refused a relayed move on a task this server owns — not delivered"
+                );
+                return TaskEventStored::Withheld;
+            }
             Some(other) => tracing::debug!(
                 origin = %origin, act_id = %act_id, event_id = %event_id,
                 outcome = ?other,
@@ -4898,6 +4927,9 @@ enum TaskEventStored {
     /// A receipt that named an event this server does not hold. Nothing was
     /// written; it names the event it is waiting for.
     WaitingOn(String),
+    /// Refused, and not to be shown: a move on a task this server owns that
+    /// the rules refused, or one posted outside its task's conversation.
+    Withheld,
 }
 
 /// The venue of the task a relayed event names, read from the log.
@@ -17840,7 +17872,7 @@ mod relayed_task_verdict_tests {
         let state = test_state_with_db();
         let mgr = test_manager();
         setup_authenticated_peer(&state, &mgr).await;
-        let _rx = capable_member(&state, "#syskeeper");
+        let mut rx = capable_member(&state, "#syskeeper");
         let key = key_on_file(&state, HOME);
 
         let act_id = "01SYSTEMTASK00000000000000";
@@ -17865,6 +17897,173 @@ mod relayed_task_verdict_tests {
             !state.with_db(|db| db.is_act_event(expiry)).unwrap(),
             "and the move is refused, not filed: the rules answered it the \
              way they answer any sender who may not send that verb"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "and nobody here is shown it: on a task this server owns, its \
+             refusal is the ruling"
+        );
+    }
+
+    /// The same event, as a peer relays it from a sender other than the
+    /// default one.
+    async fn relay_from(
+        state: &Arc<SharedState>,
+        mgr: &Arc<crate::s2s::S2sManager>,
+        channel: &str,
+        event_id: &str,
+        tags: HashMap<String, String>,
+        account: &str,
+    ) {
+        process_s2s_message(
+            state,
+            mgr,
+            PEER,
+            S2sMessage::Tagmsg {
+                event_id: format!("{PEER}:{event_id}"),
+                from: "someone!s@remote".to_string(),
+                target: channel.to_string(),
+                tags,
+                origin: PEER.to_string(),
+                account: Some(account.to_string()),
+            },
+        )
+        .await;
+    }
+
+    /// A move sent into a room other than its task's is malformed for every
+    /// server, so it reaches nobody here, whoever owns the task.
+    #[tokio::test]
+    async fn a_relayed_move_in_the_wrong_room_reaches_nobody() {
+        const WORKER: &str = "did:plc:wrongroomworker";
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        let mut task_room = capable_member(&state, "#taskroom");
+        let mut other_room = capable_member(&state, "#otherroom");
+        let offer_key = key_on_file(&state, SIGNER);
+        let worker_key = key_on_file(&state, WORKER);
+
+        // A task another server opened, in #taskroom.
+        let act_id = "01WRONGROOMTASK00000000000";
+        relay(
+            &state,
+            &mgr,
+            "#taskroom",
+            act_id,
+            signed_offer_tags("#taskroom", act_id, &offer_key),
+        )
+        .await;
+        assert!(received(&mut task_room).await.contains(act_id));
+
+        // A claim on it, signed for and sent to #otherroom.
+        let claim = "01WRONGROOMCLAIM0000000000";
+        relay_from(
+            &state,
+            &mgr,
+            "#otherroom",
+            claim,
+            signed_follow_up_tags(
+                "#otherroom",
+                claim,
+                "claim",
+                act_id,
+                WORKER,
+                &[],
+                &worker_key,
+            ),
+            WORKER,
+        )
+        .await;
+
+        assert!(
+            !state.with_db(|db| db.is_act_event(claim)).unwrap(),
+            "not filed"
+        );
+        for rx in [&mut other_room, &mut task_room] {
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                    .await
+                    .is_err(),
+                "and shown to nobody"
+            );
+        }
+    }
+
+    /// A refusal on a task another server owns is still delivered: the copy
+    /// here may only be behind the owner's. A claim filed unconfirmed leaves
+    /// the task open here until the owner's receipt, and the claimer's
+    /// progress meanwhile is refused here and legitimate there.
+    #[tokio::test]
+    async fn a_refused_move_on_another_servers_task_is_still_delivered() {
+        const WORKER: &str = "did:plc:laggingworker";
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        let mut rx = capable_member(&state, "#lagging");
+        let offer_key = key_on_file(&state, SIGNER);
+        let worker_key = key_on_file(&state, WORKER);
+
+        let act_id = "01LAGGINGTASK0000000000000";
+        relay(
+            &state,
+            &mgr,
+            "#lagging",
+            act_id,
+            signed_offer_tags("#lagging", act_id, &offer_key),
+        )
+        .await;
+        assert!(received(&mut rx).await.contains(act_id));
+        let claim = "01LAGGINGCLAIM000000000000";
+        relay_from(
+            &state,
+            &mgr,
+            "#lagging",
+            claim,
+            signed_follow_up_tags("#lagging", claim, "claim", act_id, WORKER, &[], &worker_key),
+            WORKER,
+        )
+        .await;
+        assert!(received(&mut rx).await.contains(claim));
+        assert_eq!(
+            state
+                .with_db(|db| db.act_task(act_id))
+                .unwrap()
+                .expect("the task stands")
+                .state,
+            "open",
+            "the claim waits for the owner's receipt"
+        );
+
+        let progress = "01LAGGINGPROGRESS000000000";
+        relay_from(
+            &state,
+            &mgr,
+            "#lagging",
+            progress,
+            signed_follow_up_tags(
+                "#lagging",
+                progress,
+                "progress",
+                act_id,
+                WORKER,
+                &[("+freeq.at/act-note", "halfway")],
+                &worker_key,
+            ),
+            WORKER,
+        )
+        .await;
+
+        assert!(
+            !state.with_db(|db| db.is_act_event(progress)).unwrap(),
+            "refused here, against a copy that is behind"
+        );
+        let line = received(&mut rx).await;
+        assert!(
+            line.contains(progress) && line.contains("act-verb=progress"),
+            "and still delivered: {line}"
         );
     }
 
