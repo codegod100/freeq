@@ -1,7 +1,7 @@
 name: Agent harness packages
 
 # Builds and tests the JS packages that put freeq into agent harnesses
-# (freeq-pi, freeq-cc, and the older freeqcc daemon) and the packages they are built on (the JS SDK,
+# (freeq-pi, freeq-cc) and the packages they are built on (the JS SDK,
 # bot-kit and harness-kit). Runs in its own workflow, path-filtered so it only triggers when
 # one of those packages changes — most PRs skip it entirely.
 on:
@@ -13,7 +13,6 @@ on:
       - 'freeq-harness-kit/**'
       - 'freeq-pi/**'
       - 'freeq-cc/**'
-      - 'freeqcc/**'
       - '.github/workflows/agent-harness.yml'
   pull_request:
     branches: [main]
@@ -23,7 +22,6 @@ on:
       - 'freeq-harness-kit/**'
       - 'freeq-pi/**'
       - 'freeq-cc/**'
-      - 'freeqcc/**'
       - '.github/workflows/agent-harness.yml'
 
 jobs:
@@ -88,18 +86,6 @@ jobs:
 
       - name: Test (freeq-pi)
         working-directory: freeq-pi
-        run: npm test
-
-      - name: Install (freeqcc)
-        working-directory: freeqcc
-        run: npm ci
-
-      - name: Build (freeqcc)
-        working-directory: freeqcc
-        run: npm run build
-
-      - name: Test (freeqcc)
-        working-directory: freeqcc
         run: npm test
 
       - name: Install (freeq-cc)
