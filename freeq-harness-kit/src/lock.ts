@@ -102,6 +102,18 @@ export class ConnectionLock {
   }
 
   /**
+   * Take the lock whoever holds it: the owner asked this window to take the
+   * connection over. The window that held it finds another live pid at its
+   * next refresh and stands down.
+   */
+  async takeOver(label?: string): Promise<void> {
+    await mkdir(dirname(this.#path), { recursive: true });
+    const info: LockInfo = { pid: process.pid, at: Date.now(), label };
+    await writeFile(this.#path, `${JSON.stringify(info)}\n`, { mode: 0o600 });
+    this.#held = true;
+  }
+
+  /**
    * Re-assert a lock we believe we hold.
    *
    * The file can vanish under us — a tmp-dir cleaner, an operator tidying up,

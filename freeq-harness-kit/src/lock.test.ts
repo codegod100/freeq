@@ -90,6 +90,22 @@ describe("one connection per installation", () => {
   });
 });
 
+describe("takeOver — taking the connection from a live window", () => {
+  it("overwrites a lock a live other process holds, and holds it", async () => {
+    // pid 1 stands in for a live process that is not us, as above.
+    await writeFile(path, JSON.stringify({ pid: 1, at: Date.now(), label: "window A" }));
+    const b = new ConnectionLock(path);
+    await b.takeOver("window B");
+    expect(b.held).toBe(true);
+    const onDisk = JSON.parse(await readFile(path, "utf8"));
+    expect(onDisk.pid).toBe(process.pid);
+    expect(onDisk.label).toBe("window B");
+    // A fresh claim in the taking process then holds it.
+    const again = new ConnectionLock(path);
+    expect((await again.acquire("window B")).held).toBe(true);
+  });
+});
+
 describe("refresh — surviving a vanished lock file", () => {
   it("recreates the file if it disappears while we hold it", async () => {
     const a = new ConnectionLock(path);

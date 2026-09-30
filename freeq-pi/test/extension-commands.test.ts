@@ -235,6 +235,25 @@ describe("/freeq", () => {
     `);
   });
 
+  it("takeover: yes takes the lock from a live window and connects", async () => {
+    const { readFile, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const h = await startPi({ config: baseConfig() });
+    const lockPath = join(h.agentDir, "freeq-connection-proj.lock");
+    expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
+    // Another live window holds it: the parent process stands in for one.
+    await writeFile(lockPath, JSON.stringify({ pid: process.ppid, at: Date.now(), label: "other" }));
+    h.notices.length = 0;
+    h.confirmAnswers.push(true);
+    await h.command("takeover");
+    expect(h.noticeTexts()).toMatchInlineSnapshot(`
+      [
+        "info: freeq: online: pi-test1234-proj (did:key:zSelf) · proj · test-model",
+      ]
+    `);
+    expect(JSON.parse(await readFile(lockPath, "utf8")).pid).toBe(process.pid);
+  });
+
   it("verbosity and provenance: show the levels, and map friendly names", async () => {
     const h = await startPi({ config: baseConfig() });
     await h.command("verbosity");

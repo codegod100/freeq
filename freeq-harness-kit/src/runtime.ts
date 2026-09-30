@@ -1380,7 +1380,9 @@ export class AgentRuntime {
             `Take it over for this window? The other session will go passive.`,
         );
         if (!ok) return;
-        await this.lock.release();
+        // Write our claim over the holder's; release() would leave a lock
+        // this window never held untouched, and connect() would then refuse.
+        await this.lock.takeOver(this.harness.cwd());
         // Force a fresh claim by clearing any stale in-memory state.
         this.lock = new ConnectionLock(ConnectionLock.pathFor(this.agentDir, takeoverMeta.project));
         await this.conn?.stop("takeover");
