@@ -32,7 +32,7 @@ import { homedir } from "node:os";
 
 const { signDelegation } = await import("@freeq/bot-kit");
 const { creatorKeyPath, loadOrCreateCreatorSeed, creatorPublicKeyB64 } = await import(
-  "../dist/owner-key.js"
+  "@freeq/harness-kit/owner-key"
 );
 
 function arg(name, fallback) {

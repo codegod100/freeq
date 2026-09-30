@@ -30,24 +30,24 @@ import {
   type FreeqConfig,
   type Mode,
   type Tier,
-} from "../src/config.js";
+} from "@freeq/harness-kit/config";
 import { deriveInstallSlug, defaultNick, isDid,
   resolveBotName,
-} from "../src/identity.js";
+} from "@freeq/harness-kit/identity";
 import {
   agentInstructions,
   authorizeInstructions,
   creatorKeyPath,
   interpretProvenanceNotice,
   waitForProvenance,
-} from "../src/owner-key.js";
+} from "@freeq/harness-kit/owner-key";
 import { McpStdioClient } from "../src/mcp-stdio.js";
 import { addressedUtterances, parseListenResult, toBridgeCall, type AvParams } from "../src/av.js";
-import { parseVerbositySteer } from "../src/steer.js";
-import { scrubSeverity } from "../src/scrub.js";
-import { nextUpdate, type ProgressState } from "../src/progress.js";
+import { parseVerbositySteer } from "@freeq/harness-kit/steer";
+import { scrubSeverity } from "@freeq/harness-kit/scrub";
+import { nextUpdate, type ProgressState } from "@freeq/harness-kit/progress";
 import { setLogger } from "@freeq/sdk";
-import { gistOf, renderStatus, toolDetail } from "../src/status.js";
+import { gistOf, renderStatus, toolDetail } from "@freeq/harness-kit/status";
 import {
   footerLine,
   inboundCardParts,
@@ -55,10 +55,10 @@ import {
   roomLineParts,
   rosterLines,
   type RoomLineInput,
-} from "../src/ui.js";
+} from "@freeq/harness-kit/ui";
 import { markForTerminal, supportsTruecolor, WORDMARK } from "../src/logo.js";
-import { WithheldBuffer, senderKey, withheldSummary } from "../src/withheld.js";
-import { peerColor } from "../src/ui.js";
+import { WithheldBuffer, senderKey, withheldSummary } from "@freeq/harness-kit/withheld";
+import { peerColor } from "@freeq/harness-kit/ui";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
@@ -67,7 +67,7 @@ import {
   resumePreamble,
   summarizeTurn,
   type TaskNote,
-} from "../src/journal.js";
+} from "@freeq/harness-kit/journal";
 import { homedir } from "node:os";
 import { join as joinPath } from "node:path";
 import { access as fsAccess } from "node:fs/promises";
@@ -95,9 +95,9 @@ async function existingCreatorKey(cfg: { ownerDid?: string }): Promise<string | 
     return undefined;
   }
 }
-import { collectSessionMeta, describeMeta } from "../src/presence.js";
-import { FreeqConnection, type InboundAsk } from "../src/connection.js";
-import { ConnectionLock } from "../src/lock.js";
+import { collectSessionMeta, describeMeta } from "@freeq/harness-kit/presence";
+import { FreeqConnection, type InboundAsk } from "@freeq/harness-kit/connection";
+import { ConnectionLock } from "@freeq/harness-kit/lock";
 import { isTerminal } from "@freeq/bot-kit";
 import {
   HandoffStore,
@@ -117,13 +117,13 @@ import {
   formatDuration,
   HANDOFF_KIND,
   type HandoffRecord,
-} from "../src/handoff.js";
+} from "@freeq/harness-kit/handoff";
 import {
   fetchServerDid,
   serverKeyFetcher,
   verifyActEvent,
   type KeyFetcher,
-} from "../src/verify.js";
+} from "@freeq/harness-kit/verify";
 import {
   TurnRecorder,
   buildProvenance,
@@ -132,13 +132,13 @@ import {
   DECISION_EVENT,
   PROVENANCE_TIERS,
   type ProvenanceTier,
-} from "../src/provenance.js";
+} from "@freeq/harness-kit/provenance";
 import {
   decideInbound,
   frameInbound,
   reachesModel,
   type InboundEvent,
-} from "../src/inbound.js";
+} from "@freeq/harness-kit/inbound";
 
 export default function (pi: ExtensionAPI): void {
   let config: FreeqConfig | undefined;
@@ -351,7 +351,7 @@ export default function (pi: ExtensionAPI): void {
    * progress report.
    */
   let askingChannel: string | undefined;
-  /** Timer and memory for the live progress line. See src/progress.ts. */
+  /** Timer and memory for the live progress line. See freeq-harness-kit/src/progress.ts. */
   let updateTimer: NodeJS.Timeout | undefined;
   let updateState: ProgressState = {};
 
@@ -507,7 +507,7 @@ export default function (pi: ExtensionAPI): void {
 
   // Messages addressed to us that the tier gate refused. Held so the agent
   // can say who is waiting instead of being indistinguishable from ignoring
-  // them. See src/withheld.ts for why this exists.
+  // them. See freeq-harness-kit/src/withheld.ts for why this exists.
   const withheld = new WithheldBuffer();
   let currentProject: string | undefined;
   /**
@@ -643,7 +643,7 @@ export default function (pi: ExtensionAPI): void {
   //
   // Three things a distracted agent used to get wrong: it missed an offer and
   // never went back to it, it accepted work and then hung, and a restart had
-  // no idea what it had been doing. See src/handoff.ts for the mechanisms;
+  // no idea what it had been doing. See freeq-harness-kit/src/handoff.ts for the mechanisms;
   // this is where they are driven.
 
   /** Offers waiting for this session to be free. Survives a restart. */
