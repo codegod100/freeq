@@ -27,13 +27,13 @@ From a clone instead, if you mean to work on it:
 ```bash
 git clone https://github.com/freeq-irc/freeq.git
 cd freeq/freeq-pi
-npm install            # also builds the linked @freeq/sdk and @freeq/bot-kit
+npm install            # also builds the linked @freeq/sdk, bot-kit and harness-kit
 pi install "$(pwd)"
 ```
 
-`npm install` is required before `pi install` in that case: the SDK and
-bot-kit are linked from the same repo and must be compiled first (a `prepare`
-script handles it).
+`npm install` is required before `pi install` in that case: the SDK, bot-kit
+and harness-kit are linked from the same repo and must be compiled first (a
+`prepare` script handles it).
 
 Note that `pi install git:github.com/freeq-irc/freeq` reports success and
 installs nothing, because pi expects the package manifest at the repo root and
