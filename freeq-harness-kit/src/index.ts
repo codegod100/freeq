@@ -11,6 +11,7 @@ export * from "./ask.js";
 export * from "./config.js";
 export * from "./connection.js";
 export * from "./discovery.js";
+export * from "./doctor.js";
 export * from "./handoff.js";
 export * from "./harness.js";
 export * from "./identity.js";

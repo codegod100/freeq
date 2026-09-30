@@ -84,6 +84,7 @@ import {
 import { decideInbound, frameInbound, reachesModel, type InboundEvent } from "./inbound.js";
 import type { Harness, InboundCard, NoticeLevel } from "./harness.js";
 import type { FreeqToolParams } from "./tool.js";
+import { formatDoctor, runDoctor, type DoctorLine } from "./doctor.js";
 import type { HarnessNames } from "./names.js";
 
 /** Root of freeq state on this machine — bot-kit's `~/.freeq`. */
@@ -1242,6 +1243,14 @@ export class AgentRuntime {
    */
   async runCommand(args: string): Promise<void> {
     const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+    // A check reads and reports: it must not connect a dormant project, mint
+    // its identity, or stop at a config it cannot parse, which is one of the
+    // things it reports.
+    if (sub === "doctor") {
+      const { text, level } = formatDoctor(await this.doctor());
+      this.notify(text, level);
+      return;
+    }
     // Deliberate use of freeq is the reason a dormant project connects.
     // 'off' is exempt: turning it off must not first turn it on.
     if (sub !== "off") await this.wake();
@@ -1857,8 +1866,8 @@ export class AgentRuntime {
       default:
         this.notify(
           [
-            "/freeq [status | login <did> | join #c | leave #c | peers |",
-            "        handoffs | mode #c <silent|addressed|participant> |",
+            "/freeq [status | doctor | login <did> | join #c | leave #c |",
+            "        peers | handoffs | mode #c <silent|addressed|participant> |",
             "        trust <did> <tier> | provenance <tier> | mute | unmute |",
             "        takeover | on | off]",
             "",
@@ -1875,6 +1884,33 @@ export class AgentRuntime {
           "info",
         );
     }
+  }
+
+  /**
+   * The setup check: the kit's common lines (`doctor.ts`), then the
+   * harness's own. A harness line that throws is reported, not raised.
+   */
+  async doctor(): Promise<DoctorLine[]> {
+    const project =
+      this.currentProject ?? (await collectSessionMeta({ cwd: this.harness.cwd(), model: this.harness.modelId() })).project;
+    const lines = await runDoctor({
+      agentDir: this.harness.agentDir,
+      botsRoot: BOTS_ROOT,
+      project,
+      names: this.names,
+      conn: this.conn,
+      passive: this.passive,
+      dormant: this.dormant,
+      httpOrigin: httpOriginFor,
+    });
+    if (this.harness.doctorLines) {
+      try {
+        lines.push(...(await this.harness.doctorLines()));
+      } catch (err) {
+        lines.push({ name: this.names.name, status: "fail", detail: `its own checks failed: ${(err as Error).message}` });
+      }
+    }
+    return lines;
   }
 
   // ── the person ──────────────────────────────────────────────────────────

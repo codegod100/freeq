@@ -10,6 +10,7 @@
  */
 
 import type { Tier } from "./config.js";
+import type { DoctorLine } from "./doctor.js";
 import type { TaskNote } from "./journal.js";
 import type { RoomLineInput } from "./ui.js";
 
@@ -92,4 +93,9 @@ export interface Harness {
    * colouring. Without it, the roster is sent as a notice.
    */
   roster?(title: string, lines: string[], dids: Array<string | undefined>): void;
+  /**
+   * The harness's own lines for `/freeq doctor`, after the kit's common
+   * checks: what only the harness knows about its setup.
+   */
+  doctorLines?(): Promise<DoctorLine[]>;
 }

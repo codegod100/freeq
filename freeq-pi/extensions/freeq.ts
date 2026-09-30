@@ -128,6 +128,17 @@ export default function (pi: ExtensionAPI): void {
       peersVisible = true;
       setTimeout(() => clearPeers(ctx), 30_000).unref?.();
     },
+    doctorLines: async () => [
+      rt.passive
+        ? {
+            name: "this window",
+            status: "warn",
+            detail: "passive — another pi session holds the connection (/freeq takeover)",
+          }
+        : rt.conn
+          ? { name: "this window", status: "ok", detail: "holds the connection" }
+          : { name: "this window", status: "warn", detail: "holds no connection" },
+    ],
     stepBegan: (phrase) => {
       // In a call, the tile is the room's window into this agent: the phrase
       // belongs there too, not only in presence strings.
@@ -785,7 +796,7 @@ export default function (pi: ExtensionAPI): void {
   // types those. After `/freeq <sub> `, complete the argument from live
   // state: subcommands, then peers or task ids as the subcommand demands.
   const SUBCOMMANDS = [
-    "status", "peers", "join", "leave", "mode", "trust", "mute", "unmute", "on", "off",
+    "status", "doctor", "peers", "join", "leave", "mode", "trust", "mute", "unmute", "on", "off",
     "handoffs", "tasks", "resume", "accept", "decline", "drop", "progress", "login", "authorize",
     "takeover", "verbosity", "provenance", "call", "hangup", "policy", "withheld",
   ];

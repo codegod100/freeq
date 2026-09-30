@@ -50,8 +50,8 @@ describe("/freeq", () => {
     expect(h.lastNotice()).toMatchInlineSnapshot(`
       {
         "level": "info",
-        "text": "/freeq [status | login <did> | join #c | leave #c | peers |
-              handoffs | mode #c <silent|addressed|participant> |
+        "text": "/freeq [status | doctor | login <did> | join #c | leave #c |
+              peers | handoffs | mode #c <silent|addressed|participant> |
               trust <did> <tier> | provenance <tier> | mute | unmute |
               takeover | on | off]
 
