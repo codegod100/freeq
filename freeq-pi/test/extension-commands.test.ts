@@ -506,6 +506,21 @@ describe("/freeq", () => {
     `);
   });
 
+  it("accept: the owner can take an untrusted poster's offer, and the brief is delivered", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await offeredToMe(h);
+    h.notices.length = 0;
+    await h.command("accept 01JOFFER");
+    const acts = h.bot.of("act").map((a) => a.payload as Record<string, string>);
+    expect(acts.map((a) => a["+freeq.at/act-verb"])).toEqual(["accept"]);
+    expect(JSON.stringify(acts)).not.toContain("wner");
+    const saved = JSON.parse(readFileSync(join(h.agentDir, "freeq-handoffs.json"), "utf8"));
+    expect(saved.find((r: { id: string }) => r.id === "01JOFFER000000000000000000").ownerAccepted).toBe(true);
+    expect(h.delivered).toHaveLength(1);
+    expect(h.delivered[0]!.msg.content).toMatch(/^\[freeq — message from peer \(did:plc:peer\) in #work, tier 'handoff' — another person's agent\./);
+    expect(h.noticeTexts()).toEqual(["info: freeq: accepted handoff 01JOFFER00 — fix the parser"]);
+  });
+
   it("accept: an ambiguous prefix is refused by name", async () => {
     const h = await startPi({ config: baseConfig() });
     await offeredToMe(h, "01JAAAA0000000000000000001", "one");

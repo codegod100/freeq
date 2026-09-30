@@ -308,28 +308,21 @@ describe("the freeq tool", () => {
     expect(await h.tool({ action: "accept", taskId: "01JOPEN" })).toMatchInlineSnapshot(`"Task 01JOPEN000 is 'open', not offered — nothing to accept."`);
   });
 
-  it("accept: from an untrusted offerer, sends the accept but the brief is withheld", async () => {
+  it("accept: refuses an untrusted offerer's work and sends nothing", async () => {
     const h = await startPi({ config: baseConfig() });
     await offeredToMe(h);
+    const { existsSync, readFileSync } = await import("node:fs");
+    const queuePath = `${h.agentDir}/freeq-offer-queue.json`;
+    const queueBefore = existsSync(queuePath) ? readFileSync(queuePath, "utf8") : undefined;
     h.notices.length = 0;
-    expect(await h.tool({ action: "accept", taskId: "01JOFFER" })).toMatchInlineSnapshot(`"Accepted 01JOFFER00 — fix the parser. The brief is now in your context; report what you did and finish with action 'complete', taskId '01JOFFER000000000000000000'."`);
-    expect(h.bot.of("act").map((a) => a.payload)).toMatchInlineSnapshot(`
-      [
-        {
-          "+freeq.at/act": "handoff",
-          "+freeq.at/act-id": "01JOFFER000000000000000000",
-          "+freeq.at/act-verb": "accept",
-          "+freeq.at/from": "did:key:zSelf",
-        },
-      ]
-    `);
-    expect(h.noticeTexts()).toMatchInlineSnapshot(`
-      [
-        "info: freeq: accepted handoff 01JOFFER00 — fix the parser",
-        "warning: freeq: 1 message to you from peer was not delivered, because peer is not trusted. To trust peer: /freeq trust did:plc:peer message (it then asks whether to deliver the message).",
-      ]
-    `);
-    expect(h.delivered.map((d) => ({ opts: d.opts, content: d.msg.content }))).toMatchInlineSnapshot(`[]`);
+    expect(await h.tool({ action: "accept", taskId: "01JOFFER" })).toMatchInlineSnapshot(
+      `"Not accepted: peer is not trusted to hand you work. Your owner can trust them with /freeq trust did:plc:peer handoff."`,
+    );
+    expect(h.bot.of("act")).toEqual([]);
+    expect(h.notices).toEqual([]);
+    expect(h.delivered).toEqual([]);
+    expect(existsSync(queuePath) ? readFileSync(queuePath, "utf8") : undefined).toEqual(queueBefore);
+    expect(await h.tool({ action: "handoffs" })).toContain("01JOFFER00  offered");
   });
 
   it("accept: from a trusted offerer while busy, sends the accept and delivers the brief", async () => {

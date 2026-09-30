@@ -80,6 +80,11 @@ export interface HandoffRecord {
   /** True when every event we applied carried a signature. */
   signed: boolean;
   /**
+   * The owner accepted this by hand (`/freeq accept`), overriding the offer
+   * policy's trust bar. Local only: never sent on the wire.
+   */
+  ownerAccepted?: boolean;
+  /**
    * Worst verification outcome across the events we applied.
    *
    * `valid` means every event's signature was checked against the key it
@@ -345,6 +350,7 @@ function normalizeRecord(raw: unknown): HandoffRecord | undefined {
     lastActor: typeof o.lastActor === "string" ? o.lastActor : undefined,
     fromReplay: o.fromReplay === true,
     signed: o.signed !== false,
+    ownerAccepted: o.ownerAccepted === true ? true : undefined,
     verification:
       o.verification === "valid" || o.verification === "unverifiable" ? o.verification : undefined,
     createdAt: typeof o.createdAt === "number" ? o.createdAt : Date.now(),

@@ -1115,3 +1115,26 @@ describe("the poster's nick", () => {
   });
 });
 
+describe("the owner's accept", () => {
+  it("is kept across a save and load, and a file without it loads as not set", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "handoff-test-"));
+    const path = join(dir, "h.json");
+    const a = new HandoffStore(path);
+    const id = offer(a);
+    a.get(id)!.ownerAccepted = true;
+    a.put(a.get(id)!);
+    await a.save();
+    const b = new HandoffStore(path);
+    await b.load();
+    expect(b.get(id)!.ownerAccepted).toBe(true);
+
+    const { writeFile } = await import("node:fs/promises");
+    const raw = JSON.parse(await readFile(path, "utf8")) as Array<Record<string, unknown>>;
+    delete raw[0]!.ownerAccepted;
+    await writeFile(path, JSON.stringify(raw));
+    const c = new HandoffStore(path);
+    await c.load();
+    expect(c.get(id)!.ownerAccepted).toBeUndefined();
+  });
+});
+

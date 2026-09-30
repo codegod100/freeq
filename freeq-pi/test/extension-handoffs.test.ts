@@ -509,6 +509,31 @@ describe("resume on connect", () => {
     expect(pre.delivered).toEqual([]);
   });
 
+  it("resumes owner-accepted work from an untrusted poster with the handoff frame", async () => {
+    const pre = await startPi({ config: baseConfig(), start: false, fetch: assigned(["01JOWNED00000000000000000"], { offerer: PEER }) });
+    writeFileSync(
+      join(pre.agentDir, "freeq-handoffs.json"),
+      JSON.stringify([
+        { id: "01JOWNED00000000000000000", kind: "handoff", state: "assigned", offerer: PEER, offererNick: "peer", offeree: SELF, assignee: SELF, ownerAccepted: true, title: "owner took it", channel: "#work", fromReplay: false, signed: true, createdAt: 0, updatedAt: 0, log: [] },
+      ]),
+    );
+    await pre.fire("session_start");
+    expect(pre.delivered).toHaveLength(1);
+    expect(pre.delivered[0]!.msg.content).toMatch(/^\[freeq — message from peer \(did:plc:peer\) in #work, tier 'handoff' — /);
+  });
+
+  it("does not deliver resumed work from an untrusted poster without the owner's accept", async () => {
+    const pre = await startPi({ config: baseConfig(), start: false, fetch: assigned(["01JPLAIN00000000000000000"], { offerer: PEER }) });
+    writeFileSync(
+      join(pre.agentDir, "freeq-handoffs.json"),
+      JSON.stringify([
+        { id: "01JPLAIN00000000000000000", kind: "handoff", state: "assigned", offerer: PEER, offererNick: "peer", offeree: SELF, assignee: SELF, title: "plain", channel: "#work", fromReplay: false, signed: true, createdAt: 0, updatedAt: 0, log: [] },
+      ]),
+    );
+    await pre.fire("session_start");
+    expect(pre.delivered).toEqual([]);
+  });
+
   it("answers /freeq resume offline", async () => {
     const h = await startPi({ config: baseConfig({ enabled: false }) });
     await h.command("resume");

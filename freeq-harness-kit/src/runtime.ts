@@ -708,6 +708,11 @@ export class AgentRuntime {
     // expiry sweep noticed, days later.
     this.ensureWatchdog(cfg).start({ taskId: rec.id, channel: rec.channel, title: rec.title });
 
+    // Work the owner accepted by hand is delivered at `handoff` even from a
+    // poster trusted less; a poster trusted more keeps their own tier.
+    const posterTier = tierFor(cfg, rec.offerer);
+    const tier = rec.ownerAccepted && !tierAtLeast(posterTier, "handoff") ? "handoff" : posterTier;
+
     this.deliver({
       kind: "chat",
       channel: rec.channel,
@@ -727,7 +732,7 @@ export class AgentRuntime {
         `taskId '${rec.id}'). Do not send secrets or absolute paths back.`,
       addressed: true,
       mode: cfg.muted ? "silent" : "addressed",
-      tier: tierFor(cfg, rec.offerer),
+      tier,
     });
   }
 
@@ -987,6 +992,18 @@ export class AgentRuntime {
             `Task ${rec.id.slice(0, 10)} is offered to ${rec.offeree.slice(0, 24)}…, not to you. ` +
               `A handoff is addressed to an identity; only its offeree can take it.`,
           );
+        }
+        if (params.action === "accept") {
+          // The same bar the offer policy applies: below it, a brief would be
+          // withheld at delivery, so taking the work would only be a promise
+          // this agent cannot keep. The owner can still accept it by hand.
+          const cfg = this.config ?? (await this.ensureConfig());
+          if (!tierAtLeast(tierFor(cfg, rec.offerer), "handoff")) {
+            return text(
+              `Not accepted: ${rec.offererNick ?? rec.offerer} is not trusted to hand you work. ` +
+                `Your owner can trust them with ${this.names.hint("trust")} ${rec.offerer} handoff.`,
+            );
+          }
         }
         const queue = await this.ensureOffers();
         queue.remove(rec.id);
@@ -1619,6 +1636,11 @@ export class AgentRuntime {
         // No tier check on either: the owner typed this, and the trust map
         // exists to decide what happens WITHOUT them, not to overrule them.
         if (sub === "accept") {
+          // Recorded so the brief, now and on any resume, is delivered at
+          // the tier the owner vouched for rather than withheld.
+          rec.ownerAccepted = true;
+          store.put(rec);
+          await store.save();
           await this.acceptOffer(cfg, rec);
         } else {
           await this.declineOffer(rec, rest.slice(1).join(" ") || "declined by the operator");
