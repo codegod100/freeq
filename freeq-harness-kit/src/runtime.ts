@@ -2204,6 +2204,11 @@ export class AgentRuntime {
       onMessage: (channel, msg) => {
         void (async () => {
           const did = await this.conn!.resolveSenderDid(msg);
+          try {
+            if (this.harness.intercept?.({ channel, from: msg.from, did, text: msg.text })) return;
+          } catch (err) {
+            this.notify(`freeq: could not check a message: ${(err as Error).message}`, "error");
+          }
           const isChannel = channel.startsWith("#");
           // bot-kit's mention check also enforces a per-channel cooldown,
           // which is what stops two agents that mention each other from

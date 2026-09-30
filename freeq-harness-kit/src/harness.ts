@@ -94,6 +94,13 @@ export interface Harness {
    */
   roster?(title: string, lines: string[], dids: Array<string | undefined>): void;
   /**
+   * A message the harness takes for itself instead of the model, such as a
+   * tool-approval verdict. Called for every inbound chat message, with the
+   * sender's server-resolved DID, before the gate; `true` means taken: it
+   * is not delivered and no reply is owed for it.
+   */
+  intercept?(msg: { channel: string; from: string; did: string | null; text: string }): boolean;
+  /**
    * The harness's own lines for `/freeq doctor`, after the kit's common
    * checks: what only the harness knows about its setup.
    */

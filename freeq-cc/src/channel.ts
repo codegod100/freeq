@@ -32,7 +32,10 @@ import {
   type ServerCapabilities,
 } from "@modelcontextprotocol/sdk/types.js";
 
+import { z } from "zod";
+
 import { AgentRuntime } from "@freeq/harness-kit/runtime";
+import { isDid } from "@freeq/harness-kit/identity";
 import type { BotFactory } from "@freeq/harness-kit/connection";
 import type { Harness, InboundCard } from "@freeq/harness-kit/harness";
 import {
@@ -126,6 +129,24 @@ function kitToolInput(hook: Record<string, unknown>): Record<string, unknown> {
   return input;
 }
 
+/**
+ * A reply to a relayed tool-approval prompt: `yes <id>` or `no <id>`. The id
+ * is five lowercase letters without `l`, as Claude Code makes them; case is
+ * ignored because phones capitalise.
+ */
+export const VERDICT = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i;
+
+/** Claude Code asking the channel to relay a tool-approval prompt. */
+const PermissionRequest = z.object({
+  method: z.literal("notifications/claude/channel/permission_request"),
+  params: z.object({
+    request_id: z.string(),
+    tool_name: z.string(),
+    description: z.string(),
+    input_preview: z.string(),
+  }),
+});
+
 /** The `<channel>` tag's attributes for a delivery: identifiers only. */
 function channelMeta(card: InboundCard): Record<string, string> {
   const venue = card.channel.startsWith("#") || card.channel.startsWith("&") ? "channel" : "dm";
@@ -216,6 +237,23 @@ export async function createChannel(opts: ChannelOptions): Promise<Channel> {
     },
     isIdle: () => idle,
     journal,
+    // The owner's `yes <id>` / `no <id>` in a DM answers a relayed
+    // tool-approval prompt; it is not chat. Only from the owner's DID as the
+    // server resolved it, only in a DM, and only when relay was declared.
+    intercept: (m) => {
+      if (!relayOwner || m.did !== relayOwner) return false;
+      if (m.channel.startsWith("#") || m.channel.startsWith("&")) return false;
+      const verdict = VERDICT.exec(m.text);
+      if (!verdict || !server) return false;
+      const behavior = verdict[1]!.toLowerCase().startsWith("y") ? "allow" : "deny";
+      server
+        .notification({
+          method: "notifications/claude/channel/permission",
+          params: { request_id: verdict[2]!.toLowerCase(), behavior },
+        })
+        .catch((err: Error) => log(`freeq-cc: could not send a permission verdict: ${err.message}`));
+      return true;
+    },
   };
 
   const runtime = new AgentRuntime(harness, { botFactory: opts.botFactory });
@@ -272,13 +310,36 @@ export async function createChannel(opts: ChannelOptions): Promise<Channel> {
     log(`freeq-cc: ${(err as Error).message}`);
   }
 
+  // Permission relay lets whoever answers approve tool use in this session,
+  // so it is declared only when there is an owner to send prompts to and to
+  // take answers from. The owner at startup is the one for the session: the
+  // capability cannot change after Claude Code has read it.
+  const owner = runtime.config?.ownerDid;
+  const relayOwner = isDid(owner) ? owner : undefined;
   const capabilities: ServerCapabilities = {
-    experimental: { "claude/channel": {} },
+    experimental: relayOwner
+      ? { "claude/channel": {}, "claude/channel/permission": {} }
+      : { "claude/channel": {} },
     tools: {},
     prompts: {},
   };
   const mcp = new Server({ name: "freeq", version: "0.1.0" }, { capabilities, instructions: INSTRUCTIONS });
   server = mcp;
+
+  // A tool-approval prompt goes to the owner by DM, addressed to their DID
+  // so it reaches them under whatever nick they use.
+  mcp.setNotificationHandler(PermissionRequest, async ({ params }) => {
+    if (!relayOwner) return;
+    const conn = runtime.conn;
+    const preview =
+      params.input_preview.length > 600 ? `${params.input_preview.slice(0, 600)}…` : params.input_preview;
+    const text =
+      `Claude wants to use ${params.tool_name}: ${params.description}\n${preview}\n` +
+      `Reply "yes ${params.request_id}" or "no ${params.request_id}"`;
+    if (!conn || !conn.send(relayOwner, text)) {
+      log(`freeq-cc: could not relay permission request ${params.request_id}: not connected`);
+    }
+  });
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [

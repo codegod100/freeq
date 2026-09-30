@@ -475,3 +475,31 @@ describe("httpOriginFor", () => {
     expect(httpOriginFor("not a url")).toBe("https://irc.freeq.at");
   });
 });
+
+describe("AgentRuntime: messages the harness takes", () => {
+  it("does not deliver a message the harness intercepts, and delivers the rest", async () => {
+    const taken: Array<{ channel: string; from: string; did: string | null; text: string }> = [];
+    const h = fakeHarness({
+      intercept: (m) => {
+        if (m.text !== "yes abcde") return false;
+        taken.push(m);
+        return true;
+      },
+    });
+    writeConfig(h.agentDir);
+    const bot = new FakeBot();
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => bot });
+    await rt.start();
+    bot.emit("message", "nap", { from: "nap", text: "yes abcde", isSelf: false, tags: { account: OWNER } });
+    await tick();
+    expect(taken).toEqual([{ channel: "nap", from: "nap", did: OWNER, text: "yes abcde" }]);
+    expect(h.delivered).toEqual([]);
+    // Nothing is owed for it: a settled run sends nothing back.
+    await rt.onSettled();
+    expect(bot.messages()).toEqual([]);
+    bot.emit("message", "nap", { from: "nap", text: "hello", isSelf: false, tags: { account: OWNER } });
+    await tick();
+    expect(h.delivered).toHaveLength(1);
+    await rt.stop();
+  });
+});
