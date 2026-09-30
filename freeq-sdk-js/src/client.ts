@@ -2062,6 +2062,9 @@ export class FreeqClient extends EventEmitter {
         }
       }
     }
+    // The newest revision decides: a finished stream's last edit carries no
+    // streaming tag, so the row it folds into stops streaming.
+    const isStreaming = tags['+freeq.at/streaming'] === '1';
     const idx = batch.messages.findIndex(
       (m) => m.id === editOf || m.editOf === editOf,
     );
@@ -2077,6 +2080,7 @@ export class FreeqClient extends EventEmitter {
         // it was born with, so anything holding a reference to it —
         // a reaction, a pending delete, a reply — still resolves.
         editOf: prev.editOf ?? editOf,
+        isStreaming,
         ...(mergedReactions ? { reactions: mergedReactions } : {}),
       };
       return;
@@ -2092,6 +2096,7 @@ export class FreeqClient extends EventEmitter {
       tags,
       isSelf,
       editOf,
+      isStreaming,
       ...(editReactions ? { reactions: editReactions } : {}),
     });
   }

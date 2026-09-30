@@ -2664,6 +2664,57 @@ describe('onNickCollision policy', () => {
     expect(nicks && [...nicks].sort()).toEqual(['alice', 'bob']);
   });
 
+  // A streamed reply is stored as its opener (tagged streaming) and its
+  // edits, the last of which carries no streaming tag. Read back, the row is
+  // streaming exactly when the newest revision folded into it is tagged.
+  async function foldHistory(lines: string[]): Promise<any[]> {
+    const { client, ws } = await makeRegistered();
+    const batches: Array<[string, any[]]> = [];
+    client.on('historyBatch', (buf, msgs) => batches.push([buf, msgs]));
+    ws.recv(':srv BATCH +h1 chathistory did:plc:peer');
+    for (const line of lines) ws.recv(line);
+    ws.recv(':srv BATCH -h1');
+    for (let i = 0; i < 4; i++) await flushAsync();
+    expect(batches).toHaveLength(1);
+    return batches[0][1];
+  }
+
+  const streamOpener =
+    '@batch=h1;msgid=M0;+freeq.at/streaming=1;time=2026-07-21T00:00:00.000Z :agent!u@h PRIVMSG did:plc:peer :y';
+  const streamEdit =
+    '@batch=h1;msgid=E1;+draft/edit=M0;+freeq.at/streaming=1;time=2026-07-21T00:00:01.000Z :agent!u@h PRIVMSG did:plc:peer :yo — what';
+  const finalEdit =
+    '@batch=h1;msgid=E2;+draft/edit=M0;time=2026-07-21T00:00:02.000Z :agent!u@h PRIVMSG did:plc:peer :yo — what\'s up?';
+
+  it('a finished streamed reply read back from history is not streaming', async () => {
+    const msgs = await foldHistory([streamOpener, streamEdit, finalEdit]);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('M0');
+    expect(msgs[0].text).toBe("yo — what's up?");
+    expect(msgs[0].isStreaming, 'the newest revision carries no streaming tag').toBe(false);
+  });
+
+  it('a streamed reply read back mid-stream is still streaming', async () => {
+    const msgs = await foldHistory([streamOpener, streamEdit]);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].text).toBe('yo — what');
+    expect(msgs[0].isStreaming, 'the newest revision is tagged streaming').toBe(true);
+  });
+
+  it('a final edit whose opener is outside the window is not streaming', async () => {
+    const msgs = await foldHistory([finalEdit]);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('M0');
+    expect(msgs[0].isStreaming, 'an untagged edit on its own is not streaming').toBe(false);
+  });
+
+  it('a streaming edit whose opener is outside the window is streaming', async () => {
+    const msgs = await foldHistory([streamEdit]);
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].id).toBe('M0');
+    expect(msgs[0].isStreaming, 'a tagged edit on its own is streaming').toBe(true);
+  });
+
 // ────────────────────────────────────────────────────────────────────
 // Signed mutations, and the cap that gates them
 // ────────────────────────────────────────────────────────────────────
