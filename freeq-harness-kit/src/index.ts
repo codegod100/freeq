@@ -25,6 +25,7 @@ export * from "./runtime.js";
 export * from "./scrub.js";
 export * from "./status.js";
 export * from "./steer.js";
+export * from "./tool.js";
 export * from "./ui.js";
 export * from "./verify.js";
 export * from "./withheld.js";

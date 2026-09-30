@@ -327,6 +327,28 @@ describe("AgentRuntime: handoffs", () => {
   });
 });
 
+describe("AgentRuntime: the freeq tool", () => {
+  it("says it cannot reach peers when offline", async () => {
+    const rt = new AgentRuntime(fakeHarness().harness);
+    expect(await rt.runTool({ action: "peers" })).toBe("freeq is not configured — cannot reach peers right now.");
+  });
+
+  it("sends, and refuses a handoff to a nick it cannot resolve", async () => {
+    const { rt, bot } = await started();
+    expect(await rt.runTool({ action: "send", to: "pi-chad", message: "hi" })).toBe("Sent to pi-chad.");
+    expect(bot.messages()).toEqual(["pi-chad hi"]);
+    expect(await rt.runTool({ action: "handoff", to: "pi-chad", title: "x" })).toContain("Cannot resolve 'pi-chad' to a DID.");
+  });
+
+  it("offers a handoff to a DID and records it", async () => {
+    const { rt } = await started();
+    const out = await rt.runTool({ action: "handoff", to: "did:plc:chad", title: "fix it", brief: "details" });
+    expect(out.split("\n")[0]).toBe("Handoff offered: 01JTASK0000000000000000000");
+    expect(rt.handoffs?.get("01JTASK0000000000000000000")).toMatchObject({ state: "offered", offeree: "did:plc:chad", note: "details" });
+    expect(await rt.runTool({ action: "handoffs" })).toContain("You offered:");
+  });
+});
+
 describe("httpOriginFor", () => {
   it("maps the websocket URL to the HTTP origin", () => {
     expect(httpOriginFor("wss://irc.freeq.at/irc")).toBe("https://irc.freeq.at");
