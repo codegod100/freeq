@@ -106,6 +106,29 @@ export function decideInbound(ev: InboundEvent): InboundDecision {
   return { action: "inject", reason: `addressed message from tier '${ev.tier}' sender` };
 }
 
+const REPLY_CARE =
+  "Answer concisely and only from what you can verify in this environment. " +
+  "If you cannot answer, say so plainly.";
+
+/**
+ * How the answer goes back. An ask is answered with the turn's text. A DM or
+ * a mention is answered by what the agent sends with the freeq tool; its
+ * closing text goes back only if it sent nothing.
+ */
+function replyHow(ev: InboundEvent): string {
+  if (ev.kind === "ask") return `Your next reply will be sent back to ${ev.from} over freeq. `;
+  if (ev.channel.startsWith("#")) {
+    return (
+      `To answer, use the freeq tool: 'say' in ${ev.channel}. If you post nothing there, ` +
+      `your closing text is posted to ${ev.channel} instead, addressed to ${ev.from}. `
+    );
+  }
+  return (
+    `To answer ${ev.from}, use the freeq tool: 'send' to ${ev.from}. If you send nothing, ` +
+    `your closing text is sent to ${ev.from} instead. `
+  );
+}
+
 /**
  * Frame inbound content as untrusted input before it reaches the model.
  *
@@ -118,11 +141,7 @@ export function frameInbound(ev: InboundEvent, opts?: { expectsReply?: boolean }
   const venue = ev.channel.startsWith("#") ? `in ${ev.channel}` : "in a direct message";
   const header = `[freeq — ${headerFor(ev, who, venue)}]`;
 
-  const footer = opts?.expectsReply
-    ? `\n\n[Your next reply will be sent back to ${ev.from} over freeq. ` +
-      `Answer concisely and only from what you can verify in this environment. ` +
-      `If you cannot answer, say so plainly.]`
-    : "";
+  const footer = opts?.expectsReply ? `\n\n[${replyHow(ev)}${REPLY_CARE}]` : "";
 
   return `${header}\n\n${ev.text}${footer}`;
 }

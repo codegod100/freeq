@@ -144,6 +144,24 @@ type PendingReply =
   | { kind: "ask"; ask: InboundAsk; seq: number }
   | { kind: "channel"; channel: string; from: string; seq: number };
 
+/**
+ * Whether a send to `to` reaches the person a DM reply is owed to: their
+ * nick, or the DID a DM keyed by DID is filed under. Ignoring case.
+ */
+function sameName(to: string, item: { channel: string; from: string }): boolean {
+  const t = to.toLowerCase();
+  return t === item.from.toLowerCase() || t === item.channel.toLowerCase();
+}
+
+/**
+ * Whether `message` already starts by naming `nick`: the nick, ignoring case,
+ * with or without a leading `@`, followed by `:`, `,` or a space.
+ */
+function addresses(message: string, nick: string): boolean {
+  const escaped = nick.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^@?${escaped}[:, ]`, "i").test(message);
+}
+
 /** How often the offer queue and the watchdog are looked at. */
 const MAINTENANCE_MS = 5_000;
 
@@ -833,22 +851,28 @@ export class AgentRuntime {
 
       case "send": {
         if (!params.to || !params.message) return text("send requires 'to' and 'message'.");
-        return text(
-          conn.send(params.to, params.message)
-            ? `Sent to ${params.to}.`
-            : `Could not send to ${params.to}.`,
-        );
+        if (!conn.send(params.to, params.message)) return text(`Could not send to ${params.to}.`);
+        this.#answered((item) => !item.channel.startsWith("#") && sameName(params.to!, item));
+        return text(`Sent to ${params.to}.`);
       }
 
       case "say": {
         if (!params.channel || !params.message) {
           return text("say requires 'channel' and 'message'.");
         }
-        return text(
-          conn.send(params.channel, params.message)
-            ? `Posted to ${params.channel}.`
-            : `Could not post to ${params.channel}.`,
+        // Answering a mention: name the asker, as the automatic reply does.
+        const asker = this.#lastAskerIn(params.channel);
+        const message =
+          asker && !addresses(params.message, asker)
+            ? `@${asker} ${params.message}`
+            : params.message;
+        if (!conn.send(params.channel, message)) {
+          return text(`Could not post to ${params.channel}.`);
+        }
+        this.#answered(
+          (item) => item.channel.toLowerCase() === params.channel!.toLowerCase(),
         );
+        return text(`Posted to ${params.channel}.`);
       }
 
       case "handoff": {
@@ -2178,7 +2202,7 @@ export class AgentRuntime {
                 evidence: "I'll post one line per turn here as I work.",
                 firehose: "I'll narrate every consequential tool call as it happens.",
               };
-              this.conn!.send(channel, `${msg.from}: ${words[steer]} (verbosity → ${steer})`);
+              this.conn!.send(channel, `@${msg.from} ${words[steer]} (verbosity → ${steer})`);
               this.notify(`freeq: verbosity → ${steer} (set by ${msg.from} in ${channel})`, "info");
               return;
             }
@@ -2453,6 +2477,30 @@ export class AgentRuntime {
     }
   }
 
+  /** The most recent person owed a reply in `channel`, if anyone is. */
+  #lastAskerIn(channel: string): string | undefined {
+    let asker: string | undefined;
+    for (const item of this.#pendingReplies) {
+      if (item.kind === "channel" && item.channel.toLowerCase() === channel.toLowerCase()) {
+        asker = item.from;
+      }
+    }
+    return asker;
+  }
+
+  /**
+   * The agent answered someone itself, with the freeq tool: the DMs and
+   * mentions `matches` picks are answered, so no closing text follows for
+   * them. Asks are never answered this way; they keep the automatic answer.
+   */
+  #answered(matches: (item: { channel: string; from: string }) => boolean): void {
+    const pending = this.#pendingReplies;
+    for (let i = pending.length - 1; i >= 0; i--) {
+      const item = pending[i]!;
+      if (item.kind === "channel" && matches(item)) pending.splice(i, 1);
+    }
+  }
+
   /**
    * Send `text` to everyone waiting on this run. Called when a turn ends (the
    * live path) and when the run settles (the sweep for anything left,
@@ -2506,10 +2554,13 @@ export class AgentRuntime {
       // without the client knowing (nick churn from sibling sessions), so
       // join unconditionally. Channels only: a DM target is a nick, and
       // JOIN <nick> is nonsense.
+      // A channel reply names who it answers as @nick, which clients show as
+      // a mention; a DM goes to them as it is.
+      const line = channel.startsWith("#") ? `@${from} ${text}` : text;
       if (channel.startsWith("#")) conn.join(channel);
-      conn.send(channel, `${from}: ${text}`);
+      conn.send(channel, line);
       // A receipt in the transcript: what we handed the server, addressed so.
-      this.#receipt(channel, `${from}: ${text}`);
+      this.#receipt(channel, line);
     }
   }
 

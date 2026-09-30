@@ -170,4 +170,22 @@ describe("framing follows the tier (owner must not be called untrusted)", () => 
     expect(framed).toMatch(/sent back to/);
     expect(frameInbound(ev())).not.toMatch(/sent back to/);
   });
+
+  it("tells the model to answer a direct message with send", () => {
+    const framed = frameInbound(ev({ kind: "chat", channel: "alice", from: "alice" }), {
+      expectsReply: true,
+    });
+    expect(framed).toContain("'send' to alice");
+    expect(framed).toContain("If you send nothing, your closing text is sent to alice instead.");
+    expect(framed).not.toMatch(/sent back to/);
+  });
+
+  it("tells the model to answer a channel mention with say", () => {
+    const framed = frameInbound(ev({ kind: "chat", channel: "#dev", from: "alice" }), {
+      expectsReply: true,
+    });
+    expect(framed).toContain("'say' in #dev");
+    expect(framed).toContain("addressed to alice");
+    expect(framed).not.toMatch(/sent back to/);
+  });
 });

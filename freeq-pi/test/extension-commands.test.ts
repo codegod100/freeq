@@ -692,7 +692,7 @@ describe("/freeq", () => {
 
       can you review #12?
 
-      [Your next reply will be sent back to eve over freeq. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]",
+      [To answer eve, use the freeq tool: 'send' to eve. If you send nothing, your closing text is sent to eve instead. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]",
           "opts": {
             "deliverAs": "followUp",
             "triggerTurn": true,
@@ -703,7 +703,7 @@ describe("/freeq", () => {
 
       and #13?
 
-      [Your next reply will be sent back to eve over freeq. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]",
+      [To answer, use the freeq tool: 'say' in #work. If you post nothing there, your closing text is posted to #work instead, addressed to eve. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]",
           "opts": {
             "deliverAs": "followUp",
             "triggerTurn": true,
@@ -712,7 +712,7 @@ describe("/freeq", () => {
       ]
     `);
     await h.turn("reviewed both");
-    expect(h.bot.messages()).toEqual(["eve eve: reviewed both", "#work eve: reviewed both"]);
+    expect(h.bot.messages()).toEqual(["eve reviewed both", "#work @eve reviewed both"]);
   });
 
   it("trust: declining delivery drops the held messages", async () => {

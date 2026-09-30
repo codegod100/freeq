@@ -201,8 +201,8 @@ describe("AgentRuntime: replies", () => {
     expect(bot.messages()).toEqual([]);
     rt.onTurnStart();
     rt.onTurnEnd("the answer", false);
-    expect(bot.messages()).toEqual(["nap nap: the answer"]);
-    expect(lines.at(-1)).toMatchObject({ direction: "out", channel: "nap", text: "nap: the answer" });
+    expect(bot.messages()).toEqual(["nap the answer"]);
+    expect(lines.at(-1)).toMatchObject({ direction: "out", channel: "nap", text: "the answer" });
   });
 
   it("sweeps what is left when the run settles, and reports a missing answer", async () => {

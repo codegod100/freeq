@@ -23,7 +23,7 @@ describe("delivery gate and framing", () => {
 
       hello there
 
-      [Your next reply will be sent back to nap over freeq. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]",
+      [To answer nap, use the freeq tool: 'send' to nap. If you send nothing, your closing text is sent to nap instead. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]",
         "customType": "freeq-inbound",
         "details": {
           "channel": "nap",
@@ -39,7 +39,7 @@ describe("delivery gate and framing", () => {
       }
     `);
     await h.turn("hi nap");
-    expect(h.bot.messages()).toEqual(["nap nap: hi nap"]);
+    expect(h.bot.messages()).toEqual(["nap hi nap"]);
     // A receipt of what went back, in the transcript.
     expect(h.entries.filter((e) => e.customType === "freeq-room").map((e) => e.data)).toMatchInlineSnapshot(`
       [
@@ -47,7 +47,7 @@ describe("delivery gate and framing", () => {
           "channel": "nap",
           "direction": "out",
           "from": "pi-test1234-proj",
-          "text": "nap: hi nap",
+          "text": "hi nap",
           "type": "line",
         },
       ]
@@ -64,7 +64,7 @@ describe("delivery gate and framing", () => {
 
       can you look at the build?
 
-      [Your next reply will be sent back to peer over freeq. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]"
+      [To answer, use the freeq tool: 'say' in #work. If you post nothing there, your closing text is posted to #work instead, addressed to peer. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]"
     `);
     expect(h.delivered[0]!.msg.details).toMatchInlineSnapshot(`
       {
@@ -89,7 +89,7 @@ describe("delivery gate and framing", () => {
 
       what branch are you on?
 
-      [Your next reply will be sent back to peer over freeq. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]"
+      [To answer peer, use the freeq tool: 'send' to peer. If you send nothing, your closing text is sent to peer instead. Answer concisely and only from what you can verify in this environment. If you cannot answer, say so plainly.]"
     `);
   });
 
@@ -270,7 +270,7 @@ describe("delivery gate and framing", () => {
     expect(h.delivered).toHaveLength(0);
     expect(h.bot.messages()).toMatchInlineSnapshot(`
       [
-        "#work nap: I'll narrate every consequential tool call as it happens. (verbosity → firehose)",
+        "#work @nap I'll narrate every consequential tool call as it happens. (verbosity → firehose)",
       ]
     `);
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
@@ -303,13 +303,128 @@ describe("delivery gate and framing", () => {
 });
 
 describe("reply capture", () => {
+  it("takes a send to the asker as the reply to a DM, with nothing sent after it", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.dm("nap", OWNER, "status?");
+    await h.tool({ action: "send", to: "nap", message: "all green" });
+    await h.turn("I told nap it is all green.");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["nap all green"]);
+  });
+
+  it("takes a send to the asker as the reply to a DM keyed by DID", async () => {
+    const h = await startPi({ config: baseConfig() });
+    h.bot.emit("message", OWNER, { from: "nap", text: "status?", isSelf: false, tags: { account: OWNER } });
+    await h.quiesce();
+    expect(h.delivered).toHaveLength(1);
+    await h.tool({ action: "send", to: "nap", message: "all green" });
+    await h.turn("done");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["nap all green"]);
+  });
+
+  it("takes a send to the DID as the reply to a DM keyed by DID", async () => {
+    const h = await startPi({ config: baseConfig() });
+    h.bot.emit("message", OWNER, { from: "nap", text: "status?", isSelf: false, tags: { account: OWNER } });
+    await h.quiesce();
+    await h.tool({ action: "send", to: OWNER, message: "all green" });
+    await h.turn("done");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual([`${OWNER} all green`]);
+  });
+
+  it("sends the closing text to a DM keyed by DID, unprefixed, when the model sent nothing", async () => {
+    const h = await startPi({ config: baseConfig() });
+    h.bot.emit("message", OWNER, { from: "nap", text: "status?", isSelf: false, tags: { account: OWNER } });
+    await h.quiesce();
+    await h.turn("all green");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual([`${OWNER} all green`]);
+  });
+
+  it("takes a say in the channel as the reply to a mention", async () => {
+    const h = await startPi({ config: baseConfig({ trust: { [PEER]: "message" } }) });
+    await h.say("#work", "peer", PEER, `${NICK}: is the build green?`);
+    await h.tool({ action: "say", channel: "#work", message: "peer: yes, green" });
+    await h.turn("Answered in #work.");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["#work peer: yes, green"]);
+  });
+
+  it("names the asker on a say that answers a mention, and sends nothing after it", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.say("#naptest", "zapnap", OWNER, `hey @${NICK} whats up`);
+    await h.tool({ action: "say", channel: "#naptest", message: "not much, reviewing the audit" });
+    await h.turn("Posted.");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["#naptest @zapnap not much, reviewing the audit"]);
+  });
+
+  it("posts a say that already names the asker as written", async () => {
+    for (const message of ["zapnap: hi", "@ZapNap hi", "zapnap, hi", "@zapnap: hi"]) {
+      const h = await startPi({ config: baseConfig() });
+      await h.say("#naptest", "zapnap", OWNER, `${NICK}: ping`);
+      await h.tool({ action: "say", channel: "#naptest", message });
+      expect(h.bot.messages()).toEqual([`#naptest ${message}`]);
+    }
+  });
+
+  it("names the most recent asker when two are waiting in the channel", async () => {
+    const h = await startPi({ config: baseConfig({ trust: { [PEER]: "message" } }) });
+    await h.say("#work", "peer", PEER, `${NICK}: first?`);
+    await h.say("#work", "nap", OWNER, `${NICK}: second?`);
+    await h.tool({ action: "say", channel: "#work", message: "both done" });
+    await h.turn("Posted.");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["#work @nap both done"]);
+  });
+
+  it("posts a say to a channel with no pending mention as written", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.dm("nap", OWNER, "post the status in #work");
+    await h.tool({ action: "say", channel: "#work", message: "build is green" });
+    expect(h.bot.messages()).toEqual(["#work build is green"]);
+  });
+
+  it("still sends a DM answer without a prefix", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.dm("nap", OWNER, "status?");
+    await h.tool({ action: "send", to: "nap", message: "all green" });
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["nap all green"]);
+  });
+
+  it("answers a mention with the closing text, addressed to the asker, when the model posted nothing", async () => {
+    const h = await startPi({ config: baseConfig({ trust: { [PEER]: "message" } }) });
+    await h.say("#work", "peer", PEER, `${NICK}: is the build green?`);
+    await h.turn("yes, green");
+    await h.fire("agent_settled");
+    expect(h.bot.messages()).toEqual(["#work @peer yes, green"]);
+  });
+
+  it("keeps the asker's reply owed after a send to someone else", async () => {
+    const h = await startPi({ config: baseConfig() });
+    await h.dm("nap", OWNER, "tell bob hello, then tell me");
+    await h.tool({ action: "send", to: "bob", message: "hello" });
+    await h.turn("told bob");
+    expect(h.bot.messages()).toEqual(["bob hello", "nap told bob"]);
+  });
+
+  it("still answers an ask with the turn's text after a send to the asker", async () => {
+    const h = await startPi({ config: baseConfig({ trust: { [PEER]: "request" } }) });
+    await h.ask("peer", PEER, "what is on main?", "req-5");
+    await h.tool({ action: "send", to: "peer", message: "looking" });
+    await h.turn("main is at 45ef5082");
+    expect(h.askReplies()).toEqual([{ to: "peer", req: "req-5", a: "main is at 45ef5082" }]);
+  });
+
   it("does not answer with the text of a turn that made tool calls", async () => {
     const h = await startPi({ config: baseConfig() });
     await h.dm("nap", OWNER, "what's the weather?");
     await h.turn("fetching the forecast…", { toolCalls: true });
     expect(h.bot.messages()).toEqual([]);
     await h.turn("sunny, 21°C");
-    expect(h.bot.messages()).toEqual(["nap nap: sunny, 21°C"]);
+    expect(h.bot.messages()).toEqual(["nap sunny, 21°C"]);
   });
 
   it("does not answer a message with a turn that started before it arrived", async () => {
@@ -320,7 +435,7 @@ describe("reply capture", () => {
     await h.fire("turn_end", { message: { role: "assistant", content: [{ type: "text", text: "done with the refactor" }] } });
     expect(h.bot.messages()).toEqual([]);
     await h.turn("yes, here");
-    expect(h.bot.messages()).toEqual(["nap nap: yes, here"]);
+    expect(h.bot.messages()).toEqual(["nap yes, here"]);
   });
 
   it("answers four queued channel messages with one channel reply", async () => {
@@ -338,7 +453,7 @@ describe("reply capture", () => {
         },
         {
           "kind": "message",
-          "payload": "nap: all four: yes",
+          "payload": "@nap all four: yes",
           "target": "#work",
         },
       ]
@@ -359,12 +474,12 @@ describe("reply capture", () => {
         },
         {
           "kind": "message",
-          "payload": "peer: pong",
+          "payload": "@peer pong",
           "target": "#other",
         },
         {
           "kind": "message",
-          "payload": "nap: pong",
+          "payload": "pong",
           "target": "nap",
         },
       ]
@@ -392,6 +507,6 @@ describe("reply capture", () => {
     await h.fire("turn_end", { message: { role: "assistant", content: [{ type: "text", text: "tests pass" }] } });
     expect(h.bot.messages()).toEqual([]);
     await h.fire("agent_settled");
-    expect(h.bot.messages()).toEqual(["nap nap: tests pass"]);
+    expect(h.bot.messages()).toEqual(["nap tests pass"]);
   });
 });
