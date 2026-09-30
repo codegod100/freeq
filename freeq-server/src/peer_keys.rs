@@ -171,7 +171,10 @@ pub fn fetch_on_miss(state: &Arc<SharedState>, origin: &str, did: &str, sig_tag:
     let Ok((kid, _)) = freeq_sdk::sigtag::parse(sig_tag) else {
         return;
     };
-    let bases: Vec<String> = base_for_origin(state, origin).into_iter().collect();
+    let bases: Vec<(String, String)> = base_for_origin(state, origin)
+        .map(|base| (origin.to_string(), base))
+        .into_iter()
+        .collect();
     if bases.is_empty() {
         tracing::debug!(
             origin = %origin,
@@ -192,7 +195,10 @@ pub fn fetch_on_miss(state: &Arc<SharedState>, origin: &str, did: &str, sig_tag:
 /// a fetch gives up after [`FETCH_TIMEOUT`], well inside the shortest step
 /// the backoff ever asks on.
 pub fn fetch_again(state: &Arc<SharedState>, origin: &str, did: &str, kid: &str) {
-    let bases: Vec<String> = base_for_origin(state, origin).into_iter().collect();
+    let bases: Vec<(String, String)> = base_for_origin(state, origin)
+        .map(|base| (origin.to_string(), base))
+        .into_iter()
+        .collect();
     LOOKUPS.lock().remove(&(did.to_string(), kid.to_string()));
     // The record lookup's remembered miss goes too, so the signer's records
     // are read again rather than answered from the cache.
@@ -212,14 +218,15 @@ pub fn fetch_from_any_peer(state: &Arc<SharedState>, did: &str, sig_tag: &str) {
     let Ok((kid, _)) = freeq_sdk::sigtag::parse(sig_tag) else {
         return;
     };
-    let bases: Vec<String> = parse_peer_api_config(&state.config.s2s_peer_api)
-        .into_values()
+    let bases: Vec<(String, String)> = parse_peer_api_config(&state.config.s2s_peer_api)
+        .into_iter()
         .collect();
     start_lookup(state, bases, did, kid);
 }
 
-/// One lookup for `kid`: the signer's own records first, then `bases` in turn.
-fn start_lookup(state: &Arc<SharedState>, bases: Vec<String>, did: &str, kid: &str) {
+/// One lookup for `kid`: the signer's own records first, then `bases`, each
+/// a peer's endpoint id and its key server, in turn.
+fn start_lookup(state: &Arc<SharedState>, bases: Vec<(String, String)>, did: &str, kid: &str) {
     let entry = (did.to_string(), kid.to_string());
     {
         // How long a fruitless lookup is remembered: an unreachable key server
@@ -247,7 +254,14 @@ fn start_lookup(state: &Arc<SharedState>, bases: Vec<String>, did: &str, kid: &s
                 "Could not read the signer's own records for this key"
             ),
         }
-        for base in &bases {
+        for (peer, base) in &bases {
+            if let Some(whose) = name_held_by_another(&state, &did, peer).await {
+                tracing::warn!(
+                    did = %did, kid = %kid, peer = %peer, base = %base,
+                    "Not asking a peer's key server for a key under {whose}'s name"
+                );
+                continue;
+            }
             match fetch_key(base, &did, &kid).await {
                 Ok(peer) => {
                     let dates = peer_copy_dates(
@@ -277,6 +291,28 @@ fn start_lookup(state: &Arc<SharedState>, bases: Vec<String>, did: &str, kid: &s
             "No configured peer served this key; the sender's messages stay uncheckable"
         );
     });
+}
+
+/// Whose name `did` is, when it is a server's name that the linked server
+/// `peer` may not answer for: this server's own `did:web:` name, or the name
+/// another linked server announced in Hello. None when `peer` may answer.
+///
+/// The kid check binds an answer to the key, not to the DID, so without this
+/// a peer could file a key of its own making under another server's name,
+/// and this server's key route would then serve it as that server's. A peer
+/// still answers for its own name and for its users. The names are those of
+/// the servers linked now: a name is dropped when its link drops.
+async fn name_held_by_another(state: &Arc<SharedState>, did: &str, peer: &str) -> Option<String> {
+    let named = did.strip_prefix("did:web:")?;
+    if named.eq_ignore_ascii_case(&state.server_name) {
+        return Some("this server".to_string());
+    }
+    let manager = state.s2s_manager.lock().clone()?;
+    let names = manager.peer_names.lock().await;
+    names
+        .iter()
+        .find(|(id, name)| id.as_str() != peer && name.eq_ignore_ascii_case(named))
+        .map(|(id, _)| format!("linked peer {id}"))
 }
 
 /// File a key `key_for` found, with the dates and retirement its source
@@ -921,6 +957,120 @@ mod tests {
             wait_for_key(&state, did, &kid).await,
             Some(pubkey),
             "the signer's key must arrive from its own server"
+        );
+    }
+
+    /// A key server holding `key` under `did`, as its operator could put it
+    /// there, served on a loopback port.
+    async fn serving_key_under(did: &str, key: &ed25519_dalek::SigningKey) -> String {
+        let liar = crate::server::test_state_with_db();
+        liar.with_db(|db| db.save_signing_key(did, key.verifying_key().as_bytes()))
+            .expect("db present");
+        serve_api(liar).await
+    }
+
+    /// Link peers to `state` under the names they announced in Hello.
+    async fn link_peers(state: &Arc<SharedState>, names: &[(&str, &str)]) {
+        let manager = crate::server::test_manager();
+        for (peer, name) in names {
+            manager
+                .peer_names
+                .lock()
+                .await
+                .insert(peer.to_string(), name.to_string());
+        }
+        *state.s2s_manager.lock() = Some(manager);
+    }
+
+    /// A linked server's key server may not answer for this server's own
+    /// did:web name: this server's keys are its own, and a key filed under
+    /// its name would verify a forged ruling as this server's.
+    #[tokio::test]
+    async fn a_peer_cannot_file_a_key_under_this_servers_own_name() {
+        let forged = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let kid = freeq_sdk::sigtag::derive_kid(&forged.verifying_key());
+        let state_name = crate::config::ServerConfig::default().server_name;
+        let did = crate::server::server_did(&state_name);
+        let base = serving_key_under(&did, &forged).await;
+        let state = state_pointed_at(&base);
+        assert_eq!(state.server_name, state_name);
+        link_peers(&state, &[(PEER, "liar.example")]).await;
+
+        fetch_on_miss(
+            &state,
+            PEER,
+            &did,
+            &freeq_sdk::sigtag::sign_canonical("{}", &forged),
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            state
+                .with_db(|db| db.get_signing_key_by_kid(&did, &kid))
+                .flatten()
+                .is_none(),
+            "a peer's answer for this server's own name must not be filed"
+        );
+    }
+
+    /// A linked server's key server may not answer for the name another
+    /// linked server announced, asked by origin or by any peer.
+    #[tokio::test]
+    async fn a_peer_cannot_file_a_key_under_another_linked_servers_name() {
+        let did = "did:web:Victim.example";
+        let forged = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let kid = freeq_sdk::sigtag::derive_kid(&forged.verifying_key());
+        let sig = freeq_sdk::sigtag::sign_canonical("{}", &forged);
+        let base = serving_key_under(did, &forged).await;
+        let state = crate::server::test_state_with_config(crate::config::ServerConfig {
+            s2s_peer_api: vec![format!("{PEER}={base}")],
+            ..Default::default()
+        });
+        link_peers(
+            &state,
+            &[(PEER, "liar.example"), ("peer-victim", "victim.EXAMPLE")],
+        )
+        .await;
+
+        fetch_on_miss(&state, PEER, did, &sig);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        LOOKUPS.lock().remove(&(did.to_string(), kid.clone()));
+        fetch_from_any_peer(&state, did, &sig);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        assert!(
+            state
+                .with_db(|db| db.get_signing_key_by_kid(did, &kid))
+                .flatten()
+                .is_none(),
+            "a peer's answer for another linked server's name must not be filed"
+        );
+    }
+
+    /// A linked server's key server still answers for its own announced name.
+    #[tokio::test]
+    async fn a_peer_files_a_key_under_its_own_announced_name() {
+        let did = "did:web:holder.example";
+        let key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let kid = freeq_sdk::sigtag::derive_kid(&key.verifying_key());
+        let base = serving_key_under(did, &key).await;
+        let state = state_pointed_at(&base);
+        link_peers(
+            &state,
+            &[(PEER, "holder.example"), ("peer-other", "other.example")],
+        )
+        .await;
+
+        fetch_on_miss(
+            &state,
+            PEER,
+            did,
+            &freeq_sdk::sigtag::sign_canonical("{}", &key),
+        );
+
+        assert_eq!(
+            wait_for_key(&state, did, &kid).await,
+            Some(*key.verifying_key().as_bytes())
         );
     }
 

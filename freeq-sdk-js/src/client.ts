@@ -1466,6 +1466,7 @@ export class FreeqClient extends EventEmitter {
     buffer: string,
     from: string,
     tags: Record<string, string>,
+    replayed: boolean,
     verdict?: Verdict,
   ): ActEventPayload | undefined {
     const fields: Record<string, string> = {};
@@ -1503,7 +1504,9 @@ export class FreeqClient extends EventEmitter {
       fields,
       tags,
       sigTag: tags[signing.SIG_TAG] || undefined,
-      replayed: tags['time'] !== undefined,
+      // From history, not from the line's `time`: server-time puts `time`
+      // on every live line too.
+      replayed,
       ...(verdict ? { verdict } : {}),
     };
     this.emit('actEvent', payload);
@@ -3010,7 +3013,11 @@ export class FreeqClient extends EventEmitter {
           (actBatch.actEvents ??= []).push(held);
           carriers.push(held);
         } else {
-          const payload = this.emitActEvent(bufName, from, msg.tags, verdict);
+          // Not in a batch that is open here. A `batch` tag naming one that
+          // never opened is a history line whose envelope was missed.
+          const payload = this.emitActEvent(
+            bufName, from, msg.tags, actBatchId !== undefined && !actBatch, verdict,
+          );
           if (payload) carriers.push(payload);
         }
 
@@ -3314,7 +3321,7 @@ export class FreeqClient extends EventEmitter {
             // Held task events ride out with the batch, in wire order,
             // after the lines they refer to.
             for (const held of batch.actEvents ?? []) {
-              this.emitActEvent(held.buffer, held.from, held.tags, held.verdict);
+              this.emitActEvent(held.buffer, held.from, held.tags, true, held.verdict);
             }
             this.startDeferredChecks(batch);
           }

@@ -118,7 +118,12 @@ import {
   HANDOFF_KIND,
   type HandoffRecord,
 } from "../src/handoff.js";
-import { serverKeyFetcher, verifyActEvent, type KeyFetcher } from "../src/verify.js";
+import {
+  fetchServerDid,
+  serverKeyFetcher,
+  verifyActEvent,
+  type KeyFetcher,
+} from "../src/verify.js";
 import {
   TurnRecorder,
   buildProvenance,
@@ -620,6 +625,9 @@ export default function (pi: ExtensionAPI): void {
   let handoffs: HandoffStore | undefined;
   /** Resolves the exact key a signature names, from the server's key store. */
   let keyFetcher: KeyFetcher | undefined;
+  /** The connected server's own DID, read once; a move only the server may
+   *  make counts only under this name. */
+  let serverDid: string | undefined;
   /** Briefs we authored, kept locally so we can show what we sent. */
   const localBriefs = new Map<string, string>();
 
@@ -1208,7 +1216,11 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
 
-          const result = store.apply(ev);
+          serverDid ??= await fetchServerDid(httpOriginFor(cfg.server));
+          const result = store.apply(ev, {
+            serverDid,
+            signatureValid: verdict.outcome === "valid",
+          });
           if (!result.ok) {
             // Illegal or unattributable moves are logged, never applied.
             // Server receipts, duplicate echoes, and replayed moves for tasks
