@@ -431,8 +431,8 @@ describe("/freeq", () => {
         "level": "warning",
         "text": "freeq: messages addressed to you that were not delivered:
 
-        eve (did:plc:eve-with-a-long-iden…) — 2 messages, 2m ago ago
-        guest (guest) — 1 message, 2m ago ago
+        eve (did:plc:eve-with-a-long-iden…) — 2 messages, 2m ago
+        guest (guest) — 1 message, 2m ago
 
         /freeq trust <did> message   — trust them, then choose whether to deliver
         /freeq withheld drop         — discard them",

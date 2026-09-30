@@ -1556,7 +1556,7 @@ export class AgentRuntime {
               senders.map(
                 (x) =>
                   `  ${x.from}${x.did ? ` (${x.did.slice(0, 28)}…)` : " (guest)"} — ` +
-                  `${x.count} message${x.count === 1 ? "" : "s"}, ${formatAge(Date.now() - x.latest)} ago`,
+                  `${x.count} message${x.count === 1 ? "" : "s"}, ${formatAge(Date.now() - x.latest)}`,
               ),
             )
             .concat([
