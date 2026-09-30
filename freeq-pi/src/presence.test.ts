@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   normalizeRemote,
   formatStatus,
@@ -71,13 +75,25 @@ describe("formatStatus / parseStatus", () => {
 
 describe("collectSessionMeta", () => {
   it("advertises repo/branch/project but never a path", async () => {
-    const meta = await collectSessionMeta({ cwd: process.cwd(), model: "test-model" });
+    // A repository of our own, so the project name does not depend on what
+    // the checkout running the tests happens to be called. Started from a
+    // subdirectory: the project is the repository root's name, not the cwd's.
+    const root = join(mkdtempSync(join(tmpdir(), "freeq-presence-")), "pinned-proj");
+    const cwd = join(root, "src", "deep");
+    mkdirSync(cwd, { recursive: true });
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+    git("init", "-q", "-b", "trunk");
+    git("remote", "add", "origin", "git@github.com:freeq-irc/freeq.git");
+    git("-c", "user.email=t@example.invalid", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
+
+    const meta = await collectSessionMeta({ cwd, model: "test-model" });
     const serialized = JSON.stringify(meta);
     expect(serialized).not.toContain("/Users/");
-    expect(serialized).not.toContain(process.cwd());
+    expect(serialized).not.toContain(root);
     expect(meta).not.toHaveProperty("cwd");
-    // In this repo we expect real values.
-    expect(meta.project).toBe("freeq");
+    expect(meta.project).toBe("pinned-proj");
+    expect(meta.repo).toBe("github.com/freeq-irc/freeq");
+    expect(meta.branch).toBe("trunk");
     expect(meta.model).toBe("test-model");
   });
 });
