@@ -84,6 +84,7 @@ import {
 import { decideInbound, frameInbound, reachesModel, type InboundEvent } from "./inbound.js";
 import type { Harness, InboundCard, NoticeLevel } from "./harness.js";
 import type { FreeqToolParams } from "./tool.js";
+import type { HarnessNames } from "./names.js";
 
 /** Root of freeq state on this machine — bot-kit's `~/.freeq`. */
 export const FREEQ_ROOT = joinPath(homedir(), ".freeq");
@@ -257,7 +258,15 @@ export class AgentRuntime {
   ) {
     this.agentDir = harness.agentDir;
     this.#botFactory = options.botFactory;
+    const name = harness.name ?? "pi";
+    this.names = {
+      name,
+      hint: (sub) => harness.commandHint?.(sub) ?? `/freeq ${sub}`,
+    };
   }
+
+  /** How text and the wire name this harness. */
+  readonly names: HarnessNames;
 
   // ── presence ────────────────────────────────────────────────────────────
 
@@ -375,6 +384,7 @@ export class AgentRuntime {
     this.watchdog ??= new WorkWatchdog({
       progressIntervalSecs: cfg.progressIntervalSecs,
       stallSecs: cfg.stallSecs,
+      harness: this.names.name,
     });
     return this.watchdog;
   }
@@ -537,7 +547,7 @@ export class AgentRuntime {
     if (!only && plan.skipped > 0) {
       lines.push(
         `freeq: ${plan.skipped} more still assigned to you, not started ` +
-          `(cap is maxResume=${cfg.maxResume}) — /freeq resume <id> to take one`,
+          `(cap is maxResume=${cfg.maxResume}) — ${this.names.hint("resume")} <id> to take one`,
       );
     }
     for (const rec of plan.stale) {
@@ -646,7 +656,7 @@ export class AgentRuntime {
       // queue you work, or cost you a notification you have to read.
       this.notify(
         `freeq: ignoring handoff from ${rec.offerer} — ${decision.reason}. ` +
-          `/freeq tasks to review, /freeq trust <did> handoff to allow.`,
+          `${this.names.hint("tasks")} to review, ${this.names.hint("trust")} <did> handoff to allow.`,
         "warning",
       );
       return;
@@ -670,7 +680,7 @@ export class AgentRuntime {
       `freeq: handoff ${rec.id.slice(0, 10)} from ${rec.offerer} — ${rec.title}${age}\n` +
         `  ${decision.reason}; it will be taken when this session is free, or ` +
         `declined after ${formatDuration(cfg.offerTtlSecs)}.\n` +
-        `  /freeq accept ${rec.id.slice(0, 10)} · /freeq decline ${rec.id.slice(0, 10)}`,
+        `  ${this.names.hint("accept")} ${rec.id.slice(0, 10)} · ${this.names.hint("decline")} ${rec.id.slice(0, 10)}`,
       "info",
     );
   }
@@ -838,7 +848,7 @@ export class AgentRuntime {
         if (!channel) {
           return text(
             "handoff needs a channel to post in (the room is the audit log). " +
-              "Join one with /freeq join #x, or pass 'channel'.",
+              `Join one with ${this.names.hint("join")} #x, or pass 'channel'.`,
           );
         }
 
@@ -905,7 +915,7 @@ export class AgentRuntime {
         const cfg2 = this.config ?? (await this.ensureConfig());
         const channel = params.channel ?? cfg2.channels[0];
         if (!channel) {
-          return text("post needs a channel — the room is the work queue. Try /freeq join #x.");
+          return text(`post needs a channel — the room is the work queue. Try ${this.names.hint("join")} #x.`);
         }
 
         const brief = params.brief ?? "";
@@ -1192,12 +1202,12 @@ export class AgentRuntime {
       case "login": {
         const did = rest[0];
         if (!isDid(did)) {
-          this.notify("usage: /freeq login did:plc:… (your own DID)", "warning");
+          this.notify(`usage: ${this.names.hint("login")} did:plc:… (your own DID)`, "warning");
           return;
         }
         cfg.ownerDid = did;
         cfg.install ??= deriveInstallSlug();
-        cfg.nick ??= defaultNick(cfg.install);
+        cfg.nick ??= defaultNick(cfg.install, this.names.name);
         await saveConfig(this.agentDir, cfg);
         this.notify(`freeq: owner set to ${did}; connecting…`, "info");
         this.notify(await this.connect(), this.conn?.state === "online" ? "info" : "warning");
@@ -1209,7 +1219,7 @@ export class AgentRuntime {
         // from their own device; the server then proves the certificate
         // from that record. Step two reconnects and reports its verdict.
         if (!cfg.ownerDid) {
-          this.notify("freeq: run /freeq login <did> first", "warning");
+          this.notify(`freeq: run ${this.names.hint("login")} <did> first`, "warning");
           return;
         }
         if (rest[0] === "verify") {
@@ -1227,14 +1237,14 @@ export class AgentRuntime {
             timeoutMs: 20_000,
             pollMs: 250,
           });
-          const verdict = interpretProvenanceNotice(notice);
+          const verdict = interpretProvenanceNotice(notice, this.names);
           this.notify(`freeq: ${verdict.message}`, verdict.verified ? "info" : "warning");
           return;
         }
         if (rest[0] === "--sign-cert") {
           // For a server that does not read agent records yet: sign the
           // certificate with a creator key the owner registers by MSGSIG.
-          const ins = await authorizeInstructions({ ownerDid: cfg.ownerDid, root: FREEQ_ROOT });
+          const ins = await authorizeInstructions({ ownerDid: cfg.ownerDid, root: FREEQ_ROOT, names: this.names });
           this.notify(
             [
               "freeq authorize --sign-cert — sign this installation's delegation",
@@ -1253,12 +1263,12 @@ export class AgentRuntime {
         const botDid = (this.conn as FreeqConnection | undefined)?.did;
         if (!botDid) {
           this.notify(
-            "freeq: not connected yet, so this installation has no DID to show. Run /freeq status.",
+            `freeq: not connected yet, so this installation has no DID to show. Run ${this.names.hint("status")}.`,
             "warning",
           );
           return;
         }
-        const ins = await agentInstructions({ ownerDid: cfg.ownerDid, botDid, root: FREEQ_ROOT });
+        const ins = await agentInstructions({ ownerDid: cfg.ownerDid, botDid, root: FREEQ_ROOT, names: this.names });
         this.notify(
           ["freeq authorize — add this installation as one of your agents", "", ...ins.steps].join("\n"),
           "info",
@@ -1269,16 +1279,16 @@ export class AgentRuntime {
       case "status": {
         this.notify(
           [
-            `owner:    ${cfg.ownerDid ?? "(not logged in — /freeq login <did>)"}`,
+            `owner:    ${cfg.ownerDid ?? `(not logged in — ${this.names.hint("login")} <did>)`}`,
             `server:   ${cfg.server}`,
             `state:    ${
               this.passive
-                ? "passive — another pi session holds this installation's connection"
+                ? `passive — another ${this.names.name} session holds this installation's connection`
                 : this.conn
                   ? this.conn.describe()
                   : "offline (not connected)"
             }`,
-            `muted:    ${cfg.muted ? "YES — silent everywhere (/freeq unmute)" : "no"}`,
+            `muted:    ${cfg.muted ? `YES — silent everywhere (${this.names.hint("unmute")})` : "no"}`,
             (() => {
               // Two different facts, and conflating them is what made
               // status disagree with the server: where we are CONFIGURED to
@@ -1316,7 +1326,7 @@ export class AgentRuntime {
         )).read();
         const ok = await this.harness.confirm(
           "freeq: take over the connection",
-          `The connection is held by${holder?.label ? ` ${holder.label}` : " another pi session"}` +
+          `The connection is held by${holder?.label ? ` ${holder.label}` : ` another ${this.names.name} session`}` +
             ` (pid ${holder?.pid ?? "?"}).\n\n` +
             `Take it over for this window? The other session will go passive.`,
         );
@@ -1342,7 +1352,7 @@ export class AgentRuntime {
         if (!level || !(PROVENANCE_TIERS as readonly string[]).includes(level)) {
           this.notify(
             `freeq: provenance is '${cfg.provenance ?? "decisions"}'\n` +
-              `usage: /freeq provenance <${PROVENANCE_TIERS.join("|")}>\n` +
+              `usage: ${this.names.hint("provenance")} <${PROVENANCE_TIERS.join("|")}>\n` +
               `  silent    nothing is mirrored\n` +
               `  decisions changes and outbound actions, tags only (quiet)\n` +
               `  evidence  one readable line per turn in the channel (default)\n` +
@@ -1364,7 +1374,7 @@ export class AgentRuntime {
         this.notify(
           cfg.muted
             ? "freeq: muted — still connected and reachable, but will not " +
-              "answer or inject anything until /freeq unmute"
+              `answer or inject anything until ${this.names.hint("unmute")}`
             : "freeq: unmuted",
           "info",
         );
@@ -1389,7 +1399,7 @@ export class AgentRuntime {
       case "leave": {
         const channel = rest[0];
         if (!channel?.startsWith("#")) {
-          this.notify(`usage: /freeq ${sub} #channel`, "warning");
+          this.notify(`usage: ${this.names.hint(sub)} #channel`, "warning");
           return;
         }
         // Writing pins the project: from the first join or leave, this
@@ -1551,8 +1561,8 @@ export class AgentRuntime {
             )
             .concat([
               "",
-              "  /freeq trust <did> message   — trust them, then choose whether to deliver",
-              "  /freeq withheld drop         — discard them",
+              `  ${this.names.hint("trust")} <did> message   — trust them, then choose whether to deliver`,
+              `  ${this.names.hint("withheld drop")}         — discard them`,
             ])
             .join("\n"),
           "warning",
@@ -1564,7 +1574,7 @@ export class AgentRuntime {
         const ch = rest[0];
         const verb = (rest[1] ?? "accept").toLowerCase();
         if (!ch || !ch.startsWith("#")) {
-          this.notify("usage: /freeq policy <#channel> accept", "warning");
+          this.notify(`usage: ${this.names.hint("policy")} <#channel> accept`, "warning");
           return;
         }
         if (verb !== "accept") {
@@ -1583,7 +1593,7 @@ export class AgentRuntime {
       case "decline": {
         if (!rest[0]) {
           this.notify(
-            `usage: /freeq ${sub} <id>${sub === "decline" ? " [reason]" : ""}`,
+            `usage: ${this.names.hint(sub)} <id>${sub === "decline" ? " [reason]" : ""}`,
             "warning",
           );
           return;
@@ -1617,7 +1627,7 @@ export class AgentRuntime {
 
       case "drop": {
         if (!rest[0]) {
-          this.notify("usage: /freeq drop <id> [reason]", "warning");
+          this.notify(`usage: ${this.names.hint("drop")} <id> [reason]`, "warning");
           return;
         }
         const store = await this.ensureHandoffs();
@@ -1656,7 +1666,7 @@ export class AgentRuntime {
       case "progress": {
         const note = rest.slice(1).join(" ");
         if (!rest[0] || !note) {
-          this.notify("usage: /freeq progress <id> <note>", "warning");
+          this.notify(`usage: ${this.names.hint("progress")} <id> <note>`, "warning");
           return;
         }
         const store = await this.ensureHandoffs();
@@ -1723,7 +1733,7 @@ export class AgentRuntime {
       case "mode": {
         const [channel, mode] = rest;
         if (!channel?.startsWith("#") || !mode || !(MODES as readonly string[]).includes(mode)) {
-          this.notify(`usage: /freeq mode #channel <${MODES.join("|")}>`, "warning");
+          this.notify(`usage: ${this.names.hint("mode")} #channel <${MODES.join("|")}>`, "warning");
           return;
         }
         cfg.modes[channel.toLowerCase()] = mode as Mode;
@@ -1736,7 +1746,7 @@ export class AgentRuntime {
         const [did, tier] = rest;
         if (!isDid(did) || !tier || !(tier in TIER_RANK)) {
           this.notify(
-            `usage: /freeq trust did:plc:… <${Object.keys(TIER_RANK).join("|")}>`,
+            `usage: ${this.names.hint("trust")} did:plc:… <${Object.keys(TIER_RANK).join("|")}>`,
             "warning",
           );
           return;
@@ -1746,7 +1756,7 @@ export class AgentRuntime {
           "freeq: grant authority",
           `Grant ${did} tier '${tier}'?\n\n` +
             (TIER_RANK[tier as Tier] >= TIER_RANK.request
-              ? "At 'request' or above, that peer's agent can cause this pi session " +
+              ? `At 'request' or above, that peer's agent can cause this ${this.names.name} session ` +
                 "to run turns and can read answers it produces."
               : "At this tier the peer can be seen but cannot trigger work here."),
         );
@@ -1872,7 +1882,12 @@ export class AgentRuntime {
     this.currentProject = meta.project;
     if (meta.project && cfg.projects?.[meta.project]) return true;
     const slug = cfg.install ?? deriveInstallSlug();
-    const name = resolveBotName(slug, meta.project, (n: string) => existsSync(joinPath(BOTS_ROOT, n)));
+    const name = resolveBotName(
+      slug,
+      meta.project,
+      (n: string) => existsSync(joinPath(BOTS_ROOT, n)),
+      this.names.name,
+    );
     if (existsSync(joinPath(BOTS_ROOT, name))) return true;
     // A git checkout is somewhere someone means to keep working; a bare
     // directory is usually somewhere they are trying something out.
@@ -1917,7 +1932,7 @@ export class AgentRuntime {
             reason: decision.reason,
             at: Date.now(),
           });
-          const line = withheldSummary(this.withheld.senders());
+          const line = withheldSummary(this.withheld.senders(), this.names);
           if (line) this.notify(`freeq: ${line}`, "warning");
           this.stateChanged();
         }
@@ -1998,8 +2013,8 @@ export class AgentRuntime {
 
   async connect(): Promise<string> {
     const cfg = await this.ensureConfig();
-    if (!cfg.enabled) return "freeq is disabled (`/freeq on` to enable)";
-    if (!isDid(cfg.ownerDid)) return "freeq: not logged in — run `/freeq login <did:plc:…>`";
+    if (!cfg.enabled) return `freeq is disabled (\`${this.names.hint("on")}\` to enable)`;
+    if (!isDid(cfg.ownerDid)) return `freeq: not logged in — run \`${this.names.hint("login")} <did:plc:…>\``;
     if (this.conn && this.conn.state !== "offline") return `freeq: already ${this.conn.state}`;
     // An existing-but-offline connection still owns a bot and possibly a
     // socket the transport is retrying. Replacing it without stopping it
@@ -2020,10 +2035,10 @@ export class AgentRuntime {
     if (!claim.held) {
       this.passive = true;
       return (
-        `freeq: another pi session in this project holds the connection` +
+        `freeq: another ${this.names.name} session in this project holds the connection` +
         (claim.holder?.label ? ` (${claim.holder.label})` : "") +
         `. This window stays passive — one agent identity, one presence. ` +
-        `Close that session, or run /freeq takeover here.`
+        `Close that session, or run ${this.names.hint("takeover")} here.`
       );
     }
     this.passive = false;
@@ -2039,7 +2054,7 @@ export class AgentRuntime {
             this.passive = true;
             await this.conn.stop("another session took over");
             this.conn = undefined;
-            this.notify("freeq: another pi session took over the connection", "warning");
+            this.notify(`freeq: another ${this.names.name} session took over the connection`, "warning");
           }
         })();
       }, 60_000);
@@ -2058,6 +2073,7 @@ export class AgentRuntime {
       channels: channelsForProject(cfg, meta.project),
       meta,
       botFactory: this.#botFactory,
+      names: this.names,
       onNotice: (text, level) => this.notify(text, level),
 
       onUnexpectedChannel: (channel) => {
@@ -2072,7 +2088,7 @@ export class AgentRuntime {
         // looks joined and is not.
         this.notify(
           reason === "policy"
-            ? `freeq: ${channel} refused the join — it requires policy acceptance. Run /freeq policy ${channel} accept`
+            ? `freeq: ${channel} refused the join — it requires policy acceptance. Run ${this.names.hint("policy")} ${channel} accept`
             : `freeq: could not join ${channel} — ${reason}`,
           "warning",
         );
@@ -2293,7 +2309,7 @@ export class AgentRuntime {
         this.notify(
           `freeq: ${waiting.length} handoff(s) waiting for you:\n` +
             waiting.map((r: HandoffRecord) => `  ${describeHandoff(r, me)}`).join("\n") +
-            `\n/freeq tasks to review, /freeq accept <id> to take one.`,
+            `\n${this.names.hint("tasks")} to review, ${this.names.hint("accept")} <id> to take one.`,
           "warning",
         );
       }
@@ -2301,7 +2317,7 @@ export class AgentRuntime {
   }
 
   /** The session is ending. */
-  async stop(reason = "pi session ended"): Promise<void> {
+  async stop(reason = `${this.names.name} session ended`): Promise<void> {
     this.#stopMaintenance();
     // Say why the work stopped rather than letting it simply go quiet. NOT a
     // failure: a restart may pick it straight back up (see resume), and a

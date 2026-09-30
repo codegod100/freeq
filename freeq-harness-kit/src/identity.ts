@@ -31,8 +31,8 @@ export function deriveInstallSlug(seed?: string): string {
 }
 
 /** bot-kit state name for an installation slug. */
-export function botName(slug: string): string {
-  return `${INSTALL_PREFIX}-${slug}`;
+export function botName(slug: string, prefix = INSTALL_PREFIX): string {
+  return `${prefix}-${slug}`;
 }
 
 // ── Per-project identities ──────────────────────────────────────────────
@@ -111,9 +111,13 @@ export function legacyProjectSlug(project: string | undefined): string | undefin
 }
 
 /** bot-kit state name for a project identity under an installation. */
-export function projectBotName(installSlug: string, project: string | undefined): string {
+export function projectBotName(
+  installSlug: string,
+  project: string | undefined,
+  prefix = INSTALL_PREFIX,
+): string {
   const ps = projectSlug(project);
-  return ps ? `${INSTALL_PREFIX}-${installSlug}-${ps}` : botName(installSlug);
+  return ps ? `${prefix}-${installSlug}-${ps}` : botName(installSlug, prefix);
 }
 
 /**
@@ -129,12 +133,13 @@ export function resolveBotName(
   installSlug: string,
   project: string | undefined,
   exists: (name: string) => boolean,
+  prefix = INSTALL_PREFIX,
 ): string {
-  const current = projectBotName(installSlug, project);
+  const current = projectBotName(installSlug, project, prefix);
   if (exists(current)) return current;
   const legacy = legacyProjectSlug(project);
   if (legacy) {
-    const legacyName = `${INSTALL_PREFIX}-${installSlug}-${legacy}`;
+    const legacyName = `${prefix}-${installSlug}-${legacy}`;
     if (legacyName !== current && exists(legacyName)) return legacyName;
   }
   return current;
@@ -146,28 +151,32 @@ export function resolveBotName(
  * `chad-bot-music` are recognisably the same person's agents in different
  * rooms.
  */
-export function projectNick(base: string, project: string | undefined): string {
+export function projectNick(
+  base: string,
+  project: string | undefined,
+  prefix = INSTALL_PREFIX,
+): string {
   const ps = projectSlug(project);
-  if (!ps) return sanitizeNick(base);
+  if (!ps) return sanitizeNick(base, 16, prefix);
   // IRC nicks are length-limited; the project is the distinguishing part,
   // so it gets priority over the base when they do not both fit.
   const budget = 30 - 1 - ps.length;
-  const head = sanitizeNick(base).slice(0, Math.max(budget, 4));
-  return sanitizeNick(`${head}-${ps}`, 30);
+  const head = sanitizeNick(base, 16, prefix).slice(0, Math.max(budget, 4));
+  return sanitizeNick(`${head}-${ps}`, 30, prefix);
 }
 
 /**
  * Default nick. IRC nicks are length-limited and charset-limited, so keep it
  * short and conservative: `pi-<8 hex>`.
  */
-export function defaultNick(slug: string): string {
-  return sanitizeNick(`${INSTALL_PREFIX}-${slug}`);
+export function defaultNick(slug: string, prefix = INSTALL_PREFIX): string {
+  return sanitizeNick(`${prefix}-${slug}`, 16, prefix);
 }
 
 /** Coerce a string into something valid as an IRC nick. */
-export function sanitizeNick(raw: string, max = 16): string {
+export function sanitizeNick(raw: string, max = 16, fallback = INSTALL_PREFIX): string {
   let s = raw.replace(/[^A-Za-z0-9_\-[\]{}\\^`|]/g, "-").replace(/^[^A-Za-z[\]{}\\^`|]+/, "");
-  if (!s) s = INSTALL_PREFIX;
+  if (!s) s = fallback;
   return s.slice(0, max);
 }
 

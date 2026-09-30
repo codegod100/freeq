@@ -43,6 +43,13 @@ export interface Delivery {
 export type NoticeLevel = "info" | "warning" | "error";
 
 export interface Harness {
+  /**
+   * The harness's short name: identity and nick prefix, the discovery
+   * hello's `agent`, and the word for a session in text. Default "pi".
+   */
+  readonly name?: string;
+  /** How the person runs a subcommand, for text the kit prints. Default `/freeq <sub>`. */
+  commandHint?(sub: string): string;
   /** Directory for freeq.json, the handoff store, the offer queue and the lock. */
   readonly agentDir: string;
   /** The harness's per-project config directory name (pi: `.pi`). */

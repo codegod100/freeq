@@ -409,6 +409,48 @@ describe("AgentRuntime: /freeq commands", () => {
   });
 });
 
+describe("AgentRuntime: harness names", () => {
+  it("uses pi's names by default", async () => {
+    const { rt } = await started();
+    expect(rt.names.name).toBe("pi");
+    expect(rt.names.hint("accept")).toBe("/freeq accept");
+  });
+
+  it("names identity, nick, hello, notices and the stop reason after the harness", async () => {
+    const h = fakeHarness({ name: "cc", commandHint: (sub) => `/freeq:${sub}` });
+    writeConfig(h.agentDir);
+    const bot = new FakeBot();
+    let created: { name: string; nick: string } | undefined;
+    const stops: string[] = [];
+    bot.stop = async (reason?: string) => {
+      stops.push(reason ?? "");
+      return bot;
+    };
+    const rt = new AgentRuntime(h.harness, {
+      botFactory: async (o) => {
+        created = { name: o.name, nick: o.nick };
+        return bot;
+      },
+    });
+    await rt.start();
+    expect(created).toEqual({ name: "cc-test1234-proj", nick: "cc-test1234-proj" });
+
+    bot.emit("channelJoined", "#work");
+    const hello = bot.sent.find((s) => s.kind === "tagmsg")!;
+    expect(JSON.parse(decodeURIComponent((hello.payload as Record<string, string>)["+freeq.at/payload"]!)).agent).toBe("cc");
+
+    bot.emit("message", "eve", { from: "eve", text: "hi", isSelf: false, tags: { account: "did:plc:eve" } });
+    await tick();
+    expect(h.notices.at(-1)!.text).toContain("/freeq:trust did:plc:eve message");
+
+    await rt.runCommand("drop");
+    expect(h.notices.at(-1)!.text).toBe("usage: /freeq:drop <id> [reason]");
+
+    await rt.stop();
+    expect(stops).toEqual(["cc session ended"]);
+  });
+});
+
 describe("httpOriginFor", () => {
   it("maps the websocket URL to the HTTP origin", () => {
     expect(httpOriginFor("wss://irc.freeq.at/irc")).toBe("https://irc.freeq.at");

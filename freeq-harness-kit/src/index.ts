@@ -17,6 +17,7 @@ export * from "./identity.js";
 export * from "./inbound.js";
 export * from "./journal.js";
 export * from "./lock.js";
+export * from "./names.js";
 export * from "./owner-key.js";
 export * from "./presence.js";
 export * from "./progress.js";

@@ -25,6 +25,8 @@
  * the UI reads.
  */
 
+import { PI_NAMES, type HarnessNames } from "./names.js";
+
 export interface WithheldMessage {
   /** Sender's server-resolved DID, when they had one. Undefined for guests. */
   did?: string;
@@ -144,6 +146,7 @@ export class WithheldBuffer {
  */
 export function withheldSummary(
   senders: ReturnType<WithheldBuffer["senders"]>,
+  names: HarnessNames = PI_NAMES,
 ): string | undefined {
   if (!senders.length) return undefined;
   const head = senders[0]!;
@@ -155,6 +158,6 @@ export function withheldSummary(
   return (
     `${total} message${total === 1 ? "" : "s"} addressed to you from ${who} ` +
     `were not delivered (sender not trusted). ` +
-    `/freeq trust ${head.did ?? head.from} message — trusting them offers to deliver what was held`
+    `${names.hint("trust")} ${head.did ?? head.from} message — trusting them offers to deliver what was held`
   );
 }

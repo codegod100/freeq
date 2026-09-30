@@ -14,6 +14,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { PI_NAMES, type HarnessNames } from "./names.js";
 
 // ── Footer status ───────────────────────────────────────────────────────
 
@@ -41,12 +42,12 @@ export interface FooterState {
  *
  *   ⬡ freeq · chad-bot-freeq · 3 ch · 2 peers · 1 offer · ⚙ handoff: fix parser
  */
-export function footerLine(s: FooterState): string {
+export function footerLine(s: FooterState, names: HarnessNames = PI_NAMES): string {
   if (!s.online) {
     if (s.dormant) {
       // Not a failure and not a warning: no identity has been minted for this
       // project yet, on purpose. Say what it costs to change that.
-      return "⬡ freeq · dormant here (any /freeq command joins as this project)";
+      return `⬡ freeq · dormant here (any ${names.hint("").trim()} command joins as this project)`;
     }
     return s.passive ? "⬡ freeq · passive (another window holds this project)" : "⬡ freeq · offline";
   }
@@ -84,7 +85,11 @@ export interface OfferCardInput {
  * The card shown above the editor when work is waiting. Replaces a toast that
  * scrolled away: an offer is a thing to act on, so it stays until acted on.
  */
-export function offerCardLines(o: OfferCardInput, width = 72): string[] {
+export function offerCardLines(
+  o: OfferCardInput,
+  width = 72,
+  names: HarnessNames = PI_NAMES,
+): string[] {
   const now = o.now ?? Date.now();
   const age = formatAge(now - o.queuedAt);
   const due = o.deadline ? ` · due ${formatAge(o.deadline - now, true)}` : "";
@@ -101,7 +106,9 @@ export function offerCardLines(o: OfferCardInput, width = 72): string[] {
     const firstLine = o.brief.split("\n").find((l) => l.trim()) ?? "";
     rows.push(`│ ${fit(firstLine.trim(), width - 4)} │`);
   }
-  rows.push(`│ ${fit(`/freeq accept ${id}   ·   /freeq decline ${id} [reason]`, width - 4)} │`);
+  rows.push(
+    `│ ${fit(`${names.hint("accept")} ${id}   ·   ${names.hint("decline")} ${id} [reason]`, width - 4)} │`,
+  );
   rows.push(`└${"─".repeat(width - 2)}┘`);
   return rows;
 }

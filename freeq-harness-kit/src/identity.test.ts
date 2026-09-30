@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { botName, projectBotName, projectNick, projectSlug,
+import { botName, defaultNick, projectBotName, projectNick, projectSlug,
   legacyProjectSlug,
   resolveBotName,
   SLUG_MAX,
@@ -75,5 +75,16 @@ describe("readable project slugs", () => {
     expect(resolveBotName("inst", "my-new-project", (n) => n === legacy)).toBe(legacy);
     // With nothing on disk, new projects get the readable form.
     expect(resolveBotName("inst", "my-new-project", () => false)).toBe("pi-inst-my-new-project");
+  });
+});
+
+describe("identity prefix", () => {
+  it("defaults to pi and takes a harness's prefix", () => {
+    expect(botName("abcd1234")).toBe("pi-abcd1234");
+    expect(botName("abcd1234", "cc")).toBe("cc-abcd1234");
+    expect(defaultNick("abcd1234")).toBe("pi-abcd1234");
+    expect(defaultNick("abcd1234", "cc")).toBe("cc-abcd1234");
+    expect(projectBotName("abcd1234", "freeq", "cc")).toBe("cc-abcd1234-freeq");
+    expect(resolveBotName("abcd1234", "freeq", () => false, "cc")).toBe("cc-abcd1234-freeq");
   });
 });

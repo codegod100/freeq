@@ -20,6 +20,7 @@
 import { mkdir, readFile, writeFile, chmod, access } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { createPrivateKey, randomBytes } from "node:crypto";
+import { PI_NAMES, type HarnessNames } from "./names.js";
 
 /** Where the owner's creator seed lives, per owner DID. Mode 0600. */
 export function creatorKeyPath(root: string, ownerDid: string): string {
@@ -82,7 +83,9 @@ export interface AuthorizeInstructions {
 export async function authorizeInstructions(opts: {
   ownerDid: string;
   root: string;
+  names?: HarnessNames;
 }): Promise<AuthorizeInstructions> {
+  const names = opts.names ?? PI_NAMES;
   const keyPath = creatorKeyPath(opts.root, opts.ownerDid);
   const seed = await loadOrCreateCreatorSeed(keyPath);
   const publicKey = creatorPublicKeyB64(seed);
@@ -96,8 +99,8 @@ export async function authorizeInstructions(opts: {
       `1. In the freeq web client (or any client logged in as ${opts.ownerDid}), paste this into the message box:`,
       `      ${pasteLine}`,
       `   It is a public key. Nothing secret is being sent.`,
-      `2. Back here, run:  /freeq authorize verify`,
-      `   pi will reconnect with a signed delegation and confirm the server accepted it.`,
+      `2. Back here, run:  ${names.hint("authorize verify")}`,
+      `   ${names.name} will reconnect with a signed delegation and confirm the server accepted it.`,
     ],
   };
 }
@@ -118,7 +121,9 @@ export async function agentInstructions(opts: {
   ownerDid: string;
   botDid: string;
   root: string;
+  names?: HarnessNames;
 }): Promise<AgentInstructions> {
+  const names = opts.names ?? PI_NAMES;
   const steps = [
     `This installation's DID: ${opts.botDid}`,
     "",
@@ -126,9 +131,9 @@ export async function agentInstructions(opts: {
     "  - in the freeq web app: Settings → Agents → + Add an agent, with the DID above; or",
     `  - from a terminal: freeq-bot-id register --owner <your handle> ${opts.botDid}`,
     "",
-    "Then run:  /freeq authorize verify",
+    `Then run:  ${names.hint("authorize verify")}`,
     "",
-    "On a server that doesn't read agent records yet, use /freeq authorize --sign-cert instead.",
+    `On a server that doesn't read agent records yet, use ${names.hint("authorize --sign-cert")} instead.`,
   ];
   let legacy = false;
   try {
@@ -147,8 +152,11 @@ export async function agentInstructions(opts: {
 }
 
 /** What an unverified certificate means now: the owner's record is not there yet. */
-const WAITING_FOR_RECORD =
-  "Not verified yet: the server found no agent record naming this installation. Add its DID (shown by /freeq authorize) in the freeq web app under Settings → Agents, or with freeq-bot-id register, then run /freeq authorize verify again. On a server that doesn't read agent records yet, /freeq authorize --sign-cert is the way.";
+function waitingForRecord(names: HarnessNames): string {
+  return (
+    `Not verified yet: the server found no agent record naming this installation. Add its DID (shown by ${names.hint("authorize")}) in the freeq web app under Settings → Agents, or with freeq-bot-id register, then run ${names.hint("authorize verify")} again. On a server that doesn't read agent records yet, ${names.hint("authorize --sign-cert")} is the way.`
+  );
+}
 
 /**
  * Read the server's verdict on this installation's certificate. After
@@ -157,7 +165,10 @@ const WAITING_FOR_RECORD =
  * comes first; a verified one can follow once the server has read the
  * owner's records.
  */
-export function interpretProvenanceNotice(notice: string | undefined): {
+export function interpretProvenanceNotice(
+  notice: string | undefined,
+  names: HarnessNames = PI_NAMES,
+): {
   verified: boolean;
   message: string;
 } {
@@ -172,7 +183,7 @@ export function interpretProvenanceNotice(notice: string | undefined): {
     return { verified: true, message: "Delegation verified — this installation provably acts for you." };
   }
   if (/^Provenance stored \(unverified\)/i.test(notice)) {
-    return { verified: false, message: WAITING_FOR_RECORD };
+    return { verified: false, message: waitingForRecord(names) };
   }
   return { verified: false, message: `Server said: ${notice}` };
 }

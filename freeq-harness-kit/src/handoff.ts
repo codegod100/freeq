@@ -686,9 +686,13 @@ export class WorkWatchdog {
   #progressIntervalMs: number;
   #stallMs: number;
 
-  constructor(opts: { progressIntervalSecs: number; stallSecs: number }) {
+  /** The harness's name, for "the pi session working on this…". */
+  #harness: string;
+
+  constructor(opts: { progressIntervalSecs: number; stallSecs: number; harness?: string }) {
     this.#progressIntervalMs = opts.progressIntervalSecs * 1000;
     this.#stallMs = opts.stallSecs * 1000;
+    this.#harness = opts.harness ?? "pi";
   }
 
   /** Begin watching. Starting a task we already watch only marks it alive. */
@@ -773,7 +777,7 @@ export class WorkWatchdog {
       kind: "progress" as const,
       task,
       note:
-        `the pi session working on this is shutting down after ` +
+        `the ${this.#harness} session working on this is shutting down after ` +
         `${formatDuration((now - task.startedAt) / 1000)} — not finished`,
     }));
     this.#tasks.clear();

@@ -43,8 +43,8 @@ export interface HelloPayload {
   agent: string;
 }
 
-export function buildHello(meta: SessionMeta, did: string | undefined): HelloPayload {
-  return { v: PI_PROTOCOL_VERSION, meta, did, agent: "pi" };
+export function buildHello(meta: SessionMeta, did: string | undefined, agent = "pi"): HelloPayload {
+  return { v: PI_PROTOCOL_VERSION, meta, did, agent };
 }
 
 /** Parse and validate an inbound hello payload. Returns undefined if invalid. */

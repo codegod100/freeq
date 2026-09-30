@@ -32,6 +32,7 @@ import {
   PI_HELLO_ACK,
 } from "./discovery.js";
 import { scrubOutbound } from "./scrub.js";
+import { PI_NAMES, type HarnessNames } from "./names.js";
 import {
   AskRegistry,
   encodePayload,
@@ -116,6 +117,11 @@ export interface Peer {
 }
 
 export interface ConnectionOptions {
+  /**
+   * The harness this connection runs in: the prefix of the identity and
+   * nick, the hello's `agent`, and its name in notices. Default pi's.
+   */
+  names?: HarnessNames;
   ownerDid: string;
   /** Owner's creator seed; when set, bot-kit signs the delegation cert. */
   creatorKeyPath?: string;
@@ -219,6 +225,10 @@ export class FreeqConnection {
     this.#meta = opts.meta;
   }
 
+  get #names(): HarnessNames {
+    return this.#opts.names ?? PI_NAMES;
+  }
+
   get state(): ConnState {
     return this.#state;
   }
@@ -280,12 +290,19 @@ export class FreeqConnection {
         // Prefer an identity that already exists on disk: the slug format
         // changed, and renaming an agent would hand it a new DID and a new
         // nick, making it a stranger to everyone who trusts it.
-        name: resolveBotName(this.#opts.slug, this.#meta.project, (n) =>
-          existsSync(join(this.#opts.root ?? defaultBotsRoot(), n)),
+        name: resolveBotName(
+          this.#opts.slug,
+          this.#meta.project,
+          (n) => existsSync(join(this.#opts.root ?? defaultBotsRoot(), n)),
+          this.#names.name,
         ),
         ownerDid: this.#opts.ownerDid,
         creatorKeyPath: this.#opts.creatorKeyPath,
-        nick: projectNick(this.#opts.nick ?? defaultNick(this.#opts.slug), this.#meta.project),
+        nick: projectNick(
+          this.#opts.nick ?? defaultNick(this.#opts.slug, this.#names.name),
+          this.#meta.project,
+          this.#names.name,
+        ),
         url: this.#opts.server,
         root: this.#opts.root,
         channels: this.#opts.channels,
@@ -411,7 +428,7 @@ export class FreeqConnection {
           this.#joined.clear();
           this.#clearRejoinTimers();
           this.#notice(
-            "freeq: connection dropped — the transport is reconnecting; pi continues normally",
+            `freeq: connection dropped — the transport is reconnecting; ${this.#names.name} continues normally`,
             "warning",
             "offline",
           );
@@ -432,7 +449,7 @@ export class FreeqConnection {
       this.#state = "error";
       this.#lastError = (err as Error).message;
       this.#notice(
-        `freeq: could not connect (${this.#lastError}) — pi continues normally`,
+        `freeq: could not connect (${this.#lastError}) — ${this.#names.name} continues normally`,
         "warning",
         "offline",
       );
@@ -532,8 +549,8 @@ export class FreeqConnection {
     // The project nick is what we actually registered as; the base nick is
     // what teammates were told. "chad-bot" in a room where only
     // "chad-bot-freeq" is present should still get an answer.
-    const base = this.#opts.nick ?? defaultNick(this.#opts.slug);
-    names.add(projectNick(base, this.#meta.project));
+    const base = this.#opts.nick ?? defaultNick(this.#opts.slug, this.#names.name);
+    names.add(projectNick(base, this.#meta.project, this.#names.name));
     for (const name of names) {
       const hit = matchMention(name, text);
       if (hit) return hit.stripped;
@@ -545,7 +562,10 @@ export class FreeqConnection {
   #announce(channel: string, type: typeof PI_HELLO | typeof PI_HELLO_ACK): void {
     if (!this.#bot) return;
     try {
-      this.#bot.client.sendTagmsg(channel, helloTags(type, buildHello(this.#meta, this.did)));
+      this.#bot.client.sendTagmsg(
+        channel,
+        helloTags(type, buildHello(this.#meta, this.did, this.#names.name)),
+      );
     } catch {
       /* discovery is best-effort */
     }

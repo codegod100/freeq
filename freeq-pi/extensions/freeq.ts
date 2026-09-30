@@ -58,6 +58,8 @@ export default function (pi: ExtensionAPI): void {
 
   /** pi as a freeq harness. */
   const harness: Harness = {
+    name: "pi",
+    commandHint: (sub) => `/freeq ${sub}`,
     get agentDir() {
       return getAgentDir();
     },
@@ -389,7 +391,7 @@ export default function (pi: ExtensionAPI): void {
         offersWaiting: waiting.length,
         working: rt.currentLabel(),
         inCall: avChannel,
-      }),
+      }, rt.names),
     );
 
     // Title: which agent this window is, so a row of terminals reads.
@@ -413,6 +415,7 @@ export default function (pi: ExtensionAPI): void {
           brief: rec.note,
         },
         width,
+        rt.names,
       );
       c.ui.setWidget("freeq-offer", (_tui, theme) => {
         const box = new Container();
@@ -459,7 +462,7 @@ export default function (pi: ExtensionAPI): void {
   pi.on("session_shutdown", async (_event, ctx) => {
     track(ctx);
     await hangup("session shutdown");
-    await rt.stop("pi session ended");
+    await rt.stop();
   });
 
   // Report "working" for the whole run, and go quiet again when it settles.
