@@ -97,6 +97,13 @@ describe("session lifecycle", () => {
     expect(existsSync(join(h.agentDir, "freeq-handoffs.json"))).toBe(true);
   });
 
+  it("redraws the footer's channel count when a join is confirmed", async () => {
+    const h = await startPi({ config: baseConfig(), hasUI: true });
+    expect(h.statuses.get("freeq")).toContain("0 ch");
+    h.bot.emit("channelJoined", "#work");
+    expect(h.statuses.get("freeq")).toContain("1 ch");
+  });
+
   it("announces a pi hello into a channel once joined", async () => {
     const h = await startPi({ config: baseConfig() });
     h.bot.emit("channelJoined", "#work");

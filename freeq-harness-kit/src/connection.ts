@@ -161,6 +161,12 @@ export interface ConnectionOptions {
    * mid-task needs to ask the server what is still assigned to it.
    */
   onOnline?: () => void;
+  /**
+   * The set of channels the server has confirmed we are in changed: a join
+   * confirmed, a channel left, parted or refused, or membership reset by a
+   * connect or a drop. A footer showing the count redraws here.
+   */
+  onChannelsChanged?: () => void;
 }
 
 export interface InboundAsk {
@@ -369,6 +375,7 @@ export class FreeqConnection {
       // Announce into each channel once we're actually in it.
       bot.on("channelJoined", (channel: string) => {
         this.#joined.add(channel.toLowerCase());
+        this.#channelsChanged();
         // The server restores a session's saved channel set on reconnect, so
         // a channel this project no longer wants comes back by itself and
         // stays for good: config asks, server remembers, server wins. Leave
@@ -376,6 +383,7 @@ export class FreeqConnection {
         // announcing our arrival somewhere we are about to leave.
         if (this.#wanted.size && !this.#wanted.has(channel.toLowerCase())) {
           this.#joined.delete(channel.toLowerCase());
+          this.#channelsChanged();
           this.#bot?.client.raw(`PART ${channel} :not this project's channel`);
           this.#opts.onUnexpectedChannel?.(channel);
           return;
@@ -386,6 +394,7 @@ export class FreeqConnection {
 
       bot.on("channelLeft", (channel: string) => {
         this.#joined.delete(channel.toLowerCase());
+        this.#channelsChanged();
       });
 
       // A JOIN that the server refuses. Without this the client sends JOIN,
@@ -396,6 +405,7 @@ export class FreeqConnection {
       bot.on("joinRejected", (channel: string, numeric: string, reason: string) => {
         if (!channel) return;
         this.#joined.delete(channel.toLowerCase());
+        this.#channelsChanged();
         // 477 keeps its own word because it is the one with a remedy the
         // agent can perform itself.
         this.#refused.set(channel.toLowerCase(), numeric === "477" ? "policy" : reason);
@@ -420,12 +430,14 @@ export class FreeqConnection {
           // then we are in nothing, and saying otherwise is how the footer
           // kept listing channels an absent agent was not in.
           this.#joined.clear();
+          this.#channelsChanged();
           this.#scheduleRejoin();
         } else if (s === "connecting") {
           if (this.#state === "online") this.#state = "connecting";
         } else if (s === "disconnected" && !this.#stopped) {
           this.#state = "connecting";
           this.#joined.clear();
+          this.#channelsChanged();
           this.#clearRejoinTimers();
           this.#notice(
             `freeq: connection dropped — the transport is reconnecting; ${this.#names.name} continues normally`,
@@ -755,6 +767,15 @@ export class FreeqConnection {
   }
 
   /** Channels the server has CONFIRMED we are in, not the ones we asked for. */
+  /** Tell the host the confirmed channel set changed; presentation only. */
+  #channelsChanged(): void {
+    try {
+      this.#opts.onChannelsChanged?.();
+    } catch {
+      /* a footer that failed to redraw must not break the connection */
+    }
+  }
+
   joinedChannels(): string[] {
     return [...this.#joined];
   }

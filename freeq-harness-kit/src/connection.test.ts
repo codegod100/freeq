@@ -299,6 +299,23 @@ describe("transport state handling (the churn regression)", () => {
   });
 });
 
+describe("the confirmed channel set", () => {
+  it("reports each change: a confirmed join, a leave, a refusal", async () => {
+    let changes = 0;
+    const { conn, bot } = mk({ onChannelsChanged: () => changes++ });
+    await conn.start();
+    const before = changes;
+    bot.emit("channelJoined", "#work");
+    expect(changes).toBe(before + 1);
+    expect(conn.joinedChannels()).toEqual(["#work"]);
+    bot.emit("channelLeft", "#work");
+    expect(changes).toBe(before + 2);
+    expect(conn.joinedChannels()).toEqual([]);
+    bot.emit("joinRejected", "#work", "477", "policy");
+    expect(changes).toBe(before + 3);
+  });
+});
+
 describe("peer discovery", () => {
   it("announces a hello when a channel is joined", async () => {
     const { conn, bot } = mk();

@@ -2290,6 +2290,7 @@ export class AgentRuntime {
       // Every connect, including a reconnect after a dropped socket — the gap
       // is exactly when accepted work goes quiet without anybody deciding it
       // should.
+      onChannelsChanged: () => this.stateChanged(),
       onOnline: () => {
         try {
           this.harness.connected?.();
