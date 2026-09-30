@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -235,6 +235,95 @@ describe("AgentRuntime: presence", () => {
     await rt.start();
     rt.beginStep("reviewing");
     expect(phrases).toEqual(["reviewing"]);
+  });
+});
+
+/** An act event as the SDK delivers it. */
+function act(verb: string, taskId: string, over: Record<string, unknown> = {}, fields: Record<string, string> = {}) {
+  return {
+    channel: "#work",
+    from: "boss",
+    did: "did:plc:boss",
+    kind: "handoff",
+    verb,
+    eventId: verb === "offer" ? taskId : `${taskId}-${verb}`,
+    taskId,
+    fields: { ...(verb === "offer" ? {} : { "act-id": taskId }), ...fields },
+    tags: {},
+    replayed: false,
+    ...over,
+  };
+}
+
+describe("AgentRuntime: handoffs", () => {
+  // Act events look their signer's key up over HTTP, and every connect asks
+  // the server what is assigned: neither may reach a network.
+  const fetched: string[] = [];
+  let tasks: unknown[] = [];
+  vi.stubGlobal("fetch", async (url: string) => {
+    fetched.push(String(url));
+    return String(url).includes("/api/v1/actions")
+      ? new Response(JSON.stringify({ tasks }), { status: 200 })
+      : new Response(null, { status: 404 });
+  });
+  afterEach(() => {
+    fetched.length = 0;
+    tasks = [];
+  });
+
+  it("ignores an offer from an untrusted DID, and says so", async () => {
+    const { bot, delivered, notices } = await started();
+    bot.emit("actEvent", act("offer", "01JA", {}, { "act-to": "did:key:zSelf", "act-title": "t" }));
+    await tick();
+    expect(delivered).toEqual([]);
+    expect(notices.map((n) => n.text).join("\n")).toContain("ignoring handoff from did:plc:boss");
+  });
+
+  it("accepts a trusted offer when idle, delivers the brief, journals the start", async () => {
+    const { bot, delivered, notes, rt } = await started({ trust: { "did:plc:boss": "handoff" } });
+    bot.emit("actEvent", act("offer", "01JB", {}, { "act-to": "did:key:zSelf", "act-title": "port it" }));
+    await tick();
+    const accept = bot.sent.find((s) => s.kind === "act")!;
+    expect((accept.payload as Record<string, string>)["+freeq.at/act-verb"]).toBe("accept");
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.content).toContain("You have taken on a task handed off over freeq.");
+    expect(notes.map((n) => [n.kind, n.text])).toEqual([["start", "took on: port it"]]);
+    expect(rt.workTask).toBe("01JB");
+  });
+
+  it("queues a trusted offer while busy", async () => {
+    const { bot, delivered, rt, setIdle } = await started({ trust: { "did:plc:boss": "handoff" } });
+    setIdle(false);
+    bot.emit("actEvent", act("offer", "01JC", {}, { "act-to": "did:key:zSelf", "act-title": "later" }));
+    await tick();
+    expect(delivered).toEqual([]);
+    expect(rt.offers?.has("01JC")).toBe(true);
+  });
+
+  it("tells the model to stand down when held work is cancelled", async () => {
+    const { bot, delivered } = await started({ trust: { "did:plc:boss": "handoff" } });
+    bot.emit("actEvent", act("offer", "01JD", {}, { "act-to": "did:key:zSelf", "act-title": "held" }));
+    await tick();
+    bot.emit("actEvent", act("accept", "01JD", { did: "did:key:zSelf", from: "pi-test1234-proj" }));
+    await tick();
+    bot.emit("actEvent", act("cancel", "01JD"));
+    await tick();
+    expect(delivered).toHaveLength(2);
+    expect(delivered[1]!.content).toContain("was cancelled by the agent that offered it");
+  });
+
+  it("resumes assigned work on connect, with the journal", async () => {
+    tasks = [{ act_id: "01JE", kind: "handoff", stored_state: "assigned", venue: "#work", offerer: "did:plc:boss", assignee: "did:key:zSelf" }];
+    const h = fakeHarness();
+    writeConfig(h.agentDir, { trust: { "did:plc:boss": "handoff" } });
+    h.harness.journal.append({ taskId: "01JE", at: Date.UTC(2026, 8, 29, 22, 40), kind: "turn", text: "parser half done" });
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => new FakeBot() });
+    await rt.start();
+    await tick();
+    expect(fetched[0]).toBe("http://test.invalid/api/v1/actions?assignee=did%3Akey%3AzSelf&state=assigned");
+    expect(h.delivered).toHaveLength(1);
+    expect(h.delivered[0]!.content).toContain("- 22:40 parser half done");
+    expect(await rt.resumeAssigned(rt.config!, "01JE")).toBe("freeq: 01JE is already in flight here");
   });
 });
 

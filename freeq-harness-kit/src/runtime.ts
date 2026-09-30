@@ -19,7 +19,6 @@ import { access as fsAccess } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join as joinPath } from "node:path";
 
-import type { ActEventPayload } from "@freeq/sdk";
 import {
   loadConfig,
   saveConfig,
@@ -30,6 +29,7 @@ import {
   type FreeqConfig,
 } from "./config.js";
 import { deriveInstallSlug, isDid, resolveBotName } from "./identity.js";
+import { isTerminal } from "@freeq/bot-kit";
 import { creatorKeyPath } from "./owner-key.js";
 import { parseVerbositySteer } from "./steer.js";
 import { scrubSeverity } from "./scrub.js";
@@ -37,7 +37,7 @@ import { nextUpdate, type ProgressState } from "./progress.js";
 import { gistOf, renderStatus, toolDetail } from "./status.js";
 import type { RoomLineInput } from "./ui.js";
 import { WithheldBuffer, withheldSummary } from "./withheld.js";
-import { summarizeTurn, type TaskNote } from "./journal.js";
+import { resumePreamble, summarizeTurn, type TaskNote } from "./journal.js";
 import { collectSessionMeta } from "./presence.js";
 import { FreeqConnection, type BotFactory, type InboundAsk } from "./connection.js";
 import { ConnectionLock } from "./lock.js";
@@ -46,9 +46,15 @@ import {
   OfferQueue,
   WorkWatchdog,
   describeHandoff,
+  noteVerification,
+  decideOffer,
+  sweepOfferQueue,
+  planResume,
+  fetchAssignedTasks,
+  formatDuration,
   type HandoffRecord,
 } from "./handoff.js";
-import { type KeyFetcher } from "./verify.js";
+import { fetchServerDid, serverKeyFetcher, verifyActEvent, type KeyFetcher } from "./verify.js";
 import {
   TurnRecorder,
   buildProvenance,
@@ -98,20 +104,7 @@ export function httpOriginFor(wsUrl: string): string {
   }
 }
 
-/**
- * Temporary seams for the parts of the session still driven by the harness
- * adapter (handoff events, resume, the maintenance loop). They move into the
- * runtime next and these go away.
- */
-export interface RuntimeHooks {
-  onActEvent?(ev: ActEventPayload): void;
-  onOnline?(): void;
-  afterConnect?(cfg: FreeqConfig): void;
-  beforeStop?(): Promise<void> | void;
-}
-
 export interface RuntimeOptions {
-  hooks?: RuntimeHooks;
   /** How the bot is built. Tests inject a fake; production omits it. */
   botFactory?: BotFactory;
 }
@@ -128,6 +121,9 @@ export interface RuntimeOptions {
 type PendingReply =
   | { kind: "ask"; ask: InboundAsk; seq: number }
   | { kind: "channel"; channel: string; from: string; seq: number };
+
+/** How often the offer queue and the watchdog are looked at. */
+const MAINTENANCE_MS = 5_000;
 
 /** Provenance tier ordering. */
 function tierAtLeastProv(a: ProvenanceTier, b: ProvenanceTier): boolean {
@@ -217,11 +213,21 @@ export class AgentRuntime {
   watchdog: WorkWatchdog | undefined;
   /** Tasks this session has already re-entered — resume must be idempotent. */
   readonly resumed = new Set<string>();
+  /**
+   * One interval drives both the offer queue and the watchdog. Two would have
+   * to be torn down in the same two places anyway, and a single cancel is one
+   * thing to get right rather than three.
+   */
+  #maintenanceTimer: NodeJS.Timeout | undefined;
+  /**
+   * Armed on the transition to idle and disarmed by taking an offer, so a
+   * session that is still settling cannot be handed two tasks in ten seconds.
+   */
+  #idleAcceptArmed = true;
 
   #lastModel: string | undefined;
   #lastFirehoseAt = 0;
 
-  readonly hooks: RuntimeHooks;
   readonly #botFactory: BotFactory | undefined;
 
   constructor(
@@ -229,7 +235,6 @@ export class AgentRuntime {
     options: RuntimeOptions = {},
   ) {
     this.agentDir = harness.agentDir;
-    this.hooks = options.hooks ?? {};
     this.#botFactory = options.botFactory;
   }
 
@@ -351,6 +356,393 @@ export class AgentRuntime {
       stallSecs: cfg.stallSecs,
     });
     return this.watchdog;
+  }
+
+  // ── resilience ──────────────────────────────────────────────────────────
+  //
+  // Three things a distracted agent used to get wrong: it missed an offer and
+  // never went back to it, it accepted work and then hung, and a restart had
+  // no idea what it had been doing. See handoff.ts for the mechanisms; this
+  // is where they are driven.
+
+  #startMaintenance(cfg: FreeqConfig): void {
+    if (this.#maintenanceTimer) return;
+    this.#maintenanceTimer = setInterval(() => {
+      void this.#maintain(cfg);
+    }, MAINTENANCE_MS);
+    this.#maintenanceTimer.unref?.();
+  }
+
+  #stopMaintenance(): void {
+    if (!this.#maintenanceTimer) return;
+    clearInterval(this.#maintenanceTimer);
+    this.#maintenanceTimer = undefined;
+  }
+
+  /** One pass: drain what we can take, retire what waited too long, tick the clocks. */
+  async #maintain(cfg: FreeqConfig): Promise<void> {
+    const conn = this.conn;
+    if (!conn || conn.state !== "online") return;
+    const store = await this.ensureHandoffs();
+    const queue = await this.ensureOffers();
+
+    const idle = this.harness.isIdle();
+    if (!idle) this.#idleAcceptArmed = true;
+
+    const sweep = sweepOfferQueue({
+      entries: queue.all(),
+      lookup: (id) => store.get(id),
+      trusted: (did) => tierAtLeast(tierFor(cfg, did), "handoff"),
+      idle: idle && this.#idleAcceptArmed,
+      now: Date.now(),
+      ttlSecs: cfg.offerTtlSecs,
+    });
+
+    for (const entry of sweep.drop) queue.remove(entry.taskId);
+    for (const { entry, record, reason } of sweep.expire) {
+      queue.remove(entry.taskId);
+      await this.declineOffer(record, reason);
+    }
+    if (sweep.accept) {
+      this.#idleAcceptArmed = false;
+      queue.remove(sweep.accept.entry.taskId);
+      await this.acceptOffer(cfg, sweep.accept.record, sweep.accept.record.lastActor ?? "freeq");
+    }
+    await queue.save();
+
+    for (const action of this.ensureWatchdog(cfg).tick()) {
+      if (action.kind === "progress") {
+        await conn.sendAct(action.task.channel, "progress", action.task.taskId, {
+          note: action.note,
+        });
+        continue;
+      }
+      await conn.sendAct(action.task.channel, "fail", action.task.taskId, {
+        note: action.reason,
+      });
+      if (this.workTask === action.task.taskId) {
+        this.endStep();
+        this.workTask = undefined;
+        this.pushStatus("active", undefined, undefined, true);
+      }
+      this.notify(
+        `freeq: gave up on ${action.task.taskId.slice(0, 10)} — ${action.reason}. ` +
+          `The offerer has been told.`,
+        "warning",
+      );
+    }
+  }
+
+  /** Accept an offer and start the work. The one place either happens. */
+  async acceptOffer(cfg: FreeqConfig, rec: HandoffRecord, fromNick: string): Promise<void> {
+    const sent = await this.conn?.sendAct(rec.channel, "accept", rec.id, {});
+    if (!sent) {
+      // Put it back: an accept we could not send is not an acceptance, and
+      // the next sweep will try again or let the TTL retire it.
+      this.notify(`freeq: could not accept ${rec.id.slice(0, 10)} — will retry`, "warning");
+      const queue = await this.ensureOffers();
+      queue.add(rec.id);
+      await queue.save();
+      return;
+    }
+    this.notify(`freeq: accepted handoff ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
+    this.#startAssignedWork(cfg, rec, fromNick);
+  }
+
+  /** Decline an offer, always with a reason — silence teaches an offerer nothing. */
+  async declineOffer(rec: HandoffRecord, reason: string): Promise<void> {
+    await this.conn?.sendAct(rec.channel, "decline", rec.id, { note: reason });
+    this.notify(`freeq: declined ${rec.id.slice(0, 10)} — ${reason}`, "info");
+  }
+
+  /**
+   * Ask the server what is still assigned to us, and take it back up.
+   *
+   * Called on every connect, including a reconnect after a dropped socket:
+   * the gap is exactly when work goes quiet without anybody deciding it
+   * should. `resumed` makes a second pass a no-op rather than a second start.
+   */
+  async resumeAssigned(cfg: FreeqConfig, only?: string): Promise<string> {
+    const conn = this.conn;
+    const me = conn?.did;
+    if (!conn || conn.state !== "online" || !me) return "freeq: offline — cannot ask the server";
+
+    const answer = await fetchAssignedTasks({ origin: httpOriginFor(cfg.server), did: me });
+    if (!answer.ok) {
+      // An outage is not "nothing to resume", and reporting it that way is how
+      // a session quietly abandons work it still holds.
+      return `freeq: could not ask the server what is still yours — ${answer.reason}`;
+    }
+
+    const store = await this.ensureHandoffs();
+    // Work already in flight here is not work to resume. A reconnect on a
+    // flapping link would otherwise inject the same task's brief again on
+    // every recovery.
+    const running = new Set([...this.resumed, ...(this.watchdog?.inFlight().map((t) => t.taskId) ?? [])]);
+    const plan = planResume({
+      serverTasks: answer.tasks,
+      known: store.all(),
+      me,
+      // Filter to a named task AFTER planning, so the cap cannot decide the
+      // oldest task is the one you asked for.
+      max: only ? answer.tasks.length : cfg.maxResume,
+      already: running,
+    });
+
+    const wanted = only
+      ? plan.resume.filter((r) => r.id === only || r.id.startsWith(only))
+      : plan.resume;
+    if (only && !wanted.length) {
+      return running.has(only) || [...running].some((id) => id.startsWith(only))
+        ? `freeq: ${only} is already in flight here`
+        : `freeq: the server does not list ${only} as assigned to you`;
+    }
+
+    const lines: string[] = [];
+    for (const rec of wanted) {
+      this.resumed.add(rec.id);
+      if (!store.get(rec.id)) store.put(rec);
+      lines.push(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`);
+      this.notify(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
+      // Say so on the wire too: the offerer watched this go quiet, and a
+      // progress note is how they learn it did not stay that way.
+      await conn.sendAct(rec.channel, "progress", rec.id, {
+        note: "resumed after the assignee's session restarted",
+      });
+      this.#startAssignedWork(cfg, rec, rec.lastActor ?? "freeq", true);
+    }
+    await store.save();
+
+    if (!only && plan.skipped > 0) {
+      lines.push(
+        `freeq: ${plan.skipped} more still assigned to you, not started ` +
+          `(cap is maxResume=${cfg.maxResume}) — /freeq resume <id> to take one`,
+      );
+    }
+    for (const rec of plan.stale) {
+      lines.push(
+        `freeq: ${rec.id.slice(0, 10)} is not in the server's list of your assigned work ` +
+          `— not resuming it`,
+      );
+    }
+    if (!lines.length) return "freeq: nothing to resume";
+    return lines.join("\n");
+  }
+
+  /**
+   * What a session does when a handoff moves.
+   *
+   * The only branch with teeth is an inbound offer: accepting it means
+   * agreeing to do someone else's work. The gate is the offerer's tier plus
+   * the owner's idle policy — never a modal, because a modal is what loses
+   * work when nobody is at the terminal.
+   */
+  async #onHandoffEvent(
+    cfg: FreeqConfig,
+    ev: { verb: string; replayed: boolean; from: string },
+    rec: HandoffRecord,
+    created: boolean,
+  ): Promise<void> {
+    const me = this.conn?.did;
+
+    // Work of ours that ended, however it ended. Stop the clocks before
+    // anything else, so a completed task can never be failed for stalling.
+    if (rec.assignee === me && isTerminal(rec.kind, rec.state)) {
+      if (this.watchdog?.finish(rec.id) && this.workTask === rec.id) {
+        this.endStep();
+        this.workTask = undefined;
+        this.pushStatus("active", undefined, undefined, true);
+      }
+      this.resumed.delete(rec.id);
+    }
+    // An offer we were holding has been answered by someone, somewhere.
+    if (!created && this.offers?.has(rec.id) && rec.state !== "offered") {
+      this.offers.remove(rec.id);
+      await this.offers.save();
+    }
+
+    // We just became the assignee — by claiming an open task, or by our own
+    // accept echoing back. Either way the work is now ours, so start it.
+    // (An accept we initiated already injected; guard on the verb so we do
+    // not do it twice.)
+    if (!created && ev.verb === "claim" && rec.assignee === me) {
+      this.#startAssignedWork(cfg, rec, ev.from);
+      return;
+    }
+
+    // Work we hold was called off (retracted by its offerer, or expired by the
+    // server). A notice is not enough: this session was TOLD to do the work as
+    // an instruction in its context, so it must be told to stop the same way,
+    // or it wanders back to a task the ledger already closed.
+    if (!created && (ev.verb === "cancel" || ev.verb === "expire")) {
+      if (rec.assignee === me || rec.offeree === me) {
+        this.#standDown(cfg, rec, ev.verb, ev.from);
+        return;
+      }
+    }
+
+    // Something we offered moved.
+    if (rec.offerer === me && !created) {
+      const who = rec.assignee ? ` by ${rec.assignee.slice(0, 22)}…` : "";
+      this.notify(
+        `freeq handoff ${rec.id.slice(0, 10)} → ${rec.state}${who} (${rec.title})`,
+        "info",
+      );
+      return;
+    }
+
+    // A new OPEN task: nobody is obliged to take it, so never prompt. Surface
+    // it and let the operator or the model decide via the 'claim' action.
+    // Prompting here would turn a public work queue into a dialog generator.
+    if (created && !rec.offeree) {
+      const tier = tierFor(cfg, rec.offerer);
+      if (!tierAtLeast(tier, "handoff")) return; // untrusted poster: ignore entirely
+      this.notify(
+        `freeq: open task ${rec.id.slice(0, 10)} in ${rec.channel} — ${rec.title}` +
+          (rec.caps ? `\n  caps: ${rec.caps}` : "") +
+          `\n  claim it with the freeq tool (action 'claim').`,
+        "info",
+      );
+      return;
+    }
+
+    // A new offer addressed to us.
+    const forMe = created && rec.offeree && rec.offeree === me;
+    if (!forMe) {
+      this.notify(`freeq handoff ${rec.id.slice(0, 10)}: ${rec.state} — ${rec.title}`, "info");
+      return;
+    }
+
+    const decision = decideOffer({
+      tier: tierFor(cfg, rec.offerer),
+      idle: this.harness.isIdle(),
+      autoAcceptDid: !!cfg.autoAccept?.includes(rec.offerer),
+      autoAcceptWhenIdle: cfg.autoAcceptWhenIdle,
+    });
+
+    if (decision.action === "ignore") {
+      // An unknown DID must not be able to raise a dialog in your terminal,
+      // queue you work, or cost you a notification you have to read.
+      this.notify(
+        `freeq: ignoring handoff from ${rec.offerer} — ${decision.reason}. ` +
+          `/freeq tasks to review, /freeq trust <did> handoff to allow.`,
+        "warning",
+      );
+      return;
+    }
+
+    if (decision.action === "accept") {
+      await this.acceptOffer(cfg, rec, ev.from);
+      return;
+    }
+
+    // Queued. Notify ONCE, naming the id and how to act on it — a queue
+    // nobody is told about is just a slower way of dropping the offer.
+    const queue = await this.ensureOffers();
+    const fresh = !queue.has(rec.id);
+    queue.add(rec.id);
+    await queue.save();
+    if (!fresh) return;
+
+    const age = rec.fromReplay || ev.replayed ? " (offered while you were offline)" : "";
+    this.notify(
+      `freeq: handoff ${rec.id.slice(0, 10)} from ${rec.offerer} — ${rec.title}${age}\n` +
+        `  ${decision.reason}; it will be taken when this session is free, or ` +
+        `declined after ${formatDuration(cfg.offerTtlSecs)}.\n` +
+        `  /freeq accept ${rec.id.slice(0, 10)} · /freeq decline ${rec.id.slice(0, 10)}`,
+      "info",
+    );
+  }
+
+  /**
+   * Begin work that is now assigned to this session.
+   *
+   * Shared by the directed path (offer → accept), the open path
+   * (post → claim), and a resume after a restart, so all three report
+   * presence identically, arm the same clocks, and enter the model through
+   * the same tier-gated pipeline. There is one way to start work, not three.
+   */
+  #startAssignedWork(cfg: FreeqConfig, rec: HandoffRecord, fromNick: string, resuming = false): void {
+    // Tie presence to the task, so the room can see who is on what.
+    this.workTask = rec.id;
+    this.beginStep(gistOf(`handoff: ${rec.title}`));
+
+    // On a fresh start, note the brief. On a resume, read back what this
+    // session had done and put it in front of the model - a resumed task that
+    // arrives as a bare title makes the agent start over.
+    const previous = resuming ? resumePreamble(this.harness.journal.read(rec.id)) : "";
+    this.journal(resuming ? "resume" : "start", rec.id, resuming ? "resumed after restart" : `took on: ${rec.title}`);
+
+    // Start the clocks. Nothing tracked the work past this point before, so a
+    // model that wandered off left the task assigned until the server's
+    // expiry sweep noticed, days later.
+    this.ensureWatchdog(cfg).start({ taskId: rec.id, channel: rec.channel, title: rec.title });
+
+    this.deliver({
+      kind: "chat",
+      channel: rec.channel,
+      from: fromNick,
+      did: rec.offerer,
+      text:
+        `You have taken on a task handed off over freeq.\n\n` +
+        `Task: ${rec.title}\n` +
+        `Task id: ${rec.id}\n` +
+        (rec.caps ? `Declared capabilities: ${rec.caps}\n` : "") +
+        (rec.note ? `\nBrief:\n${rec.note}\n` : "") +
+        (previous ? `\n${previous}\n` : "") +
+        `\nWork on this in THIS environment. When you are done, report what you ` +
+        `did and mark it complete with the freeq tool (action 'complete', ` +
+        `taskId '${rec.id}'). Do not send secrets or absolute paths back.`,
+      addressed: true,
+      mode: cfg.muted ? "silent" : "addressed",
+      tier: tierFor(cfg, rec.offerer),
+    });
+  }
+
+  /**
+   * Stop work this session was carrying when the task ends underneath it.
+   *
+   * Mirrors `startAssignedWork`: presence is released, and the model is told
+   * through the same tier-gated pipeline that started it. It is deliberately
+   * an instruction rather than a notification — an agent that only sees a UI
+   * notice keeps the task in its head.
+   */
+  #standDown(cfg: FreeqConfig, rec: HandoffRecord, verb: string, fromNick: string): void {
+    const held = this.workTask === rec.id;
+    if (held) {
+      this.endStep();
+      this.workTask = undefined;
+      this.pushStatus("active", undefined, undefined, true);
+    }
+
+    const why = verb === "expire" ? "expired" : "was cancelled by the agent that offered it";
+    const note = rec.log[rec.log.length - 1]?.note;
+
+    // Never accepted: nothing was started, so this is news, not an interrupt.
+    if (!held && rec.assignee !== this.conn?.did) {
+      this.notify(`freeq: handoff ${rec.id.slice(0, 10)} ${why} — ${rec.title}`, "info");
+      return;
+    }
+
+    this.deliver({
+      kind: "chat",
+      channel: rec.channel,
+      from: fromNick,
+      did: rec.offerer,
+      text:
+        `The freeq task you were working on ${why}. It is now '${rec.state}' — a ` +
+        `terminal state, so there is nothing further to do on it and no ` +
+        `completion to report.\n\n` +
+        `Task: ${rec.title}\n` +
+        `Task id: ${rec.id}\n` +
+        (note ? `Reason given: ${note}\n` : "") +
+        `\nStop work on it. Leave whatever you have already changed in place ` +
+        `unless you are asked to revert it, say briefly where you got to, and ` +
+        `do not pick this task up again.`,
+      addressed: true,
+      mode: cfg.muted ? "silent" : "addressed",
+      tier: tierFor(cfg, rec.offerer),
+    });
   }
 
   // ── the person ──────────────────────────────────────────────────────────
@@ -697,7 +1089,65 @@ export class AgentRuntime {
         })();
       },
 
-      onActEvent: (ev) => this.hooks.onActEvent?.(ev),
+      onActEvent: (ev) => {
+        void (async () => {
+          const store = await this.ensureHandoffs();
+
+          // Check the signature BEFORE applying. Three-way outcome per the
+          // RFC: a forgery is rejected, but an unreachable key store is an
+          // outage — deferring beats destroying someone's completed work.
+          this.keyFetcher ??= serverKeyFetcher(httpOriginFor(cfg.server));
+          const verdict = await verifyActEvent(
+            {
+              channel: ev.channel,
+              did: ev.did,
+              eventId: ev.eventId,
+              tags: ev.tags,
+              sigTag: ev.sigTag,
+            },
+            { fetchKey: this.keyFetcher, selfDid: this.conn?.did ?? "" },
+          );
+
+          if (verdict.outcome === "invalid") {
+            // Do not apply, and say so loudly: this is tampering or forgery,
+            // not a transient problem.
+            this.notify(
+              `freeq: REJECTED a task event from ${ev.from} — bad signature ` +
+                `(${verdict.reason}). Task ${ev.taskId.slice(0, 10)} was NOT updated.`,
+              "error",
+            );
+            return;
+          }
+
+          this.serverDid ??= await fetchServerDid(httpOriginFor(cfg.server));
+          const result = store.apply(ev, {
+            serverDid: this.serverDid,
+            signatureValid: verdict.outcome === "valid",
+          });
+          if (!result.ok) {
+            // Illegal or unattributable moves are logged, never applied.
+            // Server receipts, duplicate echoes, and replayed moves for tasks
+            // we never saw are all routine — say nothing about those.
+            if (!result.benign && !ev.replayed) {
+              this.notify(`freeq: rejected ${ev.verb} — ${result.reason}`, "warning");
+            }
+            return;
+          }
+          noteVerification(
+            result.record,
+            verdict.outcome === "valid" ? "valid" : "unverifiable",
+          );
+          await store.save();
+          if (verdict.outcome === "unverifiable" && !ev.replayed) {
+            this.notify(
+              `freeq: could not verify the signature on ${ev.verb} for ` +
+                `${ev.taskId.slice(0, 10)} (${verdict.reason}) — applied, but unproven.`,
+              "warning",
+            );
+          }
+          await this.#onHandoffEvent(cfg, ev, result.record, result.created);
+        })();
+      },
 
       // Every connect, including a reconnect after a dropped socket — the gap
       // is exactly when accepted work goes quiet without anybody deciding it
@@ -708,7 +1158,10 @@ export class AgentRuntime {
         } catch {
           /* presentation is best-effort */
         }
-        this.hooks.onOnline?.();
+        void (async () => {
+          const message = await this.resumeAssigned(cfg);
+          if (message !== "freeq: nothing to resume") this.notify(message, "info");
+        })();
       },
 
       onAsk: (ask) => {
@@ -733,7 +1186,7 @@ export class AgentRuntime {
     this.conn = conn;
 
     await conn.start();
-    this.hooks.afterConnect?.(cfg);
+    this.#startMaintenance(cfg);
     return `freeq: ${conn.describe()}`;
   }
 
@@ -783,7 +1236,7 @@ export class AgentRuntime {
 
   /** The session is ending. */
   async stop(reason = "pi session ended"): Promise<void> {
-    await this.hooks.beforeStop?.();
+    this.#stopMaintenance();
     // Say why the work stopped rather than letting it simply go quiet. NOT a
     // failure: a restart may pick it straight back up (see resume), and a
     // false failure in a signed, permanent log is worse than a gap.

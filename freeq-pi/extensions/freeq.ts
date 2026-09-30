@@ -29,7 +29,6 @@ import {
   withProjectChannels,
   modeFor,
   tierFor,
-  tierAtLeast,
   MODES,
   TIER_RANK,
   type FreeqConfig,
@@ -59,7 +58,7 @@ import { markForTerminal, supportsTruecolor, WORDMARK } from "../src/logo.js";
 import { peerColor } from "@freeq/harness-kit/ui";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { JOURNAL_ENTRY, notesFor, resumePreamble } from "@freeq/harness-kit/journal";
+import { JOURNAL_ENTRY, notesFor } from "@freeq/harness-kit/journal";
 import { homedir } from "node:os";
 import { join as joinPath } from "node:path";
 import { collectSessionMeta, describeMeta } from "@freeq/harness-kit/presence";
@@ -71,18 +70,11 @@ import {
   describeHandoff,
   isTerminalRecord,
   shortDid,
-  noteVerification,
-  decideOffer,
-  sweepOfferQueue,
-  planResume,
-  fetchAssignedTasks,
   resolveTaskRef,
   formatAge,
-  formatDuration,
   HANDOFF_KIND,
   type HandoffRecord,
 } from "@freeq/harness-kit/handoff";
-import { fetchServerDid, serverKeyFetcher, verifyActEvent } from "@freeq/harness-kit/verify";
 import {
   buildProvenance,
   formatDecision,
@@ -90,11 +82,7 @@ import {
   PROVENANCE_TIERS,
   type ProvenanceTier,
 } from "@freeq/harness-kit/provenance";
-import {
-  AgentRuntime,
-  FREEQ_ROOT,
-  httpOriginFor,
-} from "@freeq/harness-kit/runtime";
+import { AgentRuntime, FREEQ_ROOT } from "@freeq/harness-kit/runtime";
 import type { Harness } from "@freeq/harness-kit/harness";
 
 export default function (pi: ExtensionAPI): void {
@@ -177,83 +165,7 @@ export default function (pi: ExtensionAPI): void {
     },
   };
 
-  // ── resilience ──────────────────────────────────────────────────────────
-  //
-  // The handoff driving below still lives here; the runtime reaches it
-  // through these hooks.
-  const rt: AgentRuntime = new AgentRuntime(harness, { hooks: {
-    onActEvent: (ev) => {
-      const ctx = lastCtx!;
-      const cfg = rt.config!;
-      void (async () => {
-        const store = await rt.ensureHandoffs();
-
-        // Check the signature BEFORE applying. Three-way outcome per the
-        // RFC: a forgery is rejected, but an unreachable key store is an
-        // outage — deferring beats destroying someone's completed work.
-        rt.keyFetcher ??= serverKeyFetcher(httpOriginFor(cfg.server));
-        const verdict = await verifyActEvent(
-          {
-            channel: ev.channel,
-            did: ev.did,
-            eventId: ev.eventId,
-            tags: ev.tags,
-            sigTag: ev.sigTag,
-          },
-          { fetchKey: rt.keyFetcher, selfDid: rt.conn?.did ?? "" },
-        );
-
-        if (verdict.outcome === "invalid") {
-          // Do not apply, and say so loudly: this is tampering or forgery,
-          // not a transient problem.
-          rt.notify(
-            `freeq: REJECTED a task event from ${ev.from} — bad signature ` +
-              `(${verdict.reason}). Task ${ev.taskId.slice(0, 10)} was NOT updated.`,
-            "error",
-          );
-          return;
-        }
-
-        rt.serverDid ??= await fetchServerDid(httpOriginFor(cfg.server));
-        const result = store.apply(ev, {
-          serverDid: rt.serverDid,
-          signatureValid: verdict.outcome === "valid",
-        });
-        if (!result.ok) {
-          // Illegal or unattributable moves are logged, never applied.
-          // Server receipts, duplicate echoes, and replayed moves for tasks
-          // we never saw are all routine — say nothing about those.
-          if (!result.benign && !ev.replayed) {
-            rt.notify(`freeq: rejected ${ev.verb} — ${result.reason}`, "warning");
-          }
-          return;
-        }
-        noteVerification(
-          result.record,
-          verdict.outcome === "valid" ? "valid" : "unverifiable",
-        );
-        await store.save();
-        if (verdict.outcome === "unverifiable" && !ev.replayed) {
-          rt.notify(
-            `freeq: could not verify the signature on ${ev.verb} for ` +
-              `${ev.taskId.slice(0, 10)} (${verdict.reason}) — applied, but unproven.`,
-            "warning",
-          );
-        }
-        await onHandoffEvent(ctx, cfg, ev, result.record, result.created);
-      })();
-    },
-    onOnline: () => {
-      const ctx = lastCtx!;
-      const cfg = rt.config!;
-      void (async () => {
-        const message = await resumeAssigned(ctx, cfg);
-        if (message !== "freeq: nothing to resume") rt.notify(message, "info");
-      })();
-    },
-    afterConnect: (cfg) => startMaintenance(lastCtx!, cfg),
-    beforeStop: () => stopMaintenance(),
-  } });
+  const rt = new AgentRuntime(harness);
 
   // ── inline rendering ──────────────────────────────────────────────────
   //
@@ -532,202 +444,6 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
-  // ── resilience ──────────────────────────────────────────────────────────
-  //
-  // Three things a distracted agent used to get wrong: it missed an offer and
-  // never went back to it, it accepted work and then hung, and a restart had
-  // no idea what it had been doing. See freeq-harness-kit/src/handoff.ts for the mechanisms;
-  // this is where they are driven.
-
-  /**
-   * One interval drives both. Two would have to be torn down in the same two
-   * places anyway, and a single cancel is one thing to get right rather than
-   * three.
-   */
-  let maintenanceTimer: NodeJS.Timeout | undefined;
-  const MAINTENANCE_MS = 5_000;
-  /**
-   * Armed on the transition to idle and disarmed by taking an offer, so a
-   * session that is still settling cannot be handed two tasks in ten seconds.
-   */
-  let idleAcceptArmed = true;
-
-  function startMaintenance(ctx: ExtensionContext, cfg: FreeqConfig): void {
-    if (maintenanceTimer) return;
-    maintenanceTimer = setInterval(() => {
-      void maintain(ctx, cfg);
-    }, MAINTENANCE_MS);
-    maintenanceTimer.unref?.();
-  }
-
-  function stopMaintenance(): void {
-    if (!maintenanceTimer) return;
-    clearInterval(maintenanceTimer);
-    maintenanceTimer = undefined;
-  }
-
-  /** One pass: drain what we can take, retire what waited too long, tick the clocks. */
-  async function maintain(ctx: ExtensionContext, cfg: FreeqConfig): Promise<void> {
-    if (!rt.conn || rt.conn.state !== "online") return;
-    const store = await rt.ensureHandoffs();
-    const queue = await rt.ensureOffers();
-
-    const idle = ctx.isIdle();
-    if (!idle) idleAcceptArmed = true;
-
-    const sweep = sweepOfferQueue({
-      entries: queue.all(),
-      lookup: (id) => store.get(id),
-      trusted: (did) => tierAtLeast(tierFor(cfg, did), "handoff"),
-      idle: idle && idleAcceptArmed,
-      now: Date.now(),
-      ttlSecs: cfg.offerTtlSecs,
-    });
-
-    for (const entry of sweep.drop) queue.remove(entry.taskId);
-    for (const { entry, record, reason } of sweep.expire) {
-      queue.remove(entry.taskId);
-      await declineOffer(ctx, record, reason);
-    }
-    if (sweep.accept) {
-      idleAcceptArmed = false;
-      queue.remove(sweep.accept.entry.taskId);
-      await acceptOffer(ctx, cfg, sweep.accept.record, sweep.accept.record.lastActor ?? "freeq");
-    }
-    await queue.save();
-
-    for (const action of rt.ensureWatchdog(cfg).tick()) {
-      if (action.kind === "progress") {
-        await rt.conn.sendAct(action.task.channel, "progress", action.task.taskId, {
-          note: action.note,
-        });
-        continue;
-      }
-      await rt.conn.sendAct(action.task.channel, "fail", action.task.taskId, {
-        note: action.reason,
-      });
-      if (rt.workTask === action.task.taskId) {
-        rt.endStep();
-        rt.workTask = undefined;
-        rt.pushStatus("active", undefined, undefined, true);
-      }
-      rt.notify(
-        `freeq: gave up on ${action.task.taskId.slice(0, 10)} — ${action.reason}. ` +
-          `The offerer has been told.`,
-        "warning",
-      );
-    }
-  }
-
-  /** Accept an offer and start the work. The one place either happens. */
-  async function acceptOffer(
-    ctx: ExtensionContext,
-    cfg: FreeqConfig,
-    rec: HandoffRecord,
-    fromNick: string,
-  ): Promise<void> {
-    const sent = await rt.conn?.sendAct(rec.channel, "accept", rec.id, {});
-    if (!sent) {
-      // Put it back: an accept we could not send is not an acceptance, and
-      // the next sweep will try again or let the TTL retire it.
-      rt.notify(`freeq: could not accept ${rec.id.slice(0, 10)} — will retry`, "warning");
-      const queue = await rt.ensureOffers();
-      queue.add(rec.id);
-      await queue.save();
-      return;
-    }
-    rt.notify(`freeq: accepted handoff ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
-    startAssignedWork(ctx, cfg, rec, fromNick);
-  }
-
-  /** Decline an offer, always with a reason — silence teaches an offerer nothing. */
-  async function declineOffer(
-    ctx: ExtensionContext,
-    rec: HandoffRecord,
-    reason: string,
-  ): Promise<void> {
-    await rt.conn?.sendAct(rec.channel, "decline", rec.id, { note: reason });
-    rt.notify(`freeq: declined ${rec.id.slice(0, 10)} — ${reason}`, "info");
-  }
-
-  /**
-   * Ask the server what is still assigned to us, and take it back up.
-   *
-   * Called on every connect, including a reconnect after a dropped socket:
-   * the gap is exactly when work goes quiet without anybody deciding it
-   * should. `resumed` makes a second pass a no-op rather than a second start.
-   */
-  async function resumeAssigned(
-    ctx: ExtensionContext,
-    cfg: FreeqConfig,
-    only?: string,
-  ): Promise<string> {
-    const me = rt.conn?.did;
-    if (!rt.conn || rt.conn.state !== "online" || !me) return "freeq: offline — cannot ask the server";
-
-    const answer = await fetchAssignedTasks({ origin: httpOriginFor(cfg.server), did: me });
-    if (!answer.ok) {
-      // An outage is not "nothing to resume", and reporting it that way is how
-      // a session quietly abandons work it still holds.
-      return `freeq: could not ask the server what is still yours — ${answer.reason}`;
-    }
-
-    const store = await rt.ensureHandoffs();
-    // Work already in flight here is not work to resume. A reconnect on a
-    // flapping link would otherwise inject the same task's brief again on
-    // every recovery.
-    const running = new Set([...rt.resumed, ...(rt.watchdog?.inFlight().map((t) => t.taskId) ?? [])]);
-    const plan = planResume({
-      serverTasks: answer.tasks,
-      known: store.all(),
-      me,
-      // Filter to a named task AFTER planning, so the cap cannot decide the
-      // oldest task is the one you asked for.
-      max: only ? answer.tasks.length : cfg.maxResume,
-      already: running,
-    });
-
-    const wanted = only
-      ? plan.resume.filter((r) => r.id === only || r.id.startsWith(only))
-      : plan.resume;
-    if (only && !wanted.length) {
-      return running.has(only) || [...running].some((id) => id.startsWith(only))
-        ? `freeq: ${only} is already in flight here`
-        : `freeq: the server does not list ${only} as assigned to you`;
-    }
-
-    const lines: string[] = [];
-    for (const rec of wanted) {
-      rt.resumed.add(rec.id);
-      if (!store.get(rec.id)) store.put(rec);
-      lines.push(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`);
-      rt.notify(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
-      // Say so on the wire too: the offerer watched this go quiet, and a
-      // progress note is how they learn it did not stay that way.
-      await rt.conn.sendAct(rec.channel, "progress", rec.id, {
-        note: "resumed after the assignee's session restarted",
-      });
-      startAssignedWork(ctx, cfg, rec, rec.lastActor ?? "freeq", true);
-    }
-    await store.save();
-
-    if (!only && plan.skipped > 0) {
-      lines.push(
-        `freeq: ${plan.skipped} more still assigned to you, not started ` +
-          `(cap is maxResume=${cfg.maxResume}) — /freeq resume <id> to take one`,
-      );
-    }
-    for (const rec of plan.stale) {
-      lines.push(
-        `freeq: ${rec.id.slice(0, 10)} is not in the server's list of your assigned work ` +
-          `— not resuming it`,
-      );
-    }
-    if (!lines.length) return "freeq: nothing to resume";
-    return lines.join("\n");
-  }
-
-
   // ── lifecycle ───────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
@@ -809,235 +525,6 @@ export default function (pi: ExtensionAPI): void {
     track(ctx);
     await rt.onSettled();
   });
-
-  /**
-   * What a pi session does when a handoff moves.
-   *
-   * The only branch with teeth is an inbound offer: accepting it means
-   * agreeing to do someone else's work. The gate is the offerer's tier plus
-   * the owner's idle policy — never a modal, because a modal is what loses
-   * work when nobody is at the terminal.
-   */
-  async function onHandoffEvent(
-    ctx: ExtensionContext,
-    cfg: FreeqConfig,
-    ev: { verb: string; replayed: boolean; from: string },
-    rec: HandoffRecord,
-    created: boolean,
-  ): Promise<void> {
-    const me = rt.conn?.did;
-
-    // Work of ours that ended, however it ended. Stop the clocks before
-    // anything else, so a completed task can never be failed for stalling.
-    if (rec.assignee === me && isTerminal(rec.kind, rec.state)) {
-      if (rt.watchdog?.finish(rec.id) && rt.workTask === rec.id) {
-        rt.endStep();
-        rt.workTask = undefined;
-        rt.pushStatus("active", undefined, undefined, true);
-      }
-      rt.resumed.delete(rec.id);
-    }
-    // An offer we were holding has been answered by someone, somewhere.
-    if (!created && rt.offers?.has(rec.id) && rec.state !== "offered") {
-      rt.offers.remove(rec.id);
-      await rt.offers.save();
-    }
-
-    // We just became the assignee — by claiming an open task, or by our own
-    // accept echoing back. Either way the work is now ours, so start it.
-    // (An accept we initiated already injected; guard on the verb so we do
-    // not do it twice.)
-    if (!created && ev.verb === "claim" && rec.assignee === me) {
-      startAssignedWork(ctx, cfg, rec, ev.from);
-      return;
-    }
-
-    // Work we hold was called off (retracted by its offerer, or expired by the
-    // server). A notice is not enough: this session was TOLD to do the work as
-    // an instruction in its context, so it must be told to stop the same way,
-    // or it wanders back to a task the ledger already closed.
-    if (!created && (ev.verb === "cancel" || ev.verb === "expire")) {
-      if (rec.assignee === me || rec.offeree === me) {
-        standDown(ctx, cfg, rec, ev.verb, ev.from);
-        return;
-      }
-    }
-
-    // Something we offered moved.
-    if (rec.offerer === me && !created) {
-      const who = rec.assignee ? ` by ${rec.assignee.slice(0, 22)}…` : "";
-      rt.notify(
-        `freeq handoff ${rec.id.slice(0, 10)} → ${rec.state}${who} (${rec.title})`,
-        "info",
-      );
-      return;
-    }
-
-    // A new OPEN task: nobody is obliged to take it, so never prompt. Surface
-    // it and let the operator or the model decide via the 'claim' action.
-    // Prompting here would turn a public work queue into a dialog generator.
-    if (created && !rec.offeree) {
-      const tier = tierFor(cfg, rec.offerer);
-      if (!tierAtLeast(tier, "handoff")) return; // untrusted poster: ignore entirely
-      rt.notify(
-        `freeq: open task ${rec.id.slice(0, 10)} in ${rec.channel} — ${rec.title}` +
-          (rec.caps ? `\n  caps: ${rec.caps}` : "") +
-          `\n  claim it with the freeq tool (action 'claim').`,
-        "info",
-      );
-      return;
-    }
-
-    // A new offer addressed to us.
-    const forMe = created && rec.offeree && rec.offeree === me;
-    if (!forMe) {
-      rt.notify(`freeq handoff ${rec.id.slice(0, 10)}: ${rec.state} — ${rec.title}`, "info");
-      return;
-    }
-
-    const decision = decideOffer({
-      tier: tierFor(cfg, rec.offerer),
-      idle: ctx.isIdle(),
-      autoAcceptDid: !!cfg.autoAccept?.includes(rec.offerer),
-      autoAcceptWhenIdle: cfg.autoAcceptWhenIdle,
-    });
-
-    if (decision.action === "ignore") {
-      // An unknown DID must not be able to raise a dialog in your terminal,
-      // queue you work, or cost you a notification you have to read.
-      rt.notify(
-        `freeq: ignoring handoff from ${rec.offerer} — ${decision.reason}. ` +
-          `/freeq tasks to review, /freeq trust <did> handoff to allow.`,
-        "warning",
-      );
-      return;
-    }
-
-    if (decision.action === "accept") {
-      await acceptOffer(ctx, cfg, rec, ev.from);
-      return;
-    }
-
-    // Queued. Notify ONCE, naming the id and how to act on it — a queue
-    // nobody is told about is just a slower way of dropping the offer.
-    const queue = await rt.ensureOffers();
-    const fresh = !queue.has(rec.id);
-    queue.add(rec.id);
-    await queue.save();
-    if (!fresh) return;
-
-    const age = rec.fromReplay || ev.replayed ? " (offered while you were offline)" : "";
-    rt.notify(
-      `freeq: handoff ${rec.id.slice(0, 10)} from ${rec.offerer} — ${rec.title}${age}\n` +
-        `  ${decision.reason}; it will be taken when this session is free, or ` +
-        `declined after ${formatDuration(cfg.offerTtlSecs)}.\n` +
-        `  /freeq accept ${rec.id.slice(0, 10)} · /freeq decline ${rec.id.slice(0, 10)}`,
-      "info",
-    );
-  }
-
-  /**
-   * Begin work that is now assigned to this session.
-   *
-   * Shared by the directed path (offer → accept), the open path
-   * (post → claim), and a resume after a restart, so all three report
-   * presence identically, arm the same clocks, and enter the model through
-   * the same tier-gated pipeline. There is one way to start work, not three.
-   */
-  function startAssignedWork(
-    ctx: ExtensionContext,
-    cfg: FreeqConfig,
-    rec: HandoffRecord,
-    fromNick: string,
-    resuming = false,
-  ): void {
-    // Tie presence to the task, so the room can see who is on what.
-    rt.workTask = rec.id;
-    rt.beginStep(gistOf(`handoff: ${rec.title}`));
-
-    // On a fresh start, note the brief. On a resume, read back what this
-    // session had done and put it in front of the model - a resumed task that
-    // arrives as a bare title makes the agent start over.
-    const previous = resuming ? resumePreamble(notesFor(ctx.sessionManager.getEntries(), rec.id)) : "";
-    rt.journal(resuming ? "resume" : "start", rec.id, resuming ? "resumed after restart" : `took on: ${rec.title}`);
-
-    // Start the clocks. Nothing tracked the work past this point before, so a
-    // model that wandered off left the task assigned until the server's
-    // expiry sweep noticed, days later.
-    rt.ensureWatchdog(cfg).start({ taskId: rec.id, channel: rec.channel, title: rec.title });
-
-    rt.deliver({
-      kind: "chat",
-      channel: rec.channel,
-      from: fromNick,
-      did: rec.offerer,
-      text:
-        `You have taken on a task handed off over freeq.\n\n` +
-        `Task: ${rec.title}\n` +
-        `Task id: ${rec.id}\n` +
-        (rec.caps ? `Declared capabilities: ${rec.caps}\n` : "") +
-        (rec.note ? `\nBrief:\n${rec.note}\n` : "") +
-        (previous ? `\n${previous}\n` : "") +
-        `\nWork on this in THIS environment. When you are done, report what you ` +
-        `did and mark it complete with the freeq tool (action 'complete', ` +
-        `taskId '${rec.id}'). Do not send secrets or absolute paths back.`,
-      addressed: true,
-      mode: cfg.muted ? "silent" : "addressed",
-      tier: tierFor(cfg, rec.offerer),
-    });
-  }
-
-  /**
-   * Stop work this session was carrying when the task ends underneath it.
-   *
-   * Mirrors `startAssignedWork`: presence is released, and the model is told
-   * through the same tier-gated pipeline that started it. It is deliberately
-   * an instruction rather than a notification — an agent that only sees a UI
-   * notice keeps the task in its head.
-   */
-  function standDown(
-    ctx: ExtensionContext,
-    cfg: FreeqConfig,
-    rec: HandoffRecord,
-    verb: string,
-    fromNick: string,
-  ): void {
-    const held = rt.workTask === rec.id;
-    if (held) {
-      rt.endStep();
-      rt.workTask = undefined;
-      rt.pushStatus("active", undefined, undefined, true);
-    }
-
-    const why = verb === "expire" ? "expired" : "was cancelled by the agent that offered it";
-    const note = rec.log[rec.log.length - 1]?.note;
-
-    // Never accepted: nothing was started, so this is news, not an interrupt.
-    if (!held && rec.assignee !== rt.conn?.did) {
-      rt.notify(`freeq: handoff ${rec.id.slice(0, 10)} ${why} — ${rec.title}`, "info");
-      return;
-    }
-
-    rt.deliver({
-      kind: "chat",
-      channel: rec.channel,
-      from: fromNick,
-      did: rec.offerer,
-      text:
-        `The freeq task you were working on ${why}. It is now '${rec.state}' — a ` +
-        `terminal state, so there is nothing further to do on it and no ` +
-        `completion to report.\n\n` +
-        `Task: ${rec.title}\n` +
-        `Task id: ${rec.id}\n` +
-        (note ? `Reason given: ${note}\n` : "") +
-        `\nStop work on it. Leave whatever you have already changed in place ` +
-        `unless you are asked to revert it, say briefly where you got to, and ` +
-        `do not pick this task up again.`,
-      addressed: true,
-      mode: cfg.muted ? "silent" : "addressed",
-      tier: tierFor(cfg, rec.offerer),
-    });
-  }
 
   // ── the tool ────────────────────────────────────────────────────────────
 
@@ -1527,7 +1014,7 @@ export default function (pi: ExtensionAPI): void {
             refreshUi();
             return text(`Declined ${rec.id.slice(0, 10)} — ${why}`);
           }
-          await acceptOffer(_ctx, rt.config ?? (await rt.ensureConfig()), rec, rec.lastActor ?? "freeq");
+          await rt.acceptOffer(rt.config ?? (await rt.ensureConfig()), rec, rec.lastActor ?? "freeq");
           refreshUi();
           return text(
             `Accepted ${rec.id.slice(0, 10)} — ${rec.title}. The brief is now in your context; ` +
@@ -2135,7 +1622,7 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "resume": {
-          ctx.ui.notify(await resumeAssigned(ctx, cfg, rest[0]), "info");
+          ctx.ui.notify(await rt.resumeAssigned(cfg, rest[0]), "info");
           return;
         }
 
@@ -2219,9 +1706,9 @@ export default function (pi: ExtensionAPI): void {
           // No tier check on either: the owner typed this, and the trust map
           // exists to decide what happens WITHOUT them, not to overrule them.
           if (sub === "accept") {
-            await acceptOffer(ctx, cfg, rec, rec.lastActor ?? "freeq");
+            await rt.acceptOffer(cfg, rec, rec.lastActor ?? "freeq");
           } else {
-            await declineOffer(ctx, rec, rest.slice(1).join(" ") || "declined by the operator");
+            await rt.declineOffer(rec, rest.slice(1).join(" ") || "declined by the operator");
           }
           return;
         }
