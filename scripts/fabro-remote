@@ -27,7 +27,9 @@ if [ "${1:-}" = "--close" ]; then
   exit 0
 fi
 
-# Log in once per tunnel target; the token never touches argv history files.
+# Log in once per tunnel target. The dev token is read over SSH and handed to
+# `fabro auth login` (briefly visible in the local process list, never echoed
+# or written to shell history).
 if ! fabro auth status 2>/dev/null | grep -q "127.0.0.1:${PORT}"; then
   token="$(ssh "$VM_HOST" 'cat ~/.fabro/storage/server.dev-token' 2>/dev/null)"
   fabro auth login --quiet --dev-token "$token" >/dev/null
