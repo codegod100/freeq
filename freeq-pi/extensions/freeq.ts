@@ -2543,7 +2543,7 @@ export default function (pi: ExtensionAPI): void {
   // state: subcommands, then peers or task ids as the subcommand demands.
   const SUBCOMMANDS = [
     "status", "peers", "join", "leave", "mode", "trust", "mute", "unmute", "on", "off",
-    "tasks", "resume", "accept", "decline", "drop", "progress", "login", "authorize",
+    "handoffs", "tasks", "resume", "accept", "decline", "drop", "progress", "login", "authorize",
     "takeover", "verbosity", "provenance", "call", "hangup", "policy", "withheld",
   ];
   const TASK_SUBS = new Set(["accept", "decline", "drop", "progress", "resume"]);
