@@ -142,7 +142,10 @@ export class WithheldBuffer {
  * The line the UI shows when somebody is waiting.
  *
  * Deliberately names the remedy. A notice that reports a problem without the
- * command that fixes it is a notice that gets ignored twice.
+ * command that fixes it is a notice that gets ignored twice. Trust is per
+ * DID, so the remedy for a sender with one is to trust them (which then
+ * offers to deliver what was held); a guest has no DID and cannot be
+ * trusted, so the only remedy is to discard.
  */
 export function withheldSummary(
   senders: ReturnType<WithheldBuffer["senders"]>,
@@ -151,13 +154,26 @@ export function withheldSummary(
   if (!senders.length) return undefined;
   const head = senders[0]!;
   const total = senders.reduce((n, s) => n + s.count, 0);
+  const one = total === 1;
   const who =
     senders.length === 1
       ? `${head.from}`
       : `${head.from} and ${senders.length - 1} other${senders.length === 2 ? "" : "s"}`;
+  const lead = `${total} message${one ? "" : "s"} to you from ${who} ${one ? "was" : "were"} not delivered`;
+
+  // The first held sender who can be trusted at all.
+  const trustable = senders.find((s) => s.did);
+  if (!trustable) {
+    const guests =
+      senders.length === 1
+        ? `${head.from} is a guest, and guests cannot be trusted.`
+        : `The senders are guests, and guests cannot be trusted.`;
+    return `${lead}. ${guests} To discard ${one ? "it" : "them"}: ${names.hint("withheld drop")}`;
+  }
+  const because = senders.length === 1 ? `${head.from} is not trusted` : `the senders are not trusted`;
   return (
-    `${total} message${total === 1 ? "" : "s"} addressed to you from ${who} ` +
-    `were not delivered (sender not trusted). ` +
-    `${names.hint("trust")} ${head.did ?? head.from} message — trusting them offers to deliver what was held`
+    `${lead}, because ${because}. ` +
+    `To trust ${trustable.from}: ${names.hint("trust")} ${trustable.did} message ` +
+    `(it then asks whether to deliver the message${one ? "" : "s"}).`
   );
 }

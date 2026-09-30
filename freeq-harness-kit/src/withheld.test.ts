@@ -70,13 +70,63 @@ describe("withheld buffer", () => {
     expect(withheldSummary([])).toBeUndefined();
   });
 
-  it("points at /freeq trust, the one command that delivers what was held", () => {
+  it("says who is not trusted and how to trust them", () => {
     const b = new WithheldBuffer(() => 1000);
-    b.add(msg());
-    const line = withheldSummary(b.senders())!;
-    expect(line).toContain("/freeq trust did:plc:zap message");
-    expect(line).toContain("offers to deliver");
-    expect(line).not.toContain("withheld deliver");
+    b.add(msg({ from: "alice", did: "did:plc:alice" }));
+    expect(withheldSummary(b.senders())).toBe(
+      "1 message to you from alice was not delivered, because alice is not trusted. " +
+        "To trust alice: /freeq trust did:plc:alice message (it then asks whether to deliver the message).",
+    );
+    b.add(msg({ from: "alice", did: "did:plc:alice", at: 1001 }));
+    expect(withheldSummary(b.senders())).toBe(
+      "2 messages to you from alice were not delivered, because alice is not trusted. " +
+        "To trust alice: /freeq trust did:plc:alice message (it then asks whether to deliver the messages).",
+    );
+  });
+
+  it("tells a guest's messages apart: guests cannot be trusted, only discarded", () => {
+    const b = new WithheldBuffer(() => 1000);
+    b.add(msg({ from: "anon42", did: undefined }));
+    expect(withheldSummary(b.senders())).toBe(
+      "1 message to you from anon42 was not delivered. anon42 is a guest, and guests cannot be trusted. " +
+        "To discard it: /freeq withheld drop",
+    );
+    b.add(msg({ from: "anon42", did: undefined, at: 1001 }));
+    expect(withheldSummary(b.senders())).toBe(
+      "2 messages to you from anon42 were not delivered. anon42 is a guest, and guests cannot be trusted. " +
+        "To discard them: /freeq withheld drop",
+    );
+  });
+
+  it("names the first sender with a DID in the trust hint when a guest is first", () => {
+    const b = new WithheldBuffer(() => 1000);
+    b.add(msg({ from: "alice", did: "did:plc:alice", at: 1000 }));
+    b.add(msg({ from: "anon42", did: undefined, at: 1001 }));
+    expect(withheldSummary(b.senders())).toBe(
+      "2 messages to you from anon42 and 1 other were not delivered, because the senders are not trusted. " +
+        "To trust alice: /freeq trust did:plc:alice message (it then asks whether to deliver the messages).",
+    );
+  });
+
+  it("says guests cannot be trusted when every sender is a guest", () => {
+    const b = new WithheldBuffer(() => 1000);
+    b.add(msg({ from: "anon42", did: undefined, at: 1000 }));
+    b.add(msg({ from: "anon7", did: undefined, at: 1001 }));
+    expect(withheldSummary(b.senders())).toBe(
+      "2 messages to you from anon7 and 1 other were not delivered. The senders are guests, and guests cannot be trusted. " +
+        "To discard them: /freeq withheld drop",
+    );
+  });
+
+  it("uses the harness's command hint", () => {
+    const b = new WithheldBuffer(() => 1000);
+    b.add(msg({ from: "alice", did: "did:plc:alice" }));
+    b.add(msg({ from: "anon42", did: undefined, at: 1001 }));
+    const cc = { name: "cc", hint: (sub: string) => `/freeq:${sub}` };
+    expect(withheldSummary(b.senders(), cc)).toContain("To trust alice: /freeq:trust did:plc:alice message");
+    const g = new WithheldBuffer(() => 1000);
+    g.add(msg({ from: "anon42", did: undefined }));
+    expect(withheldSummary(g.senders(), cc)).toContain("To discard it: /freeq:withheld drop");
   });
 
   it("counts every held message, not just the senders", () => {

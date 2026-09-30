@@ -326,7 +326,7 @@ describe("the freeq tool", () => {
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
         "info: freeq: accepted handoff 01JOFFER00 — fix the parser",
-        "warning: freeq: 1 message addressed to you from peer were not delivered (sender not trusted). /freeq trust did:plc:peer message — trusting them offers to deliver what was held",
+        "warning: freeq: 1 message to you from peer was not delivered, because peer is not trusted. To trust peer: /freeq trust did:plc:peer message (it then asks whether to deliver the message).",
       ]
     `);
     expect(h.delivered.map((d) => ({ opts: d.opts, content: d.msg.content }))).toMatchInlineSnapshot(`[]`);

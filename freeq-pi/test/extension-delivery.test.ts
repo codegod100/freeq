@@ -157,7 +157,7 @@ describe("delivery gate and framing", () => {
     expect(h.delivered).toHaveLength(0);
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
-        "warning: freeq: 1 message addressed to you from eve were not delivered (sender not trusted). /freeq trust did:plc:eve message — trusting them offers to deliver what was held",
+        "warning: freeq: 1 message to you from eve was not delivered, because eve is not trusted. To trust eve: /freeq trust did:plc:eve message (it then asks whether to deliver the message).",
       ]
     `);
     expect(h.entries).toMatchInlineSnapshot(`
@@ -185,7 +185,7 @@ describe("delivery gate and framing", () => {
     expect(h.delivered).toHaveLength(0);
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
-        "warning: freeq: 1 message addressed to you from guest were not delivered (sender not trusted). /freeq trust guest message — trusting them offers to deliver what was held",
+        "warning: freeq: 1 message to you from guest was not delivered. guest is a guest, and guests cannot be trusted. To discard it: /freeq withheld drop",
       ]
     `);
   });
@@ -205,7 +205,7 @@ describe("delivery gate and framing", () => {
     `);
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
-        "warning: freeq: 1 message addressed to you from eve were not delivered (sender not trusted). /freeq trust did:plc:eve message — trusting them offers to deliver what was held",
+        "warning: freeq: 1 message to you from eve was not delivered, because eve is not trusted. To trust eve: /freeq trust did:plc:eve message (it then asks whether to deliver the message).",
       ]
     `);
   });
