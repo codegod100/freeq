@@ -77,6 +77,8 @@ vi.mock("@freeq/bot-kit", async (orig) => ({
     create: async (opts: BotCreateOptions) => {
       const bot = state.bot;
       if (!bot) throw new Error("fake-pi: no fake bot installed");
+      // A reconnect builds a new bot; the fake is reused, so it starts clean.
+      bot.handlers = new Map();
       bot.created.push(opts);
       bot.nickValue = opts.nick;
       bot.createOpts = opts;
@@ -500,15 +502,25 @@ export async function startPi(opts: StartOptions = {}) {
     fetched(): string[] {
       return [...state.fetched];
     },
-    /** Replace the scratch root in text with `<root>`, so paths pin stably. */
+    /**
+     * Replace what differs between runs, so text pins stably: the scratch
+     * root and HOME (`<root>`, `<home>`) and this process's pid (`<pid>`).
+     */
     norm(text: string): string {
-      return text.split(root).join("<root>");
+      return norm(text);
     },
-    /** Notices, with the scratch root replaced. */
+    /** Notices as `level: text`, normalized. */
     noticeTexts(): string[] {
-      return notices.map((n) => `${n.level}: ${n.text.split(root).join("<root>")}`);
+      return notices.map((n) => `${n.level}: ${norm(n.text)}`);
     },
   };
+
+  function norm(text: string): string {
+    return text
+      .split(root).join("<root>")
+      .split(home).join("<home>")
+      .replace(new RegExp(`\\b${process.pid}\\b`, "g"), "<pid>");
+  }
 
   if (opts.start ?? true) await fire("session_start");
   return h;
