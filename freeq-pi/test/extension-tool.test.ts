@@ -209,6 +209,13 @@ describe("the freeq tool", () => {
     expect(h.bot.messages()).toEqual(["pi-chad fyi: rebased", "#work build is green"]);
   });
 
+  it("send: ignores 'channel' and messages the peer named in 'to'", async () => {
+    const h = await startPi({ config: baseConfig() });
+    expect(await h.tool({ action: "send", channel: "#work", message: "hi" })).toMatchInlineSnapshot(`"send requires 'to' and 'message'."`);
+    expect(await h.tool({ action: "send", to: "pi-chad", channel: "#work", message: "hi" })).toMatchInlineSnapshot(`"Sent to pi-chad."`);
+    expect(h.bot.messages()).toEqual(["pi-chad hi"]);
+  });
+
   it("handoff: requires to and title, and a DID for a nick", async () => {
     const h = await startPi({ config: baseConfig() });
     expect(await h.tool({ action: "handoff", to: "pi-chad" })).toMatchInlineSnapshot(`"handoff requires 'to' (peer DID or nick) and 'title'."`);
