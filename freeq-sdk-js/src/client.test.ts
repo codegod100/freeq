@@ -2242,11 +2242,14 @@ describe('inbound: actEvent', () => {
     const { client, ws } = await makeRegistered();
     const seen: ActEventPayload[] = [];
     client.on('actEvent', (e) => seen.push(e));
-    // JOIN replay: the server stamps the original time on the line.
+    // JOIN replay: batched for a client with `batch`, which this one always
+    // is, with the original time on the line.
+    ws.recv(':server BATCH +j chathistory #foo');
     ws.recv(
-      '@time=2026-08-22T10:00:00.000Z;+freeq.at/eventid=01REPLAY;+freeq.at/act=handoff;' +
+      '@batch=j;time=2026-08-22T10:00:00.000Z;+freeq.at/eventid=01REPLAY;+freeq.at/act=handoff;' +
         '+freeq.at/act-verb=offer;+freeq.at/act-title=x;+freeq.at/from=did:plc:eliza :eliza TAGMSG #foo',
     );
+    ws.recv(':server BATCH -j');
     // The same event again, inside the CHATHISTORY batch the joiner asks for.
     ws.recv(':server BATCH +h chathistory #foo');
     ws.recv(
@@ -2254,6 +2257,36 @@ describe('inbound: actEvent', () => {
         '+freeq.at/act-verb=offer;+freeq.at/act-title=x;+freeq.at/from=did:plc:eliza :eliza TAGMSG #foo',
     );
     ws.recv(':server BATCH -h');
+    // The batch close resolves after its deferred checks.
+    for (let i = 0; i < 4; i++) await flushAsync();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].replayed).toBe(true);
+  });
+
+  it('a task event inside a history batch is replayed', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: ActEventPayload[] = [];
+    client.on('actEvent', (e) => seen.push(e));
+    ws.recv(':server BATCH +h chathistory #foo');
+    ws.recv(
+      '@batch=h;time=2026-08-22T10:00:00.000Z;+freeq.at/eventid=01HIST;+freeq.at/act=handoff;' +
+        '+freeq.at/act-verb=offer;+freeq.at/act-title=x;+freeq.at/from=did:plc:eliza :eliza TAGMSG #foo',
+    );
+    ws.recv(':server BATCH -h');
+    // The batch close resolves after its deferred checks.
+    for (let i = 0; i < 4; i++) await flushAsync();
+    expect(seen).toHaveLength(1);
+    expect(seen[0].replayed).toBe(true);
+  });
+
+  it('a task event whose history batch was never opened is replayed', async () => {
+    const { client, ws } = await makeRegistered();
+    const seen: ActEventPayload[] = [];
+    client.on('actEvent', (e) => seen.push(e));
+    ws.recv(
+      '@batch=gone;time=2026-08-22T10:00:00.000Z;+freeq.at/eventid=01LOST;+freeq.at/act=handoff;' +
+        '+freeq.at/act-verb=offer;+freeq.at/act-title=x;+freeq.at/from=did:plc:eliza :eliza TAGMSG #foo',
+    );
     await flushAsync();
     expect(seen).toHaveLength(1);
     expect(seen[0].replayed).toBe(true);
@@ -2338,10 +2371,12 @@ describe('inbound: actEvent', () => {
     expect(seen.map((e) => e.eventId)).toEqual(['01OFFER']);
   });
 
-  it('fires a JOIN-replay event straight away, marked replayed', async () => {
+  it('fires a live event with a time tag straight away, not replayed', async () => {
     const { client, ws } = await makeRegistered();
     const seen: ActEventPayload[] = [];
     client.on('actEvent', (e) => seen.push(e));
+    // server-time puts `time` on every live line; history on JOIN comes
+    // batched to a client with `batch`, which this one always is.
     ws.recv(
       '@time=2026-08-22T10:00:00.000Z;+freeq.at/eventid=01JOINED;+freeq.at/act=handoff;' +
         '+freeq.at/act-verb=offer;+freeq.at/act-title=x;+freeq.at/from=did:plc:eliza :eliza TAGMSG #foo',
@@ -2349,7 +2384,7 @@ describe('inbound: actEvent', () => {
     await flushAsync();
     expect(seen).toHaveLength(1);
     expect(seen[0].eventId).toBe('01JOINED');
-    expect(seen[0].replayed).toBe(true);
+    expect(seen[0].replayed).toBe(false);
   });
 
   it('leaves the companion prose line to fire message', async () => {

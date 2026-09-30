@@ -206,7 +206,9 @@ export class HandoffStore {
    */
   apply(ev: ActEventLike, server?: ServerRuling): ApplyResult {
     if (ev.kind !== HANDOFF_KIND) {
-      return { ok: false, reason: `unsupported kind '${ev.kind}'` };
+      // Other kinds (bounties) are posted in rooms we are in; not ours to
+      // track, and not a fault.
+      return { ok: false, reason: `unsupported kind '${ev.kind}'`, benign: true };
     }
     const actor = ev.did;
     if (!actor) {
@@ -253,10 +255,10 @@ export class HandoffStore {
     }
 
     if (!existing) {
-      // A move for a task we never saw the opener of. Common and benign
-      // during replay; we cannot validate it, so we refuse rather than invent
-      // a task from a transition.
-      return { ok: false, reason: "move for an unknown task", taskId: ev.taskId };
+      // A move for a task we never saw the opener of: one opened before we
+      // joined, live or replayed. Common and benign; we cannot validate it,
+      // so we refuse rather than invent a task from a transition.
+      return { ok: false, reason: "move for an unknown task", taskId: ev.taskId, benign: true };
     }
 
     const task: Task = {

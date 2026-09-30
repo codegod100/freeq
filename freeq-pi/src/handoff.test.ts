@@ -216,9 +216,11 @@ describe("the connected server's rulings", () => {
 });
 
 describe("malformed and hostile input", () => {
-  it("refuses an unknown kind", () => {
+  it("refuses an unknown kind, as routine", () => {
     const r = store.apply(ev({ kind: "bounty" }));
     expect(r.ok).toBe(false);
+    // Every live bounty in a room reaches us; none is a fault to warn about.
+    if (!r.ok) expect(r.benign).toBe(true);
   });
 
   it("refuses a duplicate offer for the same id", () => {
@@ -228,10 +230,12 @@ describe("malformed and hostile input", () => {
     if (!r.ok) expect(r.reason).toMatch(/duplicate/);
   });
 
-  it("refuses a move for a task it has never seen", () => {
+  it("refuses a move for a task it has never seen, as routine", () => {
     const r = move(store, "accept", "01UNKNOWN00000000000000000", BOB);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/unknown task/);
+    // A task opened before we joined is ordinary, live or replayed.
+    if (!r.ok) expect(r.benign).toBe(true);
   });
 
   it("refuses moves on a finished task", () => {
