@@ -312,6 +312,23 @@ describe("AgentRuntime: handoffs", () => {
     expect(delivered[1]!.content).toContain("was cancelled by the agent that offered it");
   });
 
+  it("names the poster in a resumed brief, not the last actor", async () => {
+    tasks = [{ act_id: "01JF", kind: "handoff", stored_state: "assigned", venue: "#work", offerer: "did:plc:boss", assignee: "did:key:zSelf" }];
+    const h = fakeHarness();
+    writeConfig(h.agentDir, { trust: { "did:plc:boss": "handoff" } });
+    writeFileSync(
+      join(h.agentDir, "freeq-handoffs.json"),
+      JSON.stringify([
+        { id: "01JF", kind: "handoff", state: "assigned", offerer: "did:plc:boss", offererNick: "boss", offeree: "did:key:zSelf", assignee: "did:key:zSelf", lastActor: "pi-test1234-proj", title: "t", channel: "#work", fromReplay: false, signed: true, createdAt: 0, updatedAt: 0, log: [] },
+      ]),
+    );
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => new FakeBot() });
+    await rt.start();
+    await tick();
+    expect(h.delivered).toHaveLength(1);
+    expect(h.delivered[0]!.content).toContain("message from boss (did:plc:boss)");
+  });
+
   it("resumes assigned work on connect, with the journal", async () => {
     tasks = [{ act_id: "01JE", kind: "handoff", stored_state: "assigned", venue: "#work", offerer: "did:plc:boss", assignee: "did:key:zSelf" }];
     const h = fakeHarness();

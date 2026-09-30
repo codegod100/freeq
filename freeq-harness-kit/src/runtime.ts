@@ -437,7 +437,7 @@ export class AgentRuntime {
     if (sweep.accept) {
       this.#idleAcceptArmed = false;
       queue.remove(sweep.accept.entry.taskId);
-      await this.acceptOffer(cfg, sweep.accept.record, sweep.accept.record.lastActor ?? "freeq");
+      await this.acceptOffer(cfg, sweep.accept.record);
     }
     await queue.save();
 
@@ -465,7 +465,7 @@ export class AgentRuntime {
   }
 
   /** Accept an offer and start the work. The one place either happens. */
-  async acceptOffer(cfg: FreeqConfig, rec: HandoffRecord, fromNick: string): Promise<void> {
+  async acceptOffer(cfg: FreeqConfig, rec: HandoffRecord): Promise<void> {
     const sent = await this.conn?.sendAct(rec.channel, "accept", rec.id, {});
     if (!sent) {
       // Put it back: an accept we could not send is not an acceptance, and
@@ -477,7 +477,7 @@ export class AgentRuntime {
       return;
     }
     this.notify(`freeq: accepted handoff ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
-    this.#startAssignedWork(cfg, rec, fromNick);
+    this.#startAssignedWork(cfg, rec);
   }
 
   /** Decline an offer, always with a reason — silence teaches an offerer nothing. */
@@ -539,7 +539,7 @@ export class AgentRuntime {
       await conn.sendAct(rec.channel, "progress", rec.id, {
         note: "resumed after the assignee's session restarted",
       });
-      this.#startAssignedWork(cfg, rec, rec.lastActor ?? "freeq", true);
+      this.#startAssignedWork(cfg, rec, true);
     }
     await store.save();
 
@@ -596,7 +596,7 @@ export class AgentRuntime {
     // (An accept we initiated already injected; guard on the verb so we do
     // not do it twice.)
     if (!created && ev.verb === "claim" && rec.assignee === me) {
-      this.#startAssignedWork(cfg, rec, ev.from);
+      this.#startAssignedWork(cfg, rec);
       return;
     }
 
@@ -662,7 +662,7 @@ export class AgentRuntime {
     }
 
     if (decision.action === "accept") {
-      await this.acceptOffer(cfg, rec, ev.from);
+      await this.acceptOffer(cfg, rec);
       return;
     }
 
@@ -692,7 +692,7 @@ export class AgentRuntime {
    * presence identically, arm the same clocks, and enter the model through
    * the same tier-gated pipeline. There is one way to start work, not three.
    */
-  #startAssignedWork(cfg: FreeqConfig, rec: HandoffRecord, fromNick: string, resuming = false): void {
+  #startAssignedWork(cfg: FreeqConfig, rec: HandoffRecord, resuming = false): void {
     // Tie presence to the task, so the room can see who is on what.
     this.workTask = rec.id;
     this.beginStep(gistOf(`handoff: ${rec.title}`));
@@ -711,7 +711,9 @@ export class AgentRuntime {
     this.deliver({
       kind: "chat",
       channel: rec.channel,
-      from: fromNick,
+      // The poster, named as they were when they offered it. `lastActor` is
+      // whoever moved the task last, which after our accept or claim is us.
+      from: rec.offererNick ?? rec.offerer,
       did: rec.offerer,
       text:
         `You have taken on a task handed off over freeq.\n\n` +
@@ -995,7 +997,7 @@ export class AgentRuntime {
           this.stateChanged();
           return text(`Declined ${rec.id.slice(0, 10)} — ${why}`);
         }
-        await this.acceptOffer(this.config ?? (await this.ensureConfig()), rec, rec.lastActor ?? "freeq");
+        await this.acceptOffer(this.config ?? (await this.ensureConfig()), rec);
         this.stateChanged();
         return text(
           `Accepted ${rec.id.slice(0, 10)} — ${rec.title}. The brief is now in your context; ` +
@@ -1617,7 +1619,7 @@ export class AgentRuntime {
         // No tier check on either: the owner typed this, and the trust map
         // exists to decide what happens WITHOUT them, not to overrule them.
         if (sub === "accept") {
-          await this.acceptOffer(cfg, rec, rec.lastActor ?? "freeq");
+          await this.acceptOffer(cfg, rec);
         } else {
           await this.declineOffer(rec, rest.slice(1).join(" ") || "declined by the operator");
         }

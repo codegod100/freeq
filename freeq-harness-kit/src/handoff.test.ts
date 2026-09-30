@@ -1084,3 +1084,34 @@ describe("reading the server's task listing", () => {
     if (!rejected.ok) expect(rejected.reason).toMatch(/503/);
   });
 });
+
+describe("the poster's nick", () => {
+  it("is kept from the offer and not overwritten by later moves", () => {
+    const id = offer(store);
+    expect(store.get(id)!.offererNick).toBe("alice");
+    const r = move(store, "accept", id, BOB);
+    expect(r.ok).toBe(true);
+    expect(store.get(id)!.lastActor).toBe(":zBob");
+    expect(store.get(id)!.offererNick).toBe("alice");
+  });
+
+  it("survives a save and load, and an older file without it loads without it", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "handoff-test-"));
+    const path = join(dir, "h.json");
+    const a = new HandoffStore(path);
+    const id = offer(a);
+    await a.save();
+    const b = new HandoffStore(path);
+    await b.load();
+    expect(b.get(id)!.offererNick).toBe("alice");
+
+    const { writeFile } = await import("node:fs/promises");
+    const raw = JSON.parse(await readFile(path, "utf8")) as Array<Record<string, unknown>>;
+    delete raw[0]!.offererNick;
+    await writeFile(path, JSON.stringify(raw));
+    const c = new HandoffStore(path);
+    await c.load();
+    expect(c.get(id)!.offererNick).toBeUndefined();
+  });
+});
+

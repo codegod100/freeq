@@ -53,6 +53,11 @@ export interface HandoffRecord {
   state: string;
   /** DID of the offerer. */
   offerer: string;
+  /**
+   * The offerer's nick when the offer arrived, for naming them in the brief.
+   * Set once, by the offer; later moves change `lastActor`, not this.
+   */
+  offererNick?: string;
   /** DID of the intended assignee; undefined for an open (claimable) offer. */
   offeree?: string;
   /** DID currently doing the work. */
@@ -236,6 +241,7 @@ export class HandoffStore {
         kind: HANDOFF_KIND,
         state,
         offerer: actor,
+        offererNick: ev.from || undefined,
         offeree: ev.fields["act-to"] || undefined,
         title: ev.fields["act-title"] || "(untitled)",
         ctxHash: ev.fields["act-ctx-h"] || undefined,
@@ -327,6 +333,7 @@ function normalizeRecord(raw: unknown): HandoffRecord | undefined {
     kind: typeof o.kind === "string" ? o.kind : HANDOFF_KIND,
     state: o.state,
     offerer: o.offerer,
+    offererNick: typeof o.offererNick === "string" ? o.offererNick : undefined,
     offeree: typeof o.offeree === "string" ? o.offeree : undefined,
     assignee: typeof o.assignee === "string" ? o.assignee : undefined,
     title: typeof o.title === "string" ? o.title : "(untitled)",
