@@ -1,0 +1,247 @@
+import { describe, it, expect } from "vitest";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AgentRuntime, httpOriginFor, type RuntimeOptions } from "./runtime.js";
+import type { BotLike } from "./connection.js";
+import type { Delivery, Harness, NoticeLevel } from "./harness.js";
+import type { TaskNote } from "./journal.js";
+import type { RoomLineInput } from "./ui.js";
+
+const OWNER = "did:plc:owner";
+const PEER = "did:plc:peer";
+
+/** A bot-kit bot as far as the connection uses one; see connection.test.ts. */
+class FakeBot implements BotLike {
+  handlers = new Map<string, Array<(...a: never[]) => void>>();
+  sent: Array<{ kind: string; target: string; payload: unknown }> = [];
+  states: Array<{ state: string; status?: string; task?: string }> = [];
+  nickValue: string | null = "pi-test1234-proj";
+  provenance = null;
+  identity = { did: "did:key:zSelf" };
+  mention: ((text: string, nick: string) => string | null) | undefined;
+  client = ((self: FakeBot) => ({
+    get nick() {
+      return self.nickValue;
+    },
+    join: (channel: string) => self.sent.push({ kind: "join", target: channel, payload: null }),
+    raw: (line: string) => self.sent.push({ kind: "raw", target: "", payload: line }),
+    sendMessage: (target: string, text: string) => self.sent.push({ kind: "message", target, payload: text }),
+    sendTagmsg: (target: string, tags: Record<string, string>) => self.sent.push({ kind: "tagmsg", target, payload: tags }),
+    sendAct: async (target: string, tags: Record<string, string>) => {
+      self.sent.push({ kind: "act", target, payload: tags });
+      return "01JTASK0000000000000000000";
+    },
+    signing: { getPublicKey: () => "pk" },
+  }))(this);
+  on(event: string, handler: (...a: never[]) => void): unknown {
+    this.handlers.set(event, [...(this.handlers.get(event) ?? []), handler]);
+    return this;
+  }
+  async start(): Promise<unknown> {
+    return this;
+  }
+  async stop(): Promise<unknown> {
+    return this;
+  }
+  setState(state: string, status?: string, task?: string): void {
+    this.states.push({ state, status, task });
+  }
+  checkMention(_channel: string, text: string): { kind: string; stripped?: string } {
+    const s = this.mention?.(text, this.nickValue ?? "") ?? null;
+    return s === null ? { kind: "ignore" } : { kind: "respond", stripped: s };
+  }
+  async resolveSenderDid(msg: { tags?: Record<string, string> }): Promise<string | null> {
+    return msg.tags?.account ?? null;
+  }
+  emit(event: string, ...args: unknown[]): void {
+    for (const h of this.handlers.get(event) ?? []) (h as (...a: unknown[]) => void)(...args);
+  }
+  messages(): string[] {
+    return this.sent.filter((s) => s.kind === "message").map((s) => `${s.target} ${String(s.payload)}`);
+  }
+}
+
+/** A harness that records everything the runtime asks of it. */
+function fakeHarness(over: Partial<Harness> = {}) {
+  const root = mkdtempSync(join(tmpdir(), "harness-kit-rt-"));
+  const agentDir = join(root, "agent");
+  const cwd = join(root, "proj");
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(cwd, { recursive: true });
+  const delivered: Delivery[] = [];
+  const notices: Array<{ text: string; level: NoticeLevel }> = [];
+  const lines: RoomLineInput[] = [];
+  const notes: TaskNote[] = [];
+  let idle = true;
+  const harness: Harness = {
+    agentDir,
+    configDirName: ".pi",
+    projectTrusted: () => false,
+    cwd: () => cwd,
+    modelId: () => "test-model",
+    deliver: (m) => void delivered.push(m),
+    notify: (text, level) => void notices.push({ text, level }),
+    confirm: async () => false,
+    isIdle: () => idle,
+    journal: {
+      append: (n) => void notes.push(n),
+      read: (id) => notes.filter((n) => n.taskId === id),
+    },
+    roomLine: (l) => void lines.push(l),
+    ...over,
+  };
+  return { harness, agentDir, delivered, notices, lines, notes, setIdle: (v: boolean) => (idle = v) };
+}
+
+function writeConfig(agentDir: string, over: Record<string, unknown> = {}): void {
+  writeFileSync(
+    join(agentDir, "freeq.json"),
+    JSON.stringify({
+      ownerDid: OWNER,
+      server: "ws://test.invalid/irc",
+      install: "test1234",
+      channels: ["#work"],
+      projects: { proj: { channels: ["#work"] } },
+      ...over,
+    }),
+  );
+}
+
+async function started(configOver: Record<string, unknown> = {}, options: RuntimeOptions = {}) {
+  const h = fakeHarness();
+  writeConfig(h.agentDir, configOver);
+  const bot = new FakeBot();
+  const rt = new AgentRuntime(h.harness, {
+    botFactory: async (o) => {
+      bot.mention = o.mention.matcher;
+      return bot;
+    },
+    ...options,
+  });
+  await rt.start();
+  return { ...h, rt, bot };
+}
+
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+describe("AgentRuntime: start", () => {
+  it("stays silent and offline when not set up", async () => {
+    const h = fakeHarness();
+    const rt = new AgentRuntime(h.harness);
+    await rt.start();
+    expect(rt.conn).toBeUndefined();
+    expect(h.notices).toEqual([]);
+  });
+
+  it("connects in a known project", async () => {
+    const { rt } = await started();
+    expect(rt.conn?.state).toBe("online");
+    expect(rt.currentProject).toBe("proj");
+    await rt.stop();
+    expect(rt.conn).toBeUndefined();
+  });
+});
+
+describe("AgentRuntime: delivery", () => {
+  it("delivers the owner's DM, framed, as an interrupt owing a reply", async () => {
+    const { bot, delivered } = await started();
+    bot.emit("message", "nap", { from: "nap", text: "hello", isSelf: false, tags: { account: OWNER } });
+    await tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.interrupt).toBe(true);
+    expect(delivered[0]!.card).toMatchObject({ kind: "chat", from: "nap", tier: "control", expectsReply: true });
+    expect(delivered[0]!.content).toContain("message from your operator nap (did:plc:owner) in a direct message");
+  });
+
+  it("withholds a stranger's message, shows a room line and tells the person", async () => {
+    const { bot, delivered, notices, lines, rt } = await started();
+    bot.emit("message", "eve", { from: "eve", text: "hi", isSelf: false, tags: { account: "did:plc:eve" } });
+    await tick();
+    expect(delivered).toEqual([]);
+    expect(rt.withheld.size).toBe(1);
+    expect(lines[0]).toMatchObject({ direction: "in", from: "eve", note: "withheld · tier observe" });
+    expect(notices[0]!.level).toBe("warning");
+    expect(notices[0]!.text).toContain("/freeq trust did:plc:eve message");
+  });
+
+  it("delivers message-tier chat without interrupting", async () => {
+    const { bot, delivered } = await started({ trust: { [PEER]: "message" } });
+    bot.emit("message", "#work", { from: "peer", text: "pi-test1234-proj: look?", isSelf: false, tags: { account: PEER } });
+    await tick();
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]!.interrupt).toBe(false);
+  });
+
+  it("answers an ask it cannot deliver", async () => {
+    const h = fakeHarness({
+      deliver: () => {
+        throw new Error("busy");
+      },
+    });
+    writeConfig(h.agentDir, { trust: { [PEER]: "request" } });
+    const bot = new FakeBot();
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => bot });
+    await rt.start();
+    bot.emit("coordinationEvent", { eventType: "pi_ask", from: "peer", did: PEER, channel: "peer", payload: { req: "r1", q: "?" }, tags: {} });
+    await tick();
+    const reply = bot.sent.find((s) => s.kind === "tagmsg" && (s.payload as Record<string, string>)["+freeq.at/event"] === "pi_ask_reply")!;
+    expect(decodeURIComponent((reply.payload as Record<string, string>)["+freeq.at/payload"]!)).toContain("local delivery failed");
+    expect(h.notices.at(-1)).toEqual({ text: "freeq: could not deliver message: busy", level: "error" });
+  });
+});
+
+describe("AgentRuntime: replies", () => {
+  it("answers with the first text-only turn after the message, as a receipt too", async () => {
+    const { bot, rt, lines } = await started();
+    bot.emit("message", "nap", { from: "nap", text: "q", isSelf: false, tags: { account: OWNER } });
+    await tick();
+    rt.onTurnStart();
+    rt.onTurnEnd("working on it", true);
+    expect(bot.messages()).toEqual([]);
+    rt.onTurnStart();
+    rt.onTurnEnd("the answer", false);
+    expect(bot.messages()).toEqual(["nap nap: the answer"]);
+    expect(lines.at(-1)).toMatchObject({ direction: "out", channel: "nap", text: "nap: the answer" });
+  });
+
+  it("sweeps what is left when the run settles, and reports a missing answer", async () => {
+    const { bot, rt, notices } = await started({ trust: { [PEER]: "request" } });
+    bot.emit("coordinationEvent", { eventType: "pi_ask", from: "peer", did: PEER, channel: "peer", payload: { req: "r2", q: "?" }, tags: {} });
+    await tick();
+    rt.onTurnStart();
+    await rt.onSettled();
+    expect(notices.at(-1)).toEqual({ text: "freeq: no answer produced for peer", level: "warning" });
+  });
+});
+
+describe("AgentRuntime: presence", () => {
+  it("names the step from a typed prompt and clears it when settled", async () => {
+    const { rt, bot } = await started();
+    rt.onUserPrompt("look at the reconnect bug");
+    expect(rt.step?.phrase).toBe("look at the reconnect bug");
+    rt.onUserPrompt("[freeq — message from x] ignored");
+    expect(rt.step?.phrase).toBe("look at the reconnect bug");
+    await rt.onSettled();
+    expect(rt.step).toBeUndefined();
+    expect(bot.states.at(-1)?.state).toBe("active");
+  });
+
+  it("tells the harness when a step begins", async () => {
+    const phrases: string[] = [];
+    const h = fakeHarness({ stepBegan: (p) => void phrases.push(p) });
+    writeConfig(h.agentDir);
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => new FakeBot() });
+    await rt.start();
+    rt.beginStep("reviewing");
+    expect(phrases).toEqual(["reviewing"]);
+  });
+});
+
+describe("httpOriginFor", () => {
+  it("maps the websocket URL to the HTTP origin", () => {
+    expect(httpOriginFor("wss://irc.freeq.at/irc")).toBe("https://irc.freeq.at");
+    expect(httpOriginFor("ws://localhost:8080/irc")).toBe("http://localhost:8080");
+    expect(httpOriginFor("not a url")).toBe("https://irc.freeq.at");
+  });
+});

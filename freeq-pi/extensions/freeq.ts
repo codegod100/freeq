@@ -1,11 +1,17 @@
 /**
  * @freeq/pi — multiplayer pi over freeq.
  *
- * Hard rules enforced here (build spec §4):
+ * This file is the pi adapter: it maps pi's extension API onto the freeq
+ * runtime in @freeq/harness-kit (`AgentRuntime`), and draws freeq in pi's
+ * TUI (the inbound card, room lines, footer, title, offer card, mark, peers
+ * widget and autocomplete).
+ *
+ * Hard rules enforced here and in the runtime (build spec §4):
  *   - zero pi core changes; documented extension surfaces only
  *   - remote input never invokes local tools directly: it becomes a framed,
  *     tier-gated user message, and the local agent decides what to do
- *   - content reaches the model in exactly ONE place (`deliver`), gated by
+ *   - content reaches the model in exactly ONE place (the runtime's
+ *     `deliver`, which calls `harness.deliver` below), gated by
  *     `decideInbound` — no other code path may inject remote input
  *   - no filesystem paths in advertised presence
  *   - connection failure degrades to offline, never breaks the session
@@ -18,7 +24,6 @@ import { Type } from "typebox";
 import { Container, Text } from "@earendil-works/pi-tui";
 
 import {
-  loadConfig,
   saveConfig,
   channelsForProject,
   withProjectChannels,
@@ -31,23 +36,17 @@ import {
   type Mode,
   type Tier,
 } from "@freeq/harness-kit/config";
-import { deriveInstallSlug, defaultNick, isDid,
-  resolveBotName,
-} from "@freeq/harness-kit/identity";
+import { deriveInstallSlug, defaultNick, isDid } from "@freeq/harness-kit/identity";
 import {
   agentInstructions,
   authorizeInstructions,
-  creatorKeyPath,
   interpretProvenanceNotice,
   waitForProvenance,
 } from "@freeq/harness-kit/owner-key";
 import { McpStdioClient } from "../src/mcp-stdio.js";
 import { addressedUtterances, parseListenResult, toBridgeCall, type AvParams } from "../src/av.js";
-import { parseVerbositySteer } from "@freeq/harness-kit/steer";
-import { scrubSeverity } from "@freeq/harness-kit/scrub";
-import { nextUpdate, type ProgressState } from "@freeq/harness-kit/progress";
 import { setLogger } from "@freeq/sdk";
-import { gistOf, renderStatus, toolDetail } from "@freeq/harness-kit/status";
+import { gistOf } from "@freeq/harness-kit/status";
 import {
   footerLine,
   inboundCardParts,
@@ -57,52 +56,17 @@ import {
   type RoomLineInput,
 } from "@freeq/harness-kit/ui";
 import { markForTerminal, supportsTruecolor, WORDMARK } from "../src/logo.js";
-import { WithheldBuffer, senderKey, withheldSummary } from "@freeq/harness-kit/withheld";
 import { peerColor } from "@freeq/harness-kit/ui";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import {
-  JOURNAL_ENTRY,
-  notesFor,
-  resumePreamble,
-  summarizeTurn,
-  type TaskNote,
-} from "@freeq/harness-kit/journal";
+import { JOURNAL_ENTRY, notesFor, resumePreamble } from "@freeq/harness-kit/journal";
 import { homedir } from "node:os";
 import { join as joinPath } from "node:path";
-import { access as fsAccess } from "node:fs/promises";
-
-/** Root of freeq state on this machine — bot-kit's `~/.freeq`. */
-const FREEQ_ROOT = joinPath(homedir(), ".freeq");
-/** Where bot-kit keeps per-identity state; one directory per minted identity. */
-const BOTS_ROOT = joinPath(FREEQ_ROOT, "bots");
-
-/**
- * The owner's creator key, if an older `/freeq authorize` made one. When
- * present, bot-kit signs the installation's delegation certificate with it
- * and the server can verify that signature against a key the owner
- * registered. Absent, the cert ships unsigned and the server proves it from
- * the owner's agent record naming this installation (Settings → Agents in
- * the web app, or `freeq-bot-id register`).
- */
-async function existingCreatorKey(cfg: { ownerDid?: string }): Promise<string | undefined> {
-  if (!cfg.ownerDid) return undefined;
-  const path = creatorKeyPath(FREEQ_ROOT, cfg.ownerDid);
-  try {
-    await fsAccess(path);
-    return path;
-  } catch {
-    return undefined;
-  }
-}
 import { collectSessionMeta, describeMeta } from "@freeq/harness-kit/presence";
-import { FreeqConnection, type InboundAsk } from "@freeq/harness-kit/connection";
+import { FreeqConnection } from "@freeq/harness-kit/connection";
 import { ConnectionLock } from "@freeq/harness-kit/lock";
 import { isTerminal } from "@freeq/bot-kit";
 import {
-  HandoffStore,
-  OfferQueue,
-  WorkWatchdog,
   hashBrief,
   describeHandoff,
   isTerminalRecord,
@@ -118,48 +82,179 @@ import {
   HANDOFF_KIND,
   type HandoffRecord,
 } from "@freeq/harness-kit/handoff";
+import { fetchServerDid, serverKeyFetcher, verifyActEvent } from "@freeq/harness-kit/verify";
 import {
-  fetchServerDid,
-  serverKeyFetcher,
-  verifyActEvent,
-  type KeyFetcher,
-} from "@freeq/harness-kit/verify";
-import {
-  TurnRecorder,
   buildProvenance,
   formatDecision,
-  PROVENANCE_EVENT,
   DECISION_EVENT,
   PROVENANCE_TIERS,
   type ProvenanceTier,
 } from "@freeq/harness-kit/provenance";
 import {
-  decideInbound,
-  frameInbound,
-  reachesModel,
-  type InboundEvent,
-} from "@freeq/harness-kit/inbound";
+  AgentRuntime,
+  FREEQ_ROOT,
+  httpOriginFor,
+} from "@freeq/harness-kit/runtime";
+import type { Harness } from "@freeq/harness-kit/harness";
 
 export default function (pi: ExtensionAPI): void {
-  let config: FreeqConfig | undefined;
-  let sources: string[] = [];
-  let conn: FreeqConnection | undefined;
-  let agentDir = getAgentDir();
   /**
-   * Only one pi session per installation talks to freeq. Identity is
-   * per-installation, so without this every window connects as the same DID
-   * and nick: presence becomes last-writer-wins and a single mention gets
-   * answered by every window at once.
+   * The context of the pi event being handled. The harness reads the
+   * session's cwd, model, idleness and UI from it; every handler below
+   * records its own before calling into the runtime.
    */
-  let lock: ConnectionLock | undefined;
-  let passive = false;
-  /** Keeps the lock file alive if something deletes it under us. */
-  let lockTimer: NodeJS.Timeout | undefined;
+  let lastCtx: ExtensionContext | undefined;
+  const track = (ctx: ExtensionContext | undefined): void => {
+    if (ctx) lastCtx = ctx;
+  };
 
-  /**
-   * Things this session owes a reply to, in arrival order: peer asks, and
-   * channel messages that addressed us (Demo 2 — humans in the room).
-   */
+  /** pi as a freeq harness. */
+  const harness: Harness = {
+    get agentDir() {
+      return getAgentDir();
+    },
+    configDirName: CONFIG_DIR_NAME,
+    projectTrusted: () => lastCtx?.isProjectTrusted() ?? false,
+    cwd: () => lastCtx?.cwd ?? process.cwd(),
+    modelId: () => lastCtx?.model?.id,
+    deliver: (msg) => {
+      // A custom message, not sendUserMessage: the model receives the framed
+      // content, but the transcript renders it as a coloured freeq card
+      // (renderer below) instead of pretending the operator typed it.
+      //
+      // deliverAs is REQUIRED while streaming; omitting it throws. When idle,
+      // pi sends immediately and triggers a turn. `followUp` waits for the
+      // agent to have NO more tool calls - i.e. until the whole task is done,
+      // every build and test run included. Someone talking to a working agent
+      // got silence for ten minutes and then four answers at once. `steer`
+      // delivers after the current tool call, before the next model call: the
+      // agent finishes what it is doing, reads the message, and can answer
+      // before continuing. The runtime asks for it (`interrupt`) only for
+      // addressed input from `request` tier and up.
+      pi.sendMessage(
+        {
+          customType: "freeq-inbound",
+          content: msg.content,
+          display: true,
+          details: msg.card satisfies FreeqInboundDetails,
+        },
+        { deliverAs: msg.interrupt ? "steer" : "followUp", triggerTurn: true },
+      );
+    },
+    notify: (text, level) => lastCtx?.ui.notify(text, level),
+    confirm: async (title, body) => (lastCtx ? lastCtx.ui.confirm(title, body) : false),
+    isIdle: () => lastCtx?.isIdle() ?? false,
+    journal: {
+      // `appendEntry` persists in the pi session log without entering model
+      // context, so the journal costs nothing until the task is resumed.
+      append: (note) => pi.appendEntry(JOURNAL_ENTRY, note),
+      read: (taskId) => notesFor(lastCtx?.sessionManager.getEntries() ?? [], taskId),
+    },
+    roomLine: (input) => {
+      if (input.direction === "out") receipt(input);
+      else surface(input);
+    },
+    stateChanged: () => refreshUi(),
+    connected: () => {
+      if (!lastCtx) return;
+      refreshUi(lastCtx);
+      showMarkOnce(lastCtx);
+    },
+    stepBegan: (phrase) => {
+      // In a call, the tile is the room's window into this agent: the phrase
+      // belongs there too, not only in presence strings.
+      if (av && avChannel) {
+        try {
+          const call = toBridgeCall(
+            { action: "show", title: "⚙ working", bullets: [phrase] },
+            (t) => rt.conn?.scrubForWire(t, avChannel!) ?? t,
+          );
+          void av.call(call.tool, call.args, 15_000).catch(() => {});
+        } catch {
+          /* the tile is decoration; never let it break a turn */
+        }
+      }
+    },
+  };
+
+  // ── resilience ──────────────────────────────────────────────────────────
+  //
+  // The handoff driving below still lives here; the runtime reaches it
+  // through these hooks.
+  const rt: AgentRuntime = new AgentRuntime(harness, { hooks: {
+    onActEvent: (ev) => {
+      const ctx = lastCtx!;
+      const cfg = rt.config!;
+      void (async () => {
+        const store = await rt.ensureHandoffs();
+
+        // Check the signature BEFORE applying. Three-way outcome per the
+        // RFC: a forgery is rejected, but an unreachable key store is an
+        // outage — deferring beats destroying someone's completed work.
+        rt.keyFetcher ??= serverKeyFetcher(httpOriginFor(cfg.server));
+        const verdict = await verifyActEvent(
+          {
+            channel: ev.channel,
+            did: ev.did,
+            eventId: ev.eventId,
+            tags: ev.tags,
+            sigTag: ev.sigTag,
+          },
+          { fetchKey: rt.keyFetcher, selfDid: rt.conn?.did ?? "" },
+        );
+
+        if (verdict.outcome === "invalid") {
+          // Do not apply, and say so loudly: this is tampering or forgery,
+          // not a transient problem.
+          rt.notify(
+            `freeq: REJECTED a task event from ${ev.from} — bad signature ` +
+              `(${verdict.reason}). Task ${ev.taskId.slice(0, 10)} was NOT updated.`,
+            "error",
+          );
+          return;
+        }
+
+        rt.serverDid ??= await fetchServerDid(httpOriginFor(cfg.server));
+        const result = store.apply(ev, {
+          serverDid: rt.serverDid,
+          signatureValid: verdict.outcome === "valid",
+        });
+        if (!result.ok) {
+          // Illegal or unattributable moves are logged, never applied.
+          // Server receipts, duplicate echoes, and replayed moves for tasks
+          // we never saw are all routine — say nothing about those.
+          if (!result.benign && !ev.replayed) {
+            rt.notify(`freeq: rejected ${ev.verb} — ${result.reason}`, "warning");
+          }
+          return;
+        }
+        noteVerification(
+          result.record,
+          verdict.outcome === "valid" ? "valid" : "unverifiable",
+        );
+        await store.save();
+        if (verdict.outcome === "unverifiable" && !ev.replayed) {
+          rt.notify(
+            `freeq: could not verify the signature on ${ev.verb} for ` +
+              `${ev.taskId.slice(0, 10)} (${verdict.reason}) — applied, but unproven.`,
+            "warning",
+          );
+        }
+        await onHandoffEvent(ctx, cfg, ev, result.record, result.created);
+      })();
+    },
+    onOnline: () => {
+      const ctx = lastCtx!;
+      const cfg = rt.config!;
+      void (async () => {
+        const message = await resumeAssigned(ctx, cfg);
+        if (message !== "freeq: nothing to resume") rt.notify(message, "info");
+      })();
+    },
+    afterConnect: (cfg) => startMaintenance(lastCtx!, cfg),
+    beforeStop: () => stopMaintenance(),
+  } });
+
   // ── inline rendering ──────────────────────────────────────────────────
   //
   // freeq traffic is first-class transcript content, not toasts: a message
@@ -248,35 +343,15 @@ export default function (pi: ExtensionAPI): void {
     return new Text(line, 1, 0);
   });
 
+
   /** Show something we posted to freeq in the transcript, as a receipt. */
-  function receipt(channel: string, text: string): void {
+  function receipt(input: RoomLineInput): void {
     try {
-      pi.appendEntry("freeq-room", {
-        type: "line",
-        direction: "out",
-        channel,
-        from: conn?.nick ?? "me",
-        text,
-      } satisfies FreeqRoomData);
+      pi.appendEntry("freeq-room", { type: "line", ...input } satisfies FreeqRoomData);
     } catch {
       /* best-effort */
     }
   }
-
-  /**
-   * `seq` is the turn counter when the message arrived. A reply is only
-   * flushed by a turn that STARTED after that — the text of a turn already in
-   * flight was written before the model saw the message, and is not its
-   * answer.
-   */
-  type PendingReply =
-    | { kind: "ask"; ask: InboundAsk; seq: number }
-    | { kind: "channel"; channel: string; from: string; seq: number };
-  const pendingReplies: PendingReply[] = [];
-  /** Monotonic across runs; incremented at every turn_start. */
-  let turnSeq = 0;
-  /** Text of the most recent assistant turn, used to form replies. */
-  let lastAssistantText = "";
 
   /**
    * OBSERVE-tier traffic is surfaced, not injected — and now it is surfaced
@@ -324,124 +399,6 @@ export default function (pi: ExtensionAPI): void {
     burstTimer.unref?.();
   }
 
-  /** Channel replies are chat, not essays. */
-
-  // ── live work status ────────────────────────────────────────────────────
-  //
-  // A watching human should be able to tell, from a freeq client, whether
-  // this agent is idle, thinking, or grinding on a specific task. Without
-  // this the member list says "available" while the console is clearly busy.
-
-  /**
-   * What we're doing, for presence: a human phrase, the current tool, and
-   * elapsed time — what a watcher needs to tell "thinking" from "stuck".
-   * Set by beginStep (typed prompts, freeq triggers, handoffs, the model's
-   * own `status` action), cleared at agent_settled.
-   */
-  let step: { phrase: string; since: number; tool?: string } | undefined;
-  /** Keeps the elapsed part of the label honest during long, quiet steps. */
-  let stepTimer: NodeJS.Timeout | undefined;
-  /** Task id we're working, if this turn came from a handoff. */
-  let workTask: string | undefined;
-  /**
-   * The channel that asked for what we are doing now, if a room asked at all.
-   *
-   * A turn started by someone typing in the terminal has no such channel and
-   * must stay silent: nobody in a room asked, so nobody in a room is owed a
-   * progress report.
-   */
-  let askingChannel: string | undefined;
-  /** Timer and memory for the live progress line. See freeq-harness-kit/src/progress.ts. */
-  let updateTimer: NodeJS.Timeout | undefined;
-  let updateState: ProgressState = {};
-
-  /**
-   * Post a progress line into the room that asked, if there is one and if
-   * there is anything new to say. Silence is the default; `nextUpdate` owns
-   * the rules.
-   */
-  function tickUpdate(cfg: FreeqConfig): void {
-    if (!askingChannel || !conn || conn.state !== "online") return;
-    if (cfg.muted || !cfg.enabled) return;
-    const intervalMs = (cfg.updateIntervalSecs ?? 0) * 1000;
-    if (intervalMs <= 0) return;
-    const out = nextUpdate(updateState, step, Date.now(), { intervalMs });
-    if (!out) return;
-    updateState = out.state;
-    try {
-      conn.send(askingChannel, out.text);
-    } catch {
-      /* a progress line is a courtesy; never let it disturb the turn */
-    }
-  }
-
-  function startUpdates(cfg: FreeqConfig, channel: string): void {
-    askingChannel = channel;
-    updateState = {};
-    const intervalMs = (cfg.updateIntervalSecs ?? 0) * 1000;
-    if (updateTimer || intervalMs <= 0) return;
-    updateTimer = setInterval(() => tickUpdate(cfg), intervalMs);
-    updateTimer.unref?.();
-  }
-
-  function stopUpdates(): void {
-    askingChannel = undefined;
-    updateState = {};
-    if (!updateTimer) return;
-    clearInterval(updateTimer);
-    updateTimer = undefined;
-  }
-  /** Coalesce rapid tool-call updates — presence is not a debug log. */
-  let lastStatusPush = 0;
-
-  /** The label a watcher sees right now, or undefined when idle. */
-  function currentLabel(): string | undefined {
-    return step ? renderStatus(step, Date.now()) : undefined;
-  }
-
-  /**
-   * Begin a named step. The phrase is the watcher-facing truth of the
-   * moment, so it is force-pushed immediately (bypassing the coalescing
-   * throttle) and then kept fresh on a slow timer for the elapsed counter.
-   */
-  function beginStep(phrase: string): void {
-    // The phrase is advertised to the whole room in presence: run it
-    // through the same scrubber that keeps paths and secrets out of chat.
-    const clean = conn ? conn.scrubForWire(phrase, "presence") : phrase;
-    step = { phrase: clean, since: Date.now() };
-    pushStatus("executing", currentLabel(), workTask, true);
-    if (!stepTimer) {
-      stepTimer = setInterval(() => {
-        if (step) pushStatus("executing", currentLabel(), workTask);
-      }, 45_000);
-      stepTimer.unref?.();
-    }
-    // In a call, the tile is the room's window into this agent: the phrase
-    // belongs there too, not only in presence strings.
-    if (av && avChannel) {
-      try {
-        const call = toBridgeCall(
-          { action: "show", title: "⚙ working", bullets: [phrase] },
-          (t) => conn?.scrubForWire(t, avChannel!) ?? t,
-        );
-        void av.call(call.tool, call.args, 15_000).catch(() => {});
-      } catch {
-        /* the tile is decoration; never let it break a turn */
-      }
-    }
-  }
-
-  function endStep(): void {
-    step = undefined;
-    if (stepTimer) {
-      clearInterval(stepTimer);
-      stepTimer = undefined;
-    }
-  }
-
-  /** Accumulates this turn's consequences for the provenance log. */
-  const turn = new TurnRecorder();
-
   /**
    * Paint everything persistent from current state: footer status, terminal
    * title, and the offer card above the editor. Called from every event that
@@ -465,10 +422,10 @@ export default function (pi: ExtensionAPI): void {
     markShown = true;
     const lines = supportsTruecolor() ? markForTerminal() : [];
     if (lines.length === 0) {
-      ctx.ui.notify(`${WORDMARK} · connected as ${conn?.nick ?? "?"}`, "info");
+      ctx.ui.notify(`${WORDMARK} · connected as ${rt.conn?.nick ?? "?"}`, "info");
       return;
     }
-    const caption = `  ${conn?.nick ?? "?"} · ${config?.channels.join(" ") ?? ""}`;
+    const caption = `  ${rt.conn?.nick ?? "?"} · ${rt.config?.channels.join(" ") ?? ""}`;
     // A component factory, not a string[]: pi truncates an array widget at
     // MAX_WIDGET_LINES (10) and says so, which is how the mark first shipped
     // with its ears cut off. The factory path has no such cap.
@@ -496,91 +453,56 @@ export default function (pi: ExtensionAPI): void {
     ctx.ui.setWidget("freeq-peers", undefined);
   }
   pi.on("turn_start", async (_e, ctx) => {
-    turnSeq++;
+    track(ctx);
     clearMark(ctx);
     clearPeers(ctx);
-    // Presence liveness: tool calls already push state, but a long thinking
-    // stretch makes none. A turn boundary is the other heartbeat — throttled
-    // inside pushStatus, so this costs at most one presence line per 2.5s.
-    pushStatus("executing", currentLabel() ?? "working", workTask);
+    rt.onTurnStart();
   });
 
-  // Messages addressed to us that the tier gate refused. Held so the agent
-  // can say who is waiting instead of being indistinguishable from ignoring
-  // them. See freeq-harness-kit/src/withheld.ts for why this exists.
-  const withheld = new WithheldBuffer();
-  let currentProject: string | undefined;
-  /**
-   * True when we deliberately did not connect because this project has no
-   * freeq identity yet. Cleared by the first thing that needs the wire.
-   */
-  let dormant = false;
-
-  /**
-   * Has this installation used freeq in this project before?
-   *
-   * Three signals, any of which means yes: the project has its own channel
-   * list, a bot-kit state directory already exists for it (so a keypair was
-   * minted at some point), or the user gave a global channel list and this is
-   * a git repository rather than a scratch directory.
-   */
-  async function projectIsKnown(ctx: ExtensionContext, cfg: FreeqConfig): Promise<boolean> {
-    const meta = await collectSessionMeta({ cwd: ctx.cwd, model: ctx.model?.id });
-    currentProject = meta.project;
-    if (meta.project && cfg.projects?.[meta.project]) return true;
-    const slug = cfg.install ?? deriveInstallSlug();
-    const name = resolveBotName(slug, meta.project, (n: string) => existsSync(joinPath(BOTS_ROOT, n)));
-    if (existsSync(joinPath(BOTS_ROOT, name))) return true;
-    // A git checkout is a project someone means to keep; a bare directory is
-    // usually a place to try something.
-    // A git checkout is somewhere someone means to keep working; a bare
-    // directory is usually somewhere they are trying something out.
-    return !!meta.repo || !!meta.branch;
-  }
   let uiCtx: ExtensionContext | undefined;
   function refreshUi(ctx?: ExtensionContext): void {
     const c = ctx ?? uiCtx;
     if (!c?.hasUI) return;
     uiCtx = c;
-    const online = conn?.state === "online";
-    const waiting = offers?.all() ?? [];
-    const store = handoffs;
+    const online = rt.conn?.state === "online";
+    const waiting = rt.offers?.all() ?? [];
+    const store = rt.handoffs;
 
     c.ui.setStatus(
       "freeq",
       footerLine({
         online,
-        passive,
-        nick: conn?.nick,
+        passive: rt.passive,
+        nick: rt.conn?.nick,
         // Confirmed joins, not configured ones: the footer's job is to say
         // where we ARE. A refused channel shows as a shortfall, not a count.
-        channels: conn?.joinedChannels().length ?? 0,
-        channelsRefused: conn?.refusedChannels().length ?? 0,
-        withheld: withheld.size,
-        dormant,
-        peers: conn?.peers().length ?? 0,
+        channels: rt.conn?.joinedChannels().length ?? 0,
+        channelsRefused: rt.conn?.refusedChannels().length ?? 0,
+        withheld: rt.withheld.size,
+        dormant: rt.dormant,
+        peers: rt.conn?.peers().length ?? 0,
         offersWaiting: waiting.length,
-        working: currentLabel(),
+        working: rt.currentLabel(),
         inCall: avChannel,
       }),
     );
 
     // Title: which agent this window is, so a row of terminals reads.
-    if (online && conn?.nick) c.ui.setTitle(`pi · ${conn.nick}`);
+    if (online && rt.conn?.nick) c.ui.setTitle(`pi · ${rt.conn.nick}`);
 
     // Offer card: the oldest waiting offer, until acted on. Rendered as a
     // component factory rather than a string[] so it picks up theme colours
     // — a plain monochrome box read as scaffolding, not as a thing to act on.
     const first = waiting[0];
     const rec = first && store ? store.get(first.taskId) : undefined;
-    if (rec && config) {
+    if (rec && rt.config) {
       const width = Math.min(100, Math.max(56, (process.stdout.columns ?? 80) - 4));
       const cardLines = offerCardLines(
         {
           taskId: rec.id,
           title: rec.title,
           from: rec.lastActor ?? rec.offerer.slice(0, 16),
-          tier: tierFor(config, rec.offerer),
+          tier: tierFor(rt.config, rec.offerer),
           queuedAt: first.queuedAt,
           deadline: rec.deadline,
           brief: rec.note,
@@ -610,35 +532,6 @@ export default function (pi: ExtensionAPI): void {
     }
   }
 
-  function pushStatus(state: string, label?: string, task?: string, force = false): void {
-    if (!conn || conn.state !== "online") return;
-    const now = Date.now();
-    if (!force && now - lastStatusPush < 2500) return;
-    lastStatusPush = now;
-    refreshUi();
-    // The label is derived from prompts and message text, so it goes through
-    // the same secret redaction as everything else on the wire.
-    conn.setWorkState(state, label ? conn.scrubForWire(label, "presence") : label, task);
-  }
-
-  /** Durable view of handoffs. Loaded once per session. */
-  let handoffs: HandoffStore | undefined;
-  /** Resolves the exact key a signature names, from the server's key store. */
-  let keyFetcher: KeyFetcher | undefined;
-  /** The connected server's own DID, read once; a move only the server may
-   *  make counts only under this name. */
-  let serverDid: string | undefined;
-  /** Briefs we authored, kept locally so we can show what we sent. */
-  const localBriefs = new Map<string, string>();
-
-  async function ensureHandoffs(): Promise<HandoffStore> {
-    if (handoffs) return handoffs;
-    const store = new HandoffStore(HandoffStore.pathFor(agentDir));
-    await store.load();
-    handoffs = store;
-    return store;
-  }
-
   // ── resilience ──────────────────────────────────────────────────────────
   //
   // Three things a distracted agent used to get wrong: it missed an offer and
@@ -646,10 +539,6 @@ export default function (pi: ExtensionAPI): void {
   // no idea what it had been doing. See freeq-harness-kit/src/handoff.ts for the mechanisms;
   // this is where they are driven.
 
-  /** Offers waiting for this session to be free. Survives a restart. */
-  let offers: OfferQueue | undefined;
-  /** Clocks on work we accepted. */
-  let watchdog: WorkWatchdog | undefined;
   /**
    * One interval drives both. Two would have to be torn down in the same two
    * places anyway, and a single cancel is one thing to get right rather than
@@ -662,24 +551,6 @@ export default function (pi: ExtensionAPI): void {
    * session that is still settling cannot be handed two tasks in ten seconds.
    */
   let idleAcceptArmed = true;
-  /** Tasks this session has already re-entered — resume must be idempotent. */
-  const resumed = new Set<string>();
-
-  async function ensureOffers(): Promise<OfferQueue> {
-    if (offers) return offers;
-    const q = new OfferQueue(OfferQueue.pathFor(agentDir));
-    await q.load();
-    offers = q;
-    return q;
-  }
-
-  function ensureWatchdog(cfg: FreeqConfig): WorkWatchdog {
-    watchdog ??= new WorkWatchdog({
-      progressIntervalSecs: cfg.progressIntervalSecs,
-      stallSecs: cfg.stallSecs,
-    });
-    return watchdog;
-  }
 
   function startMaintenance(ctx: ExtensionContext, cfg: FreeqConfig): void {
     if (maintenanceTimer) return;
@@ -697,9 +568,9 @@ export default function (pi: ExtensionAPI): void {
 
   /** One pass: drain what we can take, retire what waited too long, tick the clocks. */
   async function maintain(ctx: ExtensionContext, cfg: FreeqConfig): Promise<void> {
-    if (!conn || conn.state !== "online") return;
-    const store = await ensureHandoffs();
-    const queue = await ensureOffers();
+    if (!rt.conn || rt.conn.state !== "online") return;
+    const store = await rt.ensureHandoffs();
+    const queue = await rt.ensureOffers();
 
     const idle = ctx.isIdle();
     if (!idle) idleAcceptArmed = true;
@@ -725,23 +596,22 @@ export default function (pi: ExtensionAPI): void {
     }
     await queue.save();
 
-    for (const action of ensureWatchdog(cfg).tick()) {
+    for (const action of rt.ensureWatchdog(cfg).tick()) {
       if (action.kind === "progress") {
-        await conn.sendAct(action.task.channel, "progress", action.task.taskId, {
+        await rt.conn.sendAct(action.task.channel, "progress", action.task.taskId, {
           note: action.note,
         });
         continue;
       }
-      await conn.sendAct(action.task.channel, "fail", action.task.taskId, {
+      await rt.conn.sendAct(action.task.channel, "fail", action.task.taskId, {
         note: action.reason,
       });
-      if (workTask === action.task.taskId) {
-        endStep();
-        workTask = undefined;
-        pushStatus("active", undefined, undefined, true);
+      if (rt.workTask === action.task.taskId) {
+        rt.endStep();
+        rt.workTask = undefined;
+        rt.pushStatus("active", undefined, undefined, true);
       }
-      notify(
-        ctx,
+      rt.notify(
         `freeq: gave up on ${action.task.taskId.slice(0, 10)} — ${action.reason}. ` +
           `The offerer has been told.`,
         "warning",
@@ -756,17 +626,17 @@ export default function (pi: ExtensionAPI): void {
     rec: HandoffRecord,
     fromNick: string,
   ): Promise<void> {
-    const sent = await conn?.sendAct(rec.channel, "accept", rec.id, {});
+    const sent = await rt.conn?.sendAct(rec.channel, "accept", rec.id, {});
     if (!sent) {
       // Put it back: an accept we could not send is not an acceptance, and
       // the next sweep will try again or let the TTL retire it.
-      notify(ctx, `freeq: could not accept ${rec.id.slice(0, 10)} — will retry`, "warning");
-      const queue = await ensureOffers();
+      rt.notify(`freeq: could not accept ${rec.id.slice(0, 10)} — will retry`, "warning");
+      const queue = await rt.ensureOffers();
       queue.add(rec.id);
       await queue.save();
       return;
     }
-    notify(ctx, `freeq: accepted handoff ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
+    rt.notify(`freeq: accepted handoff ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
     startAssignedWork(ctx, cfg, rec, fromNick);
   }
 
@@ -776,8 +646,8 @@ export default function (pi: ExtensionAPI): void {
     rec: HandoffRecord,
     reason: string,
   ): Promise<void> {
-    await conn?.sendAct(rec.channel, "decline", rec.id, { note: reason });
-    notify(ctx, `freeq: declined ${rec.id.slice(0, 10)} — ${reason}`, "info");
+    await rt.conn?.sendAct(rec.channel, "decline", rec.id, { note: reason });
+    rt.notify(`freeq: declined ${rec.id.slice(0, 10)} — ${reason}`, "info");
   }
 
   /**
@@ -792,8 +662,8 @@ export default function (pi: ExtensionAPI): void {
     cfg: FreeqConfig,
     only?: string,
   ): Promise<string> {
-    const me = conn?.did;
-    if (!conn || conn.state !== "online" || !me) return "freeq: offline — cannot ask the server";
+    const me = rt.conn?.did;
+    if (!rt.conn || rt.conn.state !== "online" || !me) return "freeq: offline — cannot ask the server";
 
     const answer = await fetchAssignedTasks({ origin: httpOriginFor(cfg.server), did: me });
     if (!answer.ok) {
@@ -802,11 +672,11 @@ export default function (pi: ExtensionAPI): void {
       return `freeq: could not ask the server what is still yours — ${answer.reason}`;
     }
 
-    const store = await ensureHandoffs();
+    const store = await rt.ensureHandoffs();
     // Work already in flight here is not work to resume. A reconnect on a
     // flapping link would otherwise inject the same task's brief again on
     // every recovery.
-    const running = new Set([...resumed, ...(watchdog?.inFlight().map((t) => t.taskId) ?? [])]);
+    const running = new Set([...rt.resumed, ...(rt.watchdog?.inFlight().map((t) => t.taskId) ?? [])]);
     const plan = planResume({
       serverTasks: answer.tasks,
       known: store.all(),
@@ -828,13 +698,13 @@ export default function (pi: ExtensionAPI): void {
 
     const lines: string[] = [];
     for (const rec of wanted) {
-      resumed.add(rec.id);
+      rt.resumed.add(rec.id);
       if (!store.get(rec.id)) store.put(rec);
       lines.push(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`);
-      notify(ctx, `freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
+      rt.notify(`freeq: resuming ${rec.id.slice(0, 10)} — ${rec.title}`, "info");
       // Say so on the wire too: the offerer watched this go quiet, and a
       // progress note is how they learn it did not stay that way.
-      await conn.sendAct(rec.channel, "progress", rec.id, {
+      await rt.conn.sendAct(rec.channel, "progress", rec.id, {
         note: "resumed after the assignee's session restarted",
       });
       startAssignedWork(ctx, cfg, rec, rec.lastActor ?? "freeq", true);
@@ -857,437 +727,11 @@ export default function (pi: ExtensionAPI): void {
     return lines.join("\n");
   }
 
-  const notify = (
-    ctx: ExtensionContext | undefined,
-    text: string,
-    level: "info" | "warning" | "error",
-  ) => {
-    try {
-      ctx?.ui.notify(text, level);
-    } catch {
-      /* best-effort */
-    }
-  };
-
-  async function ensureConfig(ctx: ExtensionContext): Promise<FreeqConfig> {
-    if (config) return config;
-    agentDir = getAgentDir();
-    const loaded = await loadConfig({
-      agentDir,
-      cwd: ctx.cwd,
-      configDirName: CONFIG_DIR_NAME,
-      projectTrusted: ctx.isProjectTrusted(),
-    });
-    config = loaded.config;
-    sources = loaded.sources;
-    if (!config.install) config.install = deriveInstallSlug();
-    return config;
-  }
-
-  // ── the ONE path from the network into the model ────────────────────────
-
-  /**
-   * Act on a decided inbound event. This is the only function in the package
-   * that may call `pi.sendUserMessage`, and it refuses to do so unless
-   * `decideInbound` said so.
-   */
-  function deliver(
-    ctx: ExtensionContext,
-    ev: InboundEvent,
-    opts?: { ask?: InboundAsk; replyToChannel?: boolean },
-  ): void {
-    const ask = opts?.ask;
-    const decision = decideInbound(ev);
-
-    if (!reachesModel(decision.action)) {
-      if (decision.action === "surface") {
-        surface({
-          direction: "in",
-          channel: ev.channel,
-          from: ev.from,
-          did: ev.did ?? undefined,
-          text: ev.text,
-          // Someone waiting on an answer gets a marker; ordinary room
-          // chatter does not need a justification attached to every line.
-          note:
-            ev.addressed || ev.kind === "ask"
-              ? `withheld · tier ${ev.tier}`
-              : undefined,
-        });
-        // Only messages meant for us. Room chatter we are merely not injecting
-        // is not a message anyone is waiting on an answer to.
-        if (ev.addressed || ev.kind === "ask") {
-          withheld.add({
-            did: ev.did ?? undefined,
-            from: ev.from,
-            channel: ev.channel,
-            text: ev.text,
-            reason: decision.reason,
-            at: Date.now(),
-          });
-          const line = withheldSummary(withheld.senders());
-          if (line) notify(ctx, `freeq: ${line}`, "warning");
-          refreshUi();
-        }
-      }
-      // An unanswerable ask still gets a reply — silence is indistinguishable
-      // from a broken agent on the far side.
-      if (ask && conn) {
-        conn.replyToAsk(ask, undefined, `declined: ${decision.reason}`);
-      }
-      return;
-    }
-
-    const expectsReply = !!ask || !!opts?.replyToChannel;
-    if (ask) {
-      pendingReplies.push({ kind: "ask", ask, seq: turnSeq });
-    } else if (opts?.replyToChannel) {
-      pendingReplies.push({ kind: "channel", channel: ev.channel, from: ev.from, seq: turnSeq });
-    }
-
-    // Attribute the coming turn to whoever caused it, so a watcher sees
-    // "answering chad in #freeq-dev" rather than an unexplained busy agent.
-    // The phrase names who and where, never the message text: presence is
-    // visible to every room we share, and one room's words are another's
-    // metadata leak.
-    if (expectsReply) {
-      const venue = ev.channel.startsWith("#") ? ` in ${ev.channel}` : "";
-      beginStep(`answering ${ev.from}${venue}`);
-      // Somebody in a room is now waiting. pi narrates every step of this in
-      // the terminal; without this the room gets one line, whenever the turn
-      // happens to end. A DM answers to the sender, a channel to the channel.
-      // `config` is the connection's loaded config; if we somehow got here
-      // before it loaded there is no interval to honour, so stay quiet rather
-      // than crash the host.
-      if (config) startUpdates(config, ev.channel);
-    }
-    const framed = frameInbound(ev, { expectsReply });
-
-    // deliverAs is REQUIRED while streaming; omitting it throws. When idle,
-    // pi sends immediately and triggers a turn.
-    // `followUp` waits for the agent to have NO more tool calls - i.e. until
-    // the whole task is done, every build and test run included. Someone
-    // talking to a working agent got silence for ten minutes and then four
-    // answers at once. `steer` delivers after the current tool call, before
-    // the next model call: the agent finishes what it is doing, reads the
-    // message, and can answer before continuing. That is what steering a
-    // working agent means, and what the mode is named for.
-    //
-    // Only for addressed input from `request` tier and up. Lower-tier chat
-    // still waits; it should not interrupt work.
-    const interrupts = ev.addressed && tierAtLeast(ev.tier, "request");
-    try {
-      // A custom message, not sendUserMessage: the model receives the same
-      // framed content as before, but the transcript renders it as a
-      // coloured freeq card (renderer above) instead of pretending the
-      // operator typed it. triggerTurn preserves the old semantics: idle →
-      // answer now; busy → steer/followUp exactly as before.
-      pi.sendMessage(
-        {
-          customType: "freeq-inbound",
-          content: framed,
-          display: true,
-          details: {
-            kind: ev.kind,
-            channel: ev.channel,
-            from: ev.from,
-            did: ev.did,
-            tier: ev.tier,
-            text: ev.text,
-            reason: decision.reason,
-            expectsReply,
-          } satisfies FreeqInboundDetails,
-        },
-        { deliverAs: interrupts ? "steer" : "followUp", triggerTurn: true },
-      );
-    } catch (err) {
-      if (ask && conn) conn.replyToAsk(ask, undefined, `local delivery failed`);
-      notify(ctx, `freeq: could not deliver message: ${(err as Error).message}`, "error");
-    }
-  }
-
-  /**
-   * Connect if we are dormant, minting this project's identity on the way.
-   *
-   * Called by everything that needs the wire. The first /freeq command in a
-   * new project is the "reason" lazy minting waits for - deliberate use, as
-   * against pi merely having been started in a directory.
-   */
-  async function wake(ctx: ExtensionContext): Promise<void> {
-    if (!dormant) return;
-    dormant = false;
-    const cfg = await ensureConfig(ctx);
-    if (!cfg.enabled || !isDid(cfg.ownerDid)) return;
-    notify(ctx, "freeq: first use in this project — minting its identity", "info");
-    const msg = await connect(ctx);
-    if (conn?.state !== "online") notify(ctx, msg, "warning");
-    refreshUi(ctx);
-  }
-
-  async function connect(ctx: ExtensionContext): Promise<string> {
-    const cfg = await ensureConfig(ctx);
-    if (!cfg.enabled) return "freeq is disabled (`/freeq on` to enable)";
-    if (!isDid(cfg.ownerDid)) return "freeq: not logged in — run `/freeq login <did:plc:…>`";
-    if (conn && conn.state !== "offline") return `freeq: already ${conn.state}`;
-    // An existing-but-offline connection still owns a bot and possibly a
-    // socket the transport is retrying. Replacing it without stopping it
-    // leaks a session, which is how one pi process ended up holding three
-    // connections and answering every mention three times.
-    if (conn) {
-      await conn.stop("replaced");
-      conn = undefined;
-    }
-
-    // Claim this PROJECT's connection slot. The meta is collected first so the
-    // lock, the identity and the nick all key off the same project name.
-    const meta = await collectSessionMeta({ cwd: ctx.cwd, model: ctx.model?.id });
-    currentProject = meta.project;
-    lock ??= new ConnectionLock(ConnectionLock.pathFor(agentDir, meta.project));
-    const claim = await lock.acquire(ctx.cwd);
-    if (!claim.held) {
-      passive = true;
-      return (
-        `freeq: another pi session in this project holds the connection` +
-        (claim.holder?.label ? ` (${claim.holder.label})` : "") +
-        `. This window stays passive — one agent identity, one presence. ` +
-        `Close that session, or run /freeq takeover here.`
-      );
-    }
-    passive = false;
-
-    // Re-assert the lock periodically: if the file vanishes the slot would
-    // silently free up and the next window would connect alongside us.
-    if (!lockTimer) {
-      lockTimer = setInterval(() => {
-        void (async () => {
-          const stillOurs = await lock?.refresh(ctx.cwd);
-          if (stillOurs === false && conn) {
-            // Somebody took over deliberately. Stand down rather than fight.
-            passive = true;
-            await conn.stop("another session took over");
-            conn = undefined;
-            notify(ctx, "freeq: another pi session took over the connection", "warning");
-          }
-        })();
-      }, 60_000);
-      lockTimer.unref?.();
-    }
-
-    conn = new FreeqConnection({
-      ownerDid: cfg.ownerDid,
-      server: cfg.server,
-      slug: cfg.install ?? deriveInstallSlug(),
-      root: BOTS_ROOT,
-      nick: cfg.nick,
-      creatorKeyPath: await existingCreatorKey(cfg),
-      // Per-project: a music repo and a work repo are different agents and
-      // belong in different rooms. Falls back to the global list.
-      channels: channelsForProject(cfg, meta.project),
-      meta,
-      onNotice: (text, level) => notify(ctx, text, level),
-
-      onUnexpectedChannel: (channel) => {
-        notify(
-          uiCtx,
-          `freeq: left ${channel} — the server had rejoined us there, but this project's channels are ${config ? channelsForProject(config, currentProject).join(", ") || "(none)" : "(none)"}`,
-          "info",
-        );
-        refreshUi();
-      },
-      onJoinRefused: (channel, reason) => {
-        // Loud, with the remedy, because the alternative is what just
-        // happened: a channel that looks joined and is not.
-        notify(
-          uiCtx,
-          reason === "policy"
-            ? `freeq: ${channel} refused the join — it requires policy acceptance. Run /freeq policy ${channel} accept`
-            : `freeq: could not join ${channel} — ${reason}`,
-          "warning",
-        );
-        refreshUi();
-      },
-      onScrub: (hits, target) => {
-        // Not every redaction is news. Rewriting the home directory to `~`
-        // loses nothing and used to fire a warning on every message, which is
-        // how a notice stops being read before the one that matters arrives.
-        const level = scrubSeverity(hits);
-        if (level === "silent") return;
-        const kinds = hits.filter((h) => h !== "home-path").join(", ") || hits.join(", ");
-        notify(
-          ctx,
-          level === "warning"
-            ? `freeq: redacted ${kinds} from a message to ${target} — check what you were about to send`
-            : `freeq: shortened an absolute path in a message to ${target}`,
-          level,
-        );
-      },
-
-      onMessage: (channel, msg) => {
-        void (async () => {
-          const did = await conn!.resolveSenderDid(msg);
-          const isChannel = channel.startsWith("#");
-          // bot-kit's mention check also enforces a per-channel cooldown,
-          // which is what stops two agents that mention each other from
-          // ping-ponging forever.
-          const mention = isChannel
-            ? conn!.checkMention(channel, msg.text)
-            : { addressed: true, stripped: msg.text, cooling: false };
-
-          if (mention.cooling) {
-            surface({
-              direction: "in",
-              channel,
-              from: msg.from,
-              text: msg.text,
-              note: "rate-limited · not answered",
-            });
-            return;
-          }
-
-          // Steering from the room, owner only. "be more verbose" typed into
-          // freeq should do the same thing as /freeq verbosity in the
-          // terminal - the person following along is the one who knows
-          // whether it is too much or too little. Gated on the OWNER's DID
-          // (server-resolved), never on the nick: anyone can call themselves
-          // chad, and a config knob is exactly what an impostor would reach for.
-          if (mention.addressed && did && did === cfg.ownerDid) {
-            const steer = parseVerbositySteer(mention.stripped);
-            if (steer) {
-              cfg.provenance = steer;
-              await saveConfig(agentDir, cfg);
-              const words: Record<ProvenanceTier, string> = {
-                silent: "I'll stop mirroring my work here entirely.",
-                decisions: "I'll keep it quiet - only decisions, and only as tags.",
-                evidence: "I'll post one line per turn here as I work.",
-                firehose: "I'll narrate every consequential tool call as it happens.",
-              };
-              conn!.send(channel, `${msg.from}: ${words[steer]} (verbosity → ${steer})`);
-              notify(ctx, `freeq: verbosity → ${steer} (set by ${msg.from} in ${channel})`, "info");
-              return;
-            }
-          }
-
-          deliver(
-            ctx,
-            {
-              kind: "chat",
-              channel,
-              from: msg.from,
-              did,
-              text: mention.addressed ? mention.stripped : msg.text,
-              addressed: mention.addressed,
-              mode: modeFor(cfg, channel),
-              tier: tierFor(cfg, did),
-            },
-            // Someone addressed us in a room: answer in the room.
-            { replyToChannel: mention.addressed },
-          );
-        })();
-      },
-
-      onActEvent: (ev) => {
-        void (async () => {
-          const store = await ensureHandoffs();
-
-          // Check the signature BEFORE applying. Three-way outcome per the
-          // RFC: a forgery is rejected, but an unreachable key store is an
-          // outage — deferring beats destroying someone's completed work.
-          keyFetcher ??= serverKeyFetcher(httpOriginFor(cfg.server));
-          const verdict = await verifyActEvent(
-            {
-              channel: ev.channel,
-              did: ev.did,
-              eventId: ev.eventId,
-              tags: ev.tags,
-              sigTag: ev.sigTag,
-            },
-            { fetchKey: keyFetcher, selfDid: conn?.did ?? "" },
-          );
-
-          if (verdict.outcome === "invalid") {
-            // Do not apply, and say so loudly: this is tampering or forgery,
-            // not a transient problem.
-            notify(
-              ctx,
-              `freeq: REJECTED a task event from ${ev.from} — bad signature ` +
-                `(${verdict.reason}). Task ${ev.taskId.slice(0, 10)} was NOT updated.`,
-              "error",
-            );
-            return;
-          }
-
-          serverDid ??= await fetchServerDid(httpOriginFor(cfg.server));
-          const result = store.apply(ev, {
-            serverDid,
-            signatureValid: verdict.outcome === "valid",
-          });
-          if (!result.ok) {
-            // Illegal or unattributable moves are logged, never applied.
-            // Server receipts, duplicate echoes, and replayed moves for tasks
-            // we never saw are all routine — say nothing about those.
-            if (!result.benign && !ev.replayed) {
-              notify(ctx, `freeq: rejected ${ev.verb} — ${result.reason}`, "warning");
-            }
-            return;
-          }
-          noteVerification(
-            result.record,
-            verdict.outcome === "valid" ? "valid" : "unverifiable",
-          );
-          await store.save();
-          if (verdict.outcome === "unverifiable" && !ev.replayed) {
-            notify(
-              ctx,
-              `freeq: could not verify the signature on ${ev.verb} for ` +
-                `${ev.taskId.slice(0, 10)} (${verdict.reason}) — applied, but unproven.`,
-              "warning",
-            );
-          }
-          await onHandoffEvent(ctx, cfg, ev, result.record, result.created);
-        })();
-      },
-
-      // Every connect, including a reconnect after a dropped socket — the gap
-      // is exactly when accepted work goes quiet without anybody deciding it
-      // should.
-      onOnline: () => {
-        refreshUi(ctx);
-        showMarkOnce(ctx);
-        void (async () => {
-          const message = await resumeAssigned(ctx, cfg);
-          if (message !== "freeq: nothing to resume") notify(ctx, message, "info");
-        })();
-      },
-
-      onAsk: (ask) => {
-        deliver(
-          ctx,
-          {
-            kind: "ask",
-            channel: ask.channel,
-            from: ask.from,
-            did: ask.did,
-            text: ask.question,
-            addressed: true, // an ask is addressed by construction
-            // An ask is a direct request, not room chatter: it is governed by
-            // the tier gate, not by the venue's presentation mode. Mute still
-            // wins, since mute means "say nothing anywhere".
-            mode: cfg.muted ? "silent" : "addressed",
-            tier: tierFor(cfg, ask.did),
-          },
-          { ask },
-        );
-      },
-    });
-
-    await conn.start();
-    startMaintenance(ctx, cfg);
-    return `freeq: ${conn.describe()}`;
-  }
 
   // ── lifecycle ───────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, ctx) => {
+    track(ctx);
     uiCtx = ctx;
     // The SDK used to write diagnostics straight to the console, which in a
     // full-screen TUI means straight over whatever the renderer had drawn —
@@ -1296,88 +740,30 @@ export default function (pi: ExtensionAPI): void {
     // screen, so the SDK's diagnostics come here instead: errors surface as
     // notices, everything quieter is dropped rather than drawn.
     setLogger({
-      error: (m, ...a) => notify(uiCtx, `freeq sdk: ${m} ${a.join(" ")}`.trim(), "error"),
+      error: (m, ...a) => rt.notify(`freeq sdk: ${m} ${a.join(" ")}`.trim(), "error"),
       warn: () => {},
       debug: () => {},
     });
-    const cfg = await ensureConfig(ctx);
-    if (!cfg.enabled || !isDid(cfg.ownerDid)) return; // silent when not set up
-
-    // Mint lazily. An identity is a keypair and a nick registered on a public
-    // server, and connecting on sight meant every directory pi was ever
-    // started in acquired one — three throwaway test directories produced
-    // three permanent agents, indistinguishable from real projects to anyone
-    // reading the roster.
-    //
-    // A project this installation already knows still connects on sight, so
-    // nothing about working in a real project changes. An unknown one waits
-    // for a reason: any /freeq command connects, and so does anything else
-    // that needs the wire. Trying freeq out should not cost you an identity.
-    if (!(await projectIsKnown(ctx, cfg))) {
-      dormant = true;
-      refreshUi(ctx);
-      return;
-    }
-    const msg = await connect(ctx);
-    if (conn?.state !== "online") notify(ctx, msg, "warning");
-
-    // Surface work that arrived while this installation was offline. The
-    // server replays channel history on join, so offers made overnight land
-    // as replayed act events; anything still open is reported once here.
-    const store = await ensureHandoffs();
-    await ensureOffers();
-    setTimeout(() => {
-      const me = conn?.did;
-      const waiting = store.inboxFor(me);
-      if (waiting.length) {
-        notify(
-          ctx,
-          `freeq: ${waiting.length} handoff(s) waiting for you:\n` +
-            waiting.map((r) => `  ${describeHandoff(r, me)}`).join("\n") +
-            `\n/freeq tasks to review, /freeq accept <id> to take one.`,
-          "warning",
-        );
-      }
-    }, 12_000).unref?.();
+    await rt.start();
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    track(ctx);
     await hangup("session shutdown");
-    stopMaintenance();
-    // Say why the work stopped rather than letting it simply go quiet. NOT a
-    // failure: a restart may pick it straight back up (see resumeAssigned),
-    // and a false failure in a signed, permanent log is worse than a gap.
-    for (const action of watchdog?.shutdown() ?? []) {
-      if (action.kind !== "progress") continue;
-      await conn?.sendAct(action.task.channel, "progress", action.task.taskId, {
-        note: action.note,
-      });
-    }
-    await offers?.save();
-    await handoffs?.save();
-    await conn?.stop("pi session ended");
-    conn = undefined;
-    if (lockTimer) {
-      clearInterval(lockTimer);
-      lockTimer = undefined;
-    }
-    // Hand the slot to the next window rather than making it wait for a
-    // liveness check to notice we're gone.
-    await lock?.release();
+    await rt.stop("pi session ended");
   });
 
   // Report "working" for the whole run, and go quiet again when it settles.
-  // A run also counts as life, which is what the stall timeout measures.
-  pi.on("agent_start", async () => {
-    watchdog?.touch();
-    pushStatus("executing", currentLabel() ?? "working", workTask, true);
+  pi.on("agent_start", async (_event, ctx) => {
+    track(ctx);
+    rt.onRunStart();
   });
 
-  // A typed prompt becomes the step phrase — this is where "bash" turns
-  // into "looking at why reconnect drops channels". Injected freeq input is
-  // role 'custom' and skips this (deliver already named that step); the
+  // A typed prompt becomes the step phrase. Injected freeq input is role
+  // 'custom' and skips this (deliver already named that step); the runtime's
   // '[freeq —' guard covers anything framed as a plain user message.
-  pi.on("message_start", async (event) => {
+  pi.on("message_start", async (event, ctx) => {
+    track(ctx);
     const m = (event as { message?: { role?: string; content?: unknown } }).message;
     if (m?.role !== "user") return;
     const text = Array.isArray(m.content)
@@ -1390,41 +776,20 @@ export default function (pi: ExtensionAPI): void {
       : typeof m.content === "string"
         ? m.content
         : "";
-    if (!text.trim() || text.startsWith("[freeq —")) return;
-    // The first prompt of a run names the step. A steer mid-run must not
-    // reset the phrase (and its elapsed clock) that the watcher follows —
-    // and a handoff brief must not overwrite the task title as the phrase.
-    if (!step) beginStep(gistOf(text));
+    rt.onUserPrompt(text);
   });
 
-  // Name the current tool so a watcher sees movement, not just a spinner,
-  // and note anything that counts as a consequence for the log.
-  pi.on("tool_call", async (event) => {
-    // A tool call is the model doing something, which is exactly what the
-    // stall timer needs to hear about — otherwise long, quiet work looks
-    // stalled and gets failed out from under itself.
-    watchdog?.touch();
+  // Name the current tool so a watcher sees movement, and note anything that
+  // counts as a consequence for the log.
+  pi.on("tool_call", async (event, ctx) => {
+    track(ctx);
     const e = event as { toolName?: string; input?: Record<string, unknown> };
-    if (!e.toolName) return;
-    // The tool is a suffix on the current phrase, never the headline —
-    // "bash" alone is exactly the contentless status this replaces.
-    if (step) step.tool = toolDetail(e.toolName, e.input);
-    pushStatus("executing", currentLabel() ?? e.toolName, workTask);
-    if (config?.provenance) {
-      turn.record({ name: e.toolName, input: e.input }, config.provenance);
-      if (config.provenance === "firehose") {
-        const input = e.input ?? {};
-        const what =
-          typeof input.command === "string" ? `bash: ${String(input.command).split("\n")[0].slice(0, 80)}` :
-          typeof input.path === "string" ? `${e.toolName}: ${String(input.path).split(/[\\/]/).pop()}` :
-          e.toolName;
-        firehose(config, what);
-      }
-    }
+    rt.onToolCall(e.toolName, e.input);
   });
 
   // Capture assistant text so an inbound ask can be answered with it.
-  pi.on("turn_end", async (event) => {
+  pi.on("turn_end", async (event, ctx) => {
+    track(ctx);
     const content = (event as { message?: { content?: unknown } }).message?.content;
     if (!Array.isArray(content)) return;
     const text = content
@@ -1434,110 +799,15 @@ export default function (pi: ExtensionAPI): void {
       .map((c) => c.text)
       .join("\n")
       .trim();
-    if (text) lastAssistantText = text;
-    // A turn that made tool calls is narration ("fetching the forecast…"),
-    // not the answer — the answer comes after the tools return. Flushing the
-    // reply queue on it delivers the narration to the asker and the actual
-    // answer to nobody (this exact misfire shipped a "Fetching a real
-    // forecast" line to #chad-compute while the forecast stayed local).
     const hasToolCalls = content.some(
       (c) => !!c && typeof c === "object" && (c as { type?: string }).type === "toolCall",
     );
-    // A turn taken while carrying a task is a step on that task. Journal the
-    // gist so a restart resumes from here rather than from the title.
-    if (text && workTask) journal("turn", workTask, summarizeTurn(text));
-    // Answer NOW, not when the run ends. A steered message reaches the model
-    // mid-task; the model answers it in its next text and carries on. If that
-    // answer waited for agent_settled it would (a) arrive after the task and
-    // (b) be overwritten by the task's wrap-up text. So the first turn that
-    // produces text after a message arrived is the reply to it.
-    if (text && !hasToolCalls && pendingReplies.length) flushReplies(text, undefined, turnSeq);
+    rt.onTurnEnd(text, hasToolCalls);
   });
 
-  /**
-   * Send `text` to everyone waiting on this run. Called from turn_end (the
-   * live path) and agent_settled (the sweep for anything left, including
-   * the "no answer produced" case that must never leave an asker hanging).
-   */
-  function flushReplies(text: string, ctx?: ExtensionContext, beforeSeq?: number): void {
-    const channelReplies = new Map<string, string>(); // channel -> last asker
-    // Take only what this text can legitimately answer; leave the rest queued.
-    const due = beforeSeq === undefined ? pendingReplies.splice(0) : [];
-    if (beforeSeq !== undefined) {
-      for (let i = pendingReplies.length - 1; i >= 0; i--) {
-        if (pendingReplies[i]!.seq < beforeSeq) due.unshift(pendingReplies.splice(i, 1)[0]!);
-      }
-    }
-    for (const item of due) {
-      if (!conn) continue;
-
-      if (item.kind === "ask") {
-        if (text) {
-          conn.replyToAsk(item.ask, text);
-          // A receipt in the transcript: what actually went back, and to whom.
-          receipt(item.ask.from, text);
-        } else {
-          // M0 finding: an empty answer is a real state — report it, never
-          // leave the asker hanging until timeout.
-          conn.replyToAsk(item.ask, undefined, "no answer produced");
-          if (ctx) notify(ctx, `freeq: no answer produced for ${item.ask.from}`, "warning");
-        }
-        continue;
-      }
-
-      // Channel replies are collected and sent once per channel below. A
-      // turn produces ONE answer; if four messages queued while we worked,
-      // that answer used to go out four times, once per queued item.
-      if (!text) continue;
-      channelReplies.set(item.channel, item.from);
-    }
-    // Sent whole: the SDK splits long text into a draft/multiline BATCH, so a
-    // cap here only ever threw away the end of an answer - the part that
-    // usually held the conclusion, after paying the tokens to produce it.
-    for (const [channel, from] of channelReplies) {
-      if (!conn) break;
-      // Membership first: a PRIVMSG to a channel we are not in is dropped
-      // server-side and the sender never finds out — the receipt below would
-      // be a lie. This exact failure hid hours of replies: a per-project
-      // session heard the operator in #chad-compute (inbound routes by DID)
-      // but its nick had never joined, so every answer vanished. JOIN is
-      // ordered before the PRIVMSG on the same socket and is a no-op when
-      // already a member — and membership can be lost without the client
-      // knowing (nick churn from sibling sessions), so join unconditionally.
-      // Channels only: a DM target is a nick, and JOIN <nick> is nonsense.
-      if (channel.startsWith("#")) conn.join(channel);
-      conn.send(channel, `${from}: ${text}`);
-      // A receipt in the transcript: what we handed the server, addressed so.
-      receipt(channel, `${from}: ${text}`);
-    }
-  }
-
-  let lastModel: string | undefined;
   pi.on("agent_settled", async (_event, ctx) => {
-    // Pay back whatever this run was triggered by and hasn't been answered
-    // yet — normally nothing, since turn_end answers live. What is left here
-    // is a run that ended without ever producing text.
-    flushReplies(lastAssistantText, ctx);
-    lastAssistantText = "";
-
-    // Mirror what this turn actually changed. Before the offline early-return
-    // below, so the recorder is always drained — otherwise a turn taken while
-    // disconnected would leak into the next one's summary.
-    await mirrorTurn(ctx, config ?? (await ensureConfig(ctx)));
-
-    if (!conn || conn.state !== "online") return;
-
-    // Back to available. Clearing the step matters: a stale "working on X"
-    // is worse than no status at all.
-    endStep();
-    stopUpdates();
-    workTask = undefined;
-    pushStatus("active", undefined, undefined, true);
-
-    const model = ctx.model?.id;
-    if (model === lastModel) return;
-    lastModel = model;
-    conn.updateMeta({ ...conn.meta, model });
+    track(ctx);
+    await rt.onSettled();
   });
 
   /**
@@ -1555,22 +825,22 @@ export default function (pi: ExtensionAPI): void {
     rec: HandoffRecord,
     created: boolean,
   ): Promise<void> {
-    const me = conn?.did;
+    const me = rt.conn?.did;
 
     // Work of ours that ended, however it ended. Stop the clocks before
     // anything else, so a completed task can never be failed for stalling.
     if (rec.assignee === me && isTerminal(rec.kind, rec.state)) {
-      if (watchdog?.finish(rec.id) && workTask === rec.id) {
-        endStep();
-        workTask = undefined;
-        pushStatus("active", undefined, undefined, true);
+      if (rt.watchdog?.finish(rec.id) && rt.workTask === rec.id) {
+        rt.endStep();
+        rt.workTask = undefined;
+        rt.pushStatus("active", undefined, undefined, true);
       }
-      resumed.delete(rec.id);
+      rt.resumed.delete(rec.id);
     }
     // An offer we were holding has been answered by someone, somewhere.
-    if (!created && offers?.has(rec.id) && rec.state !== "offered") {
-      offers.remove(rec.id);
-      await offers.save();
+    if (!created && rt.offers?.has(rec.id) && rec.state !== "offered") {
+      rt.offers.remove(rec.id);
+      await rt.offers.save();
     }
 
     // We just became the assignee — by claiming an open task, or by our own
@@ -1596,8 +866,7 @@ export default function (pi: ExtensionAPI): void {
     // Something we offered moved.
     if (rec.offerer === me && !created) {
       const who = rec.assignee ? ` by ${rec.assignee.slice(0, 22)}…` : "";
-      notify(
-        ctx,
+      rt.notify(
         `freeq handoff ${rec.id.slice(0, 10)} → ${rec.state}${who} (${rec.title})`,
         "info",
       );
@@ -1610,8 +879,7 @@ export default function (pi: ExtensionAPI): void {
     if (created && !rec.offeree) {
       const tier = tierFor(cfg, rec.offerer);
       if (!tierAtLeast(tier, "handoff")) return; // untrusted poster: ignore entirely
-      notify(
-        ctx,
+      rt.notify(
         `freeq: open task ${rec.id.slice(0, 10)} in ${rec.channel} — ${rec.title}` +
           (rec.caps ? `\n  caps: ${rec.caps}` : "") +
           `\n  claim it with the freeq tool (action 'claim').`,
@@ -1623,7 +891,7 @@ export default function (pi: ExtensionAPI): void {
     // A new offer addressed to us.
     const forMe = created && rec.offeree && rec.offeree === me;
     if (!forMe) {
-      notify(ctx, `freeq handoff ${rec.id.slice(0, 10)}: ${rec.state} — ${rec.title}`, "info");
+      rt.notify(`freeq handoff ${rec.id.slice(0, 10)}: ${rec.state} — ${rec.title}`, "info");
       return;
     }
 
@@ -1637,8 +905,7 @@ export default function (pi: ExtensionAPI): void {
     if (decision.action === "ignore") {
       // An unknown DID must not be able to raise a dialog in your terminal,
       // queue you work, or cost you a notification you have to read.
-      notify(
-        ctx,
+      rt.notify(
         `freeq: ignoring handoff from ${rec.offerer} — ${decision.reason}. ` +
           `/freeq tasks to review, /freeq trust <did> handoff to allow.`,
         "warning",
@@ -1653,15 +920,14 @@ export default function (pi: ExtensionAPI): void {
 
     // Queued. Notify ONCE, naming the id and how to act on it — a queue
     // nobody is told about is just a slower way of dropping the offer.
-    const queue = await ensureOffers();
+    const queue = await rt.ensureOffers();
     const fresh = !queue.has(rec.id);
     queue.add(rec.id);
     await queue.save();
     if (!fresh) return;
 
     const age = rec.fromReplay || ev.replayed ? " (offered while you were offline)" : "";
-    notify(
-      ctx,
+    rt.notify(
       `freeq: handoff ${rec.id.slice(0, 10)} from ${rec.offerer} — ${rec.title}${age}\n` +
         `  ${decision.reason}; it will be taken when this session is free, or ` +
         `declined after ${formatDuration(cfg.offerTtlSecs)}.\n` +
@@ -1678,19 +944,6 @@ export default function (pi: ExtensionAPI): void {
    * presence identically, arm the same clocks, and enter the model through
    * the same tier-gated pipeline. There is one way to start work, not three.
    */
-  /**
-   * Leave a breadcrumb in the pi session log for the task in flight.
-   *
-   * The server remembers WHAT is assigned; this remembers HOW far it got.
-   * `appendEntry` persists without entering model context, so the journal
-   * costs nothing until the exact task is resumed.
-   */
-  function journal(kind: TaskNote["kind"], taskId: string, text: string): void {
-    if (!text.trim()) return;
-    const note: TaskNote = { taskId, at: Date.now(), kind, text };
-    pi.appendEntry(JOURNAL_ENTRY, note);
-  }
-
   function startAssignedWork(
     ctx: ExtensionContext,
     cfg: FreeqConfig,
@@ -1699,21 +952,21 @@ export default function (pi: ExtensionAPI): void {
     resuming = false,
   ): void {
     // Tie presence to the task, so the room can see who is on what.
-    workTask = rec.id;
-    beginStep(gistOf(`handoff: ${rec.title}`));
+    rt.workTask = rec.id;
+    rt.beginStep(gistOf(`handoff: ${rec.title}`));
 
     // On a fresh start, note the brief. On a resume, read back what this
     // session had done and put it in front of the model - a resumed task that
     // arrives as a bare title makes the agent start over.
     const previous = resuming ? resumePreamble(notesFor(ctx.sessionManager.getEntries(), rec.id)) : "";
-    journal(resuming ? "resume" : "start", rec.id, resuming ? "resumed after restart" : `took on: ${rec.title}`);
+    rt.journal(resuming ? "resume" : "start", rec.id, resuming ? "resumed after restart" : `took on: ${rec.title}`);
 
     // Start the clocks. Nothing tracked the work past this point before, so a
     // model that wandered off left the task assigned until the server's
     // expiry sweep noticed, days later.
-    ensureWatchdog(cfg).start({ taskId: rec.id, channel: rec.channel, title: rec.title });
+    rt.ensureWatchdog(cfg).start({ taskId: rec.id, channel: rec.channel, title: rec.title });
 
-    deliver(ctx, {
+    rt.deliver({
       kind: "chat",
       channel: rec.channel,
       from: fromNick,
@@ -1749,23 +1002,23 @@ export default function (pi: ExtensionAPI): void {
     verb: string,
     fromNick: string,
   ): void {
-    const held = workTask === rec.id;
+    const held = rt.workTask === rec.id;
     if (held) {
-      endStep();
-      workTask = undefined;
-      pushStatus("active", undefined, undefined, true);
+      rt.endStep();
+      rt.workTask = undefined;
+      rt.pushStatus("active", undefined, undefined, true);
     }
 
     const why = verb === "expire" ? "expired" : "was cancelled by the agent that offered it";
     const note = rec.log[rec.log.length - 1]?.note;
 
     // Never accepted: nothing was started, so this is news, not an interrupt.
-    if (!held && rec.assignee !== conn?.did) {
-      notify(ctx, `freeq: handoff ${rec.id.slice(0, 10)} ${why} — ${rec.title}`, "info");
+    if (!held && rec.assignee !== rt.conn?.did) {
+      rt.notify(`freeq: handoff ${rec.id.slice(0, 10)} ${why} — ${rec.title}`, "info");
       return;
     }
 
-    deliver(ctx, {
+    rt.deliver({
       kind: "chat",
       channel: rec.channel,
       from: fromNick,
@@ -1784,78 +1037,6 @@ export default function (pi: ExtensionAPI): void {
       mode: cfg.muted ? "silent" : "addressed",
       tier: tierFor(cfg, rec.offerer),
     });
-  }
-
-  /**
-   * Publish this turn's consequences as a signed coordination event.
-   *
-   * Deliberately one line per turn. The point is a log a person will still
-   * read in six months, which rules out a running commentary of every tool
-   * call — that is what the `firehose` tier is for, and why it is not the
-   * default.
-   */
-  async function mirrorTurn(ctx: ExtensionContext, cfg: FreeqConfig): Promise<void> {
-    const tier = cfg.provenance ?? "decisions";
-    if (tier === "silent" || cfg.muted || !conn || conn.state !== "online") {
-      turn.reset();
-      return;
-    }
-    const summary = turn.summary();
-    const files = turn.files;
-    turn.reset();
-    if (!summary) return; // a turn that changed nothing says nothing
-
-    const channel = cfg.provenanceChannel ?? cfg.channels[0];
-    if (!channel) return;
-
-    const payload = buildProvenance({
-      v: 1,
-      kind: "turn",
-      text: summary,
-      files: files.length ? files : undefined,
-    });
-    try {
-      conn.sendTags(channel, {
-        "+freeq.at/event": PROVENANCE_EVENT,
-        "+freeq.at/payload": encodeURIComponent(JSON.stringify(payload)),
-      });
-      // At `evidence` and above the room also gets it as readable text, not
-      // only as a tag most clients do not render. This is the difference
-      // between "the agent went quiet for ten minutes" and watching it work.
-      if (tierAtLeastProv(tier, "evidence")) {
-        conn.send(channel, `⚙ ${summary}${files.length ? `  [${files.join(", ")}]` : ""}`);
-      }
-    } catch {
-      // The log is a side effect; never let it disturb the session.
-    }
-    void ctx;
-  }
-
-  /** Provenance tier ordering, local so the extension need not import it. */
-  function tierAtLeastProv(a: ProvenanceTier, b: ProvenanceTier): boolean {
-    const rank = { silent: 0, decisions: 1, evidence: 2, firehose: 3 } as const;
-    return rank[a] >= rank[b];
-  }
-
-  /**
-   * Live per-tool lines, `firehose` only. One line as each consequential tool
-   * call starts, so a watcher sees the agent move rather than a summary after
-   * the fact. Rate-limited: a burst of reads is one line, not forty.
-   */
-  let lastFirehoseAt = 0;
-  function firehose(cfg: FreeqConfig, line: string): void {
-    if ((cfg.provenance ?? "evidence") !== "firehose" || cfg.muted) return;
-    if (!conn || conn.state !== "online") return;
-    const channel = cfg.provenanceChannel ?? cfg.channels[0];
-    if (!channel) return;
-    const now = Date.now();
-    if (now - lastFirehoseAt < 1500) return;
-    lastFirehoseAt = now;
-    try {
-      conn.send(channel, `⚙ ${line}`);
-    } catch {
-      /* side effect */
-    }
   }
 
   // ── the tool ────────────────────────────────────────────────────────────
@@ -1919,7 +1100,7 @@ export default function (pi: ExtensionAPI): void {
       /* leaving is best-effort */
     }
     await client.close();
-    if (ch) pushStatus("active", undefined, undefined, true);
+    if (ch) rt.pushStatus("active", undefined, undefined, true);
     void reason;
   }
 
@@ -1938,13 +1119,13 @@ export default function (pi: ExtensionAPI): void {
         result = await av.call("freeq_listen", {}, 70_000);
       } catch (err) {
         if (!avListening) return;
-        notify(ctx, `freeq call: listen failed - ${(err as Error).message}`, "warning");
+        rt.notify(`freeq call: listen failed - ${(err as Error).message}`, "warning");
         await new Promise((r) => setTimeout(r, 2_000));
         continue;
       }
       for (const u of addressedUtterances(parseListenResult(McpStdioClient.text(result)))) {
         if (!avChannel) break;
-        deliver(ctx, {
+        rt.deliver({
           kind: "chat",
           channel: avChannel,
           from: u.from,
@@ -2004,7 +1185,7 @@ export default function (pi: ExtensionAPI): void {
       }
       const channel = avChannel;
       const { tool, args } = toBridgeCall(params as AvParams, (t) =>
-        conn ? conn.scrubForWire(t, channel) : t,
+        rt.conn ? rt.conn.scrubForWire(t, channel) : t,
       );
       const r = await av.call(tool, args, 30_000);
       return out(McpStdioClient.text(r) || "(ok)", !!r.isError);
@@ -2109,7 +1290,7 @@ export default function (pi: ExtensionAPI): void {
       let line = theme.fg("toolTitle", theme.bold("freeq ")) + theme.fg("accent", `${icon[verb] ?? "·"} ${verb}`);
       // Colour the peer by their DID when we know it, so the same
       // correspondent looks the same across sessions and machines.
-      const whoDid = conn?.peers().find((p) => p.nick.toLowerCase() === who.toLowerCase())?.did;
+      const whoDid = rt.conn?.peers().find((p) => p.nick.toLowerCase() === who.toLowerCase())?.did;
       if (who) line += theme.fg("dim", " → ") + theme.fg(peerColor(whoDid), who);
       const text = (a.message as string | undefined) ?? (a.title as string | undefined);
       if (text) {
@@ -2132,6 +1313,7 @@ export default function (pi: ExtensionAPI): void {
     },
     async execute(_id, params, _signal, _onUpdate, _ctx) {
       const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: {} });
+      const conn = rt.conn;
 
       if (!conn || conn.state !== "online") {
         return text(`freeq is ${conn?.state ?? "not configured"} — cannot reach peers right now.`);
@@ -2192,7 +1374,7 @@ export default function (pi: ExtensionAPI): void {
           if (!params.to || !title) {
             return text("handoff requires 'to' (peer DID or nick) and 'title'.");
           }
-          const cfg2 = config ?? (await ensureConfig(_ctx));
+          const cfg2 = rt.config ?? (await rt.ensureConfig());
           const channel = params.channel ?? cfg2.channels[0];
           if (!channel) {
             return text(
@@ -2222,9 +1404,9 @@ export default function (pi: ExtensionAPI): void {
           const taskId = await conn.sendAct(channel, "offer", undefined, fields);
           if (!taskId) return text("Could not send the handoff (offline, or not signed in).");
 
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           if (brief) {
-            localBriefs.set(taskId, brief);
+            rt.localBriefs.set(taskId, brief);
             // The brief travels as an ordinary message so the assignee can
             // read it; the signed hash on the offer makes it tamper-evident.
             conn.send(channel, `[handoff ${taskId.slice(0, 10)} brief] ${brief}`);
@@ -2261,7 +1443,7 @@ export default function (pi: ExtensionAPI): void {
           // server serialises competing claims (first valid wins).
           const title = params.title ?? params.message;
           if (!title) return text("post requires 'title' (what needs doing).");
-          const cfg2 = config ?? (await ensureConfig(_ctx));
+          const cfg2 = rt.config ?? (await rt.ensureConfig());
           const channel = params.channel ?? cfg2.channels[0];
           if (!channel) {
             return text("post needs a channel — the room is the work queue. Try /freeq join #x.");
@@ -2275,9 +1457,9 @@ export default function (pi: ExtensionAPI): void {
           const taskId = await conn.sendAct(channel, "offer", undefined, fields);
           if (!taskId) return text("Could not post the task (offline, or not signed in).");
 
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           if (brief) {
-            localBriefs.set(taskId, brief);
+            rt.localBriefs.set(taskId, brief);
             conn.send(channel, `[task ${taskId.slice(0, 10)} brief] ${brief}`);
           }
           store.put({
@@ -2314,7 +1496,7 @@ export default function (pi: ExtensionAPI): void {
           // addressed to its own DID and had no way to act on it - the human
           // had to accept on its behalf, which defeats the point of an
           // offer that survives its recipient being offline.
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const me = conn.did;
           if (!params.taskId) {
             const waiting = store.all().filter((r) => r.state === "offered" && r.offeree === me);
@@ -2336,7 +1518,7 @@ export default function (pi: ExtensionAPI): void {
                 `A handoff is addressed to an identity; only its offeree can take it.`,
             );
           }
-          const queue = await ensureOffers();
+          const queue = await rt.ensureOffers();
           queue.remove(rec.id);
           await queue.save();
           if (params.action === "decline") {
@@ -2345,7 +1527,7 @@ export default function (pi: ExtensionAPI): void {
             refreshUi();
             return text(`Declined ${rec.id.slice(0, 10)} — ${why}`);
           }
-          await acceptOffer(_ctx, config ?? (await ensureConfig(_ctx)), rec, rec.lastActor ?? "freeq");
+          await acceptOffer(_ctx, rt.config ?? (await rt.ensureConfig()), rec, rec.lastActor ?? "freeq");
           refreshUi();
           return text(
             `Accepted ${rec.id.slice(0, 10)} — ${rec.title}. The brief is now in your context; ` +
@@ -2354,7 +1536,7 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "claim": {
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const me = conn.did;
           if (!params.taskId) {
             // Be useful: show what is claimable rather than just erroring.
@@ -2398,7 +1580,7 @@ export default function (pi: ExtensionAPI): void {
                 "'alternatives' and 'evidence'.",
             );
           }
-          const cfg3 = config ?? (await ensureConfig(_ctx));
+          const cfg3 = rt.config ?? (await rt.ensureConfig());
           const channel = params.channel ?? cfg3.provenanceChannel ?? cfg3.channels[0];
           if (!channel) return text("No channel to record the decision in.");
 
@@ -2428,12 +1610,12 @@ export default function (pi: ExtensionAPI): void {
           // source there is, because it chooses what is safe to publish.
           const phrase = gistOf(params.message ?? params.title ?? "");
           if (!phrase) return text("status requires 'message' — a short present-tense phrase.");
-          beginStep(phrase);
+          rt.beginStep(phrase);
           return text(`Status published: ${phrase}`);
         }
 
         case "handoffs": {
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const me = conn.did;
           const inbox = store.inboxFor(me);
           const outbox = store.outboxFor(me);
@@ -2452,7 +1634,7 @@ export default function (pi: ExtensionAPI): void {
 
         case "complete": {
           if (!params.taskId) return text("complete requires 'taskId'.");
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const rec =
             store.get(params.taskId) ?? store.all().find((r) => r.id.startsWith(params.taskId!));
           if (!rec) return text(`No handoff known with id ${params.taskId}.`);
@@ -2484,7 +1666,7 @@ export default function (pi: ExtensionAPI): void {
          * offered/assigned/open) — only this surface was missing.
          */
         case "cancel": {
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const me = conn.did;
           if (!params.taskId) {
             // Be useful: show what is actually cancellable rather than erroring.
@@ -2564,7 +1746,7 @@ export default function (pi: ExtensionAPI): void {
         }
         // Completing the argument.
         if (TASK_SUBS.has(sub)) {
-          const recs = handoffs?.all() ?? [];
+          const recs = rt.handoffs?.all() ?? [];
           const items = recs
             .filter((r) => r.id.toLowerCase().startsWith(arg.toLowerCase()))
             .slice(0, 12)
@@ -2572,14 +1754,14 @@ export default function (pi: ExtensionAPI): void {
           return { prefix: arg, items };
         }
         if (PEER_SUBS.has(sub)) {
-          const items = (conn?.peers() ?? [])
+          const items = (rt.conn?.peers() ?? [])
             .filter((p) => p.did)
             .filter((p) => p.nick.toLowerCase().startsWith(arg.toLowerCase()) || (p.did ?? "").startsWith(arg))
             .map((p) => ({ value: p.did!, label: p.nick, description: p.did }));
           return { prefix: arg, items };
         }
         if (sub === "join" || sub === "leave" || sub === "mode" || sub === "call") {
-          const chans = (config?.channels ?? []).filter((c) => c.startsWith(arg || "#"));
+          const chans = (rt.config?.channels ?? []).filter((c) => c.startsWith(arg || "#"));
           return { prefix: arg, items: chans.map((c) => ({ value: c, label: c })) };
         }
         return current.getSuggestions(lines, line, col, options);
@@ -2602,8 +1784,8 @@ export default function (pi: ExtensionAPI): void {
       const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
       // Deliberate use of freeq is the reason a dormant project connects.
       // 'off' is exempt: turning it off must not first turn it on.
-      if (sub !== "off") await wake(ctx);
-      const cfg = await ensureConfig(ctx);
+      if (sub !== "off") await rt.wake();
+      const cfg = await rt.ensureConfig();
 
       switch (sub) {
         case "login": {
@@ -2615,9 +1797,9 @@ export default function (pi: ExtensionAPI): void {
           cfg.ownerDid = did;
           cfg.install ??= deriveInstallSlug();
           cfg.nick ??= defaultNick(cfg.install);
-          await saveConfig(agentDir, cfg);
+          await saveConfig(rt.agentDir, cfg);
           ctx.ui.notify(`freeq: owner set to ${did}; connecting…`, "info");
-          ctx.ui.notify(await connect(ctx), conn?.state === "online" ? "info" : "warning");
+          ctx.ui.notify(await rt.connect(), rt.conn?.state === "online" ? "info" : "warning");
           return;
         }
 
@@ -2631,13 +1813,13 @@ export default function (pi: ExtensionAPI): void {
           }
           if (rest[0] === "verify") {
             ctx.ui.notify("freeq: reconnecting to ask the server…", "info");
-            await conn?.stop("re-presenting delegation");
-            conn = undefined;
-            await connect(ctx);
+            await rt.conn?.stop("re-presenting delegation");
+            rt.conn = undefined;
+            await rt.connect();
             // `conn` is reassigned inside connect(); TS narrowed it to
             // undefined from the line above, so read it through a fresh
             // binding.
-            const live = (): FreeqConnection | undefined => conn as FreeqConnection | undefined;
+            const live = (): FreeqConnection | undefined => rt.conn as FreeqConnection | undefined;
             // An unverified reply comes first; a verified one follows once
             // the server has read the owner's records.
             const notice = await waitForProvenance(() => live()?.provenanceNotice, {
@@ -2666,8 +1848,8 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
           // The DID is this project's identity, made on its first connect.
-          if (!conn?.did) await connect(ctx);
-          const botDid = (conn as FreeqConnection | undefined)?.did;
+          if (!rt.conn?.did) await rt.connect();
+          const botDid = (rt.conn as FreeqConnection | undefined)?.did;
           if (!botDid) {
             ctx.ui.notify(
               "freeq: not connected yet, so this installation has no DID to show. Run /freeq status.",
@@ -2701,10 +1883,10 @@ export default function (pi: ExtensionAPI): void {
               `owner:    ${cfg.ownerDid ?? "(not logged in — /freeq login <did>)"}`,
               `server:   ${cfg.server}`,
               `state:    ${
-                passive
+                rt.passive
                   ? "passive — another pi session holds this installation's connection"
-                  : conn
-                    ? conn.describe()
+                  : rt.conn
+                    ? rt.conn.describe()
                     : "offline (not connected)"
               }`,
               `muted:    ${cfg.muted ? "YES — silent everywhere (/freeq unmute)" : "no"}`,
@@ -2713,10 +1895,10 @@ export default function (pi: ExtensionAPI): void {
                 // status disagree with the server: where we are CONFIGURED to
                 // be, and where the server says we ARE. Print both, and only
                 // remark on the difference when there is one.
-                const eff = channelsForProject(cfg, currentProject);
-                const pinned = currentProject ? cfg.projects?.[currentProject] !== undefined : false;
-                const live = conn?.joinedChannels() ?? [];
-                const refused = conn?.refusedChannels() ?? [];
+                const eff = channelsForProject(cfg, rt.currentProject);
+                const pinned = rt.currentProject ? cfg.projects?.[rt.currentProject] !== undefined : false;
+                const live = rt.conn?.joinedChannels() ?? [];
+                const refused = rt.conn?.refusedChannels() ?? [];
                 const lines = [
                   `channels: ${eff.length ? eff.join(", ") : "(none)"}` +
                     (pinned ? ` (this project only)` : ` (global)`),
@@ -2728,7 +1910,7 @@ export default function (pi: ExtensionAPI): void {
               `trusted:  ${Object.keys(cfg.trust).length} peer(s)`,
               `provenance: ${cfg.provenance ?? "decisions"}` +
                 (cfg.provenanceChannel ? ` → ${cfg.provenanceChannel}` : ""),
-              `config:   ${sources.length ? sources.join(", ") : "(defaults only)"}`,
+              `config:   ${rt.sources.length ? rt.sources.join(", ") : "(defaults only)"}`,
             ].join("\n"),
             "info",
           );
@@ -2740,8 +1922,8 @@ export default function (pi: ExtensionAPI): void {
           // connection: it will find the slot gone and go passive.
           // Same project as the slot we would claim on connect.
           const takeoverMeta = await collectSessionMeta({ cwd: ctx.cwd, model: ctx.model?.id });
-          const holder = await (lock ??= new ConnectionLock(
-            ConnectionLock.pathFor(agentDir, takeoverMeta.project),
+          const holder = await (rt.lock ??= new ConnectionLock(
+            ConnectionLock.pathFor(rt.agentDir, takeoverMeta.project),
           )).read();
           const ok = await ctx.ui.confirm(
             "freeq: take over the connection",
@@ -2750,13 +1932,13 @@ export default function (pi: ExtensionAPI): void {
               `Take it over for this window? The other session will go passive.`,
           );
           if (!ok) return;
-          await lock.release();
+          await rt.lock.release();
           // Force a fresh claim by clearing any stale in-memory state.
-          lock = new ConnectionLock(ConnectionLock.pathFor(agentDir, takeoverMeta.project));
-          await conn?.stop("takeover");
-          conn = undefined;
-          const message = await connect(ctx);
-          ctx.ui.notify(message, conn ? "info" : "warning");
+          rt.lock = new ConnectionLock(ConnectionLock.pathFor(rt.agentDir, takeoverMeta.project));
+          await rt.conn?.stop("takeover");
+          rt.conn = undefined;
+          const message = await rt.connect();
+          ctx.ui.notify(message, rt.conn ? "info" : "warning");
           return;
         }
 
@@ -2781,7 +1963,7 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
           cfg.provenance = level as ProvenanceTier;
-          await saveConfig(agentDir, cfg);
+          await saveConfig(rt.agentDir, cfg);
           ctx.ui.notify(`freeq: provenance → ${level}`, "info");
           return;
         }
@@ -2789,7 +1971,7 @@ export default function (pi: ExtensionAPI): void {
         case "mute":
         case "unmute": {
           cfg.muted = sub === "mute";
-          await saveConfig(agentDir, cfg);
+          await saveConfig(rt.agentDir, cfg);
           ctx.ui.notify(
             cfg.muted
               ? "freeq: muted — still connected and reachable, but will not " +
@@ -2803,13 +1985,13 @@ export default function (pi: ExtensionAPI): void {
         case "on":
         case "off": {
           cfg.enabled = sub === "on";
-          await saveConfig(agentDir, cfg);
+          await saveConfig(rt.agentDir, cfg);
           if (!cfg.enabled) {
-            await conn?.stop("disabled");
-            conn = undefined;
+            await rt.conn?.stop("disabled");
+            rt.conn = undefined;
             ctx.ui.notify("freeq: disabled", "info");
           } else {
-            ctx.ui.notify(await connect(ctx), "info");
+            ctx.ui.notify(await rt.connect(), "info");
           }
           return;
         }
@@ -2823,7 +2005,7 @@ export default function (pi: ExtensionAPI): void {
           }
           // Writing pins the project: from the first join or leave, this
           // project keeps its own list and stops inheriting the global one.
-          const project = currentProject;
+          const project = rt.currentProject;
           const current = channelsForProject(cfg, project);
           if (sub === "join") {
             const next = current.some((c) => c.toLowerCase() === channel.toLowerCase())
@@ -2831,11 +2013,11 @@ export default function (pi: ExtensionAPI): void {
               : [...current, channel];
             if (project) Object.assign(cfg, withProjectChannels(cfg, project, next));
             else cfg.channels = next;
-            await saveConfig(agentDir, cfg);
+            await saveConfig(rt.agentDir, cfg);
             // Keep the live intent in step with the config we just wrote, so
             // the unexpected-channel guard judges against the new list.
-            conn?.setWantedChannels(next);
-            const ok = conn?.join(channel);
+            rt.conn?.setWantedChannels(next);
+            const ok = rt.conn?.join(channel);
             ctx.ui.notify(
               ok
                 ? `freeq: joining ${channel} (mode: ${modeFor(cfg, channel)})`
@@ -2846,9 +2028,9 @@ export default function (pi: ExtensionAPI): void {
             const next = current.filter((c) => c.toLowerCase() !== channel.toLowerCase());
             if (project) Object.assign(cfg, withProjectChannels(cfg, project, next));
             else cfg.channels = next;
-            await saveConfig(agentDir, cfg);
-            conn?.setWantedChannels(next);
-            conn?.leave(channel);
+            await saveConfig(rt.agentDir, cfg);
+            rt.conn?.setWantedChannels(next);
+            rt.conn?.leave(channel);
             ctx.ui.notify(
               project
                 ? `freeq: left ${channel} for this project (${project}); other projects unaffected`
@@ -2860,8 +2042,8 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "handoffs": {
-          const store = await ensureHandoffs();
-          const me = conn?.did;
+          const store = await rt.ensureHandoffs();
+          const me = rt.conn?.did;
           const inbox = store.inboxFor(me);
           const outbox = store.outboxFor(me);
           const all = store.all();
@@ -2884,9 +2066,9 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "tasks": {
-          const store = await ensureHandoffs();
-          const queue = await ensureOffers();
-          const me = conn?.did;
+          const store = await rt.ensureHandoffs();
+          const queue = await rt.ensureOffers();
+          const me = rt.conn?.did;
           const now = Date.now();
           const age = (r: HandoffRecord) => formatAge(now - r.updatedAt);
 
@@ -2914,7 +2096,7 @@ export default function (pi: ExtensionAPI): void {
                   .map(
                     (r) =>
                       `  ${describeHandoff(r, me)}  ${age(r)}` +
-                      (watchdog?.has(r.id) ? "  [in flight]" : "  [not being worked on]"),
+                      (rt.watchdog?.has(r.id) ? "  [in flight]" : "  [not being worked on]"),
                   )
                   .join("\n")
               : "",
@@ -2958,13 +2140,13 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "withheld": {
-          const senders = withheld.senders();
+          const senders = rt.withheld.senders();
           if (!senders.length) {
             ctx.ui.notify("freeq: nothing withheld — everyone who addressed you got through", "info");
             return;
           }
           if ((rest[0] ?? "").toLowerCase() === "drop") {
-            const n = senders.reduce((acc, x) => acc + withheld.discard(x.key), 0);
+            const n = senders.reduce((acc, x) => acc + rt.withheld.discard(x.key), 0);
             ctx.ui.notify(`freeq: dropped ${n} withheld message${n === 1 ? "" : "s"}`, "info");
             refreshUi();
             return;
@@ -3000,7 +2182,7 @@ export default function (pi: ExtensionAPI): void {
             ctx.ui.notify("only 'accept' is supported here; use the web client for the rest", "warning");
             return;
           }
-          const ok = conn?.acceptPolicy(ch);
+          const ok = rt.conn?.acceptPolicy(ch);
           ctx.ui.notify(
             ok ? `freeq: accepted ${ch}'s policy and re-sent the join` : "freeq: not connected",
             ok ? "info" : "warning",
@@ -3017,7 +2199,7 @@ export default function (pi: ExtensionAPI): void {
             );
             return;
           }
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const found = resolveTaskRef(store.all(), rest[0]);
           if (!found.ok) {
             ctx.ui.notify(`freeq: ${found.reason}`, "warning");
@@ -3031,7 +2213,7 @@ export default function (pi: ExtensionAPI): void {
             );
             return;
           }
-          const queue = await ensureOffers();
+          const queue = await rt.ensureOffers();
           queue.remove(rec.id);
           await queue.save();
           // No tier check on either: the owner typed this, and the trust map
@@ -3049,14 +2231,14 @@ export default function (pi: ExtensionAPI): void {
             ctx.ui.notify("usage: /freeq drop <id> [reason]", "warning");
             return;
           }
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const found = resolveTaskRef(store.all(), rest[0]);
           if (!found.ok) {
             ctx.ui.notify(`freeq: ${found.reason}`, "warning");
             return;
           }
           const rec = found.record;
-          if (rec.assignee !== conn?.did || rec.state !== "assigned") {
+          if (rec.assignee !== rt.conn?.did || rec.state !== "assigned") {
             ctx.ui.notify(
               `freeq: ${rec.id.slice(0, 10)} is not work in flight here ` +
                 `(state '${rec.state}') — nothing to drop`,
@@ -3065,13 +2247,13 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
           const reason = rest.slice(1).join(" ") || "dropped by the operator";
-          watchdog?.finish(rec.id);
-          resumed.delete(rec.id);
-          const ok = await conn?.sendAct(rec.channel, "fail", rec.id, { note: reason });
-          if (workTask === rec.id) {
-            endStep();
-            workTask = undefined;
-            pushStatus("active", undefined, undefined, true);
+          rt.watchdog?.finish(rec.id);
+          rt.resumed.delete(rec.id);
+          const ok = await rt.conn?.sendAct(rec.channel, "fail", rec.id, { note: reason });
+          if (rt.workTask === rec.id) {
+            rt.endStep();
+            rt.workTask = undefined;
+            rt.pushStatus("active", undefined, undefined, true);
           }
           ctx.ui.notify(
             ok
@@ -3088,14 +2270,14 @@ export default function (pi: ExtensionAPI): void {
             ctx.ui.notify("usage: /freeq progress <id> <note>", "warning");
             return;
           }
-          const store = await ensureHandoffs();
+          const store = await rt.ensureHandoffs();
           const found = resolveTaskRef(store.all(), rest[0]);
           if (!found.ok) {
             ctx.ui.notify(`freeq: ${found.reason}`, "warning");
             return;
           }
           const rec = found.record;
-          if (rec.assignee !== conn?.did || rec.state !== "assigned") {
+          if (rec.assignee !== rt.conn?.did || rec.state !== "assigned") {
             ctx.ui.notify(
               `freeq: only the assignee of work in flight can report progress on it ` +
                 `(${rec.id.slice(0, 10)} is '${rec.state}')`,
@@ -3104,9 +2286,9 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
           // A manual heartbeat is also a sign of life: it resets the stall clock.
-          watchdog?.touch(Date.now(), rec.id);
-          const ok = await conn?.sendAct(rec.channel, "progress", rec.id, { note });
-          journal("progress", rec.id, note);
+          rt.watchdog?.touch(Date.now(), rec.id);
+          const ok = await rt.conn?.sendAct(rec.channel, "progress", rec.id, { note });
+          rt.journal("progress", rec.id, note);
           ctx.ui.notify(
             ok
               ? `freeq: reported progress on ${rec.id.slice(0, 10)}`
@@ -3117,10 +2299,10 @@ export default function (pi: ExtensionAPI): void {
         }
 
         case "peers": {
-          const peers = conn?.peers() ?? [];
+          const peers = rt.conn?.peers() ?? [];
           if (!peers.length) {
             ctx.ui.notify(
-              conn?.state === "online" ? "freeq: no peers seen yet" : "freeq: offline — no peers",
+              rt.conn?.state === "online" ? "freeq: no peers seen yet" : "freeq: offline — no peers",
               "info",
             );
             return;
@@ -3164,7 +2346,7 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
           cfg.modes[channel.toLowerCase()] = mode as Mode;
-          await saveConfig(agentDir, cfg);
+          await saveConfig(rt.agentDir, cfg);
           ctx.ui.notify(`freeq: ${channel} → ${mode}`, "info");
           return;
         }
@@ -3192,11 +2374,11 @@ export default function (pi: ExtensionAPI): void {
             return;
           }
           cfg.trust[did] = tier as Tier;
-          await saveConfig(agentDir, cfg);
+          await saveConfig(rt.agentDir, cfg);
           ctx.ui.notify(`freeq: ${did} → ${tier}`, "info");
           // A sender who was refused has already said their piece. Asking them
           // to repeat it is asking for a second chance to be misunderstood.
-          const held = withheld.drain(did);
+          const held = rt.withheld.drain(did);
           if (held.length && TIER_RANK[tier as Tier] >= TIER_RANK.message) {
             const wanted = await ctx.ui.confirm(
               "freeq: deliver held messages",
@@ -3205,8 +2387,7 @@ export default function (pi: ExtensionAPI): void {
             );
             if (wanted) {
               for (const m of held) {
-                deliver(
-                  ctx,
+                rt.deliver(
                   {
                     kind: "chat",
                     from: m.from,
@@ -3255,18 +2436,3 @@ function escapeRe(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * The HTTP origin that serves the key store, derived from the IRC websocket
- * URL (`wss://host/irc` → `https://host`).
- */
-function httpOriginFor(wsUrl: string): string {
-  try {
-    const u = new URL(wsUrl);
-    u.protocol = u.protocol === "ws:" ? "http:" : "https:";
-    u.pathname = "";
-    u.search = "";
-    return u.origin;
-  } catch {
-    return "https://irc.freeq.at";
-  }
-}
