@@ -1,0 +1,89 @@
+name: Agent harness packages
+
+# Builds and tests the JS packages that put freeq into agent harnesses
+# (freeq-pi, freeqcc) and the packages they are built on (the JS SDK and
+# bot-kit). Runs in its own workflow, path-filtered so it only triggers when
+# one of those packages changes — most PRs skip it entirely.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'freeq-sdk-js/**'
+      - 'freeq-bot-kit-js/**'
+      - 'freeq-harness-kit/**'
+      - 'freeq-pi/**'
+      - 'freeqcc/**'
+      - '.github/workflows/agent-harness.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'freeq-sdk-js/**'
+      - 'freeq-bot-kit-js/**'
+      - 'freeq-harness-kit/**'
+      - 'freeq-pi/**'
+      - 'freeqcc/**'
+      - '.github/workflows/agent-harness.yml'
+
+jobs:
+  agent-harness:
+    name: Agent harness packages (vitest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Built in dependency order: each package links its siblings by file:
+      # path and imports their dist/.
+      - name: Install (JS SDK)
+        working-directory: freeq-sdk-js
+        run: npm ci
+
+      - name: Build (JS SDK)
+        working-directory: freeq-sdk-js
+        run: npm run build
+
+      - name: Test (JS SDK)
+        working-directory: freeq-sdk-js
+        run: npm test
+
+      - name: Install (bot-kit)
+        working-directory: freeq-bot-kit-js
+        run: npm ci
+
+      - name: Build (bot-kit)
+        working-directory: freeq-bot-kit-js
+        run: npm run build
+
+      - name: Test (bot-kit)
+        working-directory: freeq-bot-kit-js
+        run: npm test
+
+      # freeq-pi's prepare step builds any sibling whose dist/ is missing;
+      # both are built above, so it only links them.
+      - name: Install (freeq-pi)
+        working-directory: freeq-pi
+        run: npm ci
+
+      # Also typechecks extensions/, which pi loads as TypeScript.
+      - name: Build (freeq-pi)
+        working-directory: freeq-pi
+        run: npm run build
+
+      - name: Test (freeq-pi)
+        working-directory: freeq-pi
+        run: npm test
+
+      - name: Install (freeqcc)
+        working-directory: freeqcc
+        run: npm ci
+
+      - name: Build (freeqcc)
+        working-directory: freeqcc
+        run: npm run build
+
+      - name: Test (freeqcc)
+        working-directory: freeqcc
+        run: npm test
