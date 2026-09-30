@@ -69,6 +69,15 @@ laptop can close and work keeps going. Run lifecycle notifications land in
   (resets 2026-10-01 00:00 UTC). Step 6 (a real green run) waits on that.
 - Real laptop-launched run (01M3QG67…): docker sandbox, clone, run branch push,
   hooks, Sonnet 5.5 selection all worked; LLM stages failed on the usage limit.
+- **Found + fixed:** that run still ended SUCCEEDED — unconditional edges let
+  failed agent stages fall through to the CI gate, which passed on unchanged
+  main. An outage would have looked like a quiet night. 0.254 ignores
+  graph-level `on_failure="exit"` and rejects all-conditional edges, so each
+  working stage now advances on `outcome=succeeded` and otherwise drops to an
+  `abort` goal gate. Verified: run 01M3QHMC… ended FAILED in ~1 min and
+  #freeq-dev got the FAILED line.
+- Build timing (CI gate, 4 vCPU): cold 12.7 min → 9.5 min with a warm
+  sccache; compile is ~4 min cold, the rest is the test suite.
 
 ## Open
 

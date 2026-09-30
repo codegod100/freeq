@@ -18,5 +18,19 @@ digraph BugHunt {
     verify    [shape=parallelogram, label="CI gate", script="bash .fabro/verify.sh", goal_gate=true, retry_target="fix", max_retries=2, timeout="3600s"]
     pr_body   [shape=tab, label="PR description", prompt="@prompts/pr_body.md", thread_id="bug", fidelity="full"]
 
-    start -> hunt -> fix -> verify -> pr_body -> exit
+    // A failed working stage must not fall through to the next one: with
+    // plain unconditional edges an LLM outage "succeeded" by running the CI
+    // gate on unchanged main. Each such stage advances only on success and
+    // otherwise drops to `abort`, a failing goal gate, so the run ends FAILED
+    // (and says so in #freeq-dev). Fabro 0.254 requires the unconditional
+    // fallback edge, and ignores graph-level on_failure="exit".
+    abort [shape=parallelogram, label="Stage failed", script="echo 'a working stage failed - see fabro events' >&2; exit 1", goal_gate=true, max_retries=0]
+    abort -> exit
+
+    start -> hunt
+    hunt -> fix [condition="outcome=succeeded"]
+    hunt -> abort
+    fix -> verify [condition="outcome=succeeded"]
+    fix -> abort
+    verify -> pr_body -> exit
 }

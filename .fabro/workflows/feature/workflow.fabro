@@ -51,17 +51,38 @@ digraph Feature {
     pr_body [shape=tab, label="PR description", prompt="@prompts/pr_body.md", thread_id="feat", fidelity="full"]
 
     // ── Wiring (fan-out / fan-in) ────────────────────────────────────────
-    start -> explore -> plan
-    plan -> review_security
-    plan -> review_compat
-    plan -> review_ops
+    // A failed working stage must not fall through to the next one: with
+    // plain unconditional edges an LLM outage "succeeded" by running the CI
+    // gate on unchanged main. Each such stage advances only on success and
+    // otherwise drops to `abort`, a failing goal gate, so the run ends FAILED
+    // (and says so in #freeq-dev). Fabro 0.254 requires the unconditional
+    // fallback edge, and ignores graph-level on_failure="exit".
+    abort [shape=parallelogram, label="Stage failed", script="echo 'a working stage failed - see fabro events' >&2; exit 1", goal_gate=true, max_retries=0]
+    abort -> exit
+
+    start -> explore
+    explore -> plan [condition="outcome=succeeded"]
+    explore -> abort
+    // Fan-out only on a good plan; reviews fan in unconditionally so one
+    // flaky reviewer doesn't sink the run.
+    plan -> review_security [condition="outcome=succeeded"]
+    plan -> review_compat [condition="outcome=succeeded"]
+    plan -> review_ops [condition="outcome=succeeded"]
+    plan -> abort
     review_security -> synthesize
     review_compat   -> synthesize
     review_ops      -> synthesize
-    synthesize -> approve -> implement -> verify
+    synthesize -> approve [condition="outcome=succeeded"]
+    synthesize -> abort
+    approve -> implement [condition="outcome=succeeded"]
+    approve -> abort
+    implement -> verify [condition="outcome=succeeded"]
+    implement -> abort
     verify -> cr_correctness
     verify -> cr_security
     cr_correctness -> address
     cr_security    -> address
-    address -> verify2 -> pr_body -> exit
+    address -> verify2 [condition="outcome=succeeded"]
+    address -> abort
+    verify2 -> pr_body -> exit
 }
