@@ -108,6 +108,18 @@ export interface ActEventLike {
   replayed: boolean;
 }
 
+/**
+ * What the caller knows about the server it is connected to, for moves only
+ * the server may make (`expire`): the server's own DID, read from its
+ * `/api/v1/signing-key`, and whether this event's signature verified.
+ */
+export interface ServerRuling {
+  /** The connected server's `did:web:` name; undefined while not known. */
+  serverDid?: string;
+  /** True only when the event's signature verified `valid`. */
+  signatureValid: boolean;
+}
+
 export function hashBrief(text: string): string {
   return `sha256:${createHash("sha256").update(text, "utf8").digest("hex")}`;
 }
@@ -192,7 +204,7 @@ export class HandoffStore {
    * Legality is delegated to bot-kit's transition table — this function never
    * decides which verb is allowed, only how to fold a legal one into the view.
    */
-  apply(ev: ActEventLike): ApplyResult {
+  apply(ev: ActEventLike, server?: ServerRuling): ApplyResult {
     if (ev.kind !== HANDOFF_KIND) {
       return { ok: false, reason: `unsupported kind '${ev.kind}'` };
     }
@@ -256,10 +268,16 @@ export class HandoffStore {
       deadline: existing.deadline ?? null,
     };
 
+    // A move only the server may make counts as the server's when it is
+    // signed by the server this connection is on, and the signature verified.
+    // That server rules only on its own tasks, and no other signer can use its
+    // name. A linked server's ruling on its own task is not accepted here.
+    const isSystem =
+      !!server?.serverDid && server.signatureValid && actor === server.serverDid;
     const verdict = checkTransition(
       task,
       { verb: ev.verb, msgid: ev.eventId, fields: Object.keys(ev.fields) },
-      { did: actor },
+      { did: actor, isSystem },
     );
     if (!verdict.ok) {
       // A confirmation is the home server's receipt for an event it filed,

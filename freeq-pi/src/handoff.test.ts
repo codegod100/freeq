@@ -151,6 +151,70 @@ describe("authorization — who may move a task", () => {
   });
 });
 
+describe("the connected server's rulings", () => {
+  const SERVER = "did:web:irc.example";
+
+  function expire(taskId: string, did: string, signatureValid: boolean) {
+    return store.apply(
+      ev({
+        verb: "expire",
+        did,
+        from: "irc.example",
+        eventId: "01EXPIRE000000000000000000",
+        taskId,
+        fields: { act: "handoff", "act-id": taskId },
+      }),
+      { serverDid: SERVER, signatureValid },
+    );
+  }
+
+  it("an expire signed by the connected server, and verified, expires the task", () => {
+    const id = offer(store);
+    move(store, "accept", id, BOB);
+    const r = expire(id, SERVER, true);
+    expect(r.ok, r.ok ? "" : r.reason).toBe(true);
+    expect(store.get(id)!.state).toBe("expired");
+  });
+
+  it("an expire signed under another server's did:web name is refused", () => {
+    const id = offer(store);
+    move(store, "accept", id, BOB);
+    expect(expire(id, "did:web:other.example", true).ok).toBe(false);
+    expect(store.get(id)!.state).toBe("assigned");
+  });
+
+  it("an expire signed by a did:plc is refused", () => {
+    const id = offer(store);
+    move(store, "accept", id, BOB);
+    expect(expire(id, "did:plc:someone", true).ok).toBe(false);
+    expect(store.get(id)!.state).toBe("assigned");
+  });
+
+  it("an expire under the server's name whose signature did not verify is refused", () => {
+    const id = offer(store);
+    move(store, "accept", id, BOB);
+    expect(expire(id, SERVER, false).ok).toBe(false);
+    expect(store.get(id)!.state).toBe("assigned");
+  });
+
+  it("an expire is refused when the server's name is not known", () => {
+    const id = offer(store);
+    move(store, "accept", id, BOB);
+    const r = store.apply(
+      ev({
+        verb: "expire",
+        did: SERVER,
+        eventId: "01EXPIRE000000000000000000",
+        taskId: id,
+        fields: { act: "handoff", "act-id": id },
+      }),
+      { serverDid: undefined, signatureValid: true },
+    );
+    expect(r.ok).toBe(false);
+    expect(store.get(id)!.state).toBe("assigned");
+  });
+});
+
 describe("malformed and hostile input", () => {
   it("refuses an unknown kind", () => {
     const r = store.apply(ev({ kind: "bounty" }));

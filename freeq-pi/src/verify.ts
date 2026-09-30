@@ -163,6 +163,24 @@ export function serverKeyFetcher(origin: string): KeyFetcher {
   };
 }
 
+/**
+ * The connected server's own DID, as its `/api/v1/signing-key` publishes it
+ * (`did:web:<server name>`), or undefined when it cannot be read. A failed
+ * read is not remembered: the caller asks again on the next event.
+ */
+export async function fetchServerDid(origin: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(`${origin.replace(/\/$/, "")}/api/v1/signing-key`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { did?: unknown };
+    return typeof body.did === "string" && body.did.startsWith("did:web:") ? body.did : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function base64urlToBytes(s: string): Uint8Array {
   const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
   const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));

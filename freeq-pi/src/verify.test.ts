@@ -7,6 +7,7 @@ import {
   kidOf,
   sigTagOf,
   base64urlToBytes,
+  fetchServerDid,
   type KeyFetcher,
 } from "./verify.js";
 
@@ -201,5 +202,48 @@ describe("tag and kid helpers", () => {
   it("decodes base64url without padding", () => {
     expect(base64urlToBytes("AAEC")).toEqual(new Uint8Array([0, 1, 2]));
     expect(base64urlToBytes("_w").length).toBe(1);
+  });
+});
+
+describe("fetchServerDid", () => {
+  async function serving(status: number, body: unknown): Promise<[string, () => void]> {
+    const { createServer } = await import("node:http");
+    const server = createServer((req, res) => {
+      res.writeHead(req.url === "/api/v1/signing-key" ? status : 404, {
+        "content-type": "application/json",
+      });
+      res.end(JSON.stringify(body));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as { port: number };
+    return [`http://127.0.0.1:${port}`, () => server.close()];
+  }
+
+  it("reads the did the server publishes", async () => {
+    const [origin, close] = await serving(200, { did: "did:web:irc.example", kid: "k" });
+    try {
+      expect(await fetchServerDid(origin)).toBe("did:web:irc.example");
+    } finally {
+      close();
+    }
+  });
+
+  it("gives nothing for a did that is not a did:web name", async () => {
+    const [origin, close] = await serving(200, { did: "did:plc:someone" });
+    try {
+      expect(await fetchServerDid(origin)).toBeUndefined();
+    } finally {
+      close();
+    }
+  });
+
+  it("gives nothing when the server cannot be read", async () => {
+    const [origin, close] = await serving(500, {});
+    try {
+      expect(await fetchServerDid(origin)).toBeUndefined();
+    } finally {
+      close();
+    }
+    expect(await fetchServerDid("http://127.0.0.1:1")).toBeUndefined();
   });
 });
