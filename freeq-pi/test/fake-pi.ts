@@ -28,12 +28,37 @@ import { join } from "node:path";
 // Real timer functions, captured before any test installs fake timers, so
 // `settle()` can let promise chains run while the clock is frozen.
 const realSetImmediate = globalThis.setImmediate;
+const realSetTimeout = globalThis.setTimeout;
+
+/** A stand-in for the server's HTTP API: `/api/v1/actions`, key lookups. */
+export type FetchHandler = (url: string) => { status: number; body?: unknown } | Error;
+
+/** Default: nothing assigned to us, and no key on record for anyone. */
+const defaultFetch: FetchHandler = (url) =>
+  url.includes("/api/v1/actions") ? { status: 200, body: { tasks: [] } } : { status: 404 };
 
 /** Shared, mutable state the module mocks read from. */
-const state: { agentDir: string; bot: FakeBot | undefined } = {
+const state: {
+  agentDir: string;
+  bot: FakeBot | undefined;
+  fetch: FetchHandler;
+  fetched: string[];
+} = {
   agentDir: "",
   bot: undefined,
+  fetch: defaultFetch,
+  fetched: [],
 };
+
+// The extension asks the server what is assigned to it on every connect, and
+// looks up signing keys for act events. Neither may reach a network.
+globalThis.fetch = (async (input: string | URL) => {
+  const url = String(input);
+  state.fetched.push(url);
+  const r = state.fetch(url);
+  if (r instanceof Error) throw r;
+  return new Response(r.body === undefined ? null : JSON.stringify(r.body), { status: r.status });
+}) as typeof fetch;
 
 // HOME decides where the extension looks for ~/.freeq (read once, when the
 // extension module is first imported), so it points at a scratch directory
@@ -187,6 +212,42 @@ export interface StartOptions {
   entries?: Array<{ type: string; customType?: string; data?: unknown }>;
   /** Fire `session_start` (default true). */
   start?: boolean;
+  /** The server's HTTP API. Default: nothing assigned, no keys. */
+  fetch?: FetchHandler;
+}
+
+/** An act event as the SDK hands one to bot-kit's `actEvent` listeners. */
+export interface ActEvent {
+  channel: string;
+  from: string;
+  did?: string;
+  kind: string;
+  verb: string;
+  eventId: string;
+  taskId: string;
+  fields: Record<string, string>;
+  tags: Record<string, string>;
+  sigTag?: string;
+  replayed: boolean;
+}
+
+/**
+ * Build an act event. An opener (offer) has no `act-id` field and its event
+ * id is the task id; every other verb names the task in `act-id`.
+ */
+export function actEvent(over: Partial<ActEvent> & { verb: string; taskId: string }): ActEvent {
+  const opener = over.verb === "offer";
+  return {
+    channel: "#work",
+    from: "peer",
+    did: "did:plc:peer",
+    kind: "handoff",
+    eventId: opener ? over.taskId : `${over.taskId}-${over.verb}`,
+    replayed: false,
+    tags: {},
+    ...over,
+    fields: { ...(opener ? {} : { "act-id": over.taskId }), ...(over.fields ?? {}) },
+  };
 }
 
 /** The owner DID every default config uses. */
@@ -208,6 +269,10 @@ export function baseConfig(over: Record<string, unknown> = {}): Record<string, u
 /** Let fire-and-forget async work in the extension run to completion. */
 export async function settle(rounds = 20): Promise<void> {
   for (let i = 0; i < rounds; i++) await new Promise((r) => realSetImmediate(r));
+  // File writes (config, handoff store, offer queue) finish on the thread
+  // pool, not in the check phase; give them a real moment too.
+  await new Promise((r) => realSetTimeout(r, 5));
+  for (let i = 0; i < rounds; i++) await new Promise((r) => realSetImmediate(r));
 }
 
 let loaded: ((pi: unknown) => void) | undefined;
@@ -224,6 +289,8 @@ export async function startPi(opts: StartOptions = {}) {
   mkdirSync(cwd, { recursive: true });
   if (opts.config) writeFileSync(join(agentDir, "freeq.json"), JSON.stringify(opts.config));
   state.agentDir = agentDir;
+  state.fetch = opts.fetch ?? defaultFetch;
+  state.fetched = [];
   const fakeBot = new FakeBot();
   state.bot = fakeBot;
 
@@ -288,9 +355,29 @@ export async function startPi(opts: StartOptions = {}) {
   if (!loaded) loaded = (await import("../extensions/freeq.js")).default as (pi: unknown) => void;
   loaded(pi);
 
+  /**
+   * Wait until the extension stops producing output. Its inbound handlers are
+   * fire-and-forget and await file writes, so a fixed number of ticks is not
+   * enough; this waits for the wire, notices, deliveries, entries and
+   * confirmations to stay unchanged across several real pauses.
+   */
+  const activity = () =>
+    fakeBot.sent.length + notices.length + delivered.length + entries.length + confirms.length +
+    fakeBot.states.length + state.fetched.length;
+  async function quiesce(): Promise<void> {
+    let last = -1;
+    let stable = 0;
+    for (let i = 0; i < 200 && stable < 3; i++) {
+      await settle();
+      const now = activity();
+      stable = now === last ? stable + 1 : 0;
+      last = now;
+    }
+  }
+
   async function fire(event: string, payload: unknown = {}): Promise<void> {
     for (const h of handlers.get(event) ?? []) await h(payload, ctx);
-    await settle();
+    await quiesce();
   }
 
   const h = {
@@ -315,6 +402,7 @@ export async function startPi(opts: StartOptions = {}) {
     titles,
     autocomplete,
     fire,
+    quiesce,
     setIdle(v: boolean) {
       idle = v;
     },
@@ -327,18 +415,18 @@ export async function startPi(opts: StartOptions = {}) {
     /** Run `/freeq <args>`. */
     async command(args: string): Promise<void> {
       await commands.get("freeq").handler(args, ctx);
-      await settle();
+      await quiesce();
     },
     /** Run the `freeq` tool and return its text. */
     async tool(params: Record<string, unknown>): Promise<string> {
       const r = await tools.get("freeq").execute("call-1", params, undefined, undefined, ctx);
-      await settle();
+      await quiesce();
       return r.content.map((c: { text: string }) => c.text).join("\n");
     },
     /** A direct message from `from`, whose server-resolved DID is `did`. */
     async dm(from: string, did: string | null, text: string): Promise<void> {
       fakeBot.emit("message", from, { from, text, isSelf: false, tags: did ? { account: did } : {} });
-      await settle();
+      await quiesce();
     },
     /** A channel message. */
     async say(channel: string, from: string, did: string | null, text: string): Promise<void> {
@@ -348,7 +436,7 @@ export async function startPi(opts: StartOptions = {}) {
         isSelf: false,
         tags: did ? { account: did } : {},
       });
-      await settle();
+      await quiesce();
     },
     /** Notices whose text contains `s`. */
     noticesWith(s: string): Notice[] {
@@ -368,6 +456,57 @@ export async function startPi(opts: StartOptions = {}) {
     },
     async shutdown(): Promise<void> {
       await fire("session_shutdown");
+    },
+    /** A task event arriving from the server. */
+    async act(ev: ActEvent): Promise<void> {
+      fakeBot.emit("actEvent", ev);
+      await quiesce();
+    },
+    /** A peer's `pi_ask` arriving, with the server-resolved DID. */
+    async ask(from: string, did: string | null, question: string, req = "req-1"): Promise<void> {
+      fakeBot.emit("coordinationEvent", {
+        eventType: "pi_ask",
+        from,
+        did: did ?? undefined,
+        channel: from,
+        payload: { req, q: question },
+        tags: did ? { account: did } : {},
+      });
+      await quiesce();
+    },
+    /** A peer agent's hello, which makes it an agent in `peers`. */
+    async hello(from: string, did: string, meta: Record<string, string> = {}, channel = "#work"): Promise<void> {
+      fakeBot.emit("coordinationEvent", {
+        eventType: "pi_hello",
+        from,
+        did,
+        channel,
+        payload: { v: 1, meta, did, agent: "pi" },
+        tags: { account: did },
+      });
+      await quiesce();
+    },
+    /** Replies to inbound asks we sent, decoded: `{ to, req, a?, err? }`. */
+    askReplies(): Array<{ to: string; req: string; a?: string; err?: string }> {
+      return fakeBot
+        .of("tagmsg")
+        .filter((t) => (t.payload as Record<string, string>)["+freeq.at/event"] === "pi_ask_reply")
+        .map((t) => ({
+          to: t.target,
+          ...JSON.parse(decodeURIComponent((t.payload as Record<string, string>)["+freeq.at/payload"]!)),
+        }));
+    },
+    /** URLs the extension fetched. */
+    fetched(): string[] {
+      return [...state.fetched];
+    },
+    /** Replace the scratch root in text with `<root>`, so paths pin stably. */
+    norm(text: string): string {
+      return text.split(root).join("<root>");
+    },
+    /** Notices, with the scratch root replaced. */
+    noticeTexts(): string[] {
+      return notices.map((n) => `${n.level}: ${n.text.split(root).join("<root>")}`);
     },
   };
 
