@@ -23,25 +23,7 @@ import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Container, Text } from "@earendil-works/pi-tui";
 
-import {
-  saveConfig,
-  channelsForProject,
-  withProjectChannels,
-  modeFor,
-  tierFor,
-  MODES,
-  TIER_RANK,
-  type FreeqConfig,
-  type Mode,
-  type Tier,
-} from "@freeq/harness-kit/config";
-import { deriveInstallSlug, defaultNick, isDid } from "@freeq/harness-kit/identity";
-import {
-  agentInstructions,
-  authorizeInstructions,
-  interpretProvenanceNotice,
-  waitForProvenance,
-} from "@freeq/harness-kit/owner-key";
+import { tierFor, type FreeqConfig, type Tier } from "@freeq/harness-kit/config";
 import { McpStdioClient } from "../src/mcp-stdio.js";
 import { addressedUtterances, parseListenResult, toBridgeCall, type AvParams } from "../src/av.js";
 import { setLogger } from "@freeq/sdk";
@@ -50,7 +32,6 @@ import {
   inboundCardParts,
   offerCardLines,
   roomLineParts,
-  rosterLines,
   type RoomLineInput,
 } from "@freeq/harness-kit/ui";
 import { markForTerminal, supportsTruecolor, WORDMARK } from "../src/logo.js";
@@ -60,18 +41,7 @@ import { readFile } from "node:fs/promises";
 import { JOURNAL_ENTRY, notesFor } from "@freeq/harness-kit/journal";
 import { homedir } from "node:os";
 import { join as joinPath } from "node:path";
-import { collectSessionMeta } from "@freeq/harness-kit/presence";
-import { FreeqConnection } from "@freeq/harness-kit/connection";
-import { ConnectionLock } from "@freeq/harness-kit/lock";
-import { isTerminal } from "@freeq/bot-kit";
-import {
-  describeHandoff,
-  resolveTaskRef,
-  formatAge,
-  type HandoffRecord,
-} from "@freeq/harness-kit/handoff";
-import { PROVENANCE_TIERS, type ProvenanceTier } from "@freeq/harness-kit/provenance";
-import { AgentRuntime, FREEQ_ROOT } from "@freeq/harness-kit/runtime";
+import { AgentRuntime } from "@freeq/harness-kit/runtime";
 import { FREEQ_TOOL_DESCRIPTION } from "@freeq/harness-kit/tool";
 import type { Harness } from "@freeq/harness-kit/harness";
 
@@ -137,6 +107,24 @@ export default function (pi: ExtensionAPI): void {
       if (!lastCtx) return;
       refreshUi(lastCtx);
       showMarkOnce(lastCtx);
+    },
+    roster: (title, lines, dids) => {
+      const ctx = lastCtx;
+      if (!ctx) return;
+      // A widget rather than a toast: the roster is something you read and
+      // compare, and each row is coloured by its peer's DID so the same
+      // correspondent is recognisable at a glance across sessions.
+      ctx.ui.setWidget("freeq-peers", (_tui, theme) => {
+        const box = new Container();
+        box.addChild(new Text(theme.fg("toolTitle", theme.bold(title)), 1, 0));
+        lines.forEach((line, i) => {
+          box.addChild(new Text(theme.fg(peerColor(dids[i]), line), 1, 0));
+        });
+        box.addChild(new Text(theme.fg("dim", "  (clears on your next turn)"), 1, 0));
+        return box;
+      });
+      peersVisible = true;
+      setTimeout(() => clearPeers(ctx), 30_000).unref?.();
     },
     stepBegan: (phrase) => {
       // In a call, the tile is the room's window into this agent: the phrase
@@ -347,6 +335,21 @@ export default function (pi: ExtensionAPI): void {
     if (!markVisible) return;
     markVisible = false;
     ctx.ui.setWidget("freeq-mark", undefined);
+  }
+  /** `/freeq status` shows the mark too, for twelve seconds. */
+  function showStatusMark(ctx: ExtensionContext): void {
+    if (ctx.hasUI && supportsTruecolor()) {
+      const lines = markForTerminal();
+      if (lines.length) {
+        ctx.ui.setWidget("freeq-mark", (_tui, _theme) => {
+          const box = new Container();
+          for (const line of lines) box.addChild(new Text(line, 1, 0));
+          return box;
+        });
+        markVisible = true;
+        setTimeout(() => clearMark(ctx), 12_000).unref?.();
+      }
+    }
   }
   let peersVisible = false;
   function clearPeers(ctx: ExtensionContext): void {
@@ -836,653 +839,10 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("freeq", {
     description: "freeq multiplayer: login, authorize, status, join, leave, peers, mode, trust, call, hangup",
     handler: async (args, ctx) => {
-      const [sub = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      // Deliberate use of freeq is the reason a dormant project connects.
-      // 'off' is exempt: turning it off must not first turn it on.
-      if (sub !== "off") await rt.wake();
-      const cfg = await rt.ensureConfig();
-
-      switch (sub) {
-        case "login": {
-          const did = rest[0];
-          if (!isDid(did)) {
-            ctx.ui.notify("usage: /freeq login did:plc:… (your own DID)", "warning");
-            return;
-          }
-          cfg.ownerDid = did;
-          cfg.install ??= deriveInstallSlug();
-          cfg.nick ??= defaultNick(cfg.install);
-          await saveConfig(rt.agentDir, cfg);
-          ctx.ui.notify(`freeq: owner set to ${did}; connecting…`, "info");
-          ctx.ui.notify(await rt.connect(), rt.conn?.state === "online" ? "info" : "warning");
-          return;
-        }
-
-        case "authorize": {
-          // The owner adds this installation's DID as one of their agents,
-          // from their own device; the server then proves the certificate
-          // from that record. Step two reconnects and reports its verdict.
-          if (!cfg.ownerDid) {
-            ctx.ui.notify("freeq: run /freeq login <did> first", "warning");
-            return;
-          }
-          if (rest[0] === "verify") {
-            ctx.ui.notify("freeq: reconnecting to ask the server…", "info");
-            await rt.conn?.stop("re-presenting delegation");
-            rt.conn = undefined;
-            await rt.connect();
-            // `conn` is reassigned inside connect(); TS narrowed it to
-            // undefined from the line above, so read it through a fresh
-            // binding.
-            const live = (): FreeqConnection | undefined => rt.conn as FreeqConnection | undefined;
-            // An unverified reply comes first; a verified one follows once
-            // the server has read the owner's records.
-            const notice = await waitForProvenance(() => live()?.provenanceNotice, {
-              timeoutMs: 20_000,
-              pollMs: 250,
-            });
-            const verdict = interpretProvenanceNotice(notice);
-            ctx.ui.notify(`freeq: ${verdict.message}`, verdict.verified ? "info" : "warning");
-            return;
-          }
-          if (rest[0] === "--sign-cert") {
-            // For a server that does not read agent records yet: sign the
-            // certificate with a creator key the owner registers by MSGSIG.
-            const ins = await authorizeInstructions({ ownerDid: cfg.ownerDid, root: FREEQ_ROOT });
-            ctx.ui.notify(
-              [
-                "freeq authorize --sign-cert — sign this installation's delegation",
-                "",
-                ...ins.steps,
-                "",
-                "No password, no PDS login: the line above is a public key, and the",
-                "session you paste it into is already yours.",
-              ].join("\n"),
-              "info",
-            );
-            return;
-          }
-          // The DID is this project's identity, made on its first connect.
-          if (!rt.conn?.did) await rt.connect();
-          const botDid = (rt.conn as FreeqConnection | undefined)?.did;
-          if (!botDid) {
-            ctx.ui.notify(
-              "freeq: not connected yet, so this installation has no DID to show. Run /freeq status.",
-              "warning",
-            );
-            return;
-          }
-          const ins = await agentInstructions({ ownerDid: cfg.ownerDid, botDid, root: FREEQ_ROOT });
-          ctx.ui.notify(
-            ["freeq authorize — add this installation as one of your agents", "", ...ins.steps].join("\n"),
-            "info",
-          );
-          return;
-        }
-
-        case "status": {
-          if (ctx.hasUI && supportsTruecolor()) {
-            const lines = markForTerminal();
-            if (lines.length) {
-              ctx.ui.setWidget("freeq-mark", (_tui, _theme) => {
-                const box = new Container();
-                for (const line of lines) box.addChild(new Text(line, 1, 0));
-                return box;
-              });
-              markVisible = true;
-              setTimeout(() => clearMark(ctx), 12_000).unref?.();
-            }
-          }
-          ctx.ui.notify(
-            [
-              `owner:    ${cfg.ownerDid ?? "(not logged in — /freeq login <did>)"}`,
-              `server:   ${cfg.server}`,
-              `state:    ${
-                rt.passive
-                  ? "passive — another pi session holds this installation's connection"
-                  : rt.conn
-                    ? rt.conn.describe()
-                    : "offline (not connected)"
-              }`,
-              `muted:    ${cfg.muted ? "YES — silent everywhere (/freeq unmute)" : "no"}`,
-              (() => {
-                // Two different facts, and conflating them is what made
-                // status disagree with the server: where we are CONFIGURED to
-                // be, and where the server says we ARE. Print both, and only
-                // remark on the difference when there is one.
-                const eff = channelsForProject(cfg, rt.currentProject);
-                const pinned = rt.currentProject ? cfg.projects?.[rt.currentProject] !== undefined : false;
-                const live = rt.conn?.joinedChannels() ?? [];
-                const refused = rt.conn?.refusedChannels() ?? [];
-                const lines = [
-                  `channels: ${eff.length ? eff.join(", ") : "(none)"}` +
-                    (pinned ? ` (this project only)` : ` (global)`),
-                  `joined:   ${live.length ? live.join(", ") : "(none confirmed)"}`,
-                ];
-                for (const r of refused) lines.push(`refused:  ${r.channel} — ${r.reason}`);
-                return lines.join("\n");
-              })(),
-              `trusted:  ${Object.keys(cfg.trust).length} peer(s)`,
-              `provenance: ${cfg.provenance ?? "decisions"}` +
-                (cfg.provenanceChannel ? ` → ${cfg.provenanceChannel}` : ""),
-              `config:   ${rt.sources.length ? rt.sources.join(", ") : "(defaults only)"}`,
-            ].join("\n"),
-            "info",
-          );
-          return;
-        }
-
-        case "takeover": {
-          // Deliberate, explicit, and destructive to the other window's
-          // connection: it will find the slot gone and go passive.
-          // Same project as the slot we would claim on connect.
-          const takeoverMeta = await collectSessionMeta({ cwd: ctx.cwd, model: ctx.model?.id });
-          const holder = await (rt.lock ??= new ConnectionLock(
-            ConnectionLock.pathFor(rt.agentDir, takeoverMeta.project),
-          )).read();
-          const ok = await ctx.ui.confirm(
-            "freeq: take over the connection",
-            `The connection is held by${holder?.label ? ` ${holder.label}` : " another pi session"}` +
-              ` (pid ${holder?.pid ?? "?"}).\n\n` +
-              `Take it over for this window? The other session will go passive.`,
-          );
-          if (!ok) return;
-          await rt.lock.release();
-          // Force a fresh claim by clearing any stale in-memory state.
-          rt.lock = new ConnectionLock(ConnectionLock.pathFor(rt.agentDir, takeoverMeta.project));
-          await rt.conn?.stop("takeover");
-          rt.conn = undefined;
-          const message = await rt.connect();
-          ctx.ui.notify(message, rt.conn ? "info" : "warning");
-          return;
-        }
-
-        case "verbosity":
-        case "provenance": {
-          // Friendly names map onto the provenance tiers; the two commands are
-          // one knob. `verbosity` is the word a person reaches for.
-          const friendly: Record<string, ProvenanceTier> = {
-            quiet: "decisions", less: "decisions", normal: "evidence", more: "firehose", loud: "firehose", off: "silent",
-          };
-          const level = rest[0] && friendly[rest[0]] ? friendly[rest[0]] : rest[0];
-          if (!level || !(PROVENANCE_TIERS as readonly string[]).includes(level)) {
-            ctx.ui.notify(
-              `freeq: provenance is '${cfg.provenance ?? "decisions"}'\n` +
-                `usage: /freeq provenance <${PROVENANCE_TIERS.join("|")}>\n` +
-                `  silent    nothing is mirrored\n` +
-                `  decisions changes and outbound actions, tags only (quiet)\n` +
-                `  evidence  one readable line per turn in the channel (default)\n` +
-                `  firehose  every tool call — for debugging the log itself`,
-              "info",
-            );
-            return;
-          }
-          cfg.provenance = level as ProvenanceTier;
-          await saveConfig(rt.agentDir, cfg);
-          ctx.ui.notify(`freeq: provenance → ${level}`, "info");
-          return;
-        }
-
-        case "mute":
-        case "unmute": {
-          cfg.muted = sub === "mute";
-          await saveConfig(rt.agentDir, cfg);
-          ctx.ui.notify(
-            cfg.muted
-              ? "freeq: muted — still connected and reachable, but will not " +
-                "answer or inject anything until /freeq unmute"
-              : "freeq: unmuted",
-            "info",
-          );
-          return;
-        }
-
-        case "on":
-        case "off": {
-          cfg.enabled = sub === "on";
-          await saveConfig(rt.agentDir, cfg);
-          if (!cfg.enabled) {
-            await rt.conn?.stop("disabled");
-            rt.conn = undefined;
-            ctx.ui.notify("freeq: disabled", "info");
-          } else {
-            ctx.ui.notify(await rt.connect(), "info");
-          }
-          return;
-        }
-
-        case "join":
-        case "leave": {
-          const channel = rest[0];
-          if (!channel?.startsWith("#")) {
-            ctx.ui.notify(`usage: /freeq ${sub} #channel`, "warning");
-            return;
-          }
-          // Writing pins the project: from the first join or leave, this
-          // project keeps its own list and stops inheriting the global one.
-          const project = rt.currentProject;
-          const current = channelsForProject(cfg, project);
-          if (sub === "join") {
-            const next = current.some((c) => c.toLowerCase() === channel.toLowerCase())
-              ? current
-              : [...current, channel];
-            if (project) Object.assign(cfg, withProjectChannels(cfg, project, next));
-            else cfg.channels = next;
-            await saveConfig(rt.agentDir, cfg);
-            // Keep the live intent in step with the config we just wrote, so
-            // the unexpected-channel guard judges against the new list.
-            rt.conn?.setWantedChannels(next);
-            const ok = rt.conn?.join(channel);
-            ctx.ui.notify(
-              ok
-                ? `freeq: joining ${channel} (mode: ${modeFor(cfg, channel)})`
-                : `freeq: saved ${channel}; will join when connected`,
-              ok ? "info" : "warning",
-            );
-          } else {
-            const next = current.filter((c) => c.toLowerCase() !== channel.toLowerCase());
-            if (project) Object.assign(cfg, withProjectChannels(cfg, project, next));
-            else cfg.channels = next;
-            await saveConfig(rt.agentDir, cfg);
-            rt.conn?.setWantedChannels(next);
-            rt.conn?.leave(channel);
-            ctx.ui.notify(
-              project
-                ? `freeq: left ${channel} for this project (${project}); other projects unaffected`
-                : `freeq: left ${channel}`,
-              "info",
-            );
-          }
-          return;
-        }
-
-        case "handoffs": {
-          const store = await rt.ensureHandoffs();
-          const me = rt.conn?.did;
-          const inbox = store.inboxFor(me);
-          const outbox = store.outboxFor(me);
-          const all = store.all();
-          if (!all.length) {
-            ctx.ui.notify("freeq: no handoffs on record", "info");
-            return;
-          }
-          const fmt = (rs: HandoffRecord[]) => rs.map((r) => `  ${describeHandoff(r, me)}`).join("\n");
-          ctx.ui.notify(
-            [
-              inbox.length ? `Offered to / assigned to you:\n${fmt(inbox)}` : "",
-              outbox.length ? `You offered:\n${fmt(outbox)}` : "",
-              `\n(${all.length} total on record, including finished)`,
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-            "info",
-          );
-          return;
-        }
-
-        case "tasks": {
-          const store = await rt.ensureHandoffs();
-          const queue = await rt.ensureOffers();
-          const me = rt.conn?.did;
-          const now = Date.now();
-          const age = (r: HandoffRecord) => formatAge(now - r.updatedAt);
-
-          const mine = store
-            .all()
-            .filter((r) => r.assignee === me && !isTerminal(r.kind, r.state));
-          const queued = queue
-            .all()
-            .flatMap((e) => {
-              const rec = store.get(e.taskId);
-              return rec ? [{ rec, queuedAt: e.queuedAt }] : [];
-            });
-          const queuedIds = new Set(queued.map((q) => q.rec.id));
-          const waiting = store
-            .all()
-            .filter(
-              (r) => r.state === "offered" && r.offeree === me && !queuedIds.has(r.id),
-            );
-          const nearby = store.all().filter((r) => r.state === "open" && r.offerer !== me);
-
-          const sections = [
-            mine.length
-              ? `Assigned to you:\n` +
-                mine
-                  .map(
-                    (r) =>
-                      `  ${describeHandoff(r, me)}  ${age(r)}` +
-                      (rt.watchdog?.has(r.id) ? "  [in flight]" : "  [not being worked on]"),
-                  )
-                  .join("\n")
-              : "",
-            queued.length
-              ? `Queued for when this session is free:\n` +
-                queued
-                  .map(
-                    (q) =>
-                      `  ${describeHandoff(q.rec, me)}  queued ${formatAge(now - q.queuedAt)}`,
-                  )
-                  .join("\n")
-              : "",
-            waiting.length
-              ? `Offered to you:\n` +
-                waiting.map((r) => `  ${describeHandoff(r, me)}  ${age(r)}`).join("\n")
-              : "",
-            nearby.length
-              ? `Open nearby (anyone may claim):\n` +
-                nearby
-                  .map(
-                    (r) =>
-                      `  ${describeHandoff(r, me)}  ${age(r)}` +
-                      (r.caps ? `  caps: ${r.caps}` : ""),
-                  )
-                  .join("\n")
-              : "",
-          ].filter(Boolean);
-
-          ctx.ui.notify(
-            sections.length
-              ? sections.join("\n\n")
-              : "freeq: nothing assigned, queued, offered, or open nearby",
-            "info",
-          );
-          return;
-        }
-
-        case "resume": {
-          ctx.ui.notify(await rt.resumeAssigned(cfg, rest[0]), "info");
-          return;
-        }
-
-        case "withheld": {
-          const senders = rt.withheld.senders();
-          if (!senders.length) {
-            ctx.ui.notify("freeq: nothing withheld — everyone who addressed you got through", "info");
-            return;
-          }
-          if ((rest[0] ?? "").toLowerCase() === "drop") {
-            const n = senders.reduce((acc, x) => acc + rt.withheld.discard(x.key), 0);
-            ctx.ui.notify(`freeq: dropped ${n} withheld message${n === 1 ? "" : "s"}`, "info");
-            refreshUi();
-            return;
-          }
-          ctx.ui.notify(
-            ["freeq: messages addressed to you that were not delivered:", ""]
-              .concat(
-                senders.map(
-                  (x) =>
-                    `  ${x.from}${x.did ? ` (${x.did.slice(0, 28)}…)` : " (guest)"} — ` +
-                    `${x.count} message${x.count === 1 ? "" : "s"}, ${formatAge(Date.now() - x.latest)} ago`,
-                ),
-              )
-              .concat([
-                "",
-                "  /freeq trust <did> message   — trust them, then choose whether to deliver",
-                "  /freeq withheld drop         — discard them",
-              ])
-              .join("\n"),
-            "warning",
-          );
-          return;
-        }
-
-        case "policy": {
-          const ch = rest[0];
-          const verb = (rest[1] ?? "accept").toLowerCase();
-          if (!ch || !ch.startsWith("#")) {
-            ctx.ui.notify("usage: /freeq policy <#channel> accept", "warning");
-            return;
-          }
-          if (verb !== "accept") {
-            ctx.ui.notify("only 'accept' is supported here; use the web client for the rest", "warning");
-            return;
-          }
-          const ok = rt.conn?.acceptPolicy(ch);
-          ctx.ui.notify(
-            ok ? `freeq: accepted ${ch}'s policy and re-sent the join` : "freeq: not connected",
-            ok ? "info" : "warning",
-          );
-          return;
-        }
-
-        case "accept":
-        case "decline": {
-          if (!rest[0]) {
-            ctx.ui.notify(
-              `usage: /freeq ${sub} <id>${sub === "decline" ? " [reason]" : ""}`,
-              "warning",
-            );
-            return;
-          }
-          const store = await rt.ensureHandoffs();
-          const found = resolveTaskRef(store.all(), rest[0]);
-          if (!found.ok) {
-            ctx.ui.notify(`freeq: ${found.reason}`, "warning");
-            return;
-          }
-          const rec = found.record;
-          if (rec.state !== "offered") {
-            ctx.ui.notify(
-              `freeq: ${rec.id.slice(0, 10)} is '${rec.state}', not an open offer`,
-              "warning",
-            );
-            return;
-          }
-          const queue = await rt.ensureOffers();
-          queue.remove(rec.id);
-          await queue.save();
-          // No tier check on either: the owner typed this, and the trust map
-          // exists to decide what happens WITHOUT them, not to overrule them.
-          if (sub === "accept") {
-            await rt.acceptOffer(cfg, rec, rec.lastActor ?? "freeq");
-          } else {
-            await rt.declineOffer(rec, rest.slice(1).join(" ") || "declined by the operator");
-          }
-          return;
-        }
-
-        case "drop": {
-          if (!rest[0]) {
-            ctx.ui.notify("usage: /freeq drop <id> [reason]", "warning");
-            return;
-          }
-          const store = await rt.ensureHandoffs();
-          const found = resolveTaskRef(store.all(), rest[0]);
-          if (!found.ok) {
-            ctx.ui.notify(`freeq: ${found.reason}`, "warning");
-            return;
-          }
-          const rec = found.record;
-          if (rec.assignee !== rt.conn?.did || rec.state !== "assigned") {
-            ctx.ui.notify(
-              `freeq: ${rec.id.slice(0, 10)} is not work in flight here ` +
-                `(state '${rec.state}') — nothing to drop`,
-              "warning",
-            );
-            return;
-          }
-          const reason = rest.slice(1).join(" ") || "dropped by the operator";
-          rt.watchdog?.finish(rec.id);
-          rt.resumed.delete(rec.id);
-          const ok = await rt.conn?.sendAct(rec.channel, "fail", rec.id, { note: reason });
-          if (rt.workTask === rec.id) {
-            rt.endStep();
-            rt.workTask = undefined;
-            rt.pushStatus("active", undefined, undefined, true);
-          }
-          ctx.ui.notify(
-            ok
-              ? `freeq: dropped ${rec.id.slice(0, 10)} — ${reason}. The offerer has been told.`
-              : `freeq: could not send the failure for ${rec.id.slice(0, 10)}`,
-            ok ? "info" : "warning",
-          );
-          return;
-        }
-
-        case "progress": {
-          const note = rest.slice(1).join(" ");
-          if (!rest[0] || !note) {
-            ctx.ui.notify("usage: /freeq progress <id> <note>", "warning");
-            return;
-          }
-          const store = await rt.ensureHandoffs();
-          const found = resolveTaskRef(store.all(), rest[0]);
-          if (!found.ok) {
-            ctx.ui.notify(`freeq: ${found.reason}`, "warning");
-            return;
-          }
-          const rec = found.record;
-          if (rec.assignee !== rt.conn?.did || rec.state !== "assigned") {
-            ctx.ui.notify(
-              `freeq: only the assignee of work in flight can report progress on it ` +
-                `(${rec.id.slice(0, 10)} is '${rec.state}')`,
-              "warning",
-            );
-            return;
-          }
-          // A manual heartbeat is also a sign of life: it resets the stall clock.
-          rt.watchdog?.touch(Date.now(), rec.id);
-          const ok = await rt.conn?.sendAct(rec.channel, "progress", rec.id, { note });
-          rt.journal("progress", rec.id, note);
-          ctx.ui.notify(
-            ok
-              ? `freeq: reported progress on ${rec.id.slice(0, 10)}`
-              : `freeq: could not send the progress note`,
-            ok ? "info" : "warning",
-          );
-          return;
-        }
-
-        case "peers": {
-          const peers = rt.conn?.peers() ?? [];
-          if (!peers.length) {
-            ctx.ui.notify(
-              rt.conn?.state === "online" ? "freeq: no peers seen yet" : "freeq: offline — no peers",
-              "info",
-            );
-            return;
-          }
-          const lines = rosterLines(
-            peers.map((p) => ({
-              nick: p.nick,
-              did: p.did,
-              state: p.state,
-              // Now a real field: peers publish what they are doing in the
-              // same presence string as their project and branch.
-              working: p.meta.doing,
-              project: p.meta.project,
-              model: p.meta.model,
-              seen: p.seen,
-              tier: p.did ? tierFor(cfg, p.did) : undefined,
-            })),
-          );
-          // A widget rather than a toast: the roster is something you read and
-          // compare, and each row is coloured by its peer's DID so the same
-          // correspondent is recognisable at a glance across sessions.
-          const rows = peers.map((p) => p.did);
-          ctx.ui.setWidget("freeq-peers", (_tui, theme) => {
-            const box = new Container();
-            box.addChild(new Text(theme.fg("toolTitle", theme.bold(`freeq peers (${peers.length})`)), 1, 0));
-            lines.forEach((line, i) => {
-              box.addChild(new Text(theme.fg(peerColor(rows[i]), line), 1, 0));
-            });
-            box.addChild(new Text(theme.fg("dim", "  (clears on your next turn)"), 1, 0));
-            return box;
-          });
-          peersVisible = true;
-          setTimeout(() => clearPeers(ctx), 30_000).unref?.();
-          return;
-        }
-
-        case "mode": {
-          const [channel, mode] = rest;
-          if (!channel?.startsWith("#") || !mode || !(MODES as readonly string[]).includes(mode)) {
-            ctx.ui.notify(`usage: /freeq mode #channel <${MODES.join("|")}>`, "warning");
-            return;
-          }
-          cfg.modes[channel.toLowerCase()] = mode as Mode;
-          await saveConfig(rt.agentDir, cfg);
-          ctx.ui.notify(`freeq: ${channel} → ${mode}`, "info");
-          return;
-        }
-
-        case "trust": {
-          const [did, tier] = rest;
-          if (!isDid(did) || !tier || !(tier in TIER_RANK)) {
-            ctx.ui.notify(
-              `usage: /freeq trust did:plc:… <${Object.keys(TIER_RANK).join("|")}>`,
-              "warning",
-            );
-            return;
-          }
-          // Granting 'request' means that peer's agent can trigger turns here.
-          const ok = await ctx.ui.confirm(
-            "freeq: grant authority",
-            `Grant ${did} tier '${tier}'?\n\n` +
-              (TIER_RANK[tier as Tier] >= TIER_RANK.request
-                ? "At 'request' or above, that peer's agent can cause this pi session " +
-                  "to run turns and can read answers it produces."
-                : "At this tier the peer can be seen but cannot trigger work here."),
-          );
-          if (!ok) {
-            ctx.ui.notify("freeq: trust unchanged", "info");
-            return;
-          }
-          cfg.trust[did] = tier as Tier;
-          await saveConfig(rt.agentDir, cfg);
-          ctx.ui.notify(`freeq: ${did} → ${tier}`, "info");
-          // A sender who was refused has already said their piece. Asking them
-          // to repeat it is asking for a second chance to be misunderstood.
-          const held = rt.withheld.drain(did);
-          if (held.length && TIER_RANK[tier as Tier] >= TIER_RANK.message) {
-            const wanted = await ctx.ui.confirm(
-              "freeq: deliver held messages",
-              `${held.length} message${held.length === 1 ? "" : "s"} from ${held[0]!.from} ` +
-                `arrived while they were untrusted. Deliver ${held.length === 1 ? "it" : "them"} now?`,
-            );
-            if (wanted) {
-              for (const m of held) {
-                rt.deliver(
-                  {
-                    kind: "chat",
-                    from: m.from,
-                    did: m.did ?? null,
-                    channel: m.channel,
-                    text: m.text,
-                    tier: tier as Tier,
-                    mode: modeFor(cfg, m.channel),
-                    addressed: true,
-                  },
-                  { replyToChannel: true },
-                );
-              }
-            }
-          }
-          refreshUi();
-          return;
-        }
-
-        default:
-          ctx.ui.notify(
-            [
-              "/freeq [status | login <did> | join #c | leave #c | peers |",
-              "        handoffs | mode #c <silent|addressed|participant> |",
-              "        trust <did> <tier> | provenance <tier> | mute | unmute |",
-              "        takeover | on | off]",
-              "",
-              "work:",
-              "  tasks                    what is assigned, queued, offered, or open nearby",
-              "  resume [id]              re-enter assigned work (all of it, capped, if no id)",
-              "  accept <id>              take a queued or offered task now",
-              "  decline <id> [reason]    turn one down, with a reason",
-              "  drop <id> [reason]       fail work in flight honestly instead of leaving it hanging",
-              "  progress <id> <note>     report progress by hand",
-              "",
-              "Ids may be the short prefix the notifications print.",
-            ].join("\n"),
-            "info",
-          );
-      }
+      track(ctx);
+      const [sub = "status"] = args.trim().split(/\s+/).filter(Boolean);
+      if (sub === "status") showStatusMark(ctx);
+      await rt.runCommand(args);
     },
   });
 }

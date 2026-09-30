@@ -349,6 +349,66 @@ describe("AgentRuntime: the freeq tool", () => {
   });
 });
 
+describe("AgentRuntime: /freeq commands", () => {
+  it("status names the owner, server and state", async () => {
+    const { rt, notices } = await started();
+    await rt.runCommand("status");
+    const text = notices.at(-1)!.text.split("\n");
+    expect(text[0]).toBe("owner:    did:plc:owner");
+    expect(text[1]).toBe("server:   ws://test.invalid/irc");
+    expect(text[2]).toMatch(/^state:    online: pi-test1234-proj \(did:key:zSelf\)/);
+  });
+
+  it("trust asks first, and grants only on yes", async () => {
+    const answers = [false, true];
+    const h = fakeHarness({ confirm: async () => answers.shift() ?? false });
+    writeConfig(h.agentDir);
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => new FakeBot() });
+    await rt.start();
+    await rt.runCommand("trust did:plc:eve message");
+    expect(rt.config!.trust).toEqual({});
+    await rt.runCommand("trust did:plc:eve message");
+    expect(rt.config!.trust).toEqual({ "did:plc:eve": "message" });
+    expect(h.notices.map((n) => n.text)).toEqual(["freeq: trust unchanged", "freeq: did:plc:eve → message"]);
+  });
+
+  it("join pins the project's own channel list", async () => {
+    const { rt, bot } = await started();
+    await rt.runCommand("join #new");
+    expect(rt.config!.projects).toEqual({ proj: { channels: ["#work", "#new"] } });
+    expect(bot.sent.at(-1)).toEqual({ kind: "join", target: "#new", payload: null });
+  });
+
+  it("peers goes to the harness's roster, or to a notice without one", async () => {
+    const shown: Array<{ title: string; lines: string[] }> = [];
+    const h = fakeHarness({ roster: (title, lines) => void shown.push({ title, lines }) });
+    writeConfig(h.agentDir);
+    const bot = new FakeBot();
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => bot });
+    await rt.start();
+    bot.emit("presence", { nick: "zapnap", did: OWNER, state: "online", status: "" });
+    await rt.runCommand("peers");
+    expect(shown[0]!.title).toBe("freeq peers (1)");
+    expect(shown[0]!.lines[0]).toContain("zapnap");
+
+    const plain = await started();
+    plain.bot.emit("presence", { nick: "zapnap", did: OWNER, state: "online", status: "" });
+    await plain.rt.runCommand("peers");
+    expect(plain.notices.at(-1)!.text.split("\n")[0]).toBe("freeq peers (1)");
+  });
+
+  it("wakes a dormant project on first use", async () => {
+    const h = fakeHarness();
+    writeConfig(h.agentDir, { projects: undefined });
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => new FakeBot() });
+    await rt.start();
+    expect(rt.dormant).toBe(true);
+    await rt.runCommand("mute");
+    expect(rt.conn?.state).toBe("online");
+    expect(h.notices[0]!.text).toBe("freeq: first use in this project — minting its identity");
+  });
+});
+
 describe("httpOriginFor", () => {
   it("maps the websocket URL to the HTTP origin", () => {
     expect(httpOriginFor("wss://irc.freeq.at/irc")).toBe("https://irc.freeq.at");
