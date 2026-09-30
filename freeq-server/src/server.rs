@@ -8674,7 +8674,7 @@ mod nickmap_tests {
 
 #[cfg(test)]
 pub(crate) use s2s_adversarial_tests::{
-    test_state, test_state_on, test_state_with_config, test_state_with_db,
+    test_manager, test_state, test_state_on, test_state_with_config, test_state_with_db,
     test_state_with_resolver, test_state_without_db,
 };
 
@@ -8869,7 +8869,7 @@ mod s2s_adversarial_tests {
     }
 
     /// Build a minimal S2sManager for testing.
-    pub(super) fn test_manager() -> Arc<S2sManager> {
+    pub(crate) fn test_manager() -> Arc<S2sManager> {
         test_manager_with_trust(HashMap::new())
     }
 
