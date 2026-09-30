@@ -3781,7 +3781,7 @@ export class FreeqClient extends EventEmitter {
    *  by the SDK's format() helper. Signs like any other message — the
    *  covered coordination tags ride inside the document. */
   sendTagged(target: string, text: string, tags: Record<string, string>): void {
-    void this.signedPrivmsg(target, text, tags);
+    void this.signedPrivmsg(this.wireTargetFor(target), text, tags);
   }
 
   /** Send a NOTICE. Signed like a PRIVMSG — the server verifies both against
@@ -3824,7 +3824,7 @@ export class FreeqClient extends EventEmitter {
       return;
     }
     const { kind, subject, emoji } = mutation;
-    this.signedMutation(kind, target, tags, subject, emoji);
+    this.signedMutation(kind, this.wireTargetFor(target), tags, subject, emoji);
   }
 
   /** Send a media attachment (image/audio/video URL with metadata).
@@ -3844,7 +3844,7 @@ export class FreeqClient extends EventEmitter {
     if (media.durationMs !== undefined) tags['+freeq.at/media-duration'] = String(media.durationMs);
     if (media.sizeBytes !== undefined) tags['+freeq.at/media-size'] = String(media.sizeBytes);
     const body = media.fallback ?? `📎 ${media.url}`;
-    void this.signedPrivmsg(target, body, tags);
+    void this.signedPrivmsg(this.wireTargetFor(target), body, tags);
   }
 
   /** Attach link-preview metadata to a message. Signed, same as media, with
@@ -3862,7 +3862,7 @@ export class FreeqClient extends EventEmitter {
       : preview.title
         ? `🔗 ${preview.title} (${preview.url})`
         : `🔗 ${preview.url}`;
-    void this.signedPrivmsg(target, fallback, tags);
+    void this.signedPrivmsg(this.wireTargetFor(target), fallback, tags);
   }
 
   /** Send a message and await the server-assigned msgid via echo-message.
@@ -3890,7 +3890,7 @@ export class FreeqClient extends EventEmitter {
       // bypasses signedPrivmsg sends unsigned even when signing is armed.
       // The nonce tag is not a covered field, so it rides outside the
       // signed document.
-      void this.signedPrivmsg(target, text, fullTags);
+      void this.signedPrivmsg(this.wireTargetFor(target), text, fullTags);
     });
   }
 

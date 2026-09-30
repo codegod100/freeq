@@ -2932,6 +2932,163 @@ describe('signed mutations', () => {
     }
   });
 
+  // Every signed send addresses a DM the way sendMessage does. A helper that
+  // hands the nick to the signer unchanged sends unsigned, and a server that
+  // requires signed edits then refuses a streamed reply's every edit.
+  it('a tagged line in a DM addresses the peer it knows, and signs that venue', async () => {
+    const signing = await import('./signing.js');
+    const { client, ws, verifyKey } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+
+    client.sendTagged('bob', 'chunk one', { '+freeq.at/streaming': '1' });
+    const line = await waitForSent(ws, 'PRIVMSG');
+    expect(line, 'a DM whose peer is known is addressed by DID').toContain(
+      'PRIVMSG did:plc:bob',
+    );
+
+    const canonical = await signing.messageCanonical({
+      from: 'did:plc:mutator',
+      msgid: tagOf(line, '+freeq.at/eventid')!,
+      target: signing.dmVenue('did:plc:mutator', 'did:plc:bob'),
+      body: 'chunk one',
+      tags: { '+freeq.at/streaming': '1' },
+    });
+    expect(await verifySig(canonical, tagOf(line, '+freeq.at/sig')!, verifyKey)).toBe(true);
+  });
+
+  it('a streamed edit in a DM addresses the peer it knows, and signs that venue', async () => {
+    const signing = await import('./signing.js');
+    const { client, ws, verifyKey } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+
+    const tags = { '+draft/edit': 'M0', '+freeq.at/streaming': '1' };
+    client.sendTagged('bob', 'chunk one and two', tags);
+    const line = await waitForSent(ws, 'PRIVMSG');
+    expect(line, 'an edit in a known DM is addressed by DID').toContain(
+      'PRIVMSG did:plc:bob',
+    );
+
+    const canonical = await signing.messageCanonical({
+      from: 'did:plc:mutator',
+      msgid: tagOf(line, '+freeq.at/eventid')!,
+      target: signing.dmVenue('did:plc:mutator', 'did:plc:bob'),
+      body: 'chunk one and two',
+      edit: 'M0',
+      tags,
+    });
+    expect(await verifySig(canonical, tagOf(line, '+freeq.at/sig')!, verifyKey)).toBe(true);
+  });
+
+  it('a media send in a DM addresses the peer it knows, and signs that venue', async () => {
+    const signing = await import('./signing.js');
+    const { client, ws, verifyKey } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+
+    client.sendMedia('bob', { url: 'https://cdn.example/cat.png', mime: 'image/png' });
+    const line = await waitForSent(ws, 'PRIVMSG');
+    expect(line, 'media in a known DM is addressed by DID').toContain('PRIVMSG did:plc:bob');
+
+    const canonical = await signing.messageCanonical({
+      from: 'did:plc:mutator',
+      msgid: tagOf(line, '+freeq.at/eventid')!,
+      target: signing.dmVenue('did:plc:mutator', 'did:plc:bob'),
+      body: '📎 https://cdn.example/cat.png',
+      tags: {
+        '+freeq.at/media-url': 'https://cdn.example/cat.png',
+        '+freeq.at/media-mime': 'image/png',
+      },
+    });
+    expect(await verifySig(canonical, tagOf(line, '+freeq.at/sig')!, verifyKey)).toBe(true);
+  });
+
+  it('a link preview in a DM addresses the peer it knows, and signs that venue', async () => {
+    const signing = await import('./signing.js');
+    const { client, ws, verifyKey } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+
+    client.sendLinkPreview('bob', { url: 'https://example.com/post', title: 'A post' });
+    const line = await waitForSent(ws, 'PRIVMSG');
+    expect(line, 'a link preview in a known DM is addressed by DID').toContain(
+      'PRIVMSG did:plc:bob',
+    );
+
+    const canonical = await signing.messageCanonical({
+      from: 'did:plc:mutator',
+      msgid: tagOf(line, '+freeq.at/eventid')!,
+      target: signing.dmVenue('did:plc:mutator', 'did:plc:bob'),
+      body: '🔗 A post (https://example.com/post)',
+      tags: {
+        '+freeq.at/link-url': 'https://example.com/post',
+        '+freeq.at/link-title': 'A post',
+      },
+    });
+    expect(await verifySig(canonical, tagOf(line, '+freeq.at/sig')!, verifyKey)).toBe(true);
+  });
+
+  it('sendAndAwaitEcho in a DM addresses the peer it knows, and signs that venue', async () => {
+    const signing = await import('./signing.js');
+    const { client, ws, verifyKey } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+
+    const promise = client.sendAndAwaitEcho('bob', 'first chunk', { '+freeq.at/streaming': '1' });
+    const line = await waitForSent(ws, 'PRIVMSG');
+    expect(line, 'an awaited send in a known DM is addressed by DID').toContain(
+      'PRIVMSG did:plc:bob',
+    );
+
+    const eventId = tagOf(line, '+freeq.at/eventid');
+    const canonical = await signing.messageCanonical({
+      from: 'did:plc:mutator',
+      msgid: eventId!,
+      target: signing.dmVenue('did:plc:mutator', 'did:plc:bob'),
+      body: 'first chunk',
+    });
+    expect(await verifySig(canonical, tagOf(line, '+freeq.at/sig')!, verifyKey)).toBe(true);
+
+    ws.recv(
+      `@+freeq.at/echo-nonce=${tagOf(line, '+freeq.at/echo-nonce')};msgid=${eventId} :alice PRIVMSG did:plc:bob :first chunk`,
+    );
+    expect(await promise).toBe(eventId);
+  });
+
+  it('a mutation handed to the generic TAGMSG helper in a DM addresses the peer it knows', async () => {
+    const signing = await import('./signing.js');
+    const { client, ws, verifyKey } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+
+    client.sendTagmsg('bob', { '+draft/delete': 'M0' });
+    const line = await waitForSent(ws, 'TAGMSG');
+    expect(line, 'a mutation in a known DM is addressed by DID').toContain(
+      'TAGMSG did:plc:bob',
+    );
+
+    const canonical = signing.mutationCanonical({
+      kind: 'delete',
+      from: 'did:plc:mutator',
+      msgid: tagOf(line, '+freeq.at/eventid')!,
+      target: signing.dmVenue('did:plc:mutator', 'did:plc:bob'),
+      subject: 'M0',
+    });
+    expect(await verifySig(canonical, tagOf(line, '+freeq.at/sig')!, verifyKey)).toBe(true);
+  });
+
+  it('an ephemeral TAGMSG to a known peer still goes out to the nick, unsigned', async () => {
+    const { client, ws } = await makeSigningClient();
+    ws.recv(':srv 330 alice bob did:plc:bob :is authenticated as');
+    await flushAsync();
+    ws.sent.length = 0;
+
+    client.sendTagmsg('bob', { '+freeq.at/ask': 'q1' });
+    await flushAsync();
+    expect(ws.sent).toEqual(['@+freeq.at/ask=q1 TAGMSG bob']);
+  });
+
   // A session key is registered only with a server that asked for the signing
   // capability. A server that never advertised it cannot verify a client
   // document, so it would file a public key it will never read — and the
