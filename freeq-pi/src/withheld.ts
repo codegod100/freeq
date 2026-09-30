@@ -155,6 +155,6 @@ export function withheldSummary(
   return (
     `${total} message${total === 1 ? "" : "s"} addressed to you from ${who} ` +
     `were not delivered (sender not trusted). ` +
-    `/freeq trust ${head.did ?? head.from} message — then /freeq withheld deliver`
+    `/freeq trust ${head.did ?? head.from} message — trusting them offers to deliver what was held`
   );
 }

@@ -70,6 +70,15 @@ describe("withheld buffer", () => {
     expect(withheldSummary([])).toBeUndefined();
   });
 
+  it("points at /freeq trust, the one command that delivers what was held", () => {
+    const b = new WithheldBuffer(() => 1000);
+    b.add(msg());
+    const line = withheldSummary(b.senders())!;
+    expect(line).toContain("/freeq trust did:plc:zap message");
+    expect(line).toContain("offers to deliver");
+    expect(line).not.toContain("withheld deliver");
+  });
+
   it("counts every held message, not just the senders", () => {
     const b = new WithheldBuffer(() => 1000);
     b.add(msg());
