@@ -3968,12 +3968,12 @@ fn file_replayed_task_event(
         Some(crate::db::ActWrite::Filed { .. } | crate::db::ActWrite::Confirmed { .. }) => {
             // And whatever was waiting on precisely this event — a receipt that
             // outran it — is judged now.
-            release_receipts_waiting_on(state, event_id);
+            release_events_waiting_on(state, event_id);
             ReplayOutcome::Filed
         }
         // On file, deliberately unapplied — the task's own server rules on it.
         Some(crate::db::ActWrite::StoredNotApplied) => {
-            release_receipts_waiting_on(state, event_id);
+            release_events_waiting_on(state, event_id);
             ReplayOutcome::Filed
         }
         // Filed, and applied to nothing: a receipt from a peer that does not
@@ -4085,9 +4085,7 @@ fn park_replayed_receipt(
             tags,
             ..Default::default()
         });
-    for event in &dropped {
-        note_dropped_unchecked(state, event);
-    }
+    settle_dropped(state, dropped);
 }
 
 /// Whether an actor is the server itself rather than a person.
@@ -4441,12 +4439,10 @@ fn judge_relayed_task_event(
     match verdict {
         crate::act_relay::RelayVerdict::Valid => {
             match store_relayed_task_event(state, tags, target, origin, peer_account, from) {
-                TaskEventStored::Ruled(receipt) => {
-                    // Whatever this event was, it may be the one a receipt has
-                    // been waiting for.
-                    release_receipts_waiting_on(state, event_id);
-                    (TaskEventAction::Deliver, receipt)
-                }
+                // Whatever this event was, it may be the one a receipt or a
+                // move has been waiting for. The caller releases those after
+                // delivering this one, so a room sees them after it.
+                TaskEventStored::Ruled(receipt) => (TaskEventAction::Deliver, receipt),
                 // A receipt that outran the event it confirms. Nothing was
                 // filed and nothing is shown; the subject's arrival is what
                 // judges it again, exactly as a key's arrival judges an event
@@ -4474,9 +4470,35 @@ fn judge_relayed_task_event(
                             // asking for a key it already holds.
                             ..Default::default()
                         });
-                    for event in &dropped {
-                        note_dropped_unchecked(state, event);
-                    }
+                    settle_dropped(state, dropped);
+                    (TaskEventAction::Park, None)
+                }
+                // A move that outran the post opening its task. Held until
+                // the post is filed, then judged again and delivered after
+                // it; delivered unfiled, as before, if the post never comes.
+                TaskEventStored::WaitingOnTask(act_id) => {
+                    tracing::info!(
+                        peer = %peer, event_id = %event_id, %act_id,
+                        "Holding a move until the post that opens its task arrives"
+                    );
+                    let dropped = state
+                        .act_deferred
+                        .lock()
+                        .park(crate::act_relay::ParkedEvent {
+                            tags: tags.clone(),
+                            target: target.to_string(),
+                            from: from.to_string(),
+                            peer_account: peer_account.map(str::to_string),
+                            origin: origin.to_string(),
+                            peer: peer.to_string(),
+                            peer_declared_act,
+                            event_id: event_id.to_string(),
+                            waiting_on: Some(act_id),
+                            awaiting_task_since: Some(std::time::Instant::now()),
+                            // It verified; no key is owed.
+                            ..Default::default()
+                        });
+                    settle_dropped(state, dropped);
                     (TaskEventAction::Park, None)
                 }
                 TaskEventStored::Withheld => (TaskEventAction::Drop, None),
@@ -4513,9 +4535,7 @@ fn judge_relayed_task_event(
                     kid,
                     ..Default::default()
                 });
-            for event in &dropped {
-                note_dropped_unchecked(state, event);
-            }
+            settle_dropped(state, dropped);
             (TaskEventAction::Park, None)
         }
     }
@@ -4836,6 +4856,11 @@ fn store_relayed_task_event(
                     &home,
                 );
             }
+            // A move for a task whose post has not arrived: it waits for the
+            // post, whose id is the task's, so it is filed and shown after it.
+            Some(crate::db::ActWrite::UnknownTask) if !act_id.is_empty() => {
+                return TaskEventStored::WaitingOnTask(act_id);
+            }
             // Posted outside its task's conversation: malformed for every
             // server, so nobody here is shown it.
             Some(crate::db::ActWrite::WrongVenue) => {
@@ -4930,6 +4955,9 @@ enum TaskEventStored {
     /// Refused, and not to be shown: a move on a task this server owns that
     /// the rules refused, or one posted outside its task's conversation.
     Withheld,
+    /// A move naming a task this server has no post for yet. Nothing was
+    /// written; it names the task it is waiting for.
+    WaitingOnTask(String),
 }
 
 /// The venue of the task a relayed event names, read from the log.
@@ -5017,21 +5045,67 @@ pub(crate) fn retry_deferred_task_events(state: &Arc<SharedState>, did: &str, ki
     judge_parked_events(state, waiting);
 }
 
+/// How long a relayed move waits for the post that opens its task before it
+/// is delivered unfiled, as it was before moves waited. Long enough for a
+/// post waiting on its signer's key to see the first retry of that lookup
+/// ([`crate::act_relay::FIRST_RETRY`]) answered.
+const TASK_WAIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Deliver, unfiled, every move that has waited `limit` for its task's post.
+pub(crate) fn release_overdue_task_waits(state: &Arc<SharedState>, limit: std::time::Duration) {
+    let overdue = state.act_deferred.lock().take_overdue_task_waits(limit);
+    for event in overdue {
+        tracing::info!(
+            event_id = %event.event_id, act_id = ?event.waiting_on,
+            "The post a move waited for did not arrive — delivering the move unfiled"
+        );
+        deliver_unfiled(state, &event);
+    }
+}
+
+/// Deliver a move that stopped waiting for its task's post, unfiled, the
+/// way every such move was delivered before moves waited. It verified before
+/// it parked.
+fn deliver_unfiled(state: &Arc<SharedState>, event: &crate::act_relay::ParkedEvent) {
+    deliver_relayed_tagmsg(
+        state,
+        &event.from,
+        &event.target,
+        &event.tags,
+        event.peer_account.as_deref(),
+        true,
+    );
+}
+
+/// What to do with the events the defer queue gave up to stay inside its
+/// ceilings: a move waiting for its task's post is delivered unfiled, and
+/// anything else leaves its trace on its task.
+fn settle_dropped(state: &Arc<SharedState>, dropped: Vec<crate::act_relay::ParkedEvent>) {
+    for event in &dropped {
+        match event.awaiting_task_since {
+            Some(_) => deliver_unfiled(state, event),
+            None => note_dropped_unchecked(state, event),
+        }
+    }
+}
+
 /// A task event has just been filed. Re-check whatever was waiting for that
-/// event rather than for a key: a receipt that outran the move it names.
+/// event rather than for a key: a receipt that outran the move it names, and
+/// a move that outran the post opening its task.
 ///
 /// The other half of the queue's promise. A receipt is never evicted and never
 /// refused, so the only thing that can be owed to one is its subject, and
 /// every path that files a task event calls here — the live relay, the release
-/// of something that was itself parked, and catch-up.
-pub(crate) fn release_receipts_waiting_on(state: &Arc<SharedState>, subject: &str) {
+/// of something that was itself parked, and catch-up. The live paths call it
+/// after delivering the event, so a room sees what waited on it after it.
+pub(crate) fn release_events_waiting_on(state: &Arc<SharedState>, subject: &str) {
     let waiting = state.act_deferred.lock().take_for_subject(subject);
     if waiting.is_empty() {
         return;
     }
     tracing::info!(
         %subject, count = waiting.len(),
-        "The event a receipt names is on file; re-checking the receipt"
+        "The event these name is on file; re-checking them"
     );
     judge_parked_events(state, waiting);
 }
@@ -5113,6 +5187,9 @@ fn judge_parked_events(state: &Arc<SharedState>, waiting: Vec<crate::act_relay::
         if let Some(receipt) = receipt {
             crate::connection::act::broadcast_receipt(state, &receipt, &event.target);
         }
+        if action == TaskEventAction::Deliver {
+            release_events_waiting_on(state, &event.event_id);
+        }
     }
 }
 
@@ -5140,6 +5217,7 @@ fn spawn_act_defer_retry_sweep(state: Arc<SharedState>) {
             for (origin, signer, kid) in due {
                 crate::peer_keys::fetch_again(&state, &origin, &signer, &kid);
             }
+            release_overdue_task_waits(&state, TASK_WAIT_LIMIT);
         }
     });
 }
@@ -6711,6 +6789,9 @@ async fn process_s2s_event(
             // on a task it owns. Held until after delivery below, so the room
             // sees the move before the confirmation of it.
             let mut owed_receipt = None;
+            // The event's id, once delivered: what waited on it is released
+            // after it, so the room sees it first.
+            let mut release_after: Option<String> = None;
             if is_task_event {
                 let peer_declared_act = crate::s2s::peer_supports(
                     &manager
@@ -6736,6 +6817,10 @@ async fn process_s2s_event(
                     return;
                 }
                 owed_receipt = receipt;
+                release_after = tags
+                    .get(freeq_sdk::chatsig::EVENT_ID_TAG)
+                    .or_else(|| tags.get(freeq_sdk::chatsig::EVENT_ID_TAG_BARE))
+                    .cloned();
             }
 
             // ── A relayed mutation takes the actor's own proof ──────────
@@ -7041,6 +7126,9 @@ async fn process_s2s_event(
 
             if let Some(receipt) = owed_receipt {
                 crate::connection::act::broadcast_receipt(state, &receipt, &target);
+            }
+            if let Some(event_id) = release_after {
+                release_events_waiting_on(state, &event_id);
             }
         }
 
@@ -7450,11 +7538,15 @@ async fn process_s2s_event(
             let peer_account = account.map(|a| sanitize_s2s_str(&a, 512));
 
             // Ours to rule on, or misrouted. A task we have never seen opened
-            // is not ours either — the store path says so and files nothing.
-            let home = state
-                .with_db(|db| db.act_task_origin(&act_id))
-                .flatten()
-                .unwrap_or_default();
+            // is not ours either: nothing is filed, and it does not wait for
+            // a post, since this copy is never delivered.
+            let Some(home) = state.with_db(|db| db.act_task_origin(&act_id)).flatten() else {
+                tracing::debug!(
+                    peer = %authenticated_peer_id, act_id = %act_id, event_id = %act_event_id,
+                    "A task transition was carried here for a task never opened here — dropped"
+                );
+                return;
+            };
             if !home.is_empty() {
                 tracing::warn!(
                     peer = %authenticated_peer_id, act_id = %act_id,
@@ -7474,7 +7566,7 @@ async fn process_s2s_event(
                     .unwrap_or_default(),
                 crate::s2s::ACT,
             );
-            let (_, receipt) = judge_relayed_task_event(
+            let (action, receipt) = judge_relayed_task_event(
                 state,
                 &from,
                 &target,
@@ -7484,6 +7576,9 @@ async fn process_s2s_event(
                 peer_account.as_deref(),
                 peer_declared_act,
             );
+            if action == TaskEventAction::Deliver {
+                release_events_waiting_on(state, &act_event_id);
+            }
             match receipt {
                 Some(receipt) => {
                     crate::connection::act::broadcast_receipt(state, &receipt, &target)
@@ -16558,8 +16653,8 @@ mod relayed_task_verdict_tests {
         PEER, setup_authenticated_peer, test_manager, test_manager_with_broadcast_rx,
     };
     use super::{
-        SharedState, flush_pending_routes, process_s2s_message, retry_deferred_task_events,
-        server_did, test_state_with_config, test_state_with_db,
+        SharedState, flush_pending_routes, process_s2s_message, release_overdue_task_waits,
+        retry_deferred_task_events, server_did, test_state_with_config, test_state_with_db,
     };
     use crate::s2s::S2sMessage;
 
@@ -17931,6 +18026,183 @@ mod relayed_task_verdict_tests {
             },
         )
         .await;
+    }
+
+    /// A move can reach this server before the post that opens its task: the
+    /// post waits for its signer's key while the move, whose signer's key is
+    /// held, arrives. The move waits for the post, is filed after it, and
+    /// reaches the room after it.
+    #[tokio::test]
+    async fn a_move_that_arrives_before_its_task_waits_and_follows_it() {
+        const CLAIMER: &str = "did:plc:earlyclaimer";
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        let mut rx = capable_member(&state, "#early");
+        // The poster's key is not on file yet.
+        let offer_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let claim_key = key_on_file(&state, CLAIMER);
+
+        let act_id = "01EARLYTASK000000000000000";
+        relay(
+            &state,
+            &mgr,
+            "#early",
+            act_id,
+            signed_offer_tags("#early", act_id, &offer_key),
+        )
+        .await;
+        let claim = "01EARLYCLAIM00000000000000";
+        relay_from(
+            &state,
+            &mgr,
+            "#early",
+            claim,
+            signed_follow_up_tags("#early", claim, "claim", act_id, CLAIMER, &[], &claim_key),
+            CLAIMER,
+        )
+        .await;
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "the move is not shown before its task"
+        );
+        assert!(!state.with_db(|db| db.is_act_event(claim)).unwrap());
+        assert_eq!(
+            state.act_deferred.lock().len(),
+            2,
+            "the post waits for its key, the move for its post"
+        );
+
+        state
+            .with_db(|db| db.save_signing_key(SIGNER, offer_key.verifying_key().as_bytes()))
+            .expect("db present");
+        retry_deferred_task_events(
+            &state,
+            SIGNER,
+            &freeq_sdk::sigtag::derive_kid(&offer_key.verifying_key()),
+        );
+
+        let first = received(&mut rx).await;
+        assert!(
+            first.contains(act_id) && first.contains("act-verb=offer"),
+            "the post first: {first}"
+        );
+        let second = received(&mut rx).await;
+        assert!(
+            second.contains(claim) && second.contains("act-verb=claim"),
+            "then the move: {second}"
+        );
+        assert!(
+            state.with_db(|db| db.is_act_event(claim)).unwrap(),
+            "and the move is filed"
+        );
+        assert_eq!(state.act_deferred.lock().len(), 0);
+    }
+
+    /// A move whose post never comes is delivered unfiled after the wait,
+    /// as it was before moves waited.
+    #[tokio::test]
+    async fn a_move_whose_task_never_arrives_is_delivered_after_the_wait() {
+        const CLAIMER: &str = "did:plc:orphanclaimer";
+        let state = test_state_with_db();
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        let mut rx = capable_member(&state, "#orphanmove");
+        let claim_key = key_on_file(&state, CLAIMER);
+
+        let act_id = "01NEVERPOSTED0000000000000";
+        let claim = "01ORPHANCLAIM0000000000000";
+        relay_from(
+            &state,
+            &mgr,
+            "#orphanmove",
+            claim,
+            signed_follow_up_tags(
+                "#orphanmove",
+                claim,
+                "claim",
+                act_id,
+                CLAIMER,
+                &[],
+                &claim_key,
+            ),
+            CLAIMER,
+        )
+        .await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+                .await
+                .is_err(),
+            "it waits for its post"
+        );
+
+        release_overdue_task_waits(&state, std::time::Duration::ZERO);
+
+        let line = received(&mut rx).await;
+        assert!(line.contains(claim), "then is delivered: {line}");
+        assert!(
+            !state.with_db(|db| db.is_act_event(claim)).unwrap(),
+            "unfiled, as before"
+        );
+        assert_eq!(state.act_deferred.lock().len(), 0);
+    }
+
+    /// A move waiting for its post that the full queue evicts is delivered
+    /// unfiled, not lost.
+    #[tokio::test]
+    async fn a_move_evicted_while_waiting_for_its_task_is_delivered() {
+        const CLAIMER: &str = "did:plc:evictedclaimer";
+        let state = test_state_with_config(crate::config::ServerConfig {
+            act_defer_max_per_origin: 1,
+            ..Default::default()
+        });
+        let mgr = test_manager();
+        setup_authenticated_peer(&state, &mgr).await;
+        let mut rx = capable_member(&state, "#evicted");
+        let claim_key = key_on_file(&state, CLAIMER);
+
+        let claim = "01EVICTEDCLAIM000000000000";
+        relay_from(
+            &state,
+            &mgr,
+            "#evicted",
+            claim,
+            signed_follow_up_tags(
+                "#evicted",
+                claim,
+                "claim",
+                "01EVICTEDTASK0000000000000",
+                CLAIMER,
+                &[],
+                &claim_key,
+            ),
+            CLAIMER,
+        )
+        .await;
+        assert_eq!(state.act_deferred.lock().len(), 1);
+
+        // A post whose key is not held takes the only place.
+        let unknown_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let other = "01EVICTINGPOST000000000000";
+        relay(
+            &state,
+            &mgr,
+            "#evicted",
+            other,
+            signed_offer_tags("#evicted", other, &unknown_key),
+        )
+        .await;
+
+        let line = received(&mut rx).await;
+        assert!(
+            line.contains(claim),
+            "the evicted move is delivered: {line}"
+        );
+        assert!(!state.with_db(|db| db.is_act_event(claim)).unwrap());
+        assert_eq!(state.act_deferred.lock().len(), 1);
     }
 
     /// A move sent into a room other than its task's is malformed for every

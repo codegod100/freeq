@@ -181,6 +181,11 @@ pub(crate) struct ParkedEvent {
     /// thing arrives, the event is judged again, and the ceilings that bound
     /// one have to bound the other.
     pub waiting_on: Option<String>,
+    /// Set for a move whose task this server has no post for yet, which then
+    /// waits on the task's id (the post's own id): when it began waiting.
+    /// Such a move is not lost: evicted, or still waiting after the time
+    /// limit, it is delivered unfiled, as it was before moves waited.
+    pub awaiting_task_since: Option<std::time::Instant>,
     /// Park order across every origin. Overwritten by [`DeferQueue::park`].
     pub seq: u64,
 }
@@ -429,25 +434,53 @@ impl DeferQueue {
                 e.remove();
             }
         }
-        tracing::warn!(
-            fate = %fate,
-            reason = %why,
-            event_id = %event.event_id,
-            origin = %event.origin,
-            peer = %event.peer,
-            target = %event.target,
-            max_per_origin = self.max_per_origin,
-            max_total = self.max_total,
-            "Dropped a relayed task event that was waiting for its signer's key — \
-             never delivered, never stored"
-        );
+        match event.awaiting_task_since {
+            Some(_) => tracing::warn!(
+                fate = %fate,
+                reason = %why,
+                event_id = %event.event_id,
+                origin = %event.origin,
+                peer = %event.peer,
+                target = %event.target,
+                max_per_origin = self.max_per_origin,
+                max_total = self.max_total,
+                "Stopped holding a relayed move for its task's post — delivered unfiled"
+            ),
+            None => tracing::warn!(
+                fate = %fate,
+                reason = %why,
+                event_id = %event.event_id,
+                origin = %event.origin,
+                peer = %event.peer,
+                target = %event.target,
+                max_per_origin = self.max_per_origin,
+                max_total = self.max_total,
+                "Dropped a relayed task event that was waiting for its signer's key — \
+                 never delivered, never stored"
+            ),
+        }
         event
     }
 
-    /// Take every parked receipt this event would settle, oldest first.
+    /// Take every move that has waited `limit` or longer for its task's
+    /// post, oldest first.
+    pub(crate) fn take_overdue_task_waits(
+        &mut self,
+        limit: std::time::Duration,
+    ) -> Vec<ParkedEvent> {
+        self.take_matching(|event| {
+            event
+                .awaiting_task_since
+                .is_some_and(|since| since.elapsed() >= limit)
+        })
+    }
+
+    /// Take every parked event this event would settle, oldest first: a
+    /// receipt that overtook its subject, and a move that overtook the post
+    /// that opens its task (whose id is the task's).
     ///
-    /// The other half of the release: a receipt that overtook its subject
-    /// waits here, and the subject being filed is what lets it be judged.
+    /// The other half of the release: they wait here, and the subject being
+    /// filed is what lets them be judged.
     pub(crate) fn take_for_subject(&mut self, subject: &str) -> Vec<ParkedEvent> {
         self.take_matching(|event| event.waiting_on.as_deref() == Some(subject))
     }
@@ -833,6 +866,7 @@ mod defer_tests {
             signer: signer.to_string(),
             kid: kid.to_string(),
             waiting_on: None,
+            awaiting_task_since: None,
             seq: 0,
         }
     }
