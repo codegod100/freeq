@@ -217,7 +217,8 @@ pub(super) async fn handle_authenticate(
         let reply = Message::new("AUTHENTICATE", vec![&encoded]);
         send(state, session_id, format!("{reply}\r\n"));
     } else if conn.sasl_in_progress {
-        if let Some(response) = sasl::decode_response(param) {
+        let decoded = sasl::decode_response_explained(param);
+        if let Ok(response) = decoded {
             // Check for web-token method first (server-side OAuth pre-verified)
             let mut web_handle: Option<String> = None;
             let web_token_result = if response.method.as_deref() == Some("web-token") {
@@ -515,13 +516,14 @@ pub(super) async fn handle_authenticate(
             }
         } else {
             conn.sasl_in_progress = false;
+            // Say what was wrong with it: a bare "bad response" reads as "your
+            // signature is wrong" and sent agents in circles (sasl.rs).
+            let why = decoded.err().unwrap_or_default();
+            let text = format!("SASL authentication failed (bad response: {why})");
             let fail = Message::from_server(
                 server_name,
                 irc::ERR_SASLFAIL,
-                vec![
-                    conn.nick_or_star(),
-                    "SASL authentication failed (bad response)",
-                ],
+                vec![conn.nick_or_star(), &text],
             );
             send(state, session_id, format!("{fail}\r\n"));
         }
