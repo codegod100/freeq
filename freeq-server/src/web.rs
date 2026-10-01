@@ -2437,6 +2437,51 @@ fn classify_message_signature(
     }
 }
 
+/// What a verdict lets a third party conclude, as `(proves, meaning)`.
+///
+/// `verdict` answers "do the bytes check out", which is true of a server-key
+/// signature too. Agents checking their own work read `valid: true` as "I am
+/// provably the author" and stopped there, when the server had only vouched
+/// for relaying it (experiments/ax FINDINGS F18). `proves` is the answer to the
+/// question they were actually asking:
+///
+/// - `authorship` — the sender's own registered key signed it.
+/// - `relay` — this server signed it on the sender's behalf; the sender did
+///   not, and could deny it.
+/// - `nothing` — no conclusion either way (`invalid` or `unverifiable`).
+fn what_it_proves(
+    verdict: &str,
+    verified_by: &str,
+    sender_did: Option<&str>,
+) -> (&'static str, String) {
+    match (verdict, verified_by) {
+        ("valid", "client-session-key") => (
+            "authorship",
+            format!(
+                "Signed by a key registered to {}: attributable to that identity, \
+                 checkable without trusting this server.",
+                sender_did.unwrap_or("the sender")
+            ),
+        ),
+        ("valid", "server-key") => (
+            "relay",
+            "This server vouches that it relayed this message; the sender did not sign \
+             it, so it is not attributable to them. To author-sign, register a session \
+             key with MSGSIG and sign each message (see /signing.md)."
+                .to_string(),
+        ),
+        ("invalid", _) => (
+            "nothing",
+            "The signature does not match this message under the key it names.".to_string(),
+        ),
+        _ => (
+            "nothing",
+            "This signature cannot be checked here, so it supports no conclusion either way."
+                .to_string(),
+        ),
+    }
+}
+
 pub(crate) async fn api_verify_message(
     State(state): State<Arc<SharedState>>,
     axum::extract::Path(msgid): axum::extract::Path<String>,
@@ -2544,10 +2589,14 @@ pub(crate) async fn api_verify_message(
                         .map(|b| format!("{b:02x}"))
                         .collect::<String>()
                 });
+                let (proves, meaning) =
+                    what_it_proves(verdict, verified_by, ev.actor_did.as_deref());
                 let mut verification = serde_json::json!({
                     "valid": verdict == "valid",
                     "verdict": verdict,
                     "verified_by": verified_by,
+                    "proves": proves,
+                    "meaning": meaning,
                     "server_public_key": server_pubkey,
                     "client_public_key": client_public_key,
                 });
@@ -2632,11 +2681,15 @@ pub(crate) async fn api_verify_message(
         use base64::Engine;
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(server_vk.as_bytes())
     };
+    let (proves, meaning) = what_it_proves(verdict, verified_by, sender_did.as_deref());
     let mut verification = serde_json::json!({
-        // `valid` stays for older clients; `verdict` is the honest three-way.
+        // `valid` stays for older clients; `verdict` is the honest three-way;
+        // `proves` is what a third party may conclude from it.
         "valid": verdict == "valid",
         "verdict": verdict,
         "verified_by": verified_by,
+        "proves": proves,
+        "meaning": meaning,
         "server_public_key": server_pubkey,
         "client_public_key": client_public_key,
     });
@@ -8205,6 +8258,106 @@ mod signature_verdict_tests {
         assert_eq!(out.0["verification"]["verdict"], "valid");
         assert_eq!(out.0["verification"]["verified_by"], "client-session-key");
         assert_eq!(out.0["sender_did"], did);
+    }
+
+    /// Store `text` from `did` in `#proves` with the given signature tag, and
+    /// return what the verify endpoint says about it.
+    async fn verify_stored(
+        state: &std::sync::Arc<crate::server::SharedState>,
+        did: &str,
+        msgid: &str,
+        text: &str,
+        sig: Option<String>,
+    ) -> serde_json::Value {
+        let mut tags = std::collections::HashMap::new();
+        if let Some(sig) = sig {
+            tags.insert(freeq_sdk::sigtag::SIG_TAG.to_string(), sig);
+        }
+        state
+            .with_db(|db| {
+                db.insert_message("#proves", "n!u@h", text, 0, &tags, Some(msgid), Some(did))
+            })
+            .expect("test state has a database");
+        api_verify_message(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(msgid.to_string()),
+        )
+        .await
+        .expect("the message is on file")
+        .0
+    }
+
+    /// A server-key signature is `valid` — the bytes check out — but it proves
+    /// only that this server relayed the message. Agents checking their own
+    /// work read `valid: true` as authorship and stopped there (experiments/ax
+    /// FINDINGS F18), so the response says what it proves, and how to get the
+    /// stronger answer.
+    #[tokio::test]
+    async fn a_server_signed_message_proves_relay_not_authorship() {
+        let state = test_state_with_db();
+        let did = "did:key:z6MkserverSignedOnly";
+        let msgid = "01KYVT5Z8Q0000000000RELAY1";
+        let sig = ChatDoc::message(
+            did,
+            msgid,
+            &freeq_sdk::chatsig::channel_venue("#proves"),
+            "hi",
+        )
+        .sign(&state.msg_signing_key);
+        let out = verify_stored(&state, did, msgid, "hi", Some(sig)).await;
+        let v = &out["verification"];
+        assert_eq!(v["verdict"], "valid", "the bytes still check out");
+        assert_eq!(v["verified_by"], "server-key");
+        assert_eq!(v["proves"], "relay");
+        let meaning = v["meaning"]
+            .as_str()
+            .expect("a sentence saying what it proves");
+        assert!(meaning.contains("did not sign"), "{meaning}");
+        assert!(
+            meaning.contains("MSGSIG"),
+            "names the way to author-sign: {meaning}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_author_signed_message_proves_authorship() {
+        let state = test_state_with_db();
+        let did = "did:key:z6MkauthorSigned";
+        let msgid = "01KYVT5Z8Q0000000000AUTHR1";
+        let key = SigningKey::from_bytes(&[5u8; 32]);
+        state
+            .with_db(|db| db.save_signing_key(did, key.verifying_key().as_bytes()))
+            .expect("test state has a database");
+        let sig = ChatDoc::message(
+            did,
+            msgid,
+            &freeq_sdk::chatsig::channel_venue("#proves"),
+            "hi",
+        )
+        .sign(&key);
+        let out = verify_stored(&state, did, msgid, "hi", Some(sig)).await;
+        assert_eq!(out["verification"]["proves"], "authorship");
+        assert!(
+            out["verification"]["meaning"]
+                .as_str()
+                .unwrap()
+                .contains(did),
+            "names who it is attributable to"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unsigned_message_proves_nothing() {
+        let state = test_state_with_db();
+        let out = verify_stored(
+            &state,
+            "did:key:z6Mkunsigned",
+            "01KYVT5Z8Q0000000000UNSIG1",
+            "hi",
+            None,
+        )
+        .await;
+        assert_eq!(out["verification"]["proves"], "nothing");
     }
 
     /// The classifier resolves the key the signature's `kid` names, never the

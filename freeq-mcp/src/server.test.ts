@@ -251,6 +251,22 @@ describe("freeq_verify", () => {
     expect(relayed.reading).toMatch(/proves the server relayed it/);
     expect(relayed.reading).not.toMatch(/non-repudiable/);
 
+    // A server that sends `proves` is taken at its word, even with a
+    // `verified_by` this tool does not know.
+    h = await harness({
+      routes: {
+        "GET /api/v1/verify/01LIVED": {
+          body: {
+            msgid: "01LIVED",
+            sender_did: "did:key:z6Mkbot",
+            verification: { valid: true, verdict: "valid", verified_by: "some-new-key-kind", proves: "relay" },
+          },
+        },
+      },
+    });
+    const provesRelay = await h.json("freeq_verify", { msgid: "01LIVED" });
+    expect(provesRelay.reading).toMatch(/proves the server relayed it/);
+
     h = await harness({
       routes: {
         "GET /api/v1/verify/01LIVEC": {

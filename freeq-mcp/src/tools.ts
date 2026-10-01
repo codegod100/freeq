@@ -125,10 +125,17 @@ export async function verify(ctx: ToolContext, args: { msgid: string }): Promise
 
   const valid = nested.valid === true || (verdict === undefined && result.verified === true);
   const invalid = verdict === "invalid";
+  // `proves` is the server's own answer to the question this tool exists for;
+  // older servers lack it, and `verified_by` stands in.
+  const proves = typeof nested.proves === "string" ? nested.proves : undefined;
   const authorSigned =
-    verifiedBy === "client-session-key" || (verifiedBy === undefined && legacySignedBy === "client");
+    proves === "authorship" ||
+    (proves === undefined &&
+      (verifiedBy === "client-session-key" || (verifiedBy === undefined && legacySignedBy === "client")));
   const serverSigned =
-    verifiedBy === "server-key" || (verifiedBy === undefined && legacySignedBy === "server");
+    proves === "relay" ||
+    (proves === undefined &&
+      (verifiedBy === "server-key" || (verifiedBy === undefined && legacySignedBy === "server")));
 
   const signer =
     (typeof result.sender_did === "string" ? result.sender_did : undefined) ??
