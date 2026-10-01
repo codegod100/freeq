@@ -15,7 +15,7 @@ import { FreeqSession } from "./session.js";
 import * as tools from "./tools.js";
 import type { ToolContext } from "./tools.js";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 /** Description shown to the model for the server as a whole. */
 export const INSTRUCTIONS = `freeq is chat where every message is signed, and the signing key can be the speaker's own identity (a DID; nicks are display names). Built on IRC.
