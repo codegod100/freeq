@@ -545,6 +545,11 @@ function parseReply(raw: unknown): { req: string; a?: string; err?: string } | u
  * Hashed rather than embedded because the nick is public, and
  * "chads-macbook" tells a channel more than it needs to know.
  */
+/** `mcp-<8 hex>` from a DID: unique per key, stable for as long as it is. */
+export function didNick(did: string): string {
+  return `mcp-${createHash("sha256").update(did).digest("hex").slice(0, 8)}`;
+}
+
 export function defaultNick(seed?: string): string {
   const material = seed ?? `${process.env.HOSTNAME ?? ""}\0${process.env.USER ?? ""}\0mcp`;
   const slug = createHash("sha256").update(material).digest("hex").slice(0, 8);
@@ -621,10 +626,16 @@ export async function defaultCreateClient(
     }
   }
 
+  // `nick` names the state directory and is derived from the host, so it is
+  // the same in every identical container; on the wire that made concurrent
+  // agents collide and bot-kit refuse to connect (experiments/ax FINDINGS
+  // F19). Unless FREEQ_NICK pins one, the IRC nick comes from the key.
+  const ircNick = cfg.nick ?? didNick(identity.did);
+
   const bot = await kit.FreeqBot.create({
     name: nick,
     ownerDid,
-    nick,
+    nick: ircNick,
     url: cfg.wsUrl,
     serverOrigin: cfg.baseUrl,
     channels: cfg.channels,

@@ -47,8 +47,29 @@ describe("defaultCreateClient", () => {
     expect(made.selfOwned).toBe(true);
     expect(made.did).toBe("did:key:zagent");
     // The delegation names the agent itself as owner.
-    expect(calls.create).toMatchObject({ name: "mcp-abc", nick: "mcp-abc", ownerDid: "did:key:zagent", root });
+    expect(calls.create).toMatchObject({ name: "mcp-abc", ownerDid: "did:key:zagent", root });
     expect(calls.seedPath).toBe(join(root, "mcp-abc", "agent.key"));
+  });
+
+  it("takes its IRC nick from its DID when no nick is configured", async () => {
+    // The host-derived default is identical in identical containers, so
+    // concurrent agents collided on it and bot-kit refused to connect
+    // (experiments/ax FINDINGS F19). The state directory keeps the host name;
+    // the nick on the wire comes from the key, which is unique.
+    const root = await mkdtemp(join(tmpdir(), "freeq-mcp-"));
+    const { kit, calls } = fakeKit();
+    await defaultCreateClient(loadConfig({}), "mcp-abc", { botKit: async () => kit, root });
+    expect(calls.create).toMatchObject({ name: "mcp-abc" });
+    expect(calls.create?.nick).toMatch(/^mcp-[a-z0-9]{8}$/);
+    expect(calls.create?.nick).not.toBe("mcp-abc");
+    expect(calls.seedPath).toBe(join(root, "mcp-abc", "agent.key"));
+  });
+
+  it("keeps FREEQ_NICK exactly when it is set", async () => {
+    const root = await mkdtemp(join(tmpdir(), "freeq-mcp-"));
+    const { kit, calls } = fakeKit();
+    await defaultCreateClient(loadConfig({ FREEQ_NICK: "mybot" }), "mybot", { botKit: async () => kit, root });
+    expect(calls.create).toMatchObject({ name: "mybot", nick: "mybot" });
   });
 
   it("binds to FREEQ_OWNER_DID when set", async () => {

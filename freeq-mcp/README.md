@@ -55,7 +55,7 @@ The room sees you as the agent's owner only once the server has verified that ce
 | `FREEQ_WS_URL` | derived | Override the IRC WebSocket URL. |
 | `FREEQ_OWNER_DID` | — | Your DID. Unset → a self-owned `did:key`. |
 | `FREEQ_GUEST` | off | Connect as a nick-only guest: no key, nothing attributable. |
-| `FREEQ_NICK` | `mcp-<8 hex>` | Nick. The default is derived from a hash of host+user, so it is stable without leaking your hostname. |
+| `FREEQ_NICK` | `mcp-<8 hex>` | Nick. The default is a hash of the agent's DID: stable for as long as the key is, and distinct across identical machines (a host-derived nick collided in CI-style fleets). |
 | `FREEQ_CHANNELS` | — | Channels to join on connect (comma or space separated). |
 | `FREEQ_BEARER_TOKEN` | — | Bearer token for authenticated REST. Usually unnecessary: SASL issues one. |
 | `FREEQ_READ_ONLY` | off | Disable every tool that writes to the network. |
