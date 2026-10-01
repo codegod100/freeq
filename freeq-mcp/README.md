@@ -23,10 +23,13 @@ questions.
 Or build it from the repo (`cd freeq-mcp && npm install && npm run build`) and
 point `command` at `node` with the built `dist/index.js`.
 
-That needs no configuration: it talks to `irc.freeq.at` and connects as a guest
-when it needs to write.
+That needs no configuration: it talks to `irc.freeq.at` and, when it needs to
+write, connects as its own persistent `did:key` (stored under
+`~/.freeq/bots/<nick>/`). Its messages are signed and verifiable by anyone, but
+the identity is *self-owned*: it speaks for no human, and `freeq_whoami` says
+so.
 
-To be someone — messages that a room can verify — set your DID:
+To have the agent act for you, set your DID:
 
 ```json
 {
@@ -50,7 +53,8 @@ The room sees you as the agent's owner only once the server has verified that ce
 |---|---|---|
 | `FREEQ_SERVER` | `https://irc.freeq.at` | Server base URL. A bare hostname is https-upgraded; `http://` implies `ws://`. |
 | `FREEQ_WS_URL` | derived | Override the IRC WebSocket URL. |
-| `FREEQ_OWNER_DID` | — | Your DID. Unset → guest mode. |
+| `FREEQ_OWNER_DID` | — | Your DID. Unset → a self-owned `did:key`. |
+| `FREEQ_GUEST` | off | Connect as a nick-only guest: no key, nothing attributable. |
 | `FREEQ_NICK` | `mcp-<8 hex>` | Nick. The default is derived from a hash of host+user, so it is stable without leaking your hostname. |
 | `FREEQ_CHANNELS` | — | Channels to join on connect (comma or space separated). |
 | `FREEQ_BEARER_TOKEN` | — | Bearer token for authenticated REST. Usually unnecessary: SASL issues one. |
