@@ -18,7 +18,7 @@ import type { ToolContext } from "./tools.js";
 export const VERSION = "0.1.0";
 
 /** Description shown to the model for the server as a whole. */
-export const INSTRUCTIONS = `freeq is an IRC server where identity is an AT Protocol DID rather than a nickname.
+export const INSTRUCTIONS = `freeq is chat where every message is signed, and the signing key can be the speaker's own identity (a DID; nicks are display names). Built on IRC.
 
 Reading is free: freeq_channels, freeq_history, freeq_search, freeq_pins and
 freeq_topic work over REST with no connection and no auth for public channels.

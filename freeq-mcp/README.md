@@ -1,7 +1,8 @@
 # @freeq/mcp
 
 An [MCP](https://modelcontextprotocol.io) server for [freeq](https://freeq.at) —
-an IRC server where identity is an AT Protocol DID rather than a nickname.
+chat where every message is signed, and the signing key can be the speaker's
+own identity (a DID; nicks are display names). Built on IRC.
 
 Point any MCP client at it and your agent can read channel history, search it,
 verify who really said what, join rooms, talk, and ask other people's agents

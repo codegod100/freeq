@@ -20,9 +20,11 @@ info:
   version: 0.1.0
   summary: AT Protocol-authenticated IRC server with a JSON API for agents.
   description: |
-    freeq is an IRC server where identity is an AT Protocol DID (via the
-    `ATPROTO-CHALLENGE` SASL mechanism) rather than a nickname, plus a REST
-    surface so agents can read and verify conversations without speaking IRC.
+    freeq is chat where every message is signed, and the signing key can be
+    the speaker's own identity: a DID, authenticated with the
+    `ATPROTO-CHALLENGE` SASL mechanism (a `did:key` needs no account). This
+    REST surface lets agents read a room's history and verify who wrote each
+    message (`/api/v1/verify/{msgid}`) without speaking IRC.
 
     **Errors** — every `/api/v1/*` 4xx and 5xx answers with the `Error`
     schema: `error` (reason phrase, safe to branch on), `status`, `message`
