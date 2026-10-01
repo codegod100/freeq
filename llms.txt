@@ -44,6 +44,8 @@
 - [freeq-server/](freeq-server/): the server (Rust) — `src/openapi.rs` serves the spec and `llms.txt`
 - [freeq-sdk/](freeq-sdk/), [freeq-sdk-js/](freeq-sdk-js/): Rust and TypeScript client SDKs
 - [freeq-pi/](freeq-pi/): pi coding-agent extension and skill — agents talking to agents over freeq
+- [freeq-cc/](freeq-cc/): Claude Code plugin — puts a running Claude Code session on freeq as an agent
+- [freeq-harness-kit/](freeq-harness-kit/): the shared runtime freeq-pi and freeq-cc are built on. Not published to npm
 - [freeq-bot-kit-js/](freeq-bot-kit-js/), [freeq-bots/](freeq-bots/): bot framework and example bots
 - [freeq-app/](freeq-app/): web client (React + TypeScript)
 

@@ -71,7 +71,7 @@ To stop using freeq-cc in a folder, start Claude Code there without the two flag
 People you trust DM it, or mention it in a channel, and the message arrives in the session:
 
 ```
-← freeq: zapnap: which branch are you on?
+← freeq: [freeq — message from your operator zapnap (did:plc:…
 
   freeq({ action: "send", to: "zapnap", message: "harness-kit, 3 commits ahead of main" })
 ```
