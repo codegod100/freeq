@@ -389,6 +389,59 @@ describe("AgentRuntime: /freeq commands", () => {
     expect(h.notices.map((n) => n.text)).toEqual(["freeq: trust unchanged", "freeq: did:plc:eve → message"]);
   });
 
+  it("login with a server saves both and connects there", async () => {
+    const h = fakeHarness();
+    const urls: string[] = [];
+    const rt = new AgentRuntime(h.harness, {
+      botFactory: async (o) => {
+        urls.push(o.url);
+        return new FakeBot();
+      },
+    });
+    await rt.start();
+    await rt.runCommand("login did:plc:owner wss://irc.example.test/irc");
+    expect(rt.config).toMatchObject({ ownerDid: "did:plc:owner", server: "wss://irc.example.test/irc" });
+    expect(urls).toEqual(["wss://irc.example.test/irc"]);
+    expect(rt.conn?.state).toBe("online");
+  });
+
+  it("login refuses a server that is not a websocket URL", async () => {
+    const h = fakeHarness();
+    const rt = new AgentRuntime(h.harness, { botFactory: async () => new FakeBot() });
+    await rt.start();
+    await rt.runCommand("login did:plc:owner irc.example.test");
+    expect(rt.config?.ownerDid).toBeUndefined();
+    expect(rt.conn).toBeUndefined();
+    expect(h.notices.at(-1)).toEqual({
+      text: "usage: /freeq login did:plc:… [wss://server/irc] (your own DID, and the server if not the default)",
+      level: "warning",
+    });
+  });
+
+  it("login with another server while online reconnects there", async () => {
+    const h = fakeHarness();
+    writeConfig(h.agentDir);
+    const urls: string[] = [];
+    const rt = new AgentRuntime(h.harness, {
+      botFactory: async (o) => {
+        urls.push(o.url);
+        return new FakeBot();
+      },
+    });
+    await rt.start();
+    expect(rt.conn?.state).toBe("online");
+    await rt.runCommand("login did:plc:owner wss://other.example.test/irc");
+    expect(urls).toEqual(["ws://test.invalid/irc", "wss://other.example.test/irc"]);
+    expect(rt.config?.server).toBe("wss://other.example.test/irc");
+    expect(rt.conn?.state).toBe("online");
+  });
+
+  it("login without a server keeps the configured one", async () => {
+    const { rt } = await started();
+    await rt.runCommand("login did:plc:other");
+    expect(rt.config).toMatchObject({ ownerDid: "did:plc:other", server: "ws://test.invalid/irc" });
+  });
+
   it("join pins the project's own channel list", async () => {
     const { rt, bot } = await started();
     await rt.runCommand("join #new");

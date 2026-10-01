@@ -1258,16 +1258,27 @@ export class AgentRuntime {
 
     switch (sub) {
       case "login": {
-        const did = rest[0];
-        if (!isDid(did)) {
-          this.notify(`usage: ${this.names.hint("login")} did:plc:… (your own DID)`, "warning");
+        const [did, server] = rest;
+        if (!isDid(did) || (server !== undefined && !/^wss?:\/\/\S+$/.test(server))) {
+          this.notify(
+            `usage: ${this.names.hint("login")} did:plc:… [wss://server/irc] (your own DID, and the server if not the default)`,
+            "warning",
+          );
           return;
         }
+        // A new server means the open connection is to the wrong place:
+        // close it so connect() opens one to the new server.
+        const moved = server !== undefined && server !== cfg.server;
         cfg.ownerDid = did;
+        if (server) cfg.server = server;
         cfg.install ??= deriveInstallSlug();
         cfg.nick ??= defaultNick(cfg.install, this.names.name);
         await saveConfig(this.agentDir, cfg);
-        this.notify(`freeq: owner set to ${did}; connecting…`, "info");
+        if (moved && this.conn) {
+          await this.conn.stop("server changed");
+          this.conn = undefined;
+        }
+        this.notify(`freeq: owner set to ${did}${server ? `, server ${server}` : ""}; connecting…`, "info");
         this.notify(await this.connect(), this.conn?.state === "online" ? "info" : "warning");
         return;
       }
@@ -1866,7 +1877,7 @@ export class AgentRuntime {
       default:
         this.notify(
           [
-            "/freeq [status | doctor | login <did> | join #c | leave #c |",
+            "/freeq [status | doctor | login <did> [server] | join #c | leave #c |",
             "        peers | handoffs | mode #c <silent|addressed|participant> |",
             "        trust <did> <tier> | provenance <tier> | mute | unmute |",
             "        takeover | on | off]",

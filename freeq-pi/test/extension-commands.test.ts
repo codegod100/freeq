@@ -50,7 +50,7 @@ describe("/freeq", () => {
     expect(h.lastNotice()).toMatchInlineSnapshot(`
       {
         "level": "info",
-        "text": "/freeq [status | doctor | login <did> | join #c | leave #c |
+        "text": "/freeq [status | doctor | login <did> [server] | join #c | leave #c |
               peers | handoffs | mode #c <silent|addressed|participant> |
               trust <did> <tier> | provenance <tier> | mute | unmute |
               takeover | on | off]
@@ -73,7 +73,7 @@ describe("/freeq", () => {
     await h.command("login chad");
     expect(h.noticeTexts()).toMatchInlineSnapshot(`
       [
-        "warning: usage: /freeq login did:plc:… (your own DID)",
+        "warning: usage: /freeq login did:plc:… [wss://server/irc] (your own DID, and the server if not the default)",
       ]
     `);
     h.notices.length = 0;
