@@ -170,7 +170,7 @@ export interface FreeqClientOptions {
   /** When `false`, the SDK does NOT auto-mint a session ed25519 key and
    *  send MSGSIG after SASL success. Defaults to true for backward
    *  compatibility. Useful for agents that hold their own signing key
-   *  (e.g. freeqcc using its did:key seed) or for headless tests. */
+   *  (e.g. a bot-kit agent using its did:key seed) or for headless tests. */
   autoMsgSig?: boolean;
 
   /** Keeps this device's signing key across connects, so the same key is
