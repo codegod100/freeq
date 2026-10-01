@@ -267,6 +267,29 @@ describe("freeq_verify", () => {
     const provesRelay = await h.json("freeq_verify", { msgid: "01LIVED" });
     expect(provesRelay.reading).toMatch(/proves the server relayed it/);
 
+    // A session key the server merely recorded is authorship on its word,
+    // not independent proof; the reading must not over-claim.
+    h = await harness({
+      routes: {
+        "GET /api/v1/verify/01LIVEE": {
+          body: {
+            msgid: "01LIVEE",
+            sender_did: "did:plc:alice",
+            verification: {
+              valid: true,
+              verdict: "valid",
+              verified_by: "client-session-key",
+              proves: "authorship",
+              independent: false,
+            },
+          },
+        },
+      },
+    });
+    const onItsWord = await h.json("freeq_verify", { msgid: "01LIVEE" });
+    expect(onItsWord.reading).toMatch(/rests on the server's record/);
+    expect(onItsWord.reading).not.toMatch(/non-repudiable/);
+
     h = await harness({
       routes: {
         "GET /api/v1/verify/01LIVEC": {

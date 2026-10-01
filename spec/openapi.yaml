@@ -2455,7 +2455,7 @@ components:
         how_to_verify: { type: string }
         verification:
           type: object
-          required: [valid, verdict, verified_by, proves, meaning]
+          required: [valid, verdict, verified_by, proves, independent, meaning]
           properties:
             proves:
               type: string
@@ -2466,6 +2466,14 @@ components:
                 signed it for the sender, so it is *not* attributable to them;
                 register a session key with MSGSIG to author-sign. `nothing`:
                 invalid or uncheckable.
+            independent:
+              type: boolean
+              description: |
+                Whether `proves` holds without trusting this server. True when
+                the signing key is the did:key itself, or one the identity
+                published (DID document, identity record). False for a session
+                key bound to the DID only by this server's MSGSIG record, and
+                for relay.
             meaning: { type: string, description: The same, as one sentence. }
             verdict:
               type: string

@@ -2437,34 +2437,71 @@ fn classify_message_signature(
     }
 }
 
-/// What a verdict lets a third party conclude, as `(proves, meaning)`.
+/// What a verdict lets a third party conclude, as `(proves, independent,
+/// meaning)`.
 ///
 /// `verdict` answers "do the bytes check out", which is true of a server-key
 /// signature too. Agents checking their own work read `valid: true` as "I am
 /// provably the author" and stopped there, when the server had only vouched
-/// for relaying it (experiments/ax FINDINGS F18). `proves` is the answer to the
-/// question they were actually asking:
+/// for relaying the message (experiments/ax FINDINGS F18). `proves` is the
+/// answer to the question they were actually asking:
 ///
-/// - `authorship` — the sender's own registered key signed it.
+/// - `authorship` — the sender's own key signed it.
 /// - `relay` — this server signed it on the sender's behalf; the sender did
 ///   not, and could deny it.
 /// - `nothing` — no conclusion either way (`invalid` or `unverifiable`).
+///
+/// `independent` says whether that conclusion needs anyone's word. A key the
+/// identity published itself (its DID document or identity record), or a
+/// did:key signing with the very key it names, needs none. A session key
+/// registered with MSGSIG is tied to the DID only by this server's record of
+/// which authenticated connection sent it, and the DID never signs that
+/// binding, so a skeptic has to take this server's word for whose key it is.
 fn what_it_proves(
     verdict: &str,
     verified_by: &str,
     sender_did: Option<&str>,
-) -> (&'static str, String) {
+    client_public_key: Option<&str>,
+    key_source: Option<&str>,
+) -> (&'static str, bool, String) {
+    let who = sender_did.unwrap_or("the sender");
     match (verdict, verified_by) {
-        ("valid", "client-session-key") => (
-            "authorship",
-            format!(
-                "Signed by a key registered to {}: attributable to that identity, \
-                 checkable without trusting this server.",
-                sender_did.unwrap_or("the sender")
-            ),
-        ),
+        ("valid", "client-session-key") => {
+            if signs_with_its_own_did_key(sender_did, client_public_key) {
+                (
+                    "authorship",
+                    true,
+                    format!(
+                        "Signed by {who}'s own key (the did:key is the key): attributable to \
+                         that identity, checkable without trusting this server."
+                    ),
+                )
+            } else if matches!(key_source, Some("identity-record" | "did-document")) {
+                (
+                    "authorship",
+                    true,
+                    format!(
+                        "Signed by a key {who} published in its {}: attributable to that \
+                         identity, checkable without trusting this server.",
+                        key_source.unwrap_or_default().replace('-', " ")
+                    ),
+                )
+            } else {
+                (
+                    "authorship",
+                    false,
+                    format!(
+                        "Signed by the author's own client key, which this server records as \
+                         {who}'s ({}). The signature shows the client signed it; that the key \
+                         belongs to {who} rests on this server's record.",
+                        key_source.unwrap_or("unknown source")
+                    ),
+                )
+            }
+        }
         ("valid", "server-key") => (
             "relay",
+            false,
             "This server vouches that it relayed this message; the sender did not sign \
              it, so it is not attributable to them. To author-sign, register a session \
              key with MSGSIG and sign each message (see /signing.md)."
@@ -2472,13 +2509,33 @@ fn what_it_proves(
         ),
         ("invalid", _) => (
             "nothing",
+            false,
             "The signature does not match this message under the key it names.".to_string(),
         ),
         _ => (
             "nothing",
+            false,
             "This signature cannot be checked here, so it supports no conclusion either way."
                 .to_string(),
         ),
+    }
+}
+
+/// Whether `client_public_key` (base64url) is the ed25519 key `sender_did`
+/// itself encodes, i.e. a did:key that signed with its own key.
+fn signs_with_its_own_did_key(sender_did: Option<&str>, client_public_key: Option<&str>) -> bool {
+    use base64::Engine;
+    let (Some(did), Some(client)) = (sender_did, client_public_key) else {
+        return false;
+    };
+    let Some(multibase) = did.strip_prefix("did:key:") else {
+        return false;
+    };
+    match freeq_sdk::crypto::PublicKey::from_multibase(multibase) {
+        Ok(freeq_sdk::crypto::PublicKey::Ed25519(vk)) => {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(vk.as_bytes()) == client
+        }
+        _ => false,
     }
 }
 
@@ -2589,13 +2646,19 @@ pub(crate) async fn api_verify_message(
                         .map(|b| format!("{b:02x}"))
                         .collect::<String>()
                 });
-                let (proves, meaning) =
-                    what_it_proves(verdict, verified_by, ev.actor_did.as_deref());
+                let (proves, independent, meaning) = what_it_proves(
+                    verdict,
+                    verified_by,
+                    ev.actor_did.as_deref(),
+                    client_public_key.as_deref(),
+                    key_source.as_deref(),
+                );
                 let mut verification = serde_json::json!({
                     "valid": verdict == "valid",
                     "verdict": verdict,
                     "verified_by": verified_by,
                     "proves": proves,
+                    "independent": independent,
                     "meaning": meaning,
                     "server_public_key": server_pubkey,
                     "client_public_key": client_public_key,
@@ -2681,7 +2744,13 @@ pub(crate) async fn api_verify_message(
         use base64::Engine;
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(server_vk.as_bytes())
     };
-    let (proves, meaning) = what_it_proves(verdict, verified_by, sender_did.as_deref());
+    let (proves, independent, meaning) = what_it_proves(
+        verdict,
+        verified_by,
+        sender_did.as_deref(),
+        client_public_key.as_deref(),
+        key_source.as_deref(),
+    );
     let mut verification = serde_json::json!({
         // `valid` stays for older clients; `verdict` is the honest three-way;
         // `proves` is what a third party may conclude from it.
@@ -2689,6 +2758,7 @@ pub(crate) async fn api_verify_message(
         "verdict": verdict,
         "verified_by": verified_by,
         "proves": proves,
+        "independent": independent,
         "meaning": meaning,
         "server_public_key": server_pubkey,
         "client_public_key": client_public_key,
@@ -8309,6 +8379,7 @@ mod signature_verdict_tests {
         assert_eq!(v["verdict"], "valid", "the bytes still check out");
         assert_eq!(v["verified_by"], "server-key");
         assert_eq!(v["proves"], "relay");
+        assert_eq!(v["independent"], false);
         let meaning = v["meaning"]
             .as_str()
             .expect("a sentence saying what it proves");
@@ -8319,10 +8390,15 @@ mod signature_verdict_tests {
         );
     }
 
+    /// A session key registered over MSGSIG is tied to the DID only by this
+    /// server's record of which authenticated session sent it: the DID never
+    /// signs that binding. So the message is authored by that client, but a
+    /// skeptic still has to take this server's word for whose key it is, and
+    /// the response must not claim otherwise.
     #[tokio::test]
-    async fn an_author_signed_message_proves_authorship() {
+    async fn a_session_key_proves_authorship_on_this_servers_word() {
         let state = test_state_with_db();
-        let did = "did:key:z6MkauthorSigned";
+        let did = "did:plc:sessionkeyuser";
         let msgid = "01KYVT5Z8Q0000000000AUTHR1";
         let key = SigningKey::from_bytes(&[5u8; 32]);
         state
@@ -8336,13 +8412,51 @@ mod signature_verdict_tests {
         )
         .sign(&key);
         let out = verify_stored(&state, did, msgid, "hi", Some(sig)).await;
-        assert_eq!(out["verification"]["proves"], "authorship");
+        let v = &out["verification"];
+        assert_eq!(v["proves"], "authorship");
+        assert_eq!(v["independent"], false);
+        let meaning = v["meaning"].as_str().unwrap();
         assert!(
-            out["verification"]["meaning"]
+            meaning.contains(did),
+            "names who it is attributable to: {meaning}"
+        );
+        assert!(
+            meaning.contains("this server"),
+            "says whose word the key binding rests on: {meaning}"
+        );
+        assert!(!meaning.contains("without trusting"), "{meaning}");
+    }
+
+    /// A did:key that signs with its own key needs nobody's word: the key is
+    /// the identity.
+    #[tokio::test]
+    async fn a_did_key_signing_with_its_own_key_is_independently_checkable() {
+        let state = test_state_with_db();
+        let key = SigningKey::from_bytes(&[6u8; 32]);
+        let did = format!(
+            "did:key:{}",
+            freeq_sdk::crypto::PublicKey::Ed25519(key.verifying_key()).to_multibase()
+        );
+        let msgid = "01KYVT5Z8Q0000000000AUTHR2";
+        state
+            .with_db(|db| db.save_signing_key(&did, key.verifying_key().as_bytes()))
+            .expect("test state has a database");
+        let sig = ChatDoc::message(
+            &did,
+            msgid,
+            &freeq_sdk::chatsig::channel_venue("#proves"),
+            "hi",
+        )
+        .sign(&key);
+        let out = verify_stored(&state, &did, msgid, "hi", Some(sig)).await;
+        let v = &out["verification"];
+        assert_eq!(v["proves"], "authorship");
+        assert_eq!(v["independent"], true);
+        assert!(
+            v["meaning"]
                 .as_str()
                 .unwrap()
-                .contains(did),
-            "names who it is attributable to"
+                .contains("without trusting this server")
         );
     }
 
