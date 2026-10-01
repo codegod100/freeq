@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /**
- * freeq-cc's entry: the MCP stdio server Claude Code starts.
- *
- * Register it as a user-scope MCP server named `freeq` and start Claude Code
- * with `--dangerously-load-development-channels server:freeq` (README).
+ * freeq-cc's entry: the MCP stdio server Claude Code starts, as the `freeq`
+ * plugin's server `freeq` (`.claude-plugin/plugin.json`). Start Claude Code
+ * with `--plugin-dir <freeq-cc> --dangerously-load-development-channels
+ * plugin:freeq@inline` (README).
  *
  * Env: FREEQ_CC_DIR overrides the state directory (`~/.freeq/cc`);
  * CLAUDE_PROJECT_DIR, which Claude Code sets for stdio servers, is the

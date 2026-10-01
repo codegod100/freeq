@@ -2,20 +2,19 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { kitToolName } from "../src/channel.js";
 import { OWNER, PEER, baseConfig, startChannel } from "./helpers.js";
 
 describe("freeq-cc: the server Claude Code starts", () => {
-  it("declares the channel, the tools and the /freeq prompts", async () => {
+  it("declares the channel and the tools, and no prompts (the plugin's command files are the /freeq commands)", async () => {
     const h = await startChannel({ config: baseConfig() });
     const caps = h.client.getServerCapabilities();
     expect(caps?.experimental?.["claude/channel"]).toEqual({});
     expect(caps?.tools).toBeDefined();
-    expect(caps?.prompts).toBeDefined();
+    expect(caps?.prompts).toBeUndefined();
     const tools = (await h.client.listTools()).tools.map((t) => t.name);
     expect(tools).toEqual(["freeq", "freeq_hook"]);
-    const prompts = (await h.client.listPrompts()).prompts.map((p) => p.name);
-    expect(prompts).toEqual(expect.arrayContaining(["status", "doctor", "join", "trust", "accept", "withheld"]));
-    expect(h.client.getInstructions()).toContain('<channel source="freeq"');
+    expect(h.client.getInstructions()).toContain('<channel source="plugin:freeq:freeq"');
     await h.close();
   });
 
@@ -66,7 +65,7 @@ describe("freeq-cc: replies", () => {
   it("answers with the closing text when the agent sent nothing", async () => {
     const h = await startChannel({ config: baseConfig() });
     await h.dm("nap", OWNER, "status?");
-    await h.hook({ hook_event_name: "UserPromptSubmit", prompt: '<channel source="freeq">status?</channel>' });
+    await h.hook({ hook_event_name: "UserPromptSubmit", prompt: '<channel source="plugin:freeq:freeq">status?</channel>' });
     await h.hook({ hook_event_name: "PreToolUse", tool_name: "Bash", command: "git status" });
     await h.hook({ hook_event_name: "Stop", last_assistant_message: "Clean tree, on main." });
     expect(h.bot.messages()).toEqual(["nap Clean tree, on main."]);
@@ -129,9 +128,31 @@ describe("freeq-cc: activity from hooks", () => {
     await h.close();
   });
 
+  it("names the freeq tool's action and target in the work line, as freeq-pi does", async () => {
+    const h = await startChannel({ config: baseConfig() });
+    const out = await h.hook({
+      hook_event_name: "PreToolUse",
+      tool_name: "mcp__plugin_freeq_freeq__freeq",
+      action: "send",
+      to: "zapnap",
+    });
+    expect(out.hookSpecificOutput).toEqual({ hookEventName: "PreToolUse", permissionDecision: "allow" });
+    await h.hook({ hook_event_name: "Stop", last_assistant_message: "sent" });
+    expect(h.bot.messages()).toContain("#work ⚙ freeq send → zapnap");
+    await h.close();
+  });
+
+  it("leaves another tool's work line alone when the freeq fields arrive empty", async () => {
+    const h = await startChannel({ config: baseConfig() });
+    await h.hook({ hook_event_name: "PreToolUse", tool_name: "Bash", command: "npm test", file_path: "", action: "", to: "" });
+    await h.hook({ hook_event_name: "Stop", last_assistant_message: "tested" });
+    expect(h.bot.messages()).toContain("#work ⚙ ran: npm test");
+    await h.close();
+  });
+
   it("does not take a channel event's text as a typed prompt", async () => {
     const h = await startChannel({ config: baseConfig() });
-    await h.hook({ hook_event_name: "UserPromptSubmit", prompt: '<channel source="freeq" chat_id="nap">hi</channel>' });
+    await h.hook({ hook_event_name: "UserPromptSubmit", prompt: '<channel source="plugin:freeq:freeq" chat_id="nap">hi</channel>' });
     expect(h.channel.runtime.step).toBeUndefined();
     await h.close();
   });
@@ -147,10 +168,30 @@ describe("freeq-cc: activity from hooks", () => {
   });
 });
 
-describe("freeq-cc: /freeq prompts", () => {
-  it("/freeq:status returns the status text", async () => {
+describe("freeq-cc: the freeq tool's permission", () => {
+  it("allows the plugin's own freeq tool, and says nothing about any other", async () => {
     const h = await startChannel({ config: baseConfig() });
-    const text = await h.prompt("status");
+    const own = await h.hook({ hook_event_name: "PreToolUse", tool_name: "mcp__plugin_freeq_freeq__freeq" });
+    expect(own.hookSpecificOutput).toEqual({ hookEventName: "PreToolUse", permissionDecision: "allow" });
+    const other = await h.hook({ hook_event_name: "PreToolUse", tool_name: "Bash", command: "ls" });
+    expect(other.hookSpecificOutput).toBeUndefined();
+    const old = await h.hook({ hook_event_name: "PreToolUse", tool_name: "mcp__freeq__freeq" });
+    expect(old.hookSpecificOutput).toBeUndefined();
+    await h.close();
+  });
+
+  it("knows the plugin's tool name as the freeq tool", () => {
+    expect(kitToolName("mcp__plugin_freeq_freeq__freeq")).toBe("freeq");
+    expect(kitToolName("Bash")).toBe("bash");
+  });
+});
+
+describe("freeq-cc: /freeq commands typed by the person", () => {
+  it("runs the subcommand in the hook and hands Claude the answer to show", async () => {
+    const h = await startChannel({ config: baseConfig() });
+    const text = await h.command("/freeq:status");
+    expect(text).toContain("freeq ran /freeq:status and answered:");
+    expect(text).toContain("Show this answer to the user exactly as it is, and nothing else.");
     expect(text).toContain("owner:    did:plc:owner");
     expect(text).toContain("state:    online: cc-test1234-proj");
     await h.close();
@@ -158,7 +199,7 @@ describe("freeq-cc: /freeq prompts", () => {
 
   it("passes arguments through: /freeq:join #dev", async () => {
     const h = await startChannel({ config: baseConfig() });
-    const text = await h.prompt("join", { channel: "#dev" });
+    const text = await h.command("/freeq:join #dev");
     expect(text).toContain("freeq: joining #dev (mode: addressed)");
     const saved = JSON.parse(readFileSync(join(h.agentDir, "freeq.json"), "utf8"));
     expect(saved.projects.proj.channels).toEqual(["#work", "#dev"]);
@@ -173,7 +214,7 @@ describe("freeq-cc: /freeq prompts", () => {
       asked.push(String(req.params.message));
       return { action: "accept", content: { confirm: true } };
     });
-    const text = await h.prompt("trust", { did: PEER, tier: "request" });
+    const text = await h.command(`/freeq:trust ${PEER} request`);
     expect(asked[0]).toContain(`Grant ${PEER} tier 'request'?`);
     expect(text).toContain(`freeq: ${PEER} → request`);
     await h.close();
@@ -181,11 +222,26 @@ describe("freeq-cc: /freeq prompts", () => {
 
   it("takes an explicit yes when the client cannot elicit, and says how when it is missing", async () => {
     const h = await startChannel({ config: baseConfig() });
-    const refused = await h.prompt("trust", { did: PEER, tier: "request" });
+    const refused = await h.command(`/freeq:trust ${PEER} request`);
     expect(refused).toContain("freeq: trust unchanged");
     expect(refused).toContain(`/freeq:trust ${PEER} request yes`);
-    const granted = await h.prompt("trust", { did: PEER, tier: "request", confirm: "yes" });
+    const granted = await h.command(`/freeq:trust ${PEER} request yes`);
     expect(granted).toContain(`freeq: ${PEER} → request`);
+    await h.close();
+  });
+
+  it("does not take a typed command as the session's work", async () => {
+    const h = await startChannel({ config: baseConfig() });
+    await h.command("/freeq:status");
+    expect(h.channel.runtime.step).toBeUndefined();
+    await h.close();
+  });
+
+  it("lets anything else through as an ordinary prompt", async () => {
+    const h = await startChannel({ config: baseConfig() });
+    const out = await h.hook({ hook_event_name: "UserPromptSubmit", prompt: "/freeq:nope" });
+    expect(out.hookSpecificOutput).toBeUndefined();
+    expect(h.channel.runtime.step?.phrase).toBe("/freeq:nope");
     await h.close();
   });
 });

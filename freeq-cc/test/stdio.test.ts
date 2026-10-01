@@ -54,7 +54,7 @@ describe("freeq-cc over stdio", () => {
     );
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     child.stdin.write(rpc(2, "tools/list"));
-    child.stdin.write(rpc(3, "prompts/get", { name: "status", arguments: {} }));
+    child.stdin.write(rpc(3, "tools/call", { name: "freeq_hook", arguments: { hook_event_name: "UserPromptSubmit", prompt: "/freeq:status" } }));
 
     // Answers to all three, and time for the failing connect to log.
     const deadline = Date.now() + 10_000;

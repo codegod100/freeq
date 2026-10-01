@@ -1,8 +1,10 @@
 /**
- * The `/freeq` subcommands as MCP prompts. Claude Code lists each as
- * `/freeq:<name> (MCP)`, splits what is typed after it on whitespace and
- * fills the declared arguments in order, so every subcommand declares its
- * own. The runtime (`AgentRuntime.runCommand`) does the work.
+ * The `/freeq` subcommands. The plugin ships one command file per
+ * subcommand (`commands/<name>.md`, written by `commandFile`), so Claude
+ * Code lists each as `/freeq:<name>`. What the person types reaches
+ * freeq-cc's UserPromptSubmit hook first; `parseTyped` reads it there and
+ * the runtime (`AgentRuntime.runCommand`) does the work, so the model never
+ * runs a subcommand. The command file only tells Claude to show the answer.
  */
 
 export interface CommandArg {
@@ -32,8 +34,11 @@ export const COMMANDS: Command[] = [
   },
   {
     name: "login",
-    description: "freeq: set the owner DID (your own) and connect",
-    args: [{ name: "did", description: "your DID, did:plc:…", required: true }],
+    description: "freeq: set the owner DID (your own), and the server if given, and connect",
+    args: [
+      { name: "did", description: "your DID, did:plc:…", required: true },
+      { name: "server", description: "the freeq server, wss://…/irc, if not the configured one" },
+    ],
   },
   {
     name: "authorize",
@@ -139,27 +144,53 @@ export const COMMANDS: Command[] = [
   { name: "help", description: "freeq: the subcommands", args: [] },
 ];
 
-/** Subcommands whose trailing `confirm` argument may be `yes`. */
+/** Subcommands whose trailing `yes` confirms without being asked. */
 export const CONFIRMABLE = new Set(COMMANDS.filter((c) => c.args.includes(CONFIRM)).map((c) => c.name));
 
+/** A typed `/freeq:<sub> …` line, as the runtime takes it. */
+export interface Typed {
+  name: string;
+  /** The subcommand and its words, without a confirming `yes`. */
+  line: string;
+  /** The person typed `yes` to confirm. */
+  yes: boolean;
+}
+
 /**
- * The command line for the runtime, from a prompt's arguments in declared
- * order, and whether the person typed `yes` to confirm.
+ * Read a prompt as the person typed it. Only a prompt that starts with
+ * `/freeq:<a known subcommand>` is one; every word after it is passed on,
+ * so a note or a reason keeps all of its words.
  */
-export function commandLine(
-  command: Command,
-  args: Record<string, string | undefined> | undefined,
-): { line: string; yes: boolean } {
+export function parseTyped(prompt: string): Typed | undefined {
+  const m = /^\s*\/freeq:([a-z]+)(?:\s+([\s\S]*))?$/.exec(prompt);
+  if (!m) return undefined;
+  const name = m[1]!;
+  if (!COMMANDS.some((c) => c.name === name)) return undefined;
+  const words = (m[2] ?? "").trim().split(/\s+/).filter(Boolean);
   let yes = false;
-  const words: string[] = [];
-  for (const arg of command.args) {
-    const value = args?.[arg.name]?.trim();
-    if (!value) continue;
-    if (arg === CONFIRM) {
-      yes = value.toLowerCase() === "yes";
-      continue;
-    }
-    words.push(value);
+  if (CONFIRMABLE.has(name) && words.at(-1)?.toLowerCase() === "yes") {
+    words.pop();
+    yes = true;
   }
-  return { line: [command.name, ...words].join(" "), yes };
+  return { name, line: [name, ...words].join(" "), yes };
+}
+
+/**
+ * The plugin's command file for a subcommand. Its text goes to Claude only
+ * after the hook has run the subcommand and attached the answer, so it asks
+ * Claude to show that answer and nothing more. `disable-model-invocation`
+ * keeps the model from running it on its own. `npm run commands` writes
+ * every file; a test checks they match.
+ */
+export function commandFile(c: Command): string {
+  const hint = c.args.map((a) => (a.required ? `<${a.name}>` : `[${a.name}]`)).join(" ");
+  return [
+    "---",
+    `description: ${JSON.stringify(c.description)}`,
+    ...(hint ? [`argument-hint: ${JSON.stringify(hint)}`] : []),
+    "disable-model-invocation: true",
+    "---",
+    "freeq has already run this command and attached its answer. Show me that answer exactly as it is, and nothing else. Do not run any tool. If no answer from freeq is attached, say that freeq-cc is not running in this session.",
+    "",
+  ].join("\n");
 }

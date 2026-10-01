@@ -141,11 +141,14 @@ export async function startChannel(opts: StartOptions = {}) {
       await settle();
       return JSON.parse(text(r)) as Record<string, unknown>;
     },
-    /** Run `/freeq:<name>` and return the prompt's text. */
-    async prompt(name: string, args: Record<string, string> = {}): Promise<string> {
-      const r = await client.getPrompt({ name, arguments: args });
-      await settle();
-      return r.messages.map((m) => (m.content.type === "text" ? m.content.text : "")).join("\n");
+    /**
+     * Type a `/freeq:<sub>` line, as the UserPromptSubmit hook sees it, and
+     * return what the hook hands Claude to show.
+     */
+    async command(typed: string): Promise<string> {
+      const out = await this.hook({ hook_event_name: "UserPromptSubmit", prompt: typed });
+      const specific = out.hookSpecificOutput as { additionalContext?: string } | undefined;
+      return String(specific?.additionalContext ?? "");
     },
     async close(): Promise<void> {
       await channel.stop();
