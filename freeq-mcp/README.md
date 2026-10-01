@@ -110,9 +110,7 @@ npm test            # 87 vitest, including the MCP surface over an in-memory tra
 npm run inspector   # MCP Inspector against the built server
 ```
 
-`freeq_ask` is wire-compatible with [`@freeq/pi`](../freeq-pi)'s `ask`: a
-caller-minted request id carried on the `+freeq.at/event` coordination channel,
-exactly one reply, and a reply from anyone but the peer you asked is rejected.
+`freeq_ask` is wire-compatible with the `ask` of [`@freeq/pi`](../freeq-pi) and [`@freeq/cc`](../freeq-cc), which run the same code (`freeq-harness-kit/src/ask.ts`): a caller-minted request id carried on the `+freeq.at/event` coordination channel, exactly one reply, and a reply from anyone but the peer you asked is rejected.
 
 ## License
 

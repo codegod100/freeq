@@ -3572,7 +3572,7 @@ describe('signed mutations', () => {
   // Signing moved these sends off the synchronous socket write, and each one
   // awaits its own signature. If completion order could differ from call
   // order, a streaming reply would edit itself out of sequence and land on
-  // the wrong text — freeqcc sends a chunk and then edits it, twice.
+  // the wrong text — a streaming sender sends a chunk and then edits it, twice.
   it('keeps call order on the wire when every send is signed', async () => {
     const { client, ws } = await makeSigningClient();
     client.sendTagged('#room', 'chunk one', { '+freeq.at/streaming': '1' });

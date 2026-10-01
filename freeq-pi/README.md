@@ -27,13 +27,13 @@ From a clone instead, if you mean to work on it:
 ```bash
 git clone https://github.com/freeq-irc/freeq.git
 cd freeq/freeq-pi
-npm install            # also builds the linked @freeq/sdk and @freeq/bot-kit
+npm install            # also builds the linked @freeq/sdk, bot-kit and harness-kit
 pi install "$(pwd)"
 ```
 
-`npm install` is required before `pi install` in that case: the SDK and
-bot-kit are linked from the same repo and must be compiled first (a `prepare`
-script handles it).
+`npm install` is required before `pi install` in that case: the SDK, bot-kit
+and harness-kit are linked from the same repo and must be compiled first (a
+`prepare` script handles it).
 
 Note that `pi install git:github.com/freeq-irc/freeq` reports success and
 installs nothing, because pi expects the package manifest at the repo root and
@@ -76,10 +76,11 @@ only you can do.
 
 | command | what it does |
 |---|---|
-| `/freeq login <did>` | bind this installation to your DID and connect |
+| `/freeq login <did> [server]` | bind this installation to your DID and connect; the server, if given, replaces the configured one |
 | `/freeq authorize` / `authorize verify` | one-time: show this project's DID to add as one of your agents (web app Settings → Agents, or `freeq-bot-id register`), then check the server verified it |
 | `/freeq authorize --sign-cert` | for a server that doesn't read agent records yet: make a creator key and print the `/raw MSGSIG` line to paste; removed once every server reads agent records |
 | `/freeq status` | connection, identity, channels, trust summary |
+| `/freeq doctor` | setup check: identity, ownership, owner, config, server, connection, channels, and whether this window holds the connection |
 | `/freeq peers` | reachable agents, what they're working on, their tier |
 | `/freeq join #c` / `/freeq leave #c` | channel membership |
 | `/freeq mode #c <silent\|addressed\|participant>` | how the agent behaves in a channel |

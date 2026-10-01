@@ -28,7 +28,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 const { loadOrCreateIdentity, loadOrMintDelegation } = await import("@freeq/bot-kit");
-const { deriveInstallSlug, resolveBotName } = await import("../dist/identity.js");
+const { deriveInstallSlug, resolveBotName } = await import("@freeq/harness-kit/identity");
 
 function arg(name, fallback) {
   const i = process.argv.indexOf(`--${name}`);

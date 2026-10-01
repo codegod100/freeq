@@ -43,6 +43,7 @@
   },
   "dependencies": {
     "@freeq/bot-kit": "^0.1.0",
+    "@freeq/harness-kit": "file:../freeq-harness-kit",
     "@freeq/sdk": "^0.1.0"
   },
   "devDependencies": {

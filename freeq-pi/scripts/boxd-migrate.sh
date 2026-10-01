@@ -310,7 +310,7 @@ fi
 # that signed it.
 if [ "$SIGN" = 1 ]; then
 PUB=$(node -e '
-import("'"$SCRIPT_DIR"'/../dist/owner-key.js").then(async (m) => {
+import("'"$SCRIPT_DIR"'/../node_modules/@freeq/harness-kit/dist/owner-key.js").then(async (m) => {
   const seed = await m.loadOrCreateCreatorSeed(m.creatorKeyPath(process.env.HOME + "/.freeq", process.argv[1]));
   console.log(m.creatorPublicKeyB64(seed));
 });' "$OWNER_DID")
