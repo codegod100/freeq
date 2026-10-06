@@ -22,6 +22,7 @@ import { jumbomojiSize } from '../lib/jumbomoji';
 import { buildTranscript, rowsInSelection } from '../lib/transcript';
 import { useCachedVerdict, useVerdictLookup, copyForVerdict, verdictCopy, type Verdict } from '../lib/verify-signature';
 import { VerifySignaturePanel } from './VerifySignaturePanel';
+import { isPresenceLine, summarizePresence } from '../lib/presence';
 
 // ── Colors ──
 
@@ -1487,34 +1488,24 @@ const NEAR_TOP_PX = 120;
  *  would leave a hole in its index space. */
 type RenderRow =
   | { kind: 'message'; key: string; msg: Message; at: number }
-  | { kind: 'notices'; key: string; text: string };
+  | { kind: 'notices'; key: string; text: string; events: Message[] };
 
-const IS_JOIN_PART = /^.+ (joined|left)$/;
-
-/** Collapse consecutive join/part notices, and index what is left by msgid. */
-function buildRenderRows(messages: Message[]): {
+/** Index the messages by msgid as render rows. With `group`, each run of two
+ *  or more join/part/quit notices collapses into one summary row. */
+function buildRenderRows(messages: Message[], group: boolean): {
   rows: RenderRow[];
   indexOfId: Map<string, number>;
 } {
   const rows: RenderRow[] = [];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
-    if (msg.isSystem && IS_JOIN_PART.test(msg.text)) {
-      const prev = i > 0 ? messages[i - 1] : null;
-      if (prev?.isSystem && IS_JOIN_PART.test(prev.text)) continue; // in a run
-      const group: Message[] = [msg];
-      for (let j = i + 1; j < messages.length; j++) {
-        const m = messages[j];
-        if (m.isSystem && IS_JOIN_PART.test(m.text)) group.push(m);
-        else break;
-      }
-      if (group.length > 1) {
-        const joins = group.filter((m) => m.text.endsWith(' joined')).map((m) => m.text.replace(' joined', ''));
-        const parts = group.filter((m) => m.text.endsWith(' left')).map((m) => m.text.replace(' left', ''));
-        const said: string[] = [];
-        if (joins.length > 0) said.push(`${joins.slice(0, 3).join(', ')}${joins.length > 3 ? ` and ${joins.length - 3} more` : ''} joined`);
-        if (parts.length > 0) said.push(`${parts.slice(0, 3).join(', ')}${parts.length > 3 ? ` and ${parts.length - 3} more` : ''} left`);
-        rows.push({ kind: 'notices', key: msg.id, text: `— ${said.join('; ')}` });
+    if (group && isPresenceLine(msg)) {
+      let j = i + 1;
+      while (j < messages.length && isPresenceLine(messages[j])) j++;
+      if (j - i > 1) {
+        const events = messages.slice(i, j);
+        rows.push({ kind: 'notices', key: msg.id, text: `— ${summarizePresence(events)}`, events });
+        i = j - 1;
         continue;
       }
     }
@@ -1571,16 +1562,15 @@ export function MessageList() {
     if (s.activeChannel === 'server') return s.serverMessages;
     return s.channels.get(s.activeChannel.toLowerCase())?.messages || [];
   });
-  const showJoinPart = useStore((s) => s.showJoinPart);
+  const joinPartDisplay = useStore((s) => s.joinPartDisplay);
   const blockedDids = useStore((s) => s.blockedDids);
   const blockedNicks = useStore((s) => s.blockedNicks);
   const activeMembers = useStore((s) => s.channels.get(s.activeChannel.toLowerCase())?.members);
   /** A DM buffer: not the server tab, and not a channel name. */
   const isDM = activeChannel !== 'server' && !activeChannel.startsWith('#') && !activeChannel.startsWith('&');
 
-  // Filter out join/part/quit noise unless the user opted in.
-  // Keep moderation actions (kicks, bans, mode changes) always visible.
-  const JOIN_PART_RE = /^.+ (joined|left|quit)(\s|$)/;
+  // Join/part/quit notices are hidden unless the reader opted in.
+  // Moderation actions (kicks, bans, mode changes) are always visible.
   const messages = useMemo(() => {
     let msgs = rawMessages;
     // Hide messages from blocked users (DID first, nick fallback for guests).
@@ -1592,9 +1582,9 @@ export function MessageList() {
         return !blockedNicks.includes(m.from.toLowerCase());
       });
     }
-    if (showJoinPart) return msgs;
-    return msgs.filter((m) => !m.isSystem || !JOIN_PART_RE.test(m.text));
-  }, [rawMessages, showJoinPart, blockedDids, blockedNicks, activeMembers]);
+    if (joinPartDisplay !== 'hidden') return msgs;
+    return msgs.filter((m) => !isPresenceLine(m));
+  }, [rawMessages, joinPartDisplay, blockedDids, blockedNicks, activeMembers]);
 
   /** Whether anything on screen came from a sender, as opposed to join and
    *  part notices. A channel with none has nothing for the boundary row to
@@ -1604,7 +1594,10 @@ export function MessageList() {
   /** The rendered list, and where each row sits in it. Only a window of these
    *  is mounted at a time, so an index is the only handle on a row that works
    *  whether or not it is on screen. */
-  const { rows, indexOfId } = useMemo(() => buildRenderRows(messages), [messages]);
+  const { rows, indexOfId } = useMemo(
+    () => buildRenderRows(messages, joinPartDisplay === 'grouped'),
+    [messages, joinPartDisplay],
+  );
   /** Regrouped when a verdict settles, so a row whose mark differs from its
    *  header's moves out then. */
   const verdictOf = useVerdictLookup();
@@ -1898,6 +1891,15 @@ export function MessageList() {
   // Scroll to a specific message (from search, reply click, etc.)
   const scrollToMsgId = useStore((s) => s.scrollToMsgId);
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  /** Grouped join/part rows the reader has opened, by the run's first id. */
+  const [expandedNotices, setExpandedNotices] = useState<Set<string>>(() => new Set());
+  const toggleNotices = useCallback((key: string) => {
+    setExpandedNotices((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  }, []);
   const [pendingJump, setPendingJump] = useState<string | null>(null);
   /** The same, for the activation timers to read: they fire after the render
    *  that set it and would otherwise close over the value from before. */
@@ -2150,7 +2152,29 @@ export function MessageList() {
             row.kind === 'notices' ? (
               <div key={row.key} id={`msg-${row.key}`} className="px-4 py-0.5 flex items-start gap-3">
                 <span className="w-10 shrink-0" />
-                <span className="text-fg-dim text-xs opacity-60">{row.text}</span>
+                <div className="min-w-0">
+                  <button
+                    type="button"
+                    onClick={() => toggleNotices(row.key)}
+                    aria-expanded={expandedNotices.has(row.key)}
+                    title={`${row.events.length} join/leave events — click to ${expandedNotices.has(row.key) ? 'collapse' : 'expand'}`}
+                    className="text-fg-dim text-xs opacity-60 hover:opacity-100 text-left"
+                  >
+                    {row.text} {expandedNotices.has(row.key) ? '▴' : '▾'}
+                  </button>
+                  {expandedNotices.has(row.key) && (
+                    <ul className="mt-0.5 space-y-0.5">
+                      {row.events.map((e) => (
+                        <li key={e.id} className="text-fg-dim text-[11px] opacity-60">
+                          {e.text}{' '}
+                          <span className="opacity-70">
+                            {e.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </div>
             ) : (
             <div key={row.key} id={`msg-${row.key}`} className={highlightId === row.key ? 'bg-accent/10 transition-colors duration-1000' : ''}>
