@@ -3539,8 +3539,16 @@ final class SwiftEventHandler: @unchecked Sendable, EventHandler {
         case .awayChanged(let nick, let awayMsg):
             state.updateAwayStatus(nick: nick, awayMsg: awayMsg)
 
-        case .userQuit(let nick, _):
+        case .userQuit(let nick, let reason):
             for ch in state.channels {
+                // Only rooms they were in hear about it (parity with web/macOS).
+                if ch.members.contains(where: { $0.nick.lowercased() == nick.lowercased() }) {
+                    ch.appendIfNew(ChatMessage(
+                        id: UUID().uuidString, from: "",
+                        text: "\(nick) quit\(reason.isEmpty ? "" : " (\(reason))")",
+                        isAction: false, timestamp: Date(), replyTo: nil
+                    ))
+                }
                 ch.members.removeAll { $0.nick.lowercased() == nick.lowercased() }
                 ch.typingUsers.removeValue(forKey: nick)
             }
