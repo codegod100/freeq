@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod editor;
+mod presence;
 mod ui;
 
 use std::collections::HashSet;
@@ -394,6 +395,7 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(&resolved.nick, resolved.vi);
+    app.join_part = cfg.join_part.unwrap_or_default();
     if iroh_addr.is_some() {
         app.transport = app::Transport::Iroh;
         app.iroh_endpoint_id = iroh_addr.clone();
@@ -2751,6 +2753,23 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     "Debug mode {state} — raw IRC lines will be shown in status buffer"
                 ));
             }
+            "/joins" => {
+                use crate::presence::JoinPartDisplay;
+                if arg.is_empty() {
+                    app.status_msg(&format!(
+                        "Join/part messages: {} — /joins hidden|grouped|all",
+                        app.join_part.as_str()
+                    ));
+                } else if let Some(mode) = JoinPartDisplay::parse(arg) {
+                    app.join_part = mode;
+                    let mut cfg = config::Config::load();
+                    cfg.join_part = Some(mode);
+                    cfg.save();
+                    app.status_msg(&format!("Join/part messages: {} (saved)", mode.as_str()));
+                } else {
+                    app.status_msg("Usage: /joins hidden|grouped|all");
+                }
+            }
             "/help" | "/h" | "/commands" => {
                 app.status_msg("── Channel commands ─────────────────────");
                 app.status_msg("  /join #channel      Join a channel (/j)");
@@ -2810,6 +2829,7 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                 app.status_msg("  /logout handle      Clear cached OAuth session");
                 app.status_msg("  /net                Show/hide network info popup (/stats)");
                 app.status_msg("  /debug              Toggle raw IRC line display");
+                app.status_msg("  /joins [mode]       Join/part lines: hidden, grouped, all");
                 app.status_msg("  /reconnect          Force reconnect to server");
                 app.status_msg("  /raw line           Send raw IRC command");
                 app.status_msg("  /quit [message]     Disconnect (/q)");
@@ -2916,6 +2936,10 @@ async fn process_input(app: &mut App, handle: &client::ClientHandle, input: &str
                     cfg.tls.map(|b| b.to_string()).unwrap_or("(auto)".into())
                 ));
                 app.status_msg(&format!("  vi:      {}", cfg.vi.unwrap_or(false)));
+                app.status_msg(&format!(
+                    "  joins:   {}",
+                    cfg.join_part.unwrap_or_default().as_str()
+                ));
                 let cfg_ch = cfg
                     .channels
                     .as_ref()
