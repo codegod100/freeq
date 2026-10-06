@@ -483,6 +483,8 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val lastReadMessageIds = mutableStateMapOf<String, String>()
     val lastReadTimestamps = mutableStateMapOf<String, Long>()
     var isDarkTheme = mutableStateOf(true)
+    /** Join/part/quit lines: hidden by default, grouped or all on request. */
+    val joinPartDisplay = mutableStateOf(JoinPartDisplay.HIDDEN)
 
     val batches = mutableMapOf<String, BatchBuffer>()
 
@@ -605,6 +607,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
         }
         if (autoJoinChannels.isEmpty()) autoJoinChannels.add("#general")
         isDarkTheme.value = prefs.getBoolean("darkTheme", true)
+        joinPartDisplay.value = JoinPartDisplay.fromKey(prefs.getString("joinPartDisplay", null))
 
         // Restore read positions
         prefs.getStringSet("readPositionKeys", emptySet())?.forEach { key ->
@@ -1153,6 +1156,11 @@ class AppState(application: Application) : AndroidViewModel(application) {
     fun toggleTheme() {
         isDarkTheme.value = !isDarkTheme.value
         prefs.edit().putBoolean("darkTheme", isDarkTheme.value).apply()
+    }
+
+    fun setJoinPartDisplay(mode: JoinPartDisplay) {
+        joinPartDisplay.value = mode
+        prefs.edit().putString("joinPartDisplay", mode.key).apply()
     }
 
     // ── Muted channels ──
@@ -1815,6 +1823,16 @@ class AndroidEventHandler(private val state: AppState) : EventHandler {
 
             is FreeqEvent.UserQuit -> {
                 for (ch in state.channels) {
+                    val wasMember = ch.members.any { it.nick.equals(event.nick, ignoreCase = true) }
+                    if (wasMember) {
+                        ch.appendIfNew(ChatMessage(
+                            id = UUID.randomUUID().toString(),
+                            from = "",
+                            text = if (event.reason.isEmpty()) "${event.nick} quit" else "${event.nick} quit (${event.reason})",
+                            isAction = false,
+                            timestamp = Date()
+                        ))
+                    }
                     ch.members.removeAll { it.nick.equals(event.nick, ignoreCase = true) }
                     ch.typingUsers.remove(event.nick)
                 }

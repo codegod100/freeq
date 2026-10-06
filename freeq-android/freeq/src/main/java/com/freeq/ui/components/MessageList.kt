@@ -57,6 +57,7 @@ import com.freeq.model.SenderIdentity
 import com.freeq.model.RowSignatureMark
 import com.freeq.model.SignatureVerdict
 import com.freeq.model.ChatMessage
+import com.freeq.model.PresenceLines
 import com.freeq.model.MemberInfo
 import com.freeq.ui.theme.FreeqColors
 import com.freeq.ui.theme.Theme
@@ -76,9 +77,15 @@ fun MessageList(
     // Safety: hide blocked users' messages at render time. Messages stay in
     // the buffer so unblocking restores history. System messages (empty
     // `from`) always render.
-    val messages = channelState.messages.filter { msg ->
-        msg.from.isEmpty() || !appState.isBlocked(msg.from, appState.didForNick(msg.from))
-    }
+    // Join/part/quit lines then follow the user's display choice (hidden by
+    // default), so header runs and scroll indices see only what is drawn.
+    val joinPartDisplay by appState.joinPartDisplay
+    val messages = PresenceLines.apply(
+        channelState.messages.filter { msg ->
+            msg.from.isEmpty() || !appState.isBlocked(msg.from, appState.didForNick(msg.from))
+        },
+        joinPartDisplay
+    )
 
     // Show header if sender changes, >5 min gap, or after date/system/deleted boundary.
     // Also break across a provenance boundary: a federated message (msg.origin
